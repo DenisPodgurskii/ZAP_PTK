@@ -8,6 +8,13 @@ plugins {
     id("org.zaproxy.common")
 }
 
+repositories {
+    mavenCentral()
+    maven {
+        url = uri("https://central.sonatype.com/repository/maven-snapshots/")
+    }
+}
+
 description = "Adds the OWASP PTK extension to browsers launched from ZAP."
 
 zapAddOn {
@@ -30,9 +37,16 @@ zapAddOn {
         dependencies {
             addOns {
                 register("selenium")
+                register("client") {
+                    version.set(">=0.21.0")
+                }
             }
         }
     }
+}
+
+dependencies {
+    compileOnly("org.zaproxy.addon:client:0.21.0-SNAPSHOT")
 }
 
 java {
@@ -44,5 +58,9 @@ java {
 spotless {
     kotlinGradle {
         ktlint()
+    }
+    java {
+        clearSteps()
+        googleJavaFormat("1.17.0").aosp()
     }
 }
