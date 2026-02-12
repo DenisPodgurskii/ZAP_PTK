@@ -73,6 +73,21 @@
                 "aqb_cc/error/"
             ]
         },
+        "Anubis (Techaro)": {
+            "cats": [
+                100
+            ],
+            "html": [
+                "/\\.within\\.website/x/cmd/anubis/",
+                "<script id=\"anubis_version\"",
+                "<script id=\"anubis_challenge\"",
+                "Protected by.*Anubis.*From.*Techaro",
+                "github\\.com/TecharoHQ/anubis"
+            ],
+            "cookies": {
+                "-anubis-auth=": ""
+            }
+        },
         "AnYu (AnYu Technologies)": {
             "cats": [
                 100
@@ -594,7 +609,8 @@
                 100
             ],
             "headers": {
-                "X-Fastly-Request-ID": "\\w+"
+                "X-Fastly-Request-ID": "\\w+",
+                "X-Served-By": "^cache-[a-z]{3}\\d+-[A-Z]{3}"
             }
         },
         "FortiGate (Fortinet)": {
@@ -615,8 +631,7 @@
             ],
             "html": [
                 "FortiGuard Intrusion Prevention",
-                "//globalurl.fortinet.net",
-                "<title>Web Filter Violation"
+                "//globalurl.fortinet.net"
             ]
         },
         "FortiWeb (Fortinet)": {
@@ -1174,6 +1189,16 @@
                 "^rbzid": ""
             }
         },
+        "Reflected Networks (Reflected Networks)": {
+            "cats": [
+                100
+            ],
+            "html": [
+                "<img class=\"logo loader\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAbgAAABHCAIAAAD6G8WcAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAyRpVFh0WE1MOmNvbS5hZG9iZS54bXAAAAAAADw",
+                "content=\"Request is denied\"",
+                "<title>Forbidden</title>"
+            ]
+        },
         "RSFirewall (RSJoomla!)": {
             "cats": [
                 100
@@ -1433,7 +1458,8 @@
                 100
             ],
             "html": [
-                "waf\\.tencent\\-?cloud\\.com/"
+                "waf\\.tencent\\-?cloud\\.com/",
+                "window\\.location\\.href.{1,3}?https?://waf.tencent(?:-?cloud)?.com/(?:403|501)page\\.html"
             ]
         },
         "Teros (Citrix Systems)": {
@@ -1507,6 +1533,15 @@
             ],
             "html": [
                 "Request rejected by xVarnish\\-WAF"
+            ]
+        },
+        "Vercel WAF (Vercel)": {
+            "cats": [
+                100
+            ],
+            "html": [
+                "<title>Vercel Security Checkpoint</title>",
+                "/vercel/security/"
             ]
         },
         "Viettel (Cloudrity)": {

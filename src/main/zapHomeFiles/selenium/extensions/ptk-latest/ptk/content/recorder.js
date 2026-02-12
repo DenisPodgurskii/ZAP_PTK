@@ -225,7 +225,6 @@
                     }
                 }
             } catch (e) {
-                console.log(e)
             }
             return index
         }

@@ -643,7 +643,7 @@ jQuery(function () {
                 .map((entry) => entry.trim())
                 .filter(Boolean);
               controller
-                .runBackroungScan(result.activeTab.tabId, h, scanStrategy, pages)
+                .runBackgroundScan(result.activeTab.tabId, h, scanStrategy, pages)
                 .then(function (result) {
                   $("#request_info").html("");
                   $("#attacks_info").html("");
@@ -674,7 +674,7 @@ jQuery(function () {
   });
 
   $(document).on("click", ".stop_scan_runtime", function () {
-    controller.stopBackroungScan().then(function (result) {
+    controller.stopBackgroundScan().then(function (result) {
       changeView(result);
       bindScanResult(result);
     }).catch(e => e)
@@ -776,8 +776,6 @@ jQuery(function () {
 
     fileReader.onprogress = (event) => {
       if (event.lengthComputable) {
-        let progress = (event.loaded / event.total) * 100;
-        console.log(progress);
       }
     };
     fileReader.readAsText(file);
@@ -951,7 +949,7 @@ jQuery(function () {
     } else {
       showWelcomeForm();
     }
-  }).catch(e => { console.log(e) })
+  }).catch(() => { })
 });
 
 function showWelcomeForm() {

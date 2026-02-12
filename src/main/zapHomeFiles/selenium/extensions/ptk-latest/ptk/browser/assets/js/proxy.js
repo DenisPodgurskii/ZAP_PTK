@@ -115,7 +115,7 @@ function bindAll() {
     controller.init().then(function (result) {
         bindInfo()
         bindFrames()
-    }).catch(e => console.log(e))
+    }).catch(() => { })
 }
 
 function bindInfo() {

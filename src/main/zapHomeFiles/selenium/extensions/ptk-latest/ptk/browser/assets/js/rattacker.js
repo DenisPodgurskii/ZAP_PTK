@@ -707,7 +707,7 @@ jQuery(function () {
                             dastScanPolicy: $('#dast-scan-policy').val() || 'ACTIVE',
                             runCve: isRunCveEnabled()
                         }
-                        controller.runBackroungScan(result.activeTab.tabId, h, $('#scan_domains').val(), settings).then(function (result) {
+                        controller.runBackgroundScan(result.activeTab.tabId, h, $('#scan_domains').val(), settings).then(function (result) {
                             resetDastRenderState()
                             DAST_RENDER.scanning = true
                             startIdleChecker()
@@ -740,7 +740,7 @@ jQuery(function () {
     })
 
     $(document).on("click", ".stop_scan_runtime", function () {
-        controller.stopBackroungScan().then(function (result) {
+        controller.stopBackgroundScan().then(function (result) {
             DAST_RENDER.scanning = false
             if (DAST_RENDER.idleCheckTimer) {
                 clearInterval(DAST_RENDER.idleCheckTimer)
@@ -846,8 +846,6 @@ jQuery(function () {
 
         fileReader.onprogress = (event) => {
             if (event.lengthComputable) {
-                let progress = ((event.loaded / event.total) * 100);
-                console.log(progress);
             }
         }
         fileReader.readAsText(file)

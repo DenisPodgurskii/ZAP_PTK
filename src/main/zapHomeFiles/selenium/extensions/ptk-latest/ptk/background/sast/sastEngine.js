@@ -527,8 +527,6 @@ ${normalizedSnippet}
         }
         return [];
       });
-      console.log("Top‐level functions in merged AST:", topFuncs);
-
       const rawFindings = [];
 
       const hasTaintRules = this.modules.some(m =>

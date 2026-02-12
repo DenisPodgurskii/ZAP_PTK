@@ -92,6 +92,11 @@ jQuery(function () {
 
         controller.save('rattacker', values)
 
+        // Save automation settings via controller (stored in pentestkit8_settings.automation)
+        // Explicitly get checkbox state since form('get values') may not return unchecked checkboxes
+        const automationEnabled = $('#automation_form').find('input[name="enable"]').is(':checked')
+        controller.save('automation', { enable: automationEnabled })
+
         controller.restore().then(function (s) {
             controller.on_updated_settings(s)
         })
@@ -384,5 +389,15 @@ $(document).on("init_forms", function (e, s) {
     })
     loginLink = profileSettings.login_url
     registerLink = profileSettings.register_url
+
+    // Load automation settings from pentestkit8_settings.automation
+    // Use Semantic UI checkbox methods for proper toggle state
+    const automationEnabled = s.automation?.enable === true
+    const $automationCheckbox = $('#automation_form').find('.ui.checkbox')
+    if ($automationCheckbox.length) {
+        // Ensure checkbox is initialized, then set state
+        $automationCheckbox.checkbox()
+        $automationCheckbox.checkbox(automationEnabled ? 'check' : 'uncheck')
+    }
 
 })

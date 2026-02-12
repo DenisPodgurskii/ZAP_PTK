@@ -262,7 +262,7 @@ function bindAll(index) {
         if ($.fn.dataTable.isDataTable('#tbl_cookies')) {
             $('#tbl_cookies').DataTable().clear().draw(false)
         }
-    }).catch(e => console.log(e))
+    }).catch(() => { })
 }
 
 
@@ -407,7 +407,7 @@ function bindBlockedCookies() {
             }
             bindTable('#tbl_blocked_cookies', params)
         }
-    }).catch(e => console.log(e))
+    }).catch(() => { })
 }
 
 
@@ -426,7 +426,7 @@ function bindReadonlyCookies() {
             }
             bindTable('#tbl_readonly_cookies', params)
         }
-    }).catch(e => console.log(e))
+    }).catch(() => { })
 }
 
 

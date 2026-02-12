@@ -71,7 +71,7 @@ jQuery(function () {
                 .modal({
                     allowMultiple: true,
                     onApprove: function () {
-                        controller.runBackroungScan(result.activeTab.tabId, h).then(function (result) {
+                        controller.runBackgroundScan(result.activeTab.tabId, h).then(function (result) {
                             clearScaPanels()
                             $(document).trigger("bind_stats", result.scanResult)
                             changeView(result)
@@ -90,7 +90,7 @@ jQuery(function () {
     })
 
     $(document).on("click", ".stop_scan_runtime", function () {
-        controller.stopBackroungScan().then(function (result) {
+        controller.stopBackgroundScan().then(function (result) {
             changeView(result)
             bindScanResult(result)
         })
@@ -190,8 +190,6 @@ jQuery(function () {
 
         fileReader.onprogress = (event) => {
             if (event.lengthComputable) {
-                let progress = ((event.loaded / event.total) * 100);
-                console.log(progress);
             }
         }
         fileReader.readAsText(file)

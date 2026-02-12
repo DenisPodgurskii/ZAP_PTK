@@ -9,6 +9,32 @@ const runtime = (typeof browser !== 'undefined' && browser?.runtime)
     ? browser.runtime
     : (typeof chrome !== 'undefined' && chrome?.runtime ? chrome.runtime : null);
 
+const PTK_SPA_ATTACK_TAB_MARKER = 'ptk_spa_attack_tab';
+const PTK_SPA_DIALOG_PARAM = 'ptk_dast=1';
+
+function shouldSuppressSpaDialogs() {
+    if (typeof window === 'undefined') return false
+    if (typeof window.name === 'string' && window.name.includes(PTK_SPA_ATTACK_TAB_MARKER)) return true
+    try {
+        return String(window.location.href || '').includes(PTK_SPA_DIALOG_PARAM)
+    } catch (_) {
+        return false
+    }
+}
+
+function injectDialogSuppressor() {
+    try {
+        const script = document.createElement('script')
+        script.textContent = `(function(){try{window.alert=function(){};window.confirm=function(){return false};window.prompt=function(){return null};window.onbeforeunload=null;}catch(_){}})();`
+        const parent = document.head || document.documentElement
+        parent && parent.appendChild(script)
+        script.remove()
+    } catch (_) { }
+}
+
+if (shouldSuppressSpaDialogs()) {
+    injectDialogSuppressor()
+}
 
 function runtimeGetURL(path) {
     if (!runtime?.getURL) return null;
@@ -26,6 +52,18 @@ function sendRuntimeMessage(payload) {
     } catch (_) {
         return Promise.resolve();
     }
+}
+
+function dumpStorageFiltered(storage) {
+    const out = {}
+    try {
+        for (let i = 0; i < storage.length; i++) {
+            const key = storage.key(i)
+            if (!key || /^ptk_/i.test(key)) continue
+            out[key] = storage.getItem(key)
+        }
+    } catch (_) { }
+    return JSON.stringify(out)
 }
 const pendingWappalyzerRequests = new Map();
 let injectBridgeReady = false;
@@ -242,6 +280,9 @@ if (runtime?.onMessage) runtime.onMessage.addListener(function (message, sender,
         if (message.type == "clean iast result") {
             localStorage.removeItem('ptk_iast_buffer');
         }
+        if (message.type == "ping") {
+            return Promise.resolve({ ok: true })
+        }
     }
 
     if (message.channel == "ptk_background_iast2content_modules" && message.iastModules) {
@@ -269,7 +310,7 @@ if (runtime?.onMessage) runtime.onMessage.addListener(function (message, sender,
             browser.runtime.sendMessage({
                 channel: "ptk_content2popup",
                 type: "return_storage",
-                data: { localStorage: JSON.stringify(window.localStorage), sessionStorage: JSON.stringify(window.sessionStorage) }
+                data: { localStorage: dumpStorageFiltered(window.localStorage), sessionStorage: dumpStorageFiltered(window.sessionStorage) }
             }).catch(e => e)
             return Promise.resolve()
         }
@@ -307,8 +348,126 @@ const ptkAutomationVersion = (() => {
     }
 })()
 
-// installPtkAutomationBridge(ptkAutomationVersion)
-// initPtkAutomationMessaging()
+// Storage key for settings (must match automation.js and settings.js)
+const SETTINGS_KEY = 'pentestkit8_settings'
+
+// Automation state
+let automationEnabled = false
+let automationNonce = null
+let automationMessageHandler = null
+
+function isCypressRunnerFrame() {
+    try {
+        const path = location.pathname || ''
+        return path.startsWith('/__/') || path.includes('/__/#/')
+    } catch (_) {
+        return false
+    }
+}
+
+// Dynamic enable/disable via storage.onChanged
+;(async function initAutomation() {
+    // Check if browser API is available (content script context)
+    if (typeof browser === 'undefined' || !browser?.storage?.local) {
+        return
+    }
+
+    let enabled = false
+
+    // Initial check - use settings key with automation.enable
+    // When automation is enabled, we inject in ALL frames (including Cypress AUT iframe)
+    try {
+        const result = await browser.storage.local.get(SETTINGS_KEY)
+        enabled = result?.[SETTINGS_KEY]?.automation?.enable === true
+        if (enabled) {
+            enableAutomation()
+        }
+    } catch (e) {
+        // Silently fail - automation stays disabled
+    }
+
+    // Automation OFF: keep existing behavior (top frame only)
+    if (!enabled) {
+        try {
+            if (window.top !== window) return
+        } catch (_) { return }
+        installPtkAutomationBridge(ptkAutomationVersion, automationNonce, false)
+    } else if (isCypressRunnerFrame()) {
+        // Automation ON: skip Cypress runner frames
+        return
+    }
+
+    // Listen for settings changes (no page reload needed)
+    browser.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== 'local') return
+        if (!changes[SETTINGS_KEY]) return
+
+        const newEnabled = changes[SETTINGS_KEY]?.newValue?.automation?.enable === true
+        const oldEnabled = changes[SETTINGS_KEY]?.oldValue?.automation?.enable === true
+
+        if (newEnabled && !oldEnabled) {
+            if (!isCypressRunnerFrame()) {
+                enableAutomation()
+            }
+        } else if (!newEnabled && oldEnabled) {
+            disableAutomation()
+        }
+    })
+})()
+
+function enableAutomation() {
+    if (isCypressRunnerFrame()) return
+    if (automationEnabled) return
+    automationEnabled = true
+
+    // Generate nonce for this session
+    automationNonce = `ptk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+
+    // Expose nonce via DOM element for test frameworks (Cypress runs AUT in iframe)
+    // This allows tests to read the nonce and include it in their messages
+    let nonceEl = document.getElementById('__ptk_automation_nonce__')
+    if (!nonceEl) {
+        nonceEl = document.createElement('div')
+        nonceEl.id = '__ptk_automation_nonce__'
+        nonceEl.style.display = 'none'
+        document.documentElement.appendChild(nonceEl)
+    }
+    nonceEl.dataset.nonce = automationNonce
+
+    installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true)
+    notifyAutomationStatus(true, automationNonce)
+    initPtkAutomationMessaging()
+
+    // Listen for messages only when enabled
+    automationMessageHandler = function(event) {
+        if (event.source !== window) return
+        const data = event.data
+        if (data?.source !== 'ptk-automation') return
+        // Validate nonce (require always)
+        if (data.nonce !== automationNonce) return
+        handleAutomationBridgeMessage(data)
+    }
+    window.addEventListener("message", automationMessageHandler)
+}
+
+function disableAutomation() {
+    if (!automationEnabled) return
+    automationEnabled = false
+
+    // Remove message listener (can't uninject bridge JS, but stop responding)
+    if (automationMessageHandler) {
+        window.removeEventListener("message", automationMessageHandler)
+        automationMessageHandler = null
+    }
+    notifyAutomationStatus(false, automationNonce)
+    automationNonce = null
+
+    // Remove nonce element
+    const nonceEl = document.getElementById('__ptk_automation_nonce__')
+    if (nonceEl) {
+        nonceEl.remove()
+    }
+}
 
 window.addEventListener("message", (event) => {
     const data = event.data || {}
@@ -328,16 +487,31 @@ window.addEventListener("message", (event) => {
         return
     }
 
-    if (data?.source === 'ptk-automation') {
-        handleAutomationBridgeMessage(data)
-        return
-    }
+    // Note: ptk-automation messages are handled conditionally via automationMessageHandler
+    // when automation is enabled in settings
 
     if (data?.ptk_iast) {
         browser.runtime.sendMessage({
             channel: "ptk_content_iast2background_iast",
             type: "finding_report",
             finding: data.finding
+        }).catch(e => e)
+        return
+    }
+
+    if (data?.channel === 'ptk_iast_agent_ready') {
+        browser.runtime.sendMessage({
+            channel: "ptk_content_iast2background_iast",
+            type: "agent_ready"
+        }).catch(e => e)
+        return
+    }
+
+    if (data?.channel === 'ptk_iast_agent_failed') {
+        browser.runtime.sendMessage({
+            channel: "ptk_content_iast2background_iast",
+            type: "agent_failed",
+            error: data?.error || null
         }).catch(e => e)
         return
     }
@@ -386,46 +560,36 @@ window.addEventListener("message", (event) => {
 }, false)
 
 function handleAutomationBridgeMessage(data) {
-    if (data.type !== 'session-start' && data.type !== 'session-end') {
-        return
-    }
+    const validTypes = ['session-start', 'session-end', 'get-stats', 'get-findings', 'export-scan', 'get-session-progress']
+    if (!validTypes.includes(data.type)) return
+
     const payload = {
         channel: 'ptk_content2background_automation',
         type: data.type,
         sessionId: data.sessionId,
         options: data.options || {},
-        pageUrl: window.location.href
+        includeFindings: data.includeFindings === true,
+        limit: data.limit,
+        wait: data.wait,  // For non-blocking stop
+        pageUrl: window.location.href,
+        requestId: data.requestId
     }
+
     browser.runtime.sendMessage(payload).then((response) => {
-        if (data.type === 'session-start' && response?.error) {
-            window.postMessage({
-                source: 'ptk-extension',
-                type: 'session-error',
-                sessionId: data.sessionId,
-                error: response.error || 'PTK session failed to start'
-            }, '*')
-        }
-        if (data.type === 'session-end' && response?.summary) {
-            window.postMessage({
-                source: 'ptk-extension',
-                type: 'session-summary',
-                sessionId: data.sessionId,
-                summary: response.summary,
-                error: response.error || null
-            }, '*')
-        } else if (data.type === 'session-end' && response?.error) {
-            window.postMessage({
-                source: 'ptk-extension',
-                type: 'session-summary',
-                sessionId: data.sessionId,
-                summary: null,
-                error: response.error
-            }, '*')
-        }
+        window.postMessage({
+            source: 'ptk-extension',
+            nonce: automationNonce,  // Include nonce in response
+            requestId: data.requestId,
+            ...response
+        }, '*')
     }).catch((error) => {
-        try {
-        // Swallow automation forwarding errors to avoid console noise in content context.
-        } catch (_) { }
+        console.error('[PTK Content] Message error:', error)
+        window.postMessage({
+            source: 'ptk-extension',
+            nonce: automationNonce,
+            requestId: data.requestId,
+            error: error?.message || 'PTK automation error'
+        }, '*')
     })
 }
 
@@ -439,15 +603,28 @@ function initPtkAutomationMessaging() {
     })
 }
 
-function installPtkAutomationBridge(version) {
+function installPtkAutomationBridge(version, nonce, automationEnabledState) {
     if (window.PTK_AUTOMATION) {
         return
     }
     const script = document.createElement('script')
     script.src = browser.runtime.getURL('ptk/automationBridge.js')
     script.dataset.ptkVersion = version || 'unknown'
+    script.dataset.ptkNonce = nonce || ''  // Pass nonce to bridge
+    script.dataset.ptkAutomationEnabled = automationEnabledState ? '1' : '0'
     script.defer = true
     ;(document.documentElement || document.head || document.body).appendChild(script)
+}
+
+function notifyAutomationStatus(enabled, nonce) {
+    try {
+        window.postMessage({
+            source: 'ptk-extension',
+            type: 'automation-status',
+            enabled: enabled === true,
+            nonce: nonce || ''
+        }, '*')
+    } catch (_) { }
 }
 
 async function runAnalysis(message, js, dom, cssResults = emptyCssResult, htmlResults = createEmptyHtmlResults()) {
@@ -570,8 +747,8 @@ async function runAnalysis(message, js, dom, cssResults = emptyCssResult, htmlRe
 
 
     let auth = {
-        localStorage: JSON.stringify(window.localStorage),
-        sessionStorage: JSON.stringify(window.sessionStorage)
+        localStorage: dumpStorageFiltered(window.localStorage),
+        sessionStorage: dumpStorageFiltered(window.sessionStorage)
     }
 
     browser.runtime.sendMessage({

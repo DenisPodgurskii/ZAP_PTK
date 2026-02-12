@@ -240,11 +240,9 @@ export class ptk_rattacker {
                 matches: ['<all_urls>'],
                 runAt: 'document_start',
                 world: 'MAIN'
-            }]).then(s => {
-                console.log(s)
-            });
+            }]).then(() => { });
         } catch (e) {
-            console.log('Failed to register WebSocket script:', e);
+            console.warn('Failed to register WebSocket script:', e);
         }
     }
 
@@ -309,13 +307,12 @@ export class ptk_rattacker {
             }
 
             if (message.type == 'start') {
-                console.log('start scan')
-                this.runBackroungScan(sender.tab.id, new URL(sender.origin).host)
+                this.runBackgroundScan(sender.tab.id, new URL(sender.origin).host)
                 return Promise.resolve({ success: true, scanResult: this._cloneScanResultForUi() })
             }
 
             if (message.type == 'stop') {
-                this.stopBackroungScan()
+                this.stopBackgroundScan()
                 let result = { attacks: this.scanResult.attacks, stats: this.scanResult.stats }
                 return Promise.resolve({ scanResult: JSON.parse(JSON.stringify(result)) })
             }
@@ -629,16 +626,16 @@ export class ptk_rattacker {
     }
 
     msg_run_bg_scan(message) {
-        this.runBackroungScan(message.tabId, message.host, message.domains, message.settings)
+        this.runBackgroundScan(message.tabId, message.host, message.domains, message.settings)
         return Promise.resolve({ isScanRunning: this.engine.isRunning, scanResult: this._cloneScanResultForUi() })
     }
 
     msg_stop_bg_scan(message) {
-        this.stopBackroungScan()
+        this.stopBackgroundScan()
         return Promise.resolve({ scanResult: this._cloneScanResultForUi() })
     }
 
-    runBackroungScan(tabId, host, domains, settings) {
+    runBackgroundScan(tabId, host, domains, settings) {
         if (this.engine?.isRunning) {
             return false
         }
@@ -654,7 +651,7 @@ export class ptk_rattacker {
         this.engine.start(tabId, host, this.parseDomains(targetDomains), resolvedSettings)
     }
 
-    stopBackroungScan() {
+    stopBackgroundScan() {
         this._acceptIncomingRequests = false
         this.engine.stop()
         this.scanResult = this.engine.scanResult
@@ -697,7 +694,7 @@ export class ptk_rattacker {
         if (policyCode) {
             resolvedSettings.policyCode = policyCode
         }
-        this.runBackroungScan(tabId, host, domains || host, resolvedSettings)
+        this.runBackgroundScan(tabId, host, domains || host, resolvedSettings)
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks({
                 sessionId,
@@ -717,7 +714,7 @@ export class ptk_rattacker {
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks(null)
         }
-        this.stopBackroungScan()
+        this.stopBackgroundScan()
         const stats = this._collectSeverityStats()
         this.automationSession = null
         return {

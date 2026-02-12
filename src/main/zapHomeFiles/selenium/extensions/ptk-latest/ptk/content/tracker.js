@@ -1,10 +1,11 @@
 
-if (typeof browser === 'undefined') {
-    // Extension context not available (e.g., page reload before injection)
-    return
-}
+(() => {
+    if (typeof browser === 'undefined') {
+        // Extension context not available (e.g., page reload before injection)
+        return
+    }
 
-if (!document.getElementById('ptk_recording_control') && !window.opener) {
+    if (!document.getElementById('ptk_recording_control') && !window.opener) {
 
     browser.storage.local.get([
         'ptk_recording',
@@ -323,3 +324,4 @@ if (!document.getElementById('ptk_recording_control') && !window.opener) {
     })
 
 }
+})();

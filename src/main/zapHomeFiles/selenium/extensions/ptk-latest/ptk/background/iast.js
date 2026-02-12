@@ -183,6 +183,8 @@ export class ptk_iast {
         this.devtoolsAttached = false
         this.devtoolsTarget = null
         this.onDevtoolsEvent = null
+        this.agentReadyTabs = new Set()
+        this.agentFailedTabs = new Map()
         this.maxHttpEvents = MAX_HTTP_EVENTS
         this.maxTrackedRequests = MAX_TRACKED_REQUESTS
         this.requestLookup = new Map()
@@ -438,6 +440,27 @@ export class ptk_iast {
                 } else {
                     // Ignore findings when scan is not active or tab mismatches.
                 }
+                return
+            }
+
+            if (message.type === 'agent_ready') {
+                const tabId = sender?.tab?.id
+                if (tabId != null) {
+                    this.agentReadyTabs.add(tabId)
+                    this.agentFailedTabs.delete(tabId)
+                    sendIastModulesToContent(tabId)
+                }
+                return
+            }
+
+            if (message.type === 'agent_failed') {
+                const tabId = sender?.tab?.id
+                if (tabId != null) {
+                    this.agentReadyTabs.delete(tabId)
+                    this.agentFailedTabs.set(tabId, message?.error || 'agent_load_failed')
+                    try { console.warn('[PTK IAST] Agent load failed for tab', tabId, message?.error || 'agent_load_failed') } catch (_) { }
+                }
+                return
             }
         }
 
@@ -557,22 +580,24 @@ export class ptk_iast {
     }
 
     msg_run_bg_scan(message) {
-        return this.runBackroungScan(message.tabId, message.host, message.scanStrategy).then(async () => {
+        return this.runBackgroundScan(message.tabId, message.host, message.scanStrategy).then(async () => {
             const defaultModules = await this.getDefaultModules()
             return { isScanRunning: this.isScanRunning, scanResult: this._getPublicScanResult(), default_modules: defaultModules }
         })
     }
 
     msg_stop_bg_scan(message) {
-        this.stopBackroungScan()
+        this.stopBackgroundScan()
         return Promise.resolve({ scanResult: this._getPublicScanResult() })
     }
 
-    async runBackroungScan(tabId, host, scanStrategy) {
+    async runBackgroundScan(tabId, host, scanStrategy) {
         if (this.isScanRunning) {
             return false
         }
         this.reset()
+        this.agentReadyTabs.delete(tabId)
+        this.agentFailedTabs.delete(tabId)
         this.isScanRunning = true
         this.scanningRequest = false
         browser.tabs.sendMessage(tabId, {
@@ -593,6 +618,8 @@ export class ptk_iast {
         this.currentScanId = scanId
         activeIastTabs.add(tabId)
         this.registerScript()
+        // Inject agent into current page (MV2 path uses tabs.executeScript for Firefox)
+        await this.injectIastAgent(tabId)
         this.addListeners()
         this.attachDevtoolsDebugger(tabId)
         await loadIastModules()
@@ -600,13 +627,17 @@ export class ptk_iast {
         this.broadcastScanUpdate()
     }
 
-    stopBackroungScan() {
+    stopBackgroundScan() {
         browser.tabs.sendMessage(this.scanResult.tabId, {
             channel: "ptk_background_iast2content",
             type: "clean iast result"
         }).catch(() => { })
         this.isScanRunning = false
         activeIastTabs.delete(this.scanResult.tabId)
+        if (this.scanResult?.tabId != null) {
+            this.agentReadyTabs.delete(this.scanResult.tabId)
+            this.agentFailedTabs.delete(this.scanResult.tabId)
+        }
         this.scanResult.tabId = null
         this.unregisterScript()
         this.removeListeners()
@@ -1354,7 +1385,8 @@ export class ptk_iast {
     }
 
     registerScript() {
-        let file = !worker.isFirefox ? 'ptk/content/iast.js' : 'content/iast.js'
+        // Firefox MV2 uses different path structure than Chrome MV3
+        const file = !worker.isFirefox ? 'ptk/content/iast.js' : 'content/iast.js'
         try {
             browser.scripting.registerContentScripts([{
                 id: 'iast-agent',
@@ -1362,12 +1394,67 @@ export class ptk_iast {
                 matches: ['<all_urls>'],
                 runAt: 'document_start',
                 world: 'MAIN'
-            }]).then(s => {
-                console.log(s)
-            });
+            }]).then(() => { });
         } catch (e) {
-            console.log('Failed to register IAST script:', e);
+            console.warn('[PTK IAST] Failed to register IAST script:', e);
         }
+    }
+
+    async injectIastAgent(tabId) {
+        const file = 'ptk/content/iast.js'
+
+        // MV3 path (Chromium). Avoid in Firefox MV2 where scripting exists but behaves differently.
+        if (!worker?.isFirefox && browser?.scripting?.executeScript) {
+            try {
+                await browser.scripting.executeScript({
+                    target: { tabId },
+                    files: [file],
+                    world: 'MAIN'
+                })
+                return true
+            } catch (e) {
+                try { console.warn('[PTK IAST] executeScript failed:', e?.message || e) } catch (_) { }
+            }
+        }
+
+        // MV2-safe injection: use tabs.executeScript + script tag with absolute URL
+        if (browser?.tabs?.executeScript && browser?.runtime?.getURL) {
+            try {
+                const url = browser.runtime.getURL(file)
+                const code = `
+                    (function() {
+                        try {
+                            if (document.getElementById('__ptk_iast_agent__')) return;
+                            var s = document.createElement('script');
+                            s.id = '__ptk_iast_agent__';
+                            s.src = ${JSON.stringify(url)};
+                            s.type = 'text/javascript';
+                            s.onload = function() {
+                                try { window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*'); } catch (e) {}
+                                try { s.remove(); } catch (e) {}
+                            };
+                            s.onerror = function() {
+                                try { window.postMessage({ channel: 'ptk_iast_agent_failed', error: 'script_load_failed' }, '*'); } catch (e) {}
+                                try { s.remove(); } catch (e) {}
+                            };
+                            (document.head || document.documentElement).appendChild(s);
+                        } catch (e) {}
+                    })();
+                `
+                // Use document_idle for already-loaded pages (document_start is for initial load)
+                await browser.tabs.executeScript(tabId, { code, runAt: 'document_idle' })
+                return true
+            } catch (e) {
+                try { console.warn('[PTK IAST] tabs.executeScript failed:', e?.message || e) } catch (_) { }
+            }
+        }
+
+        console.warn('[PTK IAST] No injection method available')
+        return false
+    }
+
+    isAgentReady(tabId) {
+        return this.agentReadyTabs.has(tabId)
     }
 
     async unregisterScript() {

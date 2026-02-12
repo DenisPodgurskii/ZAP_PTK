@@ -1,7 +1,7 @@
 /* Author: Denis Podgurskii */
 export class ptk_controller_sca {
 
-    async runBackroungScan(tabId, host){
+    async runBackgroundScan(tabId, host){
         return browser.runtime.sendMessage({
             channel: "ptk_popup2background_sca",
             type: "run_bg_scan",
@@ -12,7 +12,7 @@ export class ptk_controller_sca {
         }).catch(e => e)
     }
 
-    async stopBackroungScan(){
+    async stopBackgroundScan(){
         return browser.runtime.sendMessage({
             channel: "ptk_popup2background_sca",
             type: "stop_bg_scan"

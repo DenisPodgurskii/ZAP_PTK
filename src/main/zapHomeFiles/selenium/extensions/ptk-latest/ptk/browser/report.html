@@ -15,6 +15,8 @@
     <script src="../packages/browser-polyfill/browser-polyfill.min.js"></script>
     <script src="../packages/jquery/jquery.min.js"></script>
     <script src="../packages/jquery/jquery.dataTables.min.js"></script>
+    <script src="../packages/jspdf/jspdf.umd.min.js"></script>
+    <script src="../packages/jspdf-autotable/jspdf.plugin.autotable.min.js"></script>
 
     <link rel="stylesheet" href="../packages/semantic-ui/semantic.min.css" type="text/css" />
     <script src="../packages/semantic-ui/semantic.min.js"></script>
@@ -57,6 +59,132 @@
         .hideshowreport {
             cursor: pointer;
         }
+
+        /* Risk Bar Chart Styles */
+        .risk-bar-chart {
+            width: 100%;
+            max-width: 400px;
+        }
+        .risk-bar-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .risk-bar-item .risk-label {
+            width: 70px;
+            font-weight: 500;
+            font-size: 13px;
+        }
+        .risk-bar-item .risk-bar-container {
+            flex: 1;
+            height: 20px;
+            background-color: #e8e8e8;
+            border-radius: 3px;
+            margin: 0 10px;
+            overflow: hidden;
+        }
+        .risk-bar-item .risk-bar {
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease;
+            border-radius: 3px;
+        }
+        .risk-bar-item .risk-count {
+            width: 40px;
+            text-align: right;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        /* Report View Styles */
+        .report-view-selector label {
+            font-weight: 600;
+        }
+        .inline.fields {
+            display: flex;
+            align-items: center;
+        }
+
+        /* Executive View Card Styles */
+        #executive_view .ui.card {
+            width: 100%;
+        }
+        #executive_view .finding-severity-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            color: white;
+            font-weight: bold;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+        #executive_view .finding-severity-badge.critical { background-color: var(--ptk-sev-critical); }
+        #executive_view .finding-severity-badge.high { background-color: var(--ptk-sev-high); }
+        #executive_view .finding-severity-badge.medium { background-color: var(--ptk-sev-medium); }
+        #executive_view .finding-severity-badge.low { background-color: var(--ptk-sev-low); }
+        #executive_view .finding-severity-badge.info { background-color: var(--ptk-sev-info); }
+        /* Technical View Correlated Findings Styles */
+        #tech_correlated .ui.card {
+            width: 100%;
+        }
+        #tech_correlated .finding-severity-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            color: white;
+            font-weight: bold;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+        #tech_correlated .finding-severity-badge.critical { background-color: var(--ptk-sev-critical); }
+        #tech_correlated .finding-severity-badge.high { background-color: var(--ptk-sev-high); }
+        #tech_correlated .finding-severity-badge.medium { background-color: var(--ptk-sev-medium); }
+        #tech_correlated .finding-severity-badge.low { background-color: var(--ptk-sev-low); }
+        #tech_correlated .finding-severity-badge.info { background-color: var(--ptk-sev-info); }
+        .report-toolbar-row {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .report-title-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .report-title-row .ui.dropdown {
+            min-width: 200px;
+        }
+        .report-view-selector {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            min-width: 220px;
+        }
+        #executive_view .exec-section {
+            margin-bottom: 14px;
+        }
+        #summary_segment {
+            margin-bottom: 14px;
+        }
+        .export-controls-group {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-left: auto;
+            flex-wrap: wrap;
+        }
+        .export-buttons-stack {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+        .export-buttons-stack .ui.checkbox {
+            margin-top: 6px;
+        }
     </style>
 </head>
 
@@ -68,17 +196,185 @@
     </div> -->
     <div class="ui message">
         <div class="ui message top attached tabular menu dashboard" style="border:none">
-            <p id="dashboard_message_text" class="header short_message_text" style="min-height: 30px;">
-                &nbsp;</p>
+            <div class="report-title-row">
+                <p id="dashboard_message_text" class="header short_message_text" style="min-height: 30px;">
+                    &nbsp;</p>
+                <select id="report_preset" class="ui large dropdown">
+                    <option value="technical" selected>Technical report</option>
+                    <option value="executive">Executive report</option>
+                </select>
+            </div>
+        </div>
+        <div class="report-toolbar no-export">
+            <div class="ui mini form">
+                <div class="inline fields report-toolbar-row" style="margin-bottom: 0;">
+                    <div class="field export-controls-group">
+                        <div class="export-buttons-stack">
+                            <div class="ui buttons">
+                                <button id="export_pdf_btn" class="ui button primary disabled">Export PDF</button>
+                                <div class="or"></div>
+                                <button id="export_md_btn" class="ui button disabled">Export Markdown</button>
+                            </div>
+                            <div class="ui checkbox" style="margin-top: 6px;">
+                                <input type="checkbox" id="pdf_include_sensitive" disabled>
+                                <label>Include sensitive evidence</label>
+                            </div>
+                        </div>
+                        <div id="export_loader" class="ui inline active mini loader"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="export_status" class="ui tiny grey text" style="display: none;"></div>
         </div>
         <img src="assets/images/icon.png" style="position: absolute;right: 15px;top: 5px;width: 70px;height: 70px;"
             title="Penetration Testing Kit">
 
     </div>
 
+    <!-- Summary Segment (always visible) -->
+    <div class="ui top attached segment" id="summary_segment">
+        <div class="ui top attached massive primary label"><i class="chart bar icon"></i>Summary <i
+                data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i>
+        </div>
+        <div class="ui placeholder segment" id="summary_segment_content" style="margin-top: 50px !important; display: none;">
+            <div style="padding: 20px;">
+                <div class="ui two column stackable grid">
+                    <!-- Risk Rating Bar Chart -->
+                    <div class="column">
+                        <h4 class="ui header">Risk Ratings</h4>
+                        <div id="summary_risk_chart" class="risk-bar-chart">
+                            <div class="risk-bar-item" data-severity="critical">
+                                <span class="risk-label">Critical</span>
+                                <div class="risk-bar-container">
+                                    <div class="risk-bar" style="background-color: var(--ptk-sev-critical);"></div>
+                                </div>
+                                <span class="risk-count">0</span>
+                            </div>
+                            <div class="risk-bar-item" data-severity="high">
+                                <span class="risk-label">High</span>
+                                <div class="risk-bar-container">
+                                    <div class="risk-bar" style="background-color: var(--ptk-sev-high);"></div>
+                                </div>
+                                <span class="risk-count">0</span>
+                            </div>
+                            <div class="risk-bar-item" data-severity="medium">
+                                <span class="risk-label">Medium</span>
+                                <div class="risk-bar-container">
+                                    <div class="risk-bar" style="background-color: var(--ptk-sev-medium);"></div>
+                                </div>
+                                <span class="risk-count">0</span>
+                            </div>
+                            <div class="risk-bar-item" data-severity="low">
+                                <span class="risk-label">Low</span>
+                                <div class="risk-bar-container">
+                                    <div class="risk-bar" style="background-color: var(--ptk-sev-low);"></div>
+                                </div>
+                                <span class="risk-count">0</span>
+                            </div>
+                            <div class="risk-bar-item" data-severity="info">
+                                <span class="risk-label">Info</span>
+                                <div class="risk-bar-container">
+                                    <div class="risk-bar" style="background-color: var(--ptk-sev-info);"></div>
+                                </div>
+                                <span class="risk-count">0</span>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Findings by Engine Table -->
+                    <div class="column">
+                        <h4 class="ui header">Findings by Engine</h4>
+                        <table id="summary_findings_table" class="ui celled compact table">
+                            <thead>
+                                <tr>
+                                    <th>Engine</th>
+                                    <th>Critical</th>
+                                    <th>High</th>
+                                    <th>Medium</th>
+                                    <th>Low</th>
+                                    <th>Info</th>
+                                    <th>Total</th>
+                                </tr>
+                            </thead>
+                            <tbody id="summary_findings_tbody">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <!-- Exposure & Hygiene + Remediation (executive view only) -->
+                <div id="summary_executive_extras" class="executive-only" style="display: none; margin-top: 20px;">
+                    <div class="ui two column stackable grid">
+                        <div class="column">
+                            <h4 class="ui header"><i class="shield alternate icon"></i>Exposure &amp; Hygiene</h4>
+                            <div id="summary_exposure_content" class="ui basic segment" style="padding: 10px 0;"></div>
+                        </div>
+                        <div class="column">
+                            <h4 class="ui header"><i class="tasks icon"></i>Remediation Plan</h4>
+                            <div id="summary_remediation_content" class="ui basic segment" style="padding: 10px 0;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="ui divider"></div>
+    </div>
 
-    <div class="ui top attached segment" id="dashboard" style="display: none;">
-        <div class="ui top attached massive primary label"><i class="bug layout icon"></i>General information <i
+    <!-- Executive View Container (hidden by default) -->
+    <div id="executive_view" style="display: none;">
+        <div class="ui top attached segment exec-section" id="exec_top_risks">
+            <div class="ui top attached massive primary label"><i class="exclamation triangle icon"></i><span class="exec-section-title-text">Top 5 Highest Risks</span> <i
+                data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i></div>
+            <div class="ui placeholder segment" style="margin-top: 50px !important;">
+                <div class="ui cards" id="exec_top_risks_content" style="padding: 20px;"></div>
+            </div>
+            <div class="ui divider"></div>
+        </div>
+        <div class="ui top attached segment exec-section" id="exec_correlated">
+            <div class="ui top attached massive primary label"><i class="linkify icon"></i><span class="exec-section-title-text">Correlated Findings</span> <i
+                data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i></div>
+            <div class="ui placeholder segment" style="margin-top: 50px !important;">
+                <div class="ui cards" id="exec_correlated_content" style="padding: 20px;"></div>
+            </div>
+            <div class="ui divider"></div>
+        </div>
+        <div class="ui top attached segment exec-section" id="exec_dast_top">
+            <div class="ui top attached massive primary label"><i class="bug icon"></i>DAST Top Findings <i
+                data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i></div>
+            <div class="ui placeholder segment" style="margin-top: 50px !important;">
+                <div class="ui cards" id="exec_dast_top_content" style="padding: 20px;"></div>
+            </div>
+            <div class="ui divider"></div>
+        </div>
+        <div class="ui top attached segment exec-section" id="exec_iast_top">
+            <div class="ui top attached massive primary label"><i class="random icon"></i>IAST Top Findings <i
+                data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i></div>
+            <div class="ui placeholder segment" style="margin-top: 50px !important;">
+                <div class="ui cards" id="exec_iast_top_content" style="padding: 20px;"></div>
+            </div>
+            <div class="ui divider"></div>
+        </div>
+        <div class="ui top attached segment exec-section" id="exec_sast_top">
+            <div class="ui top attached massive primary label"><i class="code branch icon"></i>SAST Top Findings <i
+                data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i></div>
+            <div class="ui placeholder segment" style="margin-top: 50px !important;">
+                <div class="ui cards" id="exec_sast_top_content" style="padding: 20px;"></div>
+            </div>
+            <div class="ui divider"></div>
+        </div>
+        <div class="ui top attached segment exec-section" id="exec_sca_top">
+            <div class="ui top attached massive primary label"><i class="cubes icon"></i>SCA Top Findings <i
+                data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i></div>
+            <div class="ui placeholder segment" style="margin-top: 50px !important;">
+                <div class="ui cards" id="exec_sca_top_content" style="padding: 20px;"></div>
+            </div>
+            <div class="ui divider"></div>
+        </div>
+    </div>
+
+    <!-- Technical View Container (visible by default, wraps existing sections) -->
+    <div id="technical_view">
+
+        <div class="ui top attached segment" id="dashboard" style="display: none;">
+        <div class="ui top attached massive primary label"><i class="clipboard list icon"></i>General information <i
                 data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i>
         </div>
         <div class="ui placeholder segment" style="margin-top: 50px !important; overflow: scroll;">
@@ -223,9 +519,18 @@
         <div class="ui divider"></div>
     </div>
 
+        <!-- Correlated Findings Section (technical view) - appears after General Information -->
+        <div class="ui top attached segment" id="tech_correlated" style="display: none;">
+            <div class="ui top attached massive primary label"><i class="linkify icon"></i><span class="tech-section-title-text">Correlated Findings</span> <i
+                data-content="Collapse" class="minus square outline icon hideshowreport" style="float: right;"></i></div>
+            <div class="ui placeholder segment" style="margin-top: 50px !important;">
+                <div class="ui cards" id="tech_correlated_content" style="padding: 20px;"></div>
+            </div>
+            <div class="ui divider"></div>
+        </div>
 
-    <div class="ui top attached segment" id="rattacker_report" style="display: none;">
-        <div class="ui top attached massive primary label"><i class="bug layout icon"></i>DAST (Dynamic Application
+        <div class="ui top attached segment" id="rattacker_report" style="display: none;">
+        <div class="ui top attached massive primary label"><i class="bug icon"></i>DAST (Dynamic Application
             Security Testing) result <i data-content="Collapse" class="minus square outline icon hideshowreport"
                 style="float: right;"></i></div>
         <div class="ui placeholder segment" style="margin-top: 50px !important;">
@@ -295,6 +600,43 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="ptk-severity-filter" data-engine="dast" style="padding: 0 40px 10px 40px;">
+                                <div class="ui tiny form">
+                                    <div class="inline fields" style="margin-bottom: 0;">
+                                        <label>Filter severity:</label>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="dast" data-severity="critical" checked>
+                                                <label>Critical</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="dast" data-severity="high" checked>
+                                                <label>High</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="dast" data-severity="medium" checked>
+                                                <label>Medium</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="dast" data-severity="low" checked>
+                                                <label>Low</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="dast" data-severity="info" checked>
+                                                <label>Info</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             <div style="  margin-top: 5px;scrollbar-width: none;">
                                 <form class="ui form controls">
                                     <div class="content" id="rattacker_content" style="padding:1px">
@@ -312,8 +654,8 @@
         <div class="ui divider"></div>
     </div>
 
-    <div class="ui top attached segment" id="iast_report" style="display: none;">
-        <div class="ui top attached massive primary label"><i class="bug layout icon"></i>IAST (Interactive Application
+        <div class="ui top attached segment" id="iast_report" style="display: none;">
+        <div class="ui top attached massive primary label"><i class="random icon"></i>IAST (Interactive Application
             Security Testing) result <i data-content="Collapse" class="minus square outline icon hideshowreport"
                 style="float: right;"></i></div>
         <div class="ui placeholder segment" style="margin-top: 50px !important;">
@@ -374,6 +716,43 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="ptk-severity-filter" data-engine="iast" style="padding: 0 40px 10px 40px;">
+                                <div class="ui tiny form">
+                                    <div class="inline fields" style="margin-bottom: 0;">
+                                        <label>Filter severity:</label>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="iast" data-severity="critical" checked>
+                                                <label>Critical</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="iast" data-severity="high" checked>
+                                                <label>High</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="iast" data-severity="medium" checked>
+                                                <label>Medium</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="iast" data-severity="low" checked>
+                                                <label>Low</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="iast" data-severity="info" checked>
+                                                <label>Info</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             <div style="  margin-top: 5px;scrollbar-width: none;">
                                 <form class="ui form controls">
                                     <div class="ui cards" id="iast_report_items" style="padding:1px">
@@ -391,8 +770,8 @@
         <div class="ui divider"></div>
     </div>
 
-    <div class="ui top attached segment" id="sast_report" style="display: none;">
-        <div class="ui top attached massive primary label"><i class="bug layout icon"></i>SAST (Static Application
+        <div class="ui top attached segment" id="sast_report" style="display: none;">
+        <div class="ui top attached massive primary label"><i class="code branch icon"></i>SAST (Static Application
             Security Testing) result <i data-content="Collapse" class="minus square outline icon hideshowreport"
                 style="float: right;"></i></div>
         <div class="ui placeholder segment" style="margin-top: 50px !important;">
@@ -460,6 +839,43 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="ptk-severity-filter" data-engine="sast" style="padding: 0 40px 10px 40px;">
+                                <div class="ui tiny form">
+                                    <div class="inline fields" style="margin-bottom: 0;">
+                                        <label>Filter severity:</label>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sast" data-severity="critical" checked>
+                                                <label>Critical</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sast" data-severity="high" checked>
+                                                <label>High</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sast" data-severity="medium" checked>
+                                                <label>Medium</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sast" data-severity="low" checked>
+                                                <label>Low</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sast" data-severity="info" checked>
+                                                <label>Info</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             <div style="  margin-top: 5px;scrollbar-width: none;">
                                 <form class="ui form controls">
                                     <div class="ui cards" id="sast_report_items" style="padding:1px">
@@ -477,8 +893,8 @@
         <div class="ui divider"></div>
     </div>
 
-    <div class="ui top attached segment" id="sca_report" style="display: none;">
-        <div class="ui top attached massive primary label"><i class="bug layout icon"></i>SCA (Software Composition
+        <div class="ui top attached segment" id="sca_report" style="display: none;">
+        <div class="ui top attached massive primary label"><i class="cubes icon"></i>SCA (Software Composition
             Analysis) result <i data-content="Collapse" class="minus square outline icon hideshowreport"
                 style="float: right;"></i></div>
         <div class="ui placeholder segment" style="margin-top: 50px !important;">
@@ -538,6 +954,43 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="ptk-severity-filter" data-engine="sca" style="padding: 0 40px 10px 40px;">
+                                <div class="ui tiny form">
+                                    <div class="inline fields" style="margin-bottom: 0;">
+                                        <label>Filter severity:</label>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sca" data-severity="critical" checked>
+                                                <label>Critical</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sca" data-severity="high" checked>
+                                                <label>High</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sca" data-severity="medium" checked>
+                                                <label>Medium</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sca" data-severity="low" checked>
+                                                <label>Low</label>
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <div class="ui checkbox">
+                                                <input type="checkbox" class="severity-filter" data-engine="sca" data-severity="info" checked>
+                                                <label>Info</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             <div style="  margin-top: 5px;scrollbar-width: none;">
                                 <form class="ui form controls">
                                     <div class="ui cards" id="sca_report_items" style="padding:1px">
@@ -554,6 +1007,9 @@
         </div>
         <div class="ui divider"></div>
     </div>
+    </div><!-- End technical_view -->
+
+    <div id="report_methodology_footer" class="ui tiny grey text" style="margin: 24px 0 12px; padding: 0 20px;"></div>
 </body>
 
 

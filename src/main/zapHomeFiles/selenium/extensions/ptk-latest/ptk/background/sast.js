@@ -69,6 +69,41 @@ export class ptk_sast {
     return this.defaultModulesCache;
   }
 
+  async _prepareSastOptions(scanStrategyRaw, opts = {}) {
+    let rulepack = opts?.rulepack;
+    let catalog = opts?.catalog;
+
+    if (!rulepack || !catalog) {
+      [rulepack, catalog] = await Promise.all([
+        loadRulepack("SAST"),
+        fetch(browser.runtime.getURL("ptk/background/sast/modules/catalog.json")).then(res => res.json())
+      ]);
+    }
+
+    normalizeRulepack(rulepack, { engine: "SAST", childKey: "rules" });
+    if (rulepack && Array.isArray(rulepack.modules)) {
+      this.defaultModulesCache = rulepack.modules;
+    }
+
+    const scanStrategySettings = (scanStrategyRaw && typeof scanStrategyRaw === "object") ? scanStrategyRaw : {};
+    let scanStrategyCode = (typeof scanStrategyRaw === "number" || typeof scanStrategyRaw === "string")
+      ? Number(scanStrategyRaw)
+      : Number(scanStrategySettings.scanStrategyCode ?? scanStrategySettings.scanStrategy ?? scanStrategySettings.policyCode ?? scanStrategySettings.policy ?? 0);
+    if (!Number.isFinite(scanStrategyCode)) scanStrategyCode = 0;
+    const scanStrategy = Object.assign({}, scanStrategySettings, { scanStrategyCode });
+
+    const pages = Array.isArray(opts?.pages) ? opts.pages : null;
+    const mergedOpts = Object.assign({}, opts, {
+      rulepack,
+      catalog,
+      pages: pages || scanStrategy.pages || scanStrategy.routes || [],
+      spaDelayMs: opts?.spaDelayMs || scanStrategy.spaDelayMs || scanStrategy.spaDelay || null,
+      scanStrategyCode,
+    });
+
+    return { scanStrategy, opts: mergedOpts, scanStrategyCode };
+  }
+
   async init() {
     this.storage = await ptk_storage.getItem(this.storageKey);
     if (!this.storage || !Object.keys(this.storage).length) return;
@@ -936,30 +971,14 @@ export class ptk_sast {
 
   async msg_run_bg_scan(message) {
     try {
-      const [rulepack, catalog] = await Promise.all([
-        loadRulepack("SAST"),
-        fetch(browser.runtime.getURL("ptk/background/sast/modules/catalog.json")).then(res => res.json())
-      ]);
-      normalizeRulepack(rulepack, { engine: 'SAST', childKey: 'rules' })
-
       const scanStrategyRaw = message.scanStrategy ?? message.policy;
-      const scanStrategySettings = (scanStrategyRaw && typeof scanStrategyRaw === "object") ? scanStrategyRaw : {};
-      let scanStrategyCode = (typeof scanStrategyRaw === "number" || typeof scanStrategyRaw === "string")
-        ? Number(scanStrategyRaw)
-        : Number(scanStrategySettings.scanStrategyCode ?? scanStrategySettings.scanStrategy ?? scanStrategySettings.policyCode ?? scanStrategySettings.policy ?? 0);
-      if (!Number.isFinite(scanStrategyCode)) scanStrategyCode = 0;
-      const scanStrategy = Object.assign({}, scanStrategySettings, { scanStrategyCode });
-      const pages = Array.isArray(message.pages) ? message.pages : null;
       const opts = {
-        rulepack,
-        catalog,
-        pages: pages || scanStrategy.pages || scanStrategy.routes || [],
-        spaDelayMs: scanStrategy.spaDelayMs || scanStrategy.spaDelay || message.spaDelayMs || null,
-        scanStrategyCode,
+        pages: Array.isArray(message.pages) ? message.pages : null,
+        spaDelayMs: message.spaDelayMs || null,
       };
 
-      await this.runBackroungScan(message.tabId, message.host, scanStrategy, opts);
-      const defaultModules = await this.getDefaultModules(rulepack);
+      await this.runBackgroundScan(message.tabId, message.host, scanStrategyRaw, opts);
+      const defaultModules = await this.getDefaultModules();
 
       return {
         isScanRunning: this.isScanRunning,
@@ -975,7 +994,7 @@ export class ptk_sast {
   }
 
   msg_stop_bg_scan(message) {
-    this.stopBackroungScan();
+    this.stopBackgroundScan();
     return Promise.resolve({
       scanResult: this._cloneScanResultForUi(),
     });
@@ -1201,10 +1220,13 @@ export class ptk_sast {
     return normalizedBase + normalizedApiBase + normalizedEndpoint;
   }
 
-  async runBackroungScan(tabId, host, scanStrategy, opts) {
-    if (this.isScanRunning) {
-      return false;
-    }
+  async runBackgroundScan(tabId, host, scanStrategyRaw, opts = {}) {
+    if (this.isScanRunning) return false;
+
+    const prepared = await this._prepareSastOptions(scanStrategyRaw, opts);
+    const scanStrategy = prepared.scanStrategy;
+    opts = prepared.opts;
+
     this.reset();
     this.isScanRunning = true;
     this.scanningRequest = false;
@@ -1284,10 +1306,20 @@ export class ptk_sast {
       this.scanSpaPages(tabId, pages, opts).catch((err) => {
         console.error("[SAST] Multi-page SPA scan failed", err);
       });
+    } else {
+      this.waitForSpaIdle(tabId, opts?.spaDelayMs || 500)
+        .then(() => this.requestScriptsFromTab(tabId))
+        .then((payload) => {
+          if (!payload?.scripts) return;
+          return this.scanCode(payload.scripts, payload.html, payload.file);
+        })
+        .catch((err) => {
+          console.error("[SAST] Initial script collection failed", err);
+        });
     }
   }
 
-  stopBackroungScan() {
+  stopBackgroundScan() {
     if (this.scanResult?.scanId) {
       if (worker.isFirefox && this.sastWorker) {
         this.sastWorker.postMessage({ type: "stop_scan", scanId: this.scanResult.scanId });

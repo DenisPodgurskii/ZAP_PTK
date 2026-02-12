@@ -216,12 +216,14 @@ async function runSpaParamTest({ param, payload, checks = [], markerDomain, mark
             try {
                 for (let i = 0; i < localStorage.length; i++) {
                     const k = localStorage.key(i)
+                    if (!k || /^ptk_/i.test(k)) continue
                     snap.local[k] = localStorage.getItem(k)
                 }
             } catch (_) { }
             try {
                 for (let i = 0; i < sessionStorage.length; i++) {
                     const k = sessionStorage.key(i)
+                    if (!k || /^ptk_/i.test(k)) continue
                     snap.session[k] = sessionStorage.getItem(k)
                 }
             } catch (_) { }

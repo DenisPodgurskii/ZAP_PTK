@@ -448,7 +448,7 @@ export class ptk_dashboard {
         try {
             self = JSON.parse(JSON.stringify(this))//FF fix
         } catch (e) {
-
+            self = {}
         }
         browser.runtime.sendMessage({
             channel: "ptk_background2popup_dashboard",
@@ -705,11 +705,11 @@ export class ptk_dashboard {
 
         if (message.scans.dast) {
             if (running.dast) skipped.dast = true
-            else worker.ptk_app.rattacker.runBackroungScan(message.tabId, message.host, message.domains, message.settings)
+            else worker.ptk_app.rattacker.runBackgroundScan(message.tabId, message.host, message.domains, message.settings)
         }
         if (message.scans.iast) {
             if (running.iast) skipped.iast = true
-            else worker.ptk_app.iast.runBackroungScan(message.tabId, message.host)
+            else worker.ptk_app.iast.runBackgroundScan(message.tabId, message.host)
         }
         if (message.scans.sast) {
             if (running.sast) {
@@ -724,7 +724,7 @@ export class ptk_dashboard {
         }
         if (message.scans.sca) {
             if (running.sca) skipped.sca = true
-            else worker.ptk_app.sca.runBackroungScan(message.tabId, message.host)
+            else worker.ptk_app.sca.runBackgroundScan(message.tabId, message.host)
         }
 
         let scans = {
@@ -735,15 +735,26 @@ export class ptk_dashboard {
             exportable: this._buildExportableFlags()
         }
 
-        return Promise.resolve(Object.assign({}, self, worker.ptk_app.proxy.activeTab, { scans: scans }, { skipped }))
+        let payload = {}
+        try {
+            payload = JSON.parse(JSON.stringify({
+                activeTab: worker.ptk_app.proxy.activeTab || null,
+                scans,
+                skipped
+            }))
+        } catch (e) {
+            payload = { activeTab: null, scans, skipped }
+        }
+
+        return Promise.resolve(payload)
     }
 
     async msg_stop_bg_scan(message) {
 
-        if (message.scans.dast) worker.ptk_app.rattacker.stopBackroungScan()
-        if (message.scans.iast) worker.ptk_app.iast.stopBackroungScan()
-        if (message.scans.sast) worker.ptk_app.sast.stopBackroungScan()
-        if (message.scans.sca) worker.ptk_app.sca.stopBackroungScan()
+        if (message.scans.dast) worker.ptk_app.rattacker.stopBackgroundScan()
+        if (message.scans.iast) worker.ptk_app.iast.stopBackgroundScan()
+        if (message.scans.sast) worker.ptk_app.sast.stopBackgroundScan()
+        if (message.scans.sca) worker.ptk_app.sca.stopBackgroundScan()
 
         let scans = {
             dast: worker.ptk_app.rattacker.engine.isRunning,
@@ -776,7 +787,7 @@ export class ptk_dashboard {
         }
         if (worker.ptk_app?.settings?.history?.route != 'index') {
             let link = ""
-            if (['session', 'sca', 'iast', 'sast', 'proxy', 'rbuilder', 'rattacker', 'macro', 'traffic', 'decoder', 'swagger-editor', 'portscanner', 'jwt', 'xss', 'sql'].includes(worker.ptk_app.settings.history.route)) {
+            if (['session', 'sca', 'iast', 'sast', 'proxy', 'rbuilder', 'rattacker', 'macro', 'traffic', 'swagger', 'decoder', 'portscanner', 'jwt', 'xss', 'sql'].includes(worker.ptk_app.settings.history.route)) {
                 link = worker.ptk_app.settings.history.route + ".html"
                 if (worker.ptk_app.settings.history.hash) {
                     link += "#" + worker.ptk_app.settings.history.hash

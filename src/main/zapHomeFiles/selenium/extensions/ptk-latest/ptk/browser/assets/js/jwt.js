@@ -46,14 +46,14 @@ jQuery(function () {
         var fileReader = new FileReader()
         fileReader.onload = function () {
             controller.load_dict(fileReader.result).then(result => {
-                console.log(result)
+                //console.log(result)
             })
         }
 
         fileReader.onprogress = (event) => {
             if (event.lengthComputable) {
                 let progress = ((event.loaded / event.total) * 100);
-                console.log(progress);
+                //console.log(progress);
             }
         }
         fileReader.readAsText(file)
@@ -299,9 +299,8 @@ jQuery(function () {
 
     $("#jwk_injection_attack_dlg_generate").on('click', function (e) {
         jose.generateSecret('HS256', { "extractable": true }).then(result => {
-            console.log(result)
             jose.importJWK(result, 'HS256').then(result => {
-                console.log(result)
+                //console.log(result)
             })
         })
 
@@ -621,15 +620,6 @@ jQuery(function () {
 
     /////
 
-    // function updByEditorMode() {
-    //     console.log('mode: ' + editorMode)
-    //     if (editorMode == 2) {
-    //         updToken()
-    //     } else if (editorMode == 1) {
-    //         updTokenControls()
-    //     }
-    // }
-
     async function generateKeyPair(alg) {
         return jose.generateKeyPair(alg, {
             extractable: true,
@@ -720,7 +710,6 @@ jQuery(function () {
     }
 
     function updToken() {
-        console.log('update token')
 
         let $form = $('#jwt_form'), values = $form.form('get values')
         let payloadPlain = editorPayload.getValue().replace(/\n/g, '')
@@ -753,7 +742,6 @@ jQuery(function () {
                 $('#signature_msg_wrapper').addClass('negative')
                 //$('.button.updatein').addClass('disabled')
                 editorMode = null
-                console.log(e)
             })
 
         }
@@ -990,7 +978,6 @@ function reset() {
 
 
 function bindTokens(tokens) {
-    console.log(tokens)
     let selectedToken
     if (!tokens.length) {
         $("#source").dropdown('clear')

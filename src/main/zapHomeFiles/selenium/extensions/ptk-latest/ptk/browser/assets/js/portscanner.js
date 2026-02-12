@@ -98,7 +98,6 @@ function isPortOpen(target, port, timeout = 500) {
         img.onload = img.onerror
         img.src = 'http://' + target + ':' + port
     } catch (e) {
-        console.log(e)
     }
 
     setTimeout(function () {
@@ -161,5 +160,4 @@ async function bindInfo() {
 
     }
 }
-
 

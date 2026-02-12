@@ -35769,7 +35769,7 @@
             "cookies": {
                 "Nop.customer": ""
             },
-            "description": "nopCommerce is an open-source ecommerce solution based on Microsoft's ASP​.NET Core framework and MS SQL Server 2012 (or higher) backend database.",
+            "description": "nopCommerce is an open-source ecommerce solution based on Microsoft's ASP��.NET Core framework and MS SQL Server 2012 (or higher) backend database.",
             "html": "(?:<!--Powered by nopCommerce|Powered by: <a[^>]+nopcommerce)",
             "icon": "nopCommerce.png",
             "implies": "Microsoft ASP.NET",

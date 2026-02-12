@@ -286,9 +286,7 @@ export class ptk_sca {
                         }
                     }
                 })
-                .catch(function (error) {
-                    console.log(error);
-                })
+                .catch(function () { })
         )
 
         if (fetches.length) {
@@ -388,12 +386,12 @@ export class ptk_sca {
     }
 
     async msg_run_bg_scan(message) {
-        await this.runBackroungScan(message.tabId, message.host)
+        await this.runBackgroundScan(message.tabId, message.host)
         return Promise.resolve({ isScanRunning: this.isScanRunning, scanResult: JSON.parse(JSON.stringify(this.scanResult)) })
     }
 
     msg_stop_bg_scan(message) {
-        this.stopBackroungScan()
+        this.stopBackgroundScan()
         return Promise.resolve({ scanResult: JSON.parse(JSON.stringify(this.scanResult)) })
     }
 
@@ -619,7 +617,7 @@ export class ptk_sca {
         }
     }
 
-    async runBackroungScan(tabId, host) {
+    async runBackgroundScan(tabId, host) {
         if (this.isScanRunning) {
             return false
         }
@@ -635,7 +633,7 @@ export class ptk_sca {
         this.addListeners()
     }
 
-    stopBackroungScan() {
+    stopBackgroundScan() {
         this.isScanRunning = false
         this.activeTabId = null
         if (this.scanResult) {

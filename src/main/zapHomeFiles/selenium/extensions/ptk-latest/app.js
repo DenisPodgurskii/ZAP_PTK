@@ -20,6 +20,7 @@ import { ptk_jwt } from "./ptk/background/jwt.js"
 
 import { ptk_iast } from "./ptk/background/iast.js"
 import { ptk_sast } from "./ptk/background/sast.js"
+import { ptk_automation } from "./ptk/background/automation.js"
 
 
 const worker = self
@@ -32,13 +33,15 @@ export class ptk_app {
         this.settings = new ptk_settings(settings)
 
         browser.storage.local.get('pentestkit8_settings').then(function (result) {
- 
             if (result.pentestkit8_settings) {
                 this.settings.mergeSettings(result.pentestkit8_settings)
                 if (this.updated) this.settings.release_note.show = true
             } else {
                 this.settings.resetSettings()
             }
+
+            // Mark settings as ready so getSettings() can return
+            this.settings.markReady()
 
             this.proxy = new ptk_proxy(this.settings.proxy)
 
@@ -62,6 +65,9 @@ export class ptk_app {
             this.iast = new ptk_iast()
 
             this.sast = new ptk_sast()
+
+            this.automation = new ptk_automation()
+            this.automation.init(this)
 
             this.recorder = new ptk_recorder(settings.recorder)
             this.recorder.addMessageListeners()

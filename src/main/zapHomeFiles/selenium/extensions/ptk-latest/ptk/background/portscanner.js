@@ -49,7 +49,7 @@ export class ptk_portscanner {
         let domain = message.domain
         let ports = message.ports
         for(let i =0; i < ports.length; i++){
-            console.log(this.isPortOpen(domain, ports[i]))
+            this.isPortOpen(domain, ports[i]).catch(() => { })
         }
 
     }

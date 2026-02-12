@@ -460,9 +460,18 @@ function mountRequestEditor(value) {
 
 export function sortAttacks() {
     // Expensive for large lists; call once after the scan completes.
-    $(".attack_info")
-        .sort((a, b) => $(a).data("order") - $(b).data("order"))
-        .appendTo("#attacks_info");
+    const $container = $("#attacks_info");
+    if (!$container.length) return;
+
+    // jQuery collections are array-like and do not always expose Array#sort.
+    const nodes = $(".attack_info").get();
+    nodes.sort((a, b) => {
+        const aOrder = Number($(a).data("order")) || 0;
+        const bOrder = Number($(b).data("order")) || 0;
+        return aOrder - bOrder;
+    });
+
+    $container.append(nodes);
 }
 
 function canonicalizeSastUrl(raw, base) {

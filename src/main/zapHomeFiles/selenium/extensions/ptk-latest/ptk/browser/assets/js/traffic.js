@@ -229,7 +229,6 @@ controller.setup = function (options, fileinputId, outputHolder, harLog) {
             var perfCascadeSvg = window.perfCascade.fromHar(logData, options)
             outputHolder.appendChild(perfCascadeSvg)
         } catch (e) {
-            console.log(e)
         }
 
         /** append SVG to page - that's it */
@@ -252,9 +251,7 @@ controller.setup = function (options, fileinputId, outputHolder, harLog) {
             } else {
                 renderPerfCascadeChart(data)
             }
-        }, function (progress) {
-            console.log("unzip progress: ", progress / 100, "%");
-        })
+        }, function () { })
     }
 
 

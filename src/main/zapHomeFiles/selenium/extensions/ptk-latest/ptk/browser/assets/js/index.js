@@ -656,6 +656,16 @@ async function bindTokens(data) {
     }
 }
 
+function stripPtkStorageKeys(obj) {
+    if (!obj || typeof obj !== "object") return obj
+    const cleaned = {}
+    Object.keys(obj).forEach((key) => {
+        if (/^ptk_/i.test(key)) return
+        cleaned[key] = obj[key]
+    })
+    return cleaned
+}
+
 
 
 function bindStorage(force = false) {
@@ -668,6 +678,7 @@ function bindStorage(force = false) {
     let dt = new Array()
     Object.keys(controller.storage).forEach(key => {
         let item = JSON.parse(controller.storage[key])
+        item = stripPtkStorageKeys(item)
         if (Object.keys(item).length > 0 && item[key] != "") {
             $(document).trigger("bind_" + key, item)
             $("a[data-tab='" + key + "']").show()
@@ -697,10 +708,11 @@ function bindStorage(force = false) {
 }
 
 $(document).on("bind_localStorage", function (e, item) {
-    if (Object.keys(item).length > 0) {
+    const filtered = stripPtkStorageKeys(item)
+    if (Object.keys(filtered).length > 0) {
 
-        let output = JSON.stringify(item, null, 4)
-        let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(item), jwtHelper.storageRegex)
+        let output = JSON.stringify(filtered, null, 4)
+        let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(filtered), jwtHelper.storageRegex)
         if (jwtToken) {
             let jwt = JSON.parse(decodedToken)
             tokens.push(['localStorage', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
@@ -723,9 +735,10 @@ async function loadFullDashboard() {
 }
 
 $(document).on("bind_sessionStorage", function (e, item) {
-    if (Object.keys(item).length > 0) {
-        let output = JSON.stringify(item, null, 4)
-        let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(item), jwtHelper.storageRegex)
+    const filtered = stripPtkStorageKeys(item)
+    if (Object.keys(filtered).length > 0) {
+        let output = JSON.stringify(filtered, null, 4)
+        let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(filtered), jwtHelper.storageRegex)
         if (jwtToken) {
             let jwt = JSON.parse(decodedToken)
             tokens.push(['sessionStorage', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
@@ -862,21 +875,17 @@ $(document).on("click", ".dast_scan_stop, .iast_scan_stop, .sast_scan_stop, .sca
         sast: $(this).hasClass('sast_scan_stop') ? true : false,
         sca: $(this).hasClass('sca_scan_stop') ? true : false,
     }
-    controller.stopBackroungScan(s).then(function (result) {
+    controller.stopBackgroundScan(s).then(function (result) {
         applyDashboardScanControls(result?.scans)
-    }).catch(e => {
-        console.log(e)
-    })
+    }).catch(() => { })
 })
 
 $(document).on("click", "#stop_all_scans", function () {
     if ($(this).hasClass('disabled')) return false
     const s = { dast: true, iast: true, sast: true, sca: true }
-    controller.stopBackroungScan(s).then(function (result) {
+    controller.stopBackgroundScan(s).then(function (result) {
         applyDashboardScanControls(result?.scans)
-    }).catch(e => {
-        console.log(e)
-    })
+    }).catch(() => { })
     return false
 })
 
@@ -895,9 +904,7 @@ $(document).on("click", "#export_all_scans", function () {
     tasks.push(scaController.exportScanResult().then(result => {
         if (result) downloadScanExport(result, "PTK_SCA_scan.json")
     }))
-    Promise.all(tasks).catch(err => {
-        console.log(err)
-    })
+    Promise.all(tasks).catch(() => { })
     return false
 })
 
@@ -930,12 +937,6 @@ $(document).on("click", "#manage_scans", function () {
             $('#dast-scan-policy').val(settings.dastScanPolicy || 'ACTIVE')
             setRunCveState(false)
             const contentReady = await rutils.pingContentScript(activeTab.tabId, { timeoutMs: 1800 })
-            console.log("[PTK] Manage scans content ping", {
-                tabId: activeTab.tabId,
-                url: activeTab.url,
-                contentReady,
-                cachedReady: controller._contentReadyByTabId?.[activeTab.tabId]
-            })
             setReloadWarning($('#ptk_reload_warning'), !contentReady)
             updateRuntimeScanToggles(contentReady)
 
@@ -963,7 +964,7 @@ $(document).on("click", "#manage_scans", function () {
                             setReloadWarning($('#ptk_reload_warning'), true)
                             return false
                         }
-                        controller.runBackroungScan(result.activeTab.tabId, h, $('#scan_domains').val(), s, settings).then(function (result) {
+                        controller.runBackgroundScan(result.activeTab.tabId, h, $('#scan_domains').val(), s, settings).then(function (result) {
                             //changeView(result)
                         })
                     }

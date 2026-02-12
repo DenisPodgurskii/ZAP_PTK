@@ -282,7 +282,6 @@ export class ptk_jwtHelper {
                     return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
                 }).join(''));
             } catch (e) {
-                console.log(e)
             }
 
             if (base64Url.length == 3)
@@ -394,13 +393,9 @@ export class ptk_jwtHelper {
             let format = this.detectCertFormat(keys['private'])
             let privateKey = null
             if (format == ptk_jwtHelper.PKCS8) {
-                privateKey = await jose.importPKCS8(keys['private'], hObj.alg).catch(e => {
-                    console.log(e)
-                })
+                privateKey = await jose.importPKCS8(keys['private'], hObj.alg).catch(() => undefined)
             } else if (format == ptk_jwtHelper.JWK) {
-                privateKey = await jose.importJWK(JSON.parse(keys['private']), hObj.alg).catch(e => {
-                    console.log(e)
-                })
+                privateKey = await jose.importJWK(JSON.parse(keys['private']), hObj.alg).catch(() => undefined)
             }
 
 
@@ -443,18 +438,14 @@ export class ptk_ruleManager {
 
     static getDynamicRules() {
         if (!worker.isFirefox) {
-            return chrome.declarativeNetRequest.getDynamicRules((rules) => {
-                console.log(rules)
-            })
+            return chrome.declarativeNetRequest.getDynamicRules(() => { })
         }
         return []
     }
 
     static getSessionRules() {
         if (!worker.isFirefox) {
-            return chrome.declarativeNetRequest.getSessionRules((rules) => {
-                console.log(rules)
-            })
+            return chrome.declarativeNetRequest.getSessionRules(() => { })
         }
         return []
     }
@@ -529,7 +520,6 @@ export class ptk_ruleManager {
                     removeRuleIds: [id]
                 })
             } catch (e) {
-                console.log(e)
             }
         }
     }

@@ -3,6 +3,13 @@ const frame = document.getElementById('ptkFrame')
 const menuWrapper = document.getElementById('mainMenuWrapper')
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Set clipboard permissions only in browsers that support them (Chrome)
+  // Firefox doesn't support these permission policies and logs warnings
+  const ptkFrame = document.getElementById('ptkFrame')
+  if (ptkFrame && (typeof navigator.userAgentData !== 'undefined' || !navigator.userAgent.includes('Firefox'))) {
+    ptkFrame.setAttribute('allow', 'clipboard-read; clipboard-write')
+  }
+
   // Wire the menu clicks to load pages into the iframe
   const mainMenu = document.getElementById('mainMenu')
   if (mainMenu) {
@@ -64,15 +71,15 @@ jQuery(function () {
                     
                     <a class="item" href="#" data-history="macro">Macro</a>
                     <a class="item" href="#" data-history="traffic">Traffic</a>
-
-                    <a class="item" href="#" data-history="swagger-editor">Swagger</a>
+                    <a class="item" href="#" data-history="swagger">Swagger</a>
 
                     <!--a class="item" href="portscanner.html" data-history="portscanner">Port Scanner</a-->
                     </div>
                 </div>
-                <div style="position: absolute;width: 30px;height: 30px;right: 47px;top: -6px;"> 
-                <a class="item" href="https://athenaos.org/en/resources/browser-pentesting/#_top" target="_blank"><img src="assets/images/athenaos.svg" id="AthenaOS" title="Athena OS Integration"></a>
-                </div>
+
+                <a class="item" href="https://www.zaproxy.org/blog/2026-01-19-owasp-ptk-add-on/" target="_blank"><img src="assets/images/zap.svg" id="ZAP" title="OWASP PTK Integration with ZAP" style="position: absolute;width: 28px;height: 28px;right: 47px;top: 7px;"></a>
+                <a class="item" href="https://athenaos.org/en/resources/browser-pentesting/#_top" target="_blank"><img src="assets/images/athenaos.svg" id="AthenaOS" title="Athena OS Integration" style="position: absolute;width: 30px;height: 30px;right: 32px;top: 6px;"></a>
+   
     
                 
                 <!--div class="ui dropdown item " style="position: absolute;width: 30px;height: 30px;right: 34px;top: 3px;padding: 0px; ">
@@ -202,17 +209,19 @@ jQuery(function () {
   $("body").prepend(
     `
 <div class="ui success tiny message" id="ptk_release_note" style="display:none;position: absolute;bottom: 0;right: 0;z-index: 2;margin:0; width:500px">
-    <i class="close icon ptk_release_note"></i>
-    <div class="header">
-        Release notes - #${version}
-    </div>
-    <ul class="list">
-        <li><strong>JWT attacks:</strong> Improved JWT attack validation and fixed false positives for <code>alg=none</code> checks, including better handling of public/unauthenticated endpoints.</li>
-        <li><strong>SPA attacks support:</strong> Added improved support for attacking Single-Page Applications (SPA), with more reliable navigation and in-app flow handling during DAST.</li>
-        <li><strong>UI performance:</strong> Faster and more responsive dashboard/UI experience, especially while scans are running under load.</li>
-    </ul>
-    <p>More details on <a href="https://pentestkit.co.uk/release_notes.html" target="_blank">https://pentestkit.co.uk/release_notes.html</a></p>
+  <i class="close icon ptk_release_note"></i>
+  <div class="header">
+    Release notes - #${version}
+  </div>
+  <ul class="list">
+    <li><strong>Reports export:</strong> Added export in <strong>PDF</strong> and <strong>Markdown</strong> formats.</li>
+    <li><strong>Executive vs Technical:</strong> New report presets with a <strong>Summary</strong> section for quick high-level visibility.</li>
+    <li><strong>Triage & correlation:</strong> Added <strong>severity filters</strong>, <strong>confidence scoring</strong>, and <strong>correlated findings</strong> across DAST/IAST/SAST/SCA.</li>
+    <li><strong>Safer exports:</strong> Safe-by-default <strong>redaction</strong>, cleaner evidence (truncation), and Executive reports now <strong>group/dedupe</strong> noisy repeats.</li>
+  </ul>
+  <p>More details on <a href="https://pentestkit.co.uk/release_notes.html" target="_blank">https://pentestkit.co.uk/release_notes.html</a></p>
 </div>
+
         `
 
   )

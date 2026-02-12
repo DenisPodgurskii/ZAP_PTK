@@ -64,7 +64,7 @@ http://ricostacruz.com/cheatsheets/umdjs.html
       return a % b;
     },
     "log": function(a) {
-      console.log(a); return a;
+      return a;
     },
     "in": function(a, b) {
       if (!b || typeof b.indexOf === "undefined") return false;

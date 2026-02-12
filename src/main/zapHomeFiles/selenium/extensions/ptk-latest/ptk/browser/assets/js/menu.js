@@ -64,7 +64,6 @@ jQuery(function () {
 
 
 
-    if (!isIframePage) {
         $('#footer_menu').prepend(
         `
         <div class=""
@@ -74,8 +73,6 @@ jQuery(function () {
         </div>
 
         <div class="ui mini message" style="height: 25px;position: fixed; bottom: 0px; right:0px; z-index:1; padding-top: 1px;padding-left: 4px; padding-right: 4px;">            
-            <!--a href="https://athenaos.org/en/resources/browser-pentesting/#_top" target="_blank"><img
-                    src="assets/images/athenaos.png" title="Athena OS integration" style="width: 24px; padding:1px"></a-->
             <a href="https://www.youtube.com/channel/UCbEcTounPkV1aitE1egXfqw/" target="_blank"><i
             class="youtube big icon" title="PTK on youtube" style="margin-top: -18px;"></i></a>
             <a href="https://pentestkit.co.uk" target="_blank"><i class="globe big icon" title="PTK website"
@@ -131,7 +128,7 @@ jQuery(function () {
 
         `
         )
-    }
+  
 
 
 

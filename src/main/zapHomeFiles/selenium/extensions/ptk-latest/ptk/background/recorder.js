@@ -122,7 +122,7 @@ export class ptk_recorder {
                 browser.scripting.executeScript({ files: [this.trackerJS], target: { tabId: tabId, allFrames: false } }).then(function () {
                     browser.scripting.executeScript({ files: [popuJSPath], target: { tabId: tabId, allFrames: false } })
                     browser.scripting.executeScript({ files: [file], target: { tabId: tabId, allFrames: true } })
-                }).catch(e => console.log(e))
+                }).catch(e => console.warn(e))
             } else {
                 browser.scripting.executeScript({ files: [file], target: { tabId: tabId, allFrames: true } }).catch(e => e)
             }
@@ -579,7 +579,7 @@ export class ptk_recorder {
                 "ptk_double_click": this.doubleClick
             }).then(function () {
                 self.startInActiveTab(startUrl).catch((e) => {
-                    console.log('Failed to start recording in active tab', e)
+                    console.warn('Failed to start recording in active tab', e)
                 })
             })
         } else {
@@ -620,8 +620,7 @@ export class ptk_recorder {
                                 this.recording.recordingRequests[l].request.requestBody.postData = r.postData
                                 this.recording.recordingRequests[l].request.requestBody.postDataEntries = r.postDataEntries
                             } else {
-                                console.log('No request body for postData')
-                                console.log(this.recording.recordingRequests[l]?.request)
+                                console.warn('No request body for postData', this.recording.recordingRequests[l]?.request)
                             }
                         }
                         a.splice(k, 1)
@@ -685,7 +684,7 @@ export class ptk_recorder {
                 "ptk_path_to_icons": this.pathToIcons
             }).then(function () {
                 self.startInActiveTab(startUrl).catch((e) => {
-                    console.log('Failed to start replay in active tab', e)
+                    console.warn('Failed to start replay in active tab', e)
                 })
             })
         } else {

@@ -85,6 +85,8 @@ export class dastEngine {
             policy: settings?.dastScanPolicy || settings?.scanPolicy
         })
         this._proModuleLoadPromise = this.loadProModules()
+        this._debuggerDialogTabs = new Set()
+        this._debuggerDialogListener = null
     }
 
     reset() {
@@ -1577,22 +1579,111 @@ export class dastEngine {
     async _withSpaAttackTab(url, fn) {
         let tabId = null
         try {
-            const tab = await browser.tabs.create({ url, active: false })
-            tabId = tab.id
-            // instruct page hook to track leaks for this marker if needed
-            if (typeof fn === 'function') {
-                try {
-                    const marker = null
-                    // marker is set per-call in fn via sendMessage payload
-                } catch (_) { }
+            const isFirefox = typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo
+            if (isFirefox) {
+                const markedUrl = this._addSpaDialogMarker(url)
+                const tab = await browser.tabs.create({ url: markedUrl, active: false })
+                tabId = tab.id
+                await this._markSpaAttackTab(tabId, { runAt: "document_start" })
+            } else {
+                const tab = await browser.tabs.create({ url: "about:blank", active: false })
+                tabId = tab.id
+                await this._markSpaAttackTab(tabId)
+                await browser.tabs.update(tabId, { url })
             }
             await this._waitForTabReady(tabId)
             const res = await fn(tabId, url)
             return res
         } finally {
             if (tabId !== null) {
+                await this._detachDialogAutoDismiss(tabId)
                 try { await browser.tabs.remove(tabId) } catch (_) { }
             }
+        }
+    }
+
+    _addSpaDialogMarker(url) {
+        const marker = "ptk_dast=1"
+        if (!url || url.includes(marker)) return url
+        const hashIndex = url.indexOf("#")
+        if (hashIndex >= 0) {
+            const base = url.slice(0, hashIndex)
+            const hash = url.slice(hashIndex + 1)
+            const joiner = hash.includes("?") ? "&" : "?"
+            return `${base}#${hash}${joiner}${marker}`
+        }
+        const joiner = url.includes("?") ? "&" : "?"
+        return `${url}${joiner}${marker}`
+    }
+
+    async _attachDialogAutoDismiss(tabId) {
+        const isFirefox = typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo
+        if (isFirefox) return false
+        if (!browser?.debugger || !tabId) return false
+        const target = { tabId }
+        try {
+            await browser.debugger.attach(target, "1.3")
+        } catch (_) {
+            return false
+        }
+        try {
+            await browser.debugger.sendCommand(target, "Page.enable")
+            await browser.debugger.sendCommand(target, "Runtime.enable")
+        } catch (_) { }
+        this._ensureDebuggerDialogListener()
+        this._debuggerDialogTabs.add(tabId)
+        return true
+    }
+
+    async _detachDialogAutoDismiss(tabId) {
+        if (!browser?.debugger || !tabId) return
+        this._debuggerDialogTabs.delete(tabId)
+        try {
+            await browser.debugger.detach({ tabId })
+        } catch (_) { }
+    }
+
+    _ensureDebuggerDialogListener() {
+        if (this._debuggerDialogListener || !browser?.debugger?.onEvent) return
+        this._debuggerDialogListener = (source, method, params) => {
+            if (!source?.tabId || !this._debuggerDialogTabs.has(source.tabId)) return
+            if (method !== "Page.javascriptDialogOpening" && method !== "Runtime.javascriptDialogOpening") return
+            try {
+                browser.debugger.sendCommand(source, "Page.handleJavaScriptDialog", { accept: true })
+            } catch (_) { }
+        }
+        browser.debugger.onEvent.addListener(this._debuggerDialogListener)
+    }
+
+    async _markSpaAttackTab(tabId, opts = {}) {
+        if (!tabId) return
+        const marker = 'ptk_spa_attack_tab'
+        const runAt = opts.runAt || "document_start"
+        const code = (name) => {
+            try {
+                if (!window.name || !window.name.includes(name)) {
+                    window.name = (window.name ? window.name + " " : "") + name
+                }
+            } catch (_) { }
+        }
+        if (browser?.scripting?.executeScript) {
+            try {
+                await browser.scripting.executeScript({
+                    target: { tabId, allFrames: true },
+                    func: code,
+                    args: [marker]
+                })
+                return
+            } catch (_) { }
+        }
+        if (browser?.tabs?.executeScript) {
+            try {
+                await browser.tabs.executeScript(tabId, {
+                    code: `try{var n=${JSON.stringify(marker)};if(!window.name||window.name.indexOf(n)===-1){window.name=(window.name?window.name+' ':'')+n;}}catch(_){}`,
+                    allFrames: true,
+                    runAt
+                })
+            } catch (_) { }
         }
     }
 

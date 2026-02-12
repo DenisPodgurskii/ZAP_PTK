@@ -287,7 +287,6 @@ class rbuilderUI {
     }
 
     parseRequest() {
-        console.log('parseRequest')
         this.updating = true
         let $form = $('#request_form')
         let values = $form.form('get values')
@@ -319,9 +318,7 @@ class rbuilderUI {
                         }
                     }
 
-                } catch (e) {
-                    console.log(e)
-                }
+                } catch (e) { }
                 let self = this
                 controller.parseRawRequest(rawRequest, opts, formId).then(function (obj) {
                     if (obj) {
@@ -799,8 +796,7 @@ jQuery(function () {
 
         fileReader.onprogress = (event) => {
             if (event.lengthComputable) {
-                let progress = ((event.loaded / event.total) * 100);
-                console.log(progress);
+                // Keep hook for potential progress UI updates.
             }
         }
         fileReader.readAsText(file)
@@ -815,8 +811,6 @@ jQuery(function () {
     })
 
     controller.init().then(function (result) {
-        console.log(result)
-
         rbuilder.buildFromStorage(result)
 
         let params = new URLSearchParams(window.location.search)

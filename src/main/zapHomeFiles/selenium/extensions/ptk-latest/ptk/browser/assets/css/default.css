@@ -68,6 +68,23 @@ body {
   justify-content: flex-end;
 }
 
+#summary_findings_table .summary-sev-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+}
+
+#summary_findings_table .summary-sev-count {
+  min-width: 18px;
+  text-align: left;
+}
+
+#summary_findings_table .ptk-summary-checkbox {
+  margin: 0;
+}
+
 :root {
   --ptk-sev-critical: #b42318;
   --ptk-sev-critical-hover: #7a271a;
@@ -198,6 +215,31 @@ footer.center.aligned p {
 
 footer p {
   color: rgba(255, 255, 255, 0.5);
+}
+
+.report-toolbar {
+  position: absolute !important;
+  right: 100px !important;
+  top: 15px;
+  z-index: 2;
+}
+
+.report-toolbar .ui.buttons {
+  margin-bottom: 4px;
+}
+
+.no-export {
+  display: block;
+}
+
+.ptk-exporting .no-export {
+  display: none !important;
+}
+
+@media print {
+  .no-export {
+    display: none !important;
+  }
 }
 
 ul,
@@ -740,7 +782,7 @@ nav.ui.menu.ui.container > .right.menu > a.item:last-child {
 }
 
 #mainMenu > .item {
-  padding: 10px;
+  padding: 9px;
 }
 
 .request_methods .menu.transition {
@@ -805,26 +847,6 @@ nav.ui.menu.ui.container > .right.menu > a.item:last-child {
   min-width: 150px;
 }
 
-#swagger_form .prompt {
-  position: absolute !important;
-  z-index: 1;
-  top: 25px;
-  left: -1px;
-  min-width: 150px;
-}
-
-#swagger_form .swagger_host .prompt {
-  top: 2px;
-  left: -160px;
-  width: 100px;
-}
-
-#swagger_form .swagger_schemes .prompt {
-  top: 2px;
-  left: -160px;
-  width: 100px;
-}
-
 #portscanner_form .prompt {
   position: absolute !important;
   z-index: 100;
@@ -843,12 +865,6 @@ nav.ui.menu.ui.container > .right.menu > a.item:last-child {
   position: absolute;
   right: 0px;
   top: -23px;
-}
-
-#swaggerGif {
-  position: absolute;
-  right: 14px;
-  top: -8px;
 }
 
 .infoSigns {

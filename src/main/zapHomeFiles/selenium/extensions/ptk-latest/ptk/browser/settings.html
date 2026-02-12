@@ -57,6 +57,10 @@
         <i class="id cloud icon"></i>
         PTK Pro
       </a>
+      <a class="item" forItem="automation_form">
+        <i class="cogs icon"></i>
+        Automation
+      </a>
     </div>
     <div style="margin-left:116px; margin-right: 55px;">
       <div class="ui five column width grid" id="settings_header">
@@ -300,6 +304,30 @@
               </div>
             </div>
             <div class="four wide column"></div>
+          </div>
+        </div>
+      </form>
+
+      <form class="ui small form" id="automation_form" style="display: none;">
+        <div class="ui five column width grid">
+          <div class="row" style="border-bottom: solid 1px #cecece;">
+            <div class="six wide column">Enable Page Automation API</div>
+            <div class="four wide column"><code><b>false</b></code></div>
+            <div class="two wide column">
+              <div class="ui toggle checkbox">
+                <input type="checkbox" name="enable">
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <div class="sixteen wide column">
+              <div class="ui warning message">
+                <div class="header">Security Warning</div>
+                <p>When enabled, any JavaScript on visited pages can access the automation API.
+                Only enable this for trusted test environments (CI/CD pipelines, local testing).
+                Disable when browsing normally.</p>
+              </div>
+            </div>
           </div>
         </div>
       </form>

@@ -1,11 +1,9 @@
 {
-"update_url": "https://clients2.google.com/service/update2/crx",
-
     "author": "Denis Podgurskii",
     "name": "OWASP Penetration Testing Kit",
     "short_name": "OWASP PTK",
     "description": "OWASP Penetration Testing Kit",
-    "version": "9.5.0",
+    "version": "9.6.1",
     "manifest_version": 3,
     "incognito": "split",
     "background": {
@@ -13,7 +11,8 @@
         "type": "module"
     },
     "content_security_policy": {
-        "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals;"
+        "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http: https: ws: wss:;",
+        "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; default-src 'self'; script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http: https: ws: wss:;"
     },
     "sandbox": {
         "pages": [
@@ -62,6 +61,7 @@
         "storage",
         "unlimitedStorage",
         "tabs",
+        "webNavigation",
         "webRequest",
         "background",
         "offscreen",
@@ -96,7 +96,21 @@
                 "ptk/background/*.json",
                 "ptk/*.map",
                 "ptk/*.png",
-                "ptk/*.json"
+                "ptk/*.json",
+                "ptk/browser/*.html",
+                "ptk/browser/assets/css/*.css",
+                "ptk/browser/assets/js/*.js",
+                "ptk/browser/assets/images/*",
+                "ptk/packages/*/*.js",
+                "ptk/packages/*/*.css",
+                "ptk/packages/*/*.map",
+                "ptk/packages/*/*.png",
+                "ptk/packages/*/*.svg",
+                "ptk/packages/*/*.woff",
+                "ptk/packages/*/*.woff2",
+                "ptk/packages/*/*.ttf",
+                "ptk/packages/*/*.eot",
+                "ptk/packages/*/*.html"
             ],
             "matches": [
                 "<all_urls>"

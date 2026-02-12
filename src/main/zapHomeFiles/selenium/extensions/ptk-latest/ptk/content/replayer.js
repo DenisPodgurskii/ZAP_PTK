@@ -177,7 +177,7 @@
                     browser.storage.local.set({ 'ptk_replay_step': (this.step + 1) })
 
                     this.abortController = new AbortController()
-                    this.awaitTimeout = this.wait(item.Duration, { signal: this.abortController.signal }).catch(e => console.log(e))
+                    this.awaitTimeout = this.wait(item.Duration, { signal: this.abortController.signal }).catch(() => { })
                     await this.awaitTimeout
 
                     if (this.paused) break
