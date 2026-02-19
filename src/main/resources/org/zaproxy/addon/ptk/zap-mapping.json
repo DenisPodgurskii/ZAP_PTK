@@ -1,0 +1,312 @@
+{
+  "schema": "ptk-zap-mapping-v1",
+  "version": 1,
+  "engines": [
+    {
+      "engine": "DAST",
+      "moduleMappings": [
+        {
+          "moduleId": "sql_injection",
+          "baseAlertId": 200000,
+          "rules": {
+            "sqlinjection_1": 1,
+            "sqlinjection_3": 2,
+            "sqlinjection_2": 3,
+            "sqlinjection_4": 4
+          }
+        },
+        {
+          "moduleId": "os_command_injection",
+          "baseAlertId": 200001,
+          "rules": {
+            "oscommand_1": 1
+          }
+        },
+        {
+          "moduleId": "xss",
+          "baseAlertId": 200002,
+          "rules": {
+            "xss_1": 1,
+            "xss_2": 2,
+            "xss_3": 3,
+            "xss_4": 4,
+            "xss_5": 5
+          }
+        },
+        {
+          "moduleId": "jwt_injection",
+          "baseAlertId": 200003,
+          "rules": {
+            "jwt_probe_no_both": 1,
+            "jwt_probe_no_authz": 2,
+            "jwt_probe_no_cookie": 3,
+            "jwt_1": 4,
+            "jwt_2": 5,
+            "jwt_3": 6,
+            "jwt_4": 7
+          }
+        },
+        {
+          "moduleId": "version_control_exposure",
+          "baseAlertId": 200004,
+          "rules": {
+            "repo_1": 1,
+            "repo_2": 2,
+            "repo_3": 3
+          }
+        },
+        {
+          "moduleId": "headers",
+          "baseAlertId": 200005,
+          "rules": {
+            "header_csp_missing": 1,
+            "header_csp_weak_scripts": 2,
+            "header_csp_frame_ancestors_missing_or_weak": 3,
+            "header_csp_report_only_without_enforce": 4,
+            "header_hsts_missing": 5,
+            "header_hsts_ineffective_on_http": 6,
+            "header_hsts_weak": 7,
+            "header_powered_by_present": 8,
+            "header_server_banner_disclosure": 9,
+            "header_x_frame_options_obsolete": 10,
+            "header_xss_protection_obsolete": 11,
+            "header_expect_ct_obsolete": 12,
+            "header_coop_without_coep_or_corp": 13,
+            "header_coep_value_weak": 14,
+            "header_permissions_policy_legacy_or_unknown": 15,
+            "header_referrer_policy_missing_or_weak": 16,
+            "header_clear_site_data_incomplete": 17,
+            "header_clear_site_data_wildcard": 18,
+            "header_cors_wildcard_with_credentials": 19,
+            "header_set_cookie_flags_missing": 20,
+            "header_cache_control_sensitive_missing_no_store": 21
+          }
+        },
+        {
+          "moduleId": "sensitive_data_exposure",
+          "baseAlertId": 200006,
+          "rules": {
+            "credit_card_number": 1,
+            "social_securityn_umber": 2
+          }
+        },
+        {
+          "moduleId": "spa_dom_xss",
+          "baseAlertId": 200007,
+          "rules": {
+            "spa_dom_xss_default": 1
+          }
+        },
+        {
+          "moduleId": "websocket_security",
+          "baseAlertId": 200008,
+          "rules": {
+            "ws_1": 1
+          }
+        },
+        {
+          "moduleId": "recon_sourcemaps_debug",
+          "baseAlertId": 200009,
+          "rules": {
+            "recon_sourcemap_in_js": 1,
+            "recon_sourcemap_reference_in_html": 2,
+            "recon_webpack_devserver_artifacts": 3,
+            "recon_nextjs_build_metadata": 4
+          }
+        },
+        {
+          "moduleId": "recon_error_stacktraces",
+          "baseAlertId": 200010,
+          "rules": {
+            "recon_node_stacktrace": 1,
+            "recon_java_stacktrace": 2,
+            "recon_dotnet_stacktrace": 3,
+            "recon_python_traceback": 4,
+            "recon_php_fatal_error": 5,
+            "recon_internal_path_disclosure": 6
+          }
+        },
+        {
+          "moduleId": "recon_client_config_secrets",
+          "baseAlertId": 200011,
+          "rules": {
+            "recon_private_key_material": 1,
+            "recon_aws_access_key_id": 2,
+            "recon_slack_token": 3,
+            "recon_github_token": 4,
+            "recon_sentry_dsn": 5,
+            "recon_firebase_config": 6,
+            "recon_stripe_publishable_key": 7,
+            "recon_mapbox_token": 8,
+            "recon_google_api_key": 9
+          }
+        },
+        {
+          "moduleId": "recon_api_docs_specs",
+          "baseAlertId": 200012,
+          "rules": {
+            "recon_swagger_ui": 1,
+            "recon_openapi_spec": 2,
+            "recon_api_docs_routes": 3,
+            "recon_graphql_endpoint": 4,
+            "recon_graphiql_console": 5
+          }
+        },
+        {
+          "moduleId": "recon_well_known_metadata",
+          "baseAlertId": 200013,
+          "rules": {
+            "recon_security_txt": 1,
+            "recon_oidc_well_known": 2,
+            "recon_assetlinks": 3,
+            "recon_apple_association": 4
+          }
+        },
+        {
+          "moduleId": "recon_tokens_in_url",
+          "baseAlertId": 200014,
+          "rules": {
+            "recon_access_token_param": 1,
+            "recon_jwt_like_in_url": 2,
+            "recon_api_key_param": 3
+          }
+        },
+        {
+          "moduleId": "recon_parameter_leads",
+          "baseAlertId": 200015,
+          "rules": {
+            "recon_param_open_redirect": 1,
+            "recon_param_ssrf": 2,
+            "recon_param_file_path": 3,
+            "recon_param_idor": 4
+          }
+        },
+        {
+          "moduleId": "recon_internal_hosts_env_hints",
+          "baseAlertId": 200016,
+          "rules": {
+            "recon_internal_ip_leak": 1,
+            "recon_localhost_leak": 2,
+            "recon_env_hints": 3,
+            "recon_cloud_metadata_hints": 4
+          }
+        },
+        {
+          "moduleId": "recon_cors_posture",
+          "baseAlertId": 200017,
+          "rules": {
+            "recon_cors_missing_vary_origin": 1,
+            "recon_cors_permissive_methods": 2,
+            "recon_cors_permissive_headers": 3
+          }
+        },
+        {
+          "moduleId": "recon_cache_privacy",
+          "baseAlertId": 200018,
+          "rules": {
+            "recon_cache_public_with_set_cookie": 1,
+            "recon_missing_referrer_policy": 2,
+            "recon_referrer_policy_unsafe": 3
+          }
+        },
+        {
+          "moduleId": "recon_interesting_endpoints",
+          "baseAlertId": 200019,
+          "rules": {
+            "recon_admin_paths": 1,
+            "recon_debug_paths": 2,
+            "recon_spring_actuator": 3,
+            "recon_swagger_paths": 4,
+            "recon_graphql_paths": 5,
+            "recon_backup_files": 6,
+            "recon_dotenv_files": 7,
+            "recon_git_exposure": 8,
+            "recon_phpinfo": 9
+          }
+        }
+      ]
+    },
+    {
+      "engine": "IAST",
+      "moduleMappings": [
+        {
+          "moduleId": "iast_dom_xss",
+          "baseAlertId": 210000,
+          "rules": {
+            "dom_inline_event_handler": 1,
+            "dom_innerhtml_xss": 2,
+            "dom_outerhtml_xss": 3,
+            "dom_insertadjacenthtml_xss": 4,
+            "document_write_xss": 5,
+            "dom_mutation_xss": 6
+          }
+        },
+        {
+          "moduleId": "iast_js_execution",
+          "baseAlertId": 210001,
+          "rules": {
+            "eval_js_execution": 1,
+            "function_constructor_execution": 2,
+            "function_apply_execution": 3
+          }
+        },
+        {
+          "moduleId": "iast_open_redirect",
+          "baseAlertId": 210002,
+          "rules": {
+            "window_open_redirect": 1,
+            "navigation_api_redirect": 2
+          }
+        }
+      ]
+    },
+    {
+      "engine": "SAST",
+      "moduleMappings": [
+        {
+          "moduleId": "dom-xss",
+          "baseAlertId": 220000,
+          "rules": {
+            "no-inner-outer-html": 1,
+            "no-appendchild": 2,
+            "no-document-write": 3,
+            "domparser-dynamic-html-parse": 4,
+            "template-innerhtml-dynamic": 5,
+            "inline-event-handler-dynamic": 6,
+            "no-insertadjacenthtml": 7,
+            "dom-xss-taint": 8,
+            "dom-xss-taint-angular": 9
+          }
+        },
+        {
+          "moduleId": "cookie-manipulation",
+          "baseAlertId": 220001,
+          "rules": {
+            "no-document-cookie-assignment": 1,
+            "cookie-manipulation-taint": 2
+          }
+        },
+        {
+          "moduleId": "open-redirection",
+          "baseAlertId": 220002,
+          "rules": {
+            "no-open-primitive-usage": 1,
+            "same-origin-url-mutation": 2,
+            "open-redirection-taint": 3
+          }
+        },
+        {
+          "moduleId": "javascript-injection",
+          "baseAlertId": 220003,
+          "rules": {
+            "no-string-based-timers": 1,
+            "no-execscript": 2,
+            "no-eval-strings": 3,
+            "no-function-ctor-strings": 4,
+            "javascript-injection-taint": 5
+          }
+        }
+      ]
+    }
+  ]
+}

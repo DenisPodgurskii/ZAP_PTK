@@ -1,0 +1,1224 @@
+{
+  "schema": "ptk-modules-v1",
+  "engine": "SAST",
+  "version": 1,
+  "modules": [
+    {
+      "id": "dom-xss",
+      "type": "static",
+      "async": false,
+      "name": "DOM-based XSS",
+      "metadata": {
+        "description": "Detects cases where untrusted data from the DOM (URL, element values, storage, messages, etc.) flows into HTML/JS execution sinks (e.g., innerHTML, outerHTML, document.write, string-based setTimeout, insertAdjacentHTML) without proper sanitization or encoding \\u2014 enabling DOM-based cross-site scripting.",
+        "recommendation": "<p>Prevent DOM-based XSS by never inserting untrusted strings directly into HTML or executing them as code. Prefer DOM/text APIs, safe templating, or a vetted sanitizer and apply context-aware encoding where needed.</p><ul><li><strong>Primary:</strong> Use <code>textContent</code> / <code>innerText</code> or create DOM nodes instead of string-based HTML insertion. If you must insert HTML, sanitize it with a vetted library such as <a href=\"https://github.com/cure53/DOMPurify\" target=\"_blank\">DOMPurify</a>.</li><li><strong>Secondary:</strong> Apply context-sensitive encoding for attributes and JavaScript contexts, avoid <code>eval</code>/<code>new Function</code>/<code>setTimeout</code> with strings, and prefer safe templating engines.</li><li><strong>Controls:</strong> Use Content Security Policy (CSP), follow least-privilege principles, and validate/allow-list input shapes where practical.</li><li><strong>Testing:</strong> Add unit/browser tests for inline handlers and client-side flows that read from <code>location</code>, form inputs, storage, and <code>postMessage</code>.</li></ul>",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+        },
+        "maxFindings": 100,
+        "category": "xss",
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-79"
+        ],
+        "tags": [
+          "sast",
+          "dom",
+          "xss"
+        ],
+        "severity": "high",
+        "vulnId": "dom_xss"
+      },
+      "rules": [
+        {
+          "mode": "pattern",
+          "id": "no-inner-outer-html",
+          "name": "Disallow innerHTML/outerHTML assignments",
+          "severity": "low",
+          "metadata": {
+            "description": "Assignments to innerHTML/outerHTML are dangerous when they contain untrusted data and may lead to XSS.",
+            "maxFindings": 10
+          },
+          "matches": [
+            {
+              "assignment": {
+                "left": {
+                  "memberProp": "innerHTML",
+                  "caseInsensitive": true
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "memberProp": "outerHTML",
+                  "caseInsensitive": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "no-appendchild",
+          "name": "Review uses of appendChild",
+          "severity": "low",
+          "metadata": {
+            "description": "Appending nodes built from untrusted input can enable DOM XSS or DOM clobbering. While appendChild is not inherently unsafe, review the origin of the node being appended.",
+            "maxFindings": 10
+          },
+          "matches": [
+            {
+              "call": {
+                "calleeProp": "appendChild",
+                "caseInsensitive": true,
+                "argIndex": 0
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "no-document-write",
+          "name": "Disallow document.write()/writeln()",
+          "severity": "low",
+          "metadata": {
+            "description": "document.write / <code>document.writeln</code> can inject raw HTML and scripts, commonly leading to XSS.",
+            "maxFindings": 10
+          },
+          "matches": [
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "document",
+                    "write"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "document",
+                    "writeln"
+                  ]
+                },
+                "argIndex": 0
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "domparser-dynamic-html-parse",
+          "name": "Review DOMParser.parseFromString with dynamic HTML/XML",
+          "severity": "medium",
+          "metadata": {
+            "description": "Parsing dynamic HTML/XML strings with DOMParser.parseFromString can enable DOM XSS if the input is attacker-controlled.",
+            "maxFindings": 25
+          },
+          "matches": [
+            {
+              "call": {
+                "calleeProp": "parseFromString",
+                "args": [
+                  {
+                    "index": 0,
+                    "disallowTypes": [
+                      "Literal"
+                    ]
+                  },
+                  {
+                    "index": 1,
+                    "regex": "^text\\/(?:html|xml)$",
+                    "flags": "i"
+                  }
+                ],
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "DOMParser",
+                    "parseFromString"
+                  ]
+                },
+                "args": [
+                  {
+                    "index": 0,
+                    "disallowTypes": [
+                      "Literal"
+                    ]
+                  },
+                  {
+                    "index": 1,
+                    "regex": "^text\\/(?:html|xml)$",
+                    "flags": "i"
+                  }
+                ],
+                "argIndex": 0
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "template-innerhtml-dynamic",
+          "name": "template.innerHTML with dynamic content",
+          "severity": "medium",
+          "metadata": {
+            "description": "Writing dynamic strings into <template>.innerHTML creates parsed DOM that may include clobberable or scriptable markup.",
+            "maxFindings": 25
+          },
+          "matches": [
+            {
+              "assignment": {
+                "left": {
+                  "memberAny": {
+                    "of": [
+                      [
+                        "template",
+                        "innerHTML"
+                      ],
+                      [
+                        "*",
+                        "template",
+                        "innerHTML"
+                      ]
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "memberAny": {
+                    "of": [
+                      [
+                        "*",
+                        "content",
+                        "innerHTML"
+                      ]
+                    ]
+                  }
+                },
+                "right": {
+                  "binaryExpression": {
+                    "operator": "+"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "inline-event-handler-dynamic",
+          "name": "Inline event handler built from dynamic data",
+          "severity": "medium",
+          "metadata": {
+            "description": "Assigning dynamic strings to inline event handlers (on* properties or setAttribute('on...', ...)) can execute attacker-controlled JavaScript.",
+            "maxFindings": 25
+          },
+          "matches": [
+            {
+              "custom": "event_handler_string"
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "no-insertadjacenthtml",
+          "name": "Disallow insertAdjacentHTML()",
+          "severity": "low",
+          "metadata": {
+            "description": "<code>insertAdjacentHTML</code> parses and inserts HTML; unsafe with untrusted data.",
+            "maxFindings": 10
+          },
+          "matches": [
+            {
+              "call": {
+                "calleeProp": "insertAdjacentHTML",
+                "argIndex": 1,
+                "caseInsensitive": true
+              }
+            }
+          ]
+        },
+        {
+          "mode": "taint",
+          "id": "dom-xss-taint",
+          "name": "DOM-based XSS (taint flow)",
+          "severity": "high",
+          "metadata": {
+            "description": "Detects flows where untrusted DOM-derived data (location, element values, storage, message data) reaches HTML/JS execution sinks (e.g., innerHTML, document.write, insertAdjacentHTML, location assignment, eval/Function) without passing through a recognized sanitizer.",
+            "maxFindings": 50,
+            "originLimit": 50
+          },
+          "sources": [
+            "dom:getElementById_value",
+            "dom:qs_value",
+            "location:search",
+            "location:hash",
+            "location:self",
+            "location:href",
+            "location:pathname",
+            "router:snapshot_queryParams",
+            "router:snapshot_queryParams_prop",
+            "router:snapshot_queryParamMap_get",
+            "router:queryParamMap_get",
+            "router:queryParams",
+            "router:queryParams_prop",
+            "document:url",
+            "document:documentURI",
+            "document:baseURI",
+            "document:cookie",
+            "storage:local_getItem",
+            "storage:session_getItem",
+            "document:referrer",
+            "window:name",
+            "jquery:val_get",
+            "jquery:attr_get",
+            "http:response"
+          ],
+          "sinks": [
+            "dom:innerHTML",
+            "dom:template_innerHTML",
+            "dom:outerHTML",
+            "dom:document_write",
+            "dom:document_writeln",
+            "dom:insertAdjacentHTML",
+            "dom:DOMParser_parseFromString_html",
+            "dom:event_handler_assign",
+            "dom:setAttribute_on",
+            "dom:prop_on",
+            "dom:srcdoc",
+            "dom:setAttribute_srcdoc",
+            "dom:appendChild",
+            "dom:insertBefore",
+            "dom:replaceChild",
+            "jquery:html",
+            "jquery:append",
+            "jquery:prepend",
+            "jquery:wrap",
+            "jquery:before_after",
+            "jquery:insert_ops"
+          ],
+          "sanitizers": [
+            "san:dompurify_sanitize",
+            "san:encodeURIComponent",
+            "san:css_escape"
+          ],
+          "propagate": [
+            "prop:assignment:local",
+            "prop:passthrough:identity_strings",
+            "prop:url_ctor",
+            "prop:urlsearchparams_ctor",
+            "prop:urlsearchparams_get",
+            "prop:return:taint",
+            "prop:call:arg_to_param",
+            "prop:return:param_to_ret",
+            "prop:write:param_to_property",
+            "prop:promise:then",
+            "prop:callback:array_map",
+            "prop:callback:array_forEach"
+          ],
+          "taint_kinds": [
+            "dom-xss"
+          ]
+        },
+        {
+          "mode": "taint",
+          "id": "dom-xss-taint-angular",
+          "name": "DOM XSS via innerHTML (Angular)",
+          "severity": "high",
+          "metadata": {
+            "description": "Detects flows where untrusted DOM-derived data reaches Angular-compiled innerHTML/outerHTML sinks (ɵɵproperty / renderer.setProperty) without sanitization.",
+            "maxFindings": 30,
+            "originLimit": 50
+          },
+          "sources": [
+            "dom:getElementById_value",
+            "dom:qs_value",
+            "location:search",
+            "location:hash",
+            "location:self",
+            "location:href",
+            "location:pathname",
+            "router:snapshot_queryParams",
+            "router:snapshot_queryParams_prop",
+            "router:snapshot_queryParamMap_get",
+            "router:queryParamMap_get",
+            "router:queryParams",
+            "router:queryParams_prop",
+            "document:url",
+            "document:documentURI",
+            "document:baseURI",
+            "document:cookie",
+            "storage:local_getItem",
+            "storage:session_getItem",
+            "document:referrer",
+            "window:name",
+            "jquery:val_get",
+            "jquery:attr_get",
+            "http:response"
+          ],
+          "sinks": [
+            "dom:angular_property_innerHTML",
+            "dom:angular_renderer_setProperty",
+            "dom:angular_bypassSecurityTrust"
+          ],
+          "sanitizers": [
+            "san:dompurify_sanitize",
+            "san:encodeURIComponent",
+            "san:css_escape"
+          ],
+          "propagate": [
+            "prop:assignment:local",
+            "prop:passthrough:identity_strings",
+            "prop:url_ctor",
+            "prop:urlsearchparams_ctor",
+            "prop:urlsearchparams_get",
+            "prop:return:taint",
+            "prop:call:arg_to_param",
+            "prop:return:param_to_ret",
+            "prop:write:param_to_property",
+            "prop:promise:then",
+            "prop:callback:array_map",
+            "prop:callback:array_forEach"
+          ],
+          "taint_kinds": [
+            "dom-xss"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cookie-manipulation",
+      "type": "static",
+      "async": false,
+      "name": "DOM-based Cookie Manipulation",
+      "metadata": {
+        "description": "Detects cases where attacker-controlled DOM data is written into cookies (document.cookie or common wrapper functions). Can indicate session fixation, logic control, or preparation for exploit-chains.",
+        "recommendation": "<ul><li>Avoid writing security-sensitive cookies from untrusted client-side data. Prefer server-side cookie setting and validation.</li><li>For non-security cookies, validate/allow-list values, and avoid storing secrets client-side. Use HttpOnly for session cookies.</li></ul>",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Session_fixation",
+          "CWE": "https://cwe.mitre.org/data/definitions/384.html"
+        },
+        "maxFindings": 100,
+        "category": "auth_session",
+        "owasp": [
+          "A07:2025 - Authentication Failures",
+          "A07:2021 - Identification and Authentication Failures"
+        ],
+        "cwe": [
+          "CWE-384"
+        ],
+        "tags": [
+          "sast",
+          "cookies",
+          "session"
+        ],
+        "severity": "medium",
+        "vulnId": "auth_failures"
+      },
+      "rules": [
+        {
+          "mode": "pattern",
+          "id": "no-document-cookie-assignment",
+          "name": "Disallow direct document.cookie assignment (incl. bracket access)",
+          "severity": "low",
+          "metadata": {
+            "description": "Direct assignment to document.cookie (including document['cookie']) detected. Writing cookie values from untrusted data may allow attackers to control session or application behaviour.",
+            "maxFindings": 30
+          },
+          "matches": [
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "document",
+                    "cookie"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "memberProp": "cookie"
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "document",
+                    "cookie"
+                  ]
+                },
+                "right": {
+                  "binaryExpression": {
+                    "operator": "+"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "mode": "taint",
+          "id": "cookie-manipulation-taint",
+          "name": "DOM-based Cookie Manipulation (taint flow)",
+          "severity": "high",
+          "metadata": {
+            "description": "Untrusted data from DOM-derived sources flows into cookie-writing operations (document.cookie or known wrapper functions) without recognized sanitization/validation.",
+            "maxFindings": 50
+          },
+          "sources": [
+            "dom:getElementById_value",
+            "dom:qs_value",
+            "location:search",
+            "location:hash",
+            "location:self",
+            "location:href",
+            "location:pathname",
+            "document:url",
+            "document:documentURI",
+            "document:baseURI",
+            "document:referrer",
+            "window:name",
+            "storage:local_getItem",
+            "storage:session_getItem",
+            "jquery:val_get",
+            "jquery:attr_get"
+          ],
+          "sinks": [
+            "dom:document_cookie_write",
+            "cookie:wrapper_setter"
+          ],
+          "sanitizers": [],
+          "propagate": [
+            "prop:assignment:local",
+            "prop:passthrough:identity_strings",
+            "prop:return:taint",
+            "prop:call:arg_to_param",
+            "prop:return:param_to_ret",
+            "prop:write:param_to_property",
+            "prop:promise:then",
+            "prop:callback:array_map",
+            "prop:callback:array_forEach",
+            "prop:callback:addEventListener",
+            "prop:urlsearchparams_ctor",
+            "prop:urlsearchparams_get"
+          ],
+          "taint_kinds": [
+            "cookie-manipulation-taint"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "open-redirection",
+      "type": "static",
+      "async": false,
+      "name": "Open Redirection",
+      "metadata": {
+        "description": "Detects client-side code that can redirect users to attacker-controlled URLs (open redirects). Includes assignment/calls that control window/location/navigation, attr-based redirects, form actions and jQuery variants.",
+        "recommendation": "<p>Prevent open redirects by validating or allow-listing redirect targets, rejecting external or absolute URLs from untrusted sources, and mapping user inputs to predefined safe destinations instead of using them directly in navigation APIs.</p>",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards",
+          "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+        },
+        "maxFindings": 100,
+        "category": "access_control",
+        "owasp": [
+          "A01:2025 - Broken Access Control",
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-601"
+        ],
+        "tags": [
+          "sast",
+          "redirect"
+        ],
+        "severity": "medium",
+        "vulnId": "open_redirect"
+      },
+      "rules": [
+        {
+          "mode": "pattern",
+          "id": "no-open-primitive-usage",
+          "name": "Disallow direct navigation primitives",
+          "severity": "low",
+          "metadata": {
+            "description": "Direct calls/assignments that perform navigation may be abused to redirect users to attacker-controlled URLs.",
+            "maxFindings": 10
+          },
+          "matches": [
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "window",
+                    "open"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "location",
+                    "assign"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "location",
+                    "replace"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "identifier": "location"
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "location",
+                    "href"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "document",
+                    "location"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "window",
+                    "document",
+                    "location"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "top",
+                    "location"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "parent",
+                    "location"
+                  ]
+                }
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "global",
+                    "open"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "globalThis",
+                    "open"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "global",
+                    "location",
+                    "assign"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "global",
+                    "location",
+                    "replace"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "globalThis",
+                    "location",
+                    "assign"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "globalThis",
+                    "location",
+                    "replace"
+                  ]
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "global",
+                    "location",
+                    "href"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "globalThis",
+                    "location",
+                    "href"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "global",
+                    "document",
+                    "location"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "globalThis",
+                    "document",
+                    "location"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "global",
+                    "location"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "globalThis",
+                    "location"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "same-origin-url-mutation",
+          "name": "Same-origin URL mutations",
+          "severity": "low",
+          "matches": [
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "location",
+                    "search"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "location",
+                    "pathname"
+                  ]
+                }
+              }
+            },
+            {
+              "assignment": {
+                "left": {
+                  "member": [
+                    "location",
+                    "protocol"
+                  ]
+                }
+              }
+            }
+          ],
+          "metadata": {
+            "description": "Changing query, path, or protocol does not redirect to a different domain, but may affect app logic or security (e.g., protocol downgrade).",
+            "maxFindings": 10
+          }
+        },
+        {
+          "mode": "taint",
+          "id": "open-redirection-taint",
+          "name": "DOM-based Open Redirection (taint flow)",
+          "severity": "high",
+          "metadata": {
+            "description": "Untrusted data (URL-like strings from the DOM, query params, storage, messages or jQuery getters) used as targets for navigation APIs allows attackers to redirect victims to arbitrary locations.",
+            "maxFindings": 50,
+            "originLimit": 50
+          },
+          "sinks": [
+            "dom:location_assign",
+            "nav:location_methods",
+            "nav:document_location_self",
+            "nav:window_document_location_self",
+            "nav:window_location_assign",
+            "nav:top_location_self",
+            "nav:parent_location_self",
+            "window:open",
+            "dom:location_host",
+            "dom:location_hostname",
+            "nav:anchor_href",
+            "nav:form_action"
+          ],
+          "sources": [
+            "dom:getElementById_value",
+            "dom:qs_value",
+            "location:search",
+            "location:hash",
+            "location:self",
+            "location:href",
+            "location:pathname",
+            "document:url",
+            "document:documentURI",
+            "document:baseURI",
+            "document:referrer",
+            "document:cookie",
+            "window:name",
+            "storage:local_getItem",
+            "storage:session_getItem",
+            "jquery:val_get",
+            "jquery:attr_get"
+          ],
+          "sanitizers": [
+            "san:encodeURIComponent",
+            "san:encodeURI",
+            "san:css_escape"
+          ],
+          "propagate": [
+            "prop:assignment:local",
+            "prop:passthrough:identity_strings",
+            "prop:url_ctor",
+            "prop:urlsearchparams_ctor",
+            "prop:urlsearchparams_get",
+            "prop:return:taint",
+            "prop:call:arg_to_param",
+            "prop:return:param_to_ret",
+            "prop:write:param_to_property",
+            "prop:promise:then",
+            "prop:callback:array_map",
+            "prop:callback:array_forEach",
+            "prop:callback:addEventListener"
+          ],
+          "taint_kinds": [
+            "open-redirection-taint"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "javascript-injection",
+      "type": "static",
+      "async": false,
+      "name": "DOM-based JavaScript Injection",
+      "metadata": {
+        "description": "Detects dynamic execution of attacker-controlled strings in JavaScript sinks such as eval(), Function(), string-based timers, execScript, or script.text assignments. Exploiting these flows lets attackers execute arbitrary JS without relying on HTML injection.",
+        "recommendation": "<ul><li>Never pass untrusted strings to dynamic code execution APIs (<code>eval</code>, <code>Function</code>, string-based <code>setTimeout</code>/<code>setInterval</code>, <code>execScript</code>).</li><li>Prefer callbacks and safe parsers: pass actual functions to timers and use JSON.parse or allow-lists for data-driven logic.</li><li>Sanitize and validate any data embedded into script nodes. Treat URL fragments, query parameters, postMessage data, and storage as untrusted.</li><li>Consider strict CSP with <code>unsafe-eval</code> disabled to block execution of injected strings during testing.</li></ul>",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Code_Injection",
+          "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+        },
+        "maxFindings": 100,
+        "category": "injection",
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-94"
+        ],
+        "tags": [
+          "sast",
+          "javascript",
+          "code"
+        ],
+        "severity": "high",
+        "vulnId": "code_injection"
+      },
+      "rules": [
+        {
+          "mode": "pattern",
+          "id": "no-string-based-timers",
+          "name": "Avoid string-based timers",
+          "severity": "medium",
+          "metadata": {
+            "description": "Passing strings to timers (setTimeout/setInterval/setImmediate) executes them like eval, enabling JavaScript injection when the string is attacker-influenced.",
+            "maxFindings": 25
+          },
+          "matches": [
+            {
+              "call": {
+                "callee": {
+                  "identifier": "setTimeout"
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "identifier": "setInterval"
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "identifier": "setImmediate"
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "window",
+                    "setTimeout"
+                  ]
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "window",
+                    "setInterval"
+                  ]
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "window",
+                    "setImmediate"
+                  ]
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "no-execscript",
+          "name": "Avoid execScript dynamic execution",
+          "severity": "medium",
+          "metadata": {
+            "description": "Legacy execScript executes strings as code similar to eval, allowing attackers to run arbitrary JavaScript when input is untrusted.",
+            "maxFindings": 10
+          },
+          "matches": [
+            {
+              "call": {
+                "callee": {
+                  "identifier": "execScript"
+                },
+                "argIndex": 0
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "window",
+                    "execScript"
+                  ]
+                },
+                "argIndex": 0
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "no-eval-strings",
+          "name": "Avoid eval with string literals",
+          "severity": "low",
+          "metadata": {
+            "description": "eval executes a string as code. Using it with string literals is usually unnecessary and dangerous.",
+            "maxFindings": 50
+          },
+          "matches": [
+            {
+              "call": {
+                "callee": {
+                  "identifier": "eval"
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "window",
+                    "eval"
+                  ]
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "member": [
+                    "globalThis",
+                    "eval"
+                  ]
+                },
+                "argIndex": 0,
+                "args": [
+                  {
+                    "index": 0,
+                    "requireString": true
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "mode": "pattern",
+          "id": "no-function-ctor-strings",
+          "name": "Avoid Function constructor with strings",
+          "severity": "low",
+          "metadata": {
+            "description": "new Function / Function build code from strings at runtime and are equivalent to eval.",
+            "maxFindings": 50
+          },
+          "matches": [
+            {
+              "new": {
+                "callee": {
+                  "identifier": "Function"
+                }
+              }
+            },
+            {
+              "call": {
+                "callee": {
+                  "identifier": "Function"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "mode": "taint",
+          "id": "javascript-injection-taint",
+          "name": "DOM-based JavaScript Injection (taint flow)",
+          "severity": "high",
+          "metadata": {
+            "description": "Untrusted DOM data flows into dynamic JavaScript execution sinks (eval/Function/string timers/execScript/script.text) without sanitization, allowing attackers to execute arbitrary code.",
+            "maxFindings": 50,
+            "originLimit": 50
+          },
+          "sources": [
+            "dom:getElementById_value",
+            "dom:qs_value",
+            "location:search",
+            "location:hash",
+            "location:href",
+            "location:pathname",
+            "document:url",
+            "document:documentURI",
+            "document:baseURI",
+            "document:referrer",
+            "window:name",
+            "document:cookie",
+            "storage:local_getItem",
+            "storage:session_getItem",
+            "jquery:val_get",
+            "jquery:attr_get"
+          ],
+          "sinks": [
+            "eval:constructor",
+            "js:setTimeout_code",
+            "js:setInterval_code",
+            "js:setImmediate_code",
+            "js:Function_constructor_body",
+            "js:execScript",
+            "jquery:globalEval_getScript",
+            "ajax:jquery_globalEval",
+            "dom:execCommand",
+            "dom:createContextualFragment",
+            "crypto:generateCRMFRequest",
+            "js:script_text"
+          ],
+          "sanitizers": [],
+          "propagate": [
+            "prop:assignment:local",
+            "prop:passthrough:identity_strings",
+            "prop:return:taint",
+            "prop:call:arg_to_param",
+            "prop:return:param_to_ret",
+            "prop:write:param_to_property",
+            "prop:promise:then",
+            "prop:callback:array_map",
+            "prop:callback:array_forEach",
+            "prop:callback:addEventListener",
+            "prop:urlsearchparams_ctor",
+            "prop:urlsearchparams_get"
+          ],
+          "taint_kinds": [
+            "javascript-injection-taint"
+          ]
+        }
+      ]
+    }
+  ]
+}

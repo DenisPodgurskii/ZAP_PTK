@@ -1,0 +1,350 @@
+{
+  "schema": "ptk-modules-v1",
+  "engine": "IAST",
+  "version": 1,
+  "modules": [
+    {
+      "id": "iast_dom_xss",
+      "type": "runtime",
+      "async": true,
+      "name": "DOM XSS sinks",
+      "metadata": {
+        "description": "Runtime detection of DOM-based XSS in common HTML/DOM sinks.",
+        "recommendation": "<ul><li>Avoid inserting untrusted strings into HTML or inline handlers.</li><li>Prefer textContent or safe templating; sanitize with DOMPurify when HTML is required.</li><li>Use CSP without unsafe-inline where possible.</li></ul>",
+        "category": "xss",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-79"
+        ],
+        "tags": [
+          "iast",
+          "dom",
+          "xss"
+        ],
+        "severity": "high",
+        "vulnId": "dom_xss"
+      },
+      "rules": [
+        {
+          "id": "dom_inline_event_handler",
+          "name": "DOM XSS via inline event handler",
+          "sinkId": "dom.inline_event",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted data flowed into an inline event handler."
+          },
+          "hook": {
+            "kind": "attribute",
+            "objectType": "Element",
+            "attributePrefix": "on"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_innerhtml_xss",
+          "name": "DOM XSS via Element.innerHTML",
+          "sinkId": "dom.innerHTML",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted data assigned to innerHTML (possible DOM XSS)."
+          },
+          "hook": {
+            "kind": "propertySetter",
+            "objectType": "Element",
+            "property": "innerHTML"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_outerhtml_xss",
+          "name": "DOM XSS via Element.outerHTML",
+          "sinkId": "dom.outerHTML",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted data assigned to outerHTML (possible DOM XSS)."
+          },
+          "hook": {
+            "kind": "propertySetter",
+            "objectType": "Element",
+            "property": "outerHTML"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_insertadjacenthtml_xss",
+          "name": "DOM XSS via insertAdjacentHTML",
+          "sinkId": "dom.insertAdjacentHTML",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted HTML passed into insertAdjacentHTML."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectType": "Element",
+            "method": "insertAdjacentHTML",
+            "argIndex": 1
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "document_write_xss",
+          "name": "DOM XSS via document.write",
+          "sinkId": "document.write",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted data passed to document.write."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "document",
+            "method": "write",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_mutation_xss",
+          "name": "DOM XSS via DOM mutations",
+          "sinkId": "dom.mutation",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted data inserted into the DOM via DOM mutation APIs."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectType": "Node",
+            "method": "appendChild"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_js_execution",
+      "type": "runtime",
+      "async": true,
+      "name": "Dynamic JS execution",
+      "metadata": {
+        "description": "Detect tainted payloads reaching eval/Function sinks.",
+        "recommendation": "<ul><li>Never pass untrusted strings to eval or Function.</li><li>Use safe parsers and strict allow-lists.</li><li>Disable unsafe-eval in CSP.</li></ul>",
+        "category": "injection",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/95.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-95"
+        ],
+        "tags": [
+          "iast",
+          "code",
+          "execution"
+        ],
+        "severity": "high",
+        "vulnId": "code_injection"
+      },
+      "rules": [
+        {
+          "id": "eval_js_execution",
+          "name": "Dynamic code execution via eval",
+          "sinkId": "code.eval",
+          "severity": "high",
+          "metadata": {
+            "description": "Tainted string executed via eval()."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window",
+            "method": "eval",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "function_constructor_execution",
+          "name": "Dynamic code execution via Function constructor",
+          "sinkId": "code.function.constructor",
+          "severity": "high",
+          "metadata": {
+            "description": "Tainted string executed via Function constructor."
+          },
+          "hook": {
+            "kind": "constructor",
+            "objectPath": "window.Function"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "function_apply_execution",
+          "name": "Dynamic code execution via Function.apply",
+          "sinkId": "code.function.apply",
+          "severity": "high",
+          "metadata": {
+            "description": "Tainted string executed via Function.apply."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "Function.prototype",
+            "method": "apply"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_open_redirect",
+      "type": "runtime",
+      "async": true,
+      "name": "Client-side navigation sinks",
+      "metadata": {
+        "description": "Possible open redirects via navigation APIs.",
+        "recommendation": "<ul><li>Allow-list redirect targets and reject external/absolute URLs from untrusted input.</li><li>Map inputs to known routes instead of redirecting directly.</li></ul>",
+        "category": "access_control",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+          "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+        },
+        "owasp": [
+          "A01:2025 - Broken Access Control",
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-601"
+        ],
+        "tags": [
+          "iast",
+          "redirect",
+          "navigation"
+        ],
+        "severity": "low",
+        "vulnId": "open_redirect"
+      },
+      "rules": [
+        {
+          "id": "window_open_redirect",
+          "name": "Open redirect via window.open",
+          "sinkId": "nav.window.open",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted URL used in window.open (possible open redirect)."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window",
+            "method": "open",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "navigation_api_redirect",
+          "name": "Open redirect via Navigation API",
+          "sinkId": "nav.navigation.navigate",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted destination URL used in navigation.navigate."
+          },
+          "hook": {
+            "kind": "event",
+            "objectPath": "navigation",
+            "event": "navigate"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    }
+  ]
+}
