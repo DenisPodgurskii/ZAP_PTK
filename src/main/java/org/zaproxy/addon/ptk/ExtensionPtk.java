@@ -1,6 +1,10 @@
 package org.zaproxy.addon.ptk;
 
+import com.google.gson.Gson;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.parosproxy.paros.control.Control;
 import org.parosproxy.paros.extension.Extension;
 import org.parosproxy.paros.extension.ExtensionAdaptor;
@@ -9,6 +13,9 @@ import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMessage;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
+import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
+import org.zaproxy.addon.ptk.options.PtkOptionsPanel;
+import org.zaproxy.addon.ptk.options.PtkParam;
 
 public class ExtensionPtk extends ExtensionAdaptor {
 
@@ -18,6 +25,8 @@ public class ExtensionPtk extends ExtensionAdaptor {
             List.of(ExtensionClientIntegration.class);
 
     private ClientCallBackImplementor callBackImplementor;
+    private PtkOptionsPanel optionsPanel;
+    private PtkParam ptkParam;
 
     public ExtensionPtk() {
         super("ExtensionPtk");
@@ -25,11 +34,30 @@ public class ExtensionPtk extends ExtensionAdaptor {
 
     @Override
     public void hook(ExtensionHook extensionHook) {
+        super.hook(extensionHook);
         callBackImplementor = new CallBackImplementor();
         Control.getSingleton()
                 .getExtensionLoader()
                 .getExtension(ExtensionClientIntegration.class)
                 .registerClientCallBack(callBackImplementor);
+        extensionHook.addOptionsParamSet(getParam());
+        if (hasView()) {
+            extensionHook.getHookView().addOptionPanel(getOptionsPanel());
+        }
+    }
+
+    private PtkOptionsPanel getOptionsPanel() {
+        if (optionsPanel == null) {
+            optionsPanel = new PtkOptionsPanel();
+        }
+        return optionsPanel;
+    }
+
+    private PtkParam getParam() {
+        if (ptkParam == null) {
+            ptkParam = new PtkParam();
+        }
+        return ptkParam;
     }
 
     @Override
@@ -47,21 +75,50 @@ public class ExtensionPtk extends ExtensionAdaptor {
 
     class CallBackImplementor implements ClientCallBackImplementor {
 
+        private static final String PTK_CONFIG_PATH = "/ptk/config";
+        private static final Gson GSON = new Gson();
+
         public String getImplementorName() {
             return PREFIX;
         }
 
         public String handleCallBack(HttpMessage msg) {
-            // TODO temporary code for testing - have full access to the request here
-            System.out.println("PTK got callback");
-            System.out.println(
-                    msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
-            System.out.println(msg.getRequestBody().toString());
+            String uri =
+                    msg.getRequestHeader().getURI() != null
+                            ? msg.getRequestHeader().getURI().toString()
+                            : "";
+            if (uri.contains(PTK_CONFIG_PATH)) {
+                Map<String, Object> response = new LinkedHashMap<>();
+                if (getParam().isAutomatedScanningEnabled()) {
+                    PtkResourcesLoader loader = new PtkResourcesLoader();
+                    PtkResourcesLoader.LoadedPtkResources resources = loader.loadAll();
+                    Set<String> checkedPaths = getParam().getCheckedPathStrings();
+                    Map<String, PtkModulesDefinition> config =
+                            PtkConfigFilter.filterByCheckedPaths(resources, checkedPaths);
+                    response.put(
+                            "sast", config.get("sast") != null ? config.get("sast") : Map.of());
+                    response.put(
+                            "iast", config.get("iast") != null ? config.get("iast") : Map.of());
+                    response.put(
+                            "dast", config.get("dast") != null ? config.get("dast") : Map.of());
+                } else {
+                    response.put("sast", Map.of());
+                    response.put("iast", Map.of());
+                    response.put("dast", Map.of());
+                }
+                String json = GSON.toJson(response);
+                msg.getResponseBody().setBody(json);
+            } else {
+                // TODO temporary code for testing - have full access to the request here
+                System.out.println("PTK got callback");
+                System.out.println(
+                        msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
+                System.out.println(msg.getRequestBody().toString());
 
-            msg.getResponseBody().setBody("{\"result\": \"OK\"}");
+                msg.getResponseBody().setBody("{\"result\": \"OK\"}");
+            }
             msg.getResponseHeader().setHeader(HttpHeader.CONTENT_TYPE, "application/json");
             msg.getResponseHeader().setContentLength(msg.getResponseBody().length());
-
             return "";
         }
     }

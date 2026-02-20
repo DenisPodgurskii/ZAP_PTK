@@ -2,11 +2,19 @@ package org.zaproxy.addon.ptk.model;
 
 import com.google.gson.JsonElement;
 import java.util.List;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 /**
  * A single rule within a PTK module. Used for SAST (pattern/taint) and IAST. Fields are optional
  * depending on rule type (pattern, taint, or IAST runtime).
  */
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
 public class PtkRule {
 
     private String mode;
@@ -47,132 +55,4 @@ public class PtkRule {
 
     /** IAST: conditions (e.g. requiresTaint). */
     private JsonElement conditions;
-
-    public String getMode() {
-        return mode;
-    }
-
-    public void setMode(String mode) {
-        this.mode = mode;
-    }
-
-    public String getId() {
-        return id;
-    }
-
-    public void setId(String id) {
-        this.id = id;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public void setName(String name) {
-        this.name = name;
-    }
-
-    public String getSeverity() {
-        return severity;
-    }
-
-    public void setSeverity(String severity) {
-        this.severity = severity;
-    }
-
-    public PtkRuleMetadata getMetadata() {
-        return metadata;
-    }
-
-    public void setMetadata(PtkRuleMetadata metadata) {
-        this.metadata = metadata;
-    }
-
-    public List<JsonElement> getMatches() {
-        return matches;
-    }
-
-    public void setMatches(List<JsonElement> matches) {
-        this.matches = matches;
-    }
-
-    public List<String> getSources() {
-        return sources;
-    }
-
-    public void setSources(List<String> sources) {
-        this.sources = sources;
-    }
-
-    public List<String> getSinks() {
-        return sinks;
-    }
-
-    public void setSinks(List<String> sinks) {
-        this.sinks = sinks;
-    }
-
-    public List<String> getSanitizers() {
-        return sanitizers;
-    }
-
-    public void setSanitizers(List<String> sanitizers) {
-        this.sanitizers = sanitizers;
-    }
-
-    public List<String> getPropagate() {
-        return propagate;
-    }
-
-    public void setPropagate(List<String> propagate) {
-        this.propagate = propagate;
-    }
-
-    public List<String> getTaint_kinds() {
-        return taint_kinds;
-    }
-
-    public void setTaint_kinds(List<String> taint_kinds) {
-        this.taint_kinds = taint_kinds;
-    }
-
-    public String getSinkId() {
-        return sinkId;
-    }
-
-    public void setSinkId(String sinkId) {
-        this.sinkId = sinkId;
-    }
-
-    public List<String> getSanitizersAllowed() {
-        return sanitizersAllowed;
-    }
-
-    public void setSanitizersAllowed(List<String> sanitizersAllowed) {
-        this.sanitizersAllowed = sanitizersAllowed;
-    }
-
-    public String getOnSanitized() {
-        return onSanitized;
-    }
-
-    public void setOnSanitized(String onSanitized) {
-        this.onSanitized = onSanitized;
-    }
-
-    public JsonElement getHook() {
-        return hook;
-    }
-
-    public void setHook(JsonElement hook) {
-        this.hook = hook;
-    }
-
-    public JsonElement getConditions() {
-        return conditions;
-    }
-
-    public void setConditions(JsonElement conditions) {
-        this.conditions = conditions;
-    }
 }

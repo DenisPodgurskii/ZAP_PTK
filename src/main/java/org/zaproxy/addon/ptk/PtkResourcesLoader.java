@@ -7,6 +7,8 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.ZapMappingDefinition;
 
@@ -22,11 +24,7 @@ public class PtkResourcesLoader {
     private static final String DAST_MODULES = RESOURCE_BASE + "dast-modules.json";
     private static final String ZAP_MAPPING = RESOURCE_BASE + "zap-mapping.json";
 
-    private final Gson gson;
-
-    public PtkResourcesLoader() {
-        this.gson = new GsonBuilder().create();
-    }
+    private final Gson gson = new GsonBuilder().create();
 
     /**
      * Loads the SAST module definition from sast-modules.json.
@@ -106,39 +104,14 @@ public class PtkResourcesLoader {
     }
 
     /** Container for the four loaded resources. */
+    @Getter
+    @AllArgsConstructor
     public static final class LoadedPtkResources {
 
         private final PtkModulesDefinition sastModules;
         private final PtkModulesDefinition iastModules;
         private final PtkModulesDefinition dastModules;
         private final ZapMappingDefinition zapMapping;
-
-        public LoadedPtkResources(
-                PtkModulesDefinition sastModules,
-                PtkModulesDefinition iastModules,
-                PtkModulesDefinition dastModules,
-                ZapMappingDefinition zapMapping) {
-            this.sastModules = sastModules;
-            this.iastModules = iastModules;
-            this.dastModules = dastModules;
-            this.zapMapping = zapMapping;
-        }
-
-        public PtkModulesDefinition getSastModules() {
-            return sastModules;
-        }
-
-        public PtkModulesDefinition getIastModules() {
-            return iastModules;
-        }
-
-        public PtkModulesDefinition getDastModules() {
-            return dastModules;
-        }
-
-        public ZapMappingDefinition getZapMapping() {
-            return zapMapping;
-        }
 
         /** All module definitions in order: SAST, IAST, DAST. */
         public List<PtkModulesDefinition> getAllModuleDefinitions() {
