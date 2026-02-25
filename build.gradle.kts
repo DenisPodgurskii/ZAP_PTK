@@ -47,6 +47,8 @@ zapAddOn {
 
 dependencies {
     compileOnly("org.zaproxy.addon:client:0.21.0-SNAPSHOT")
+    compileOnly("org.projectlombok:lombok:1.18.34")
+    annotationProcessor("org.projectlombok:lombok:1.18.34")
     implementation("com.google.code.gson:gson:2.10.1")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -56,6 +58,14 @@ java {
     val javaVersion = JavaVersion.VERSION_17
     sourceCompatibility = javaVersion
     targetCompatibility = javaVersion
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    val lintFlags = mutableListOf("-processing")
+    if (JavaVersion.current().getMajorVersion() >= "21") {
+        lintFlags.add("-this-escape")
+    }
+    options.compilerArgs = options.compilerArgs + "-Xlint:${lintFlags.joinToString(",")}"
 }
 
 tasks.named<Test>("test") {

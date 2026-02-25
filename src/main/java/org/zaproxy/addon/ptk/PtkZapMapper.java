@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 import org.zaproxy.addon.ptk.model.EngineMapping;
 import org.zaproxy.addon.ptk.model.ModuleRuleMapping;
 import org.zaproxy.addon.ptk.model.PtkAttack;
@@ -125,15 +127,15 @@ public class PtkZapMapper {
 
         // Every rule has a reference
         for (RuleRef rr : expectedRules) {
-            String ref = getZapAlertReference(rr.moduleId, rr.ruleId);
+            String ref = getZapAlertReference(rr.getModuleId(), rr.getRuleId());
             if (ref == null) {
                 errors.add(
                         "No alert reference for rule "
-                                + rr.ruleId
+                                + rr.getRuleId()
                                 + " in module "
-                                + rr.moduleId
+                                + rr.getModuleId()
                                 + " ("
-                                + rr.engine
+                                + rr.getEngine()
                                 + ")");
             }
         }
@@ -154,20 +156,16 @@ public class PtkZapMapper {
             }
         }
 
-        return new OneToOneCheckResult(errors.isEmpty(), errors);
+        return new OneToOneCheckResult(errors.isEmpty(), List.copyOf(errors));
     }
 
+    @Getter
+    @AllArgsConstructor
     private static final class RuleRef {
 
-        final String engine;
-        final String moduleId;
-        final String ruleId;
-
-        RuleRef(String engine, String moduleId, String ruleId) {
-            this.engine = engine;
-            this.moduleId = moduleId;
-            this.ruleId = ruleId;
-        }
+        private final String engine;
+        private final String moduleId;
+        private final String ruleId;
     }
 
     private static final String MISSING_ALERT_ID = "??????";
@@ -219,68 +217,44 @@ public class PtkZapMapper {
 
         Comparator<ScannersMdEntry> byId =
                 Comparator.<ScannersMdEntry, Integer>comparing(
-                                e -> e.parsedBaseId != null ? e.parsedBaseId : Integer.MAX_VALUE)
-                        .thenComparing(e -> e.engine)
-                        .thenComparing(e -> e.moduleName);
+                                e ->
+                                        e.getParsedBaseId() != null
+                                                ? e.getParsedBaseId()
+                                                : Integer.MAX_VALUE)
+                        .thenComparing(ScannersMdEntry::getEngine)
+                        .thenComparing(ScannersMdEntry::getModuleName);
         entries.sort(byId);
 
         return entries.stream()
-                .map(e -> e.idStr + "  PTK - " + e.engine + " - " + e.moduleName)
+                .map(e -> e.getIdStr() + "  PTK - " + e.getEngine() + " - " + e.getModuleName())
                 .collect(Collectors.toList());
     }
 
+    @Getter
+    @AllArgsConstructor
     private static final class ScannersMdEntry {
 
-        final String idStr;
-        final Integer parsedBaseId;
-        final String engine;
-        final String moduleName;
-
-        ScannersMdEntry(String idStr, Integer parsedBaseId, String engine, String moduleName) {
-            this.idStr = idStr;
-            this.parsedBaseId = parsedBaseId;
-            this.engine = engine;
-            this.moduleName = moduleName;
-        }
+        private final String idStr;
+        private final Integer parsedBaseId;
+        private final String engine;
+        private final String moduleName;
     }
 
     /** (moduleId, ruleId) pair for reverse lookup. */
+    @Getter
+    @AllArgsConstructor
     public static final class ModuleAndRule {
 
         private final String moduleId;
         private final String ruleId;
-
-        public ModuleAndRule(String moduleId, String ruleId) {
-            this.moduleId = moduleId;
-            this.ruleId = ruleId;
-        }
-
-        public String getModuleId() {
-            return moduleId;
-        }
-
-        public String getRuleId() {
-            return ruleId;
-        }
     }
 
     /** Result of the unique alert reference check. */
+    @Getter
+    @AllArgsConstructor
     public static final class OneToOneCheckResult {
 
         private final boolean oneToOne;
         private final List<String> errors;
-
-        public OneToOneCheckResult(boolean oneToOne, List<String> errors) {
-            this.oneToOne = oneToOne;
-            this.errors = List.copyOf(errors);
-        }
-
-        public boolean isOneToOne() {
-            return oneToOne;
-        }
-
-        public List<String> getErrors() {
-            return errors;
-        }
     }
 }
