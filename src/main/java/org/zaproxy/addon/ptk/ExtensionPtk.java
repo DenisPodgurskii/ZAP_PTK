@@ -75,7 +75,9 @@ public class ExtensionPtk extends ExtensionAdaptor {
 
     class CallBackImplementor implements ClientCallBackImplementor {
 
+        private static final String PTK_ALERT_PATH = "/ptk/alert";
         private static final String PTK_CONFIG_PATH = "/ptk/config";
+        private static final String PTK_PROGRESS_PATH = "/ptk/progress";
         private static final Gson GSON = new Gson();
 
         public String getImplementorName() {
@@ -89,33 +91,44 @@ public class ExtensionPtk extends ExtensionAdaptor {
                             : "";
             if (uri.contains(PTK_CONFIG_PATH)) {
                 Map<String, Object> response = new LinkedHashMap<>();
-                if (getParam().isAutomatedScanningEnabled()) {
-                    PtkResourcesLoader loader = new PtkResourcesLoader();
-                    PtkResourcesLoader.LoadedPtkResources resources = loader.loadAll();
-                    Set<String> checkedPaths = getParam().getCheckedPathStrings();
-                    Map<String, PtkModulesDefinition> config =
-                            PtkConfigFilter.filterByCheckedPaths(resources, checkedPaths);
-                    response.put(
-                            "sast", config.get("sast") != null ? config.get("sast") : Map.of());
-                    response.put(
-                            "iast", config.get("iast") != null ? config.get("iast") : Map.of());
-                    response.put(
-                            "dast", config.get("dast") != null ? config.get("dast") : Map.of());
-                } else {
-                    response.put("sast", Map.of());
-                    response.put("iast", Map.of());
-                    response.put("dast", Map.of());
-                }
+                response.put("mode", getParam().isAutomatedScanningEnabled() ? "auto" : "manual");
+                PtkResourcesLoader loader = new PtkResourcesLoader();
+                PtkResourcesLoader.LoadedPtkResources resources = loader.loadAll();
+                Set<String> checkedPaths = getParam().getCheckedPathStrings();
+                Map<String, PtkModulesDefinition> config =
+                        PtkConfigFilter.filterByCheckedPaths(resources, checkedPaths);
+                response.put("sast", config.get("sast") != null ? config.get("sast") : Map.of());
+                response.put("iast", config.get("iast") != null ? config.get("iast") : Map.of());
+                response.put("dast", config.get("dast") != null ? config.get("dast") : Map.of());
                 String json = GSON.toJson(response);
                 msg.getResponseBody().setBody(json);
-            } else {
-                // TODO temporary code for testing - have full access to the request here
-                System.out.println("PTK got callback");
+            } else if (uri.contains(PTK_ALERT_PATH)) {
+                // TODO agree definition and raise the alert in ZAP
+                System.out.println("PTK got alert");
                 System.out.println(
                         msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
                 System.out.println(msg.getRequestBody().toString());
 
                 msg.getResponseBody().setBody("{\"result\": \"OK\"}");
+            } else if (uri.contains(PTK_PROGRESS_PATH)) {
+                // TODO agree definition and raise the alert in ZAP
+                // POST with {"progress": 10} maybe?
+                // Where progress is a %, and when it reaches 100 then the window will be closed
+                // when using automation.
+                System.out.println("PTK got progress");
+                System.out.println(
+                        msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
+                System.out.println(msg.getRequestBody().toString());
+
+                msg.getResponseBody().setBody("{\"result\": \"OK\"}");
+            } else {
+                // TODO temporary code for testing - have full access to the request here
+                System.out.println("PTK unexpected request");
+                System.out.println(
+                        msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
+                System.out.println(msg.getRequestBody().toString());
+
+                msg.getResponseBody().setBody("{\"result\": \"FAIL\"}");
             }
             msg.getResponseHeader().setHeader(HttpHeader.CONTENT_TYPE, "application/json");
             msg.getResponseHeader().setContentLength(msg.getResponseBody().length());
