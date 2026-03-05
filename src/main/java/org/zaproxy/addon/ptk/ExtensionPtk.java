@@ -16,6 +16,7 @@ import org.zaproxy.addon.client.ExtensionClientIntegration;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.options.PtkOptionsPanel;
 import org.zaproxy.addon.ptk.options.PtkParam;
+import org.zaproxy.zap.extension.selenium.SeleniumScriptUtils;
 
 public class ExtensionPtk extends ExtensionAdaptor {
 
@@ -80,10 +81,22 @@ public class ExtensionPtk extends ExtensionAdaptor {
         private static final String PTK_PROGRESS_PATH = "/ptk/progress";
         private static final Gson GSON = new Gson();
 
+        @Override
         public String getImplementorName() {
             return PREFIX;
         }
 
+        @Override
+        public void browserLaunched(SeleniumScriptUtils ssutils) {
+            // FIXME Temporary sleep, will replace with detecting the ping
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                // Ignore
+            }
+        }
+
+        @Override
         public String handleCallBack(HttpMessage msg) {
             String uri =
                     msg.getRequestHeader().getURI() != null
