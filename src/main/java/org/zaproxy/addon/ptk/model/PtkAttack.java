@@ -20,4 +20,5 @@ public class PtkAttack {
     private String name;
     private JsonElement action;
     private JsonElement validation;
+    private JsonElement spa;
 }

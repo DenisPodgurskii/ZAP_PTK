@@ -27,4 +27,5 @@ public class PtkModuleMetadata {
     private String regex;
     private Boolean unique;
     private Integer originLimit;
+    private Boolean spa;
 }
