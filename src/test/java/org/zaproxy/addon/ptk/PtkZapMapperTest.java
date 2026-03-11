@@ -48,7 +48,7 @@ class PtkZapMapperTest {
         assumeMappingLoaded();
         String ref = mapper.getZapAlertReference("dom-xss", "no-inner-outer-html");
         assertNotNull(ref);
-        assertTrue(ref.startsWith("220000_"), "SAST dom-xss base is 220000");
+        assertTrue(ref.startsWith("220000-"), "SAST dom-xss base is 220000");
     }
 
     @Test
@@ -66,7 +66,7 @@ class PtkZapMapperTest {
     @Test
     void getModuleIdAndRuleId_returnsExpectedModuleAndRule() {
         assumeMappingLoaded();
-        PtkZapMapper.ModuleAndRule mar = mapper.getModuleIdAndRuleId("220000_1");
+        PtkZapMapper.ModuleAndRule mar = mapper.getModuleIdAndRuleId("220000-1");
         assertNotNull(mar);
         assertEquals("dom-xss", mar.getModuleId());
         assertNotNull(mar.getRuleId());
@@ -75,7 +75,7 @@ class PtkZapMapperTest {
     @Test
     void getModuleIdAndRuleId_unknownRef_returnsNull() {
         assumeMappingLoaded();
-        assertNull(mapper.getModuleIdAndRuleId("999999_1"));
+        assertNull(mapper.getModuleIdAndRuleId("999999-1"));
     }
 
     @Test

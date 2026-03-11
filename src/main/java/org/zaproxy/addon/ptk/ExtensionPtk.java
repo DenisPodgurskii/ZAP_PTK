@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.parosproxy.paros.control.Control;
+import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.extension.Extension;
 import org.parosproxy.paros.extension.ExtensionAdaptor;
 import org.parosproxy.paros.extension.ExtensionHook;
@@ -16,9 +17,10 @@ import org.zaproxy.addon.client.ExtensionClientIntegration;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.options.PtkOptionsPanel;
 import org.zaproxy.addon.ptk.options.PtkParam;
+import org.zaproxy.zap.extension.alert.ExampleAlertProvider;
 import org.zaproxy.zap.extension.selenium.SeleniumScriptUtils;
 
-public class ExtensionPtk extends ExtensionAdaptor {
+public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvider {
 
     private static final String PREFIX = "ptk";
 
@@ -72,6 +74,13 @@ public class ExtensionPtk extends ExtensionAdaptor {
     @Override
     public List<Class<? extends Extension>> getDependencies() {
         return EXTENSION_DEPENDENCIES;
+    }
+
+    @Override
+    public List<Alert> getExampleAlerts() {
+        PtkResourcesLoader loader = new PtkResourcesLoader();
+        PtkResourcesLoader.LoadedPtkResources resources = loader.loadAll();
+        return PtkExampleAlerts.getExampleAlerts(resources);
     }
 
     class CallBackImplementor implements ClientCallBackImplementor {
