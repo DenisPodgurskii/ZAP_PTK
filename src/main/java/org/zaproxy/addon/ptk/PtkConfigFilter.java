@@ -22,10 +22,9 @@ public final class PtkConfigFilter {
     private PtkConfigFilter() {}
 
     /**
-     * Returns definitions filtered by the checked path set. If {@code checkedPaths} is null, all
-     * definitions are returned (default). If {@code checkedPaths} is empty, none are enabled so an
-     * empty map is returned. Otherwise only engines/modules/rules that correspond to checked paths
-     * are included.
+     * Returns definitions filtered by the checked path set. If {@code checkedPaths} is null or
+     * empty, all definitions are returned (default-all behavior). Otherwise only
+     * engines/modules/rules that correspond to checked paths are included.
      *
      * @param resources loaded SAST, IAST, DAST definitions
      * @param checkedPaths path strings from {@link org.zaproxy.addon.ptk.options.PtkParam}
@@ -35,7 +34,7 @@ public final class PtkConfigFilter {
     public static Map<String, PtkModulesDefinition> filterByCheckedPaths(
             PtkResourcesLoader.LoadedPtkResources resources, Set<String> checkedPaths) {
         Map<String, PtkModulesDefinition> out = new LinkedHashMap<>();
-        boolean filter = checkedPaths != null;
+        boolean filter = checkedPaths != null && !checkedPaths.isEmpty();
         PtkModulesDefinition sast = resources.getSastModules();
         PtkModulesDefinition iast = resources.getIastModules();
         PtkModulesDefinition dast = resources.getDastModules();

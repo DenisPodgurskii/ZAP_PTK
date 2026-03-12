@@ -19,7 +19,7 @@
           "moduleId": "os_command_injection",
           "baseAlertId": 200001,
           "rules": {
-            "oscommand_1": 1
+            "oscommand_inband_pipe_passwd": 1
           }
         },
         {
@@ -242,6 +242,16 @@
           }
         },
         {
+          "moduleId": "iast_dangerous_url_scheme_execution",
+          "baseAlertId": 210003,
+          "rules": {
+            "href_javascript_url_execution": 1,
+            "location_href_javascript_url_execution": 2,
+            "iframe_src_javascript_url_execution": 3,
+            "script_src_data_url_execution": 4
+          }
+        },
+        {
           "moduleId": "iast_js_execution",
           "baseAlertId": 210001,
           "rules": {
@@ -256,6 +266,45 @@
           "rules": {
             "window_open_redirect": 1,
             "navigation_api_redirect": 2
+          }
+        },
+        {
+          "moduleId": "iast_route_controlled_navigation",
+          "baseAlertId": 210004,
+          "rules": {
+            "route_replacestate_navigation": 1,
+            "route_navigation_api_navigation": 2
+          }
+        },
+        {
+          "moduleId": "iast_form_submission_hijack",
+          "baseAlertId": 210005,
+          "rules": {
+            "form_action_hijack": 1,
+            "form_formaction_hijack": 2
+          }
+        },
+        {
+          "moduleId": "iast_dangerous_form_scheme_execution",
+          "baseAlertId": 210006,
+          "rules": {
+            "form_action_javascript_url_execution": 1,
+            "form_formaction_javascript_url_execution": 2
+          }
+        },
+        {
+          "moduleId": "iast_response_field_dom_reachability",
+          "baseAlertId": 210007,
+          "rules": {
+            "response_dom_innerhtml_reachability": 1,
+            "response_dom_document_write_reachability": 2
+          }
+        },
+        {
+          "moduleId": "iast_prototype_pollution_impact",
+          "baseAlertId": 210008,
+          "rules": {
+            "prototype_pollution_fetch_init": 1
           }
         }
       ]

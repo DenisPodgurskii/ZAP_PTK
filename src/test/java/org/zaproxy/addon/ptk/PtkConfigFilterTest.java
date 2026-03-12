@@ -37,7 +37,7 @@ class PtkConfigFilterTest {
     }
 
     @Test
-    void filterByCheckedPaths_emptyCheckedPaths_returnsEmptyMap() {
+    void filterByCheckedPaths_emptyCheckedPaths_returnsAllDefinitionsUnchanged() {
         PtkModulesDefinition sast = definition("sast", "SAST", module("m1", rule("r1")));
         PtkResourcesLoader.LoadedPtkResources resources =
                 new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
@@ -46,7 +46,8 @@ class PtkConfigFilterTest {
                 PtkConfigFilter.filterByCheckedPaths(resources, Set.of());
 
         assertNotNull(result);
-        assertTrue(result.isEmpty());
+        assertEquals(1, result.size());
+        assertEquals(sast, result.get("sast"));
     }
 
     @Test
@@ -225,7 +226,7 @@ class PtkConfigFilterTest {
     private static PtkModulesDefinition definition(
             String engine, String engineName, PtkModule... modules) {
         PtkModulesDefinition def = new PtkModulesDefinition();
-        def.setSchema("ptk-modules-v1");
+        def.setSchema("ptk-" + engine.toLowerCase() + "-rulepack/v1");
         def.setEngine(engineName);
         def.setVersion(1);
         def.setModules(List.of(modules));

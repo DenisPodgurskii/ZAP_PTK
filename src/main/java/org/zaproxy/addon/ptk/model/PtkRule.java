@@ -21,7 +21,12 @@ public class PtkRule {
     private String id;
     private String name;
     private String severity;
-    private PtkRuleMetadata metadata;
+
+    /** Canonical or legacy rule metadata block; preserved as-is for round-tripping. */
+    private JsonElement metadata;
+
+    /** Canonical detector block used by v1 SAST rules. */
+    private JsonElement detector;
 
     /** SAST pattern rules: list of match descriptors. */
     private List<JsonElement> matches;

@@ -8,7 +8,7 @@ import lombok.Setter;
 
 /**
  * Root structure for PTK module definition files (sast-modules.json, iast-modules.json,
- * dast-modules.json). Schema: ptk-modules-v1.
+ * dast-modules.json). Supports canonical PTK v1 engine rulepacks.
  */
 @Getter
 @Setter

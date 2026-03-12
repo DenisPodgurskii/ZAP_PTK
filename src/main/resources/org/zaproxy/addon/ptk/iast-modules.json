@@ -1,5 +1,5 @@
 {
-  "schema": "ptk-modules-v1",
+  "schema": "ptk-iast-rulepack/v1",
   "engine": "IAST",
   "version": 1,
   "modules": [
@@ -40,6 +40,15 @@
           "sources": [
             "query",
             "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
             "postMessage",
             "inline"
           ],
@@ -67,6 +76,15 @@
           "sources": [
             "query",
             "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
             "postMessage",
             "inline"
           ],
@@ -94,6 +112,15 @@
           "sources": [
             "query",
             "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
             "postMessage",
             "inline"
           ],
@@ -121,6 +148,15 @@
           "sources": [
             "query",
             "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
             "postMessage",
             "inline"
           ],
@@ -149,6 +185,15 @@
           "sources": [
             "query",
             "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
             "postMessage",
             "inline"
           ],
@@ -177,6 +222,15 @@
           "sources": [
             "query",
             "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
             "postMessage",
             "inline"
           ],
@@ -191,6 +245,157 @@
             "kind": "methodCall",
             "objectType": "Node",
             "method": "appendChild"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_dangerous_url_scheme_execution",
+      "type": "runtime",
+      "async": true,
+      "name": "Dangerous URL scheme execution sinks",
+      "metadata": {
+        "description": "Detect tainted javascript: and data: URLs flowing into executable navigation, iframe, link, and script-loading sinks.",
+        "recommendation": "<ul><li>Reject javascript: and attacker-controlled data: URLs from untrusted input.</li><li>Normalize and allow-list destinations before assigning href/src/location values.</li><li>Prefer route identifiers over raw URLs for navigation.</li></ul>",
+        "category": "xss",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-79"
+        ],
+        "tags": [
+          "iast",
+          "javascript-url",
+          "data-url",
+          "dom",
+          "xss"
+        ],
+        "severity": "high",
+        "vulnId": "dom_xss"
+      },
+      "rules": [
+        {
+          "id": "href_javascript_url_execution",
+          "name": "javascript: URL assigned to href",
+          "sinkId": "dom.attr.href.javascriptUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer",
+            "cookie",
+            "localStorage",
+            "sessionStorage"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL assigned to href and likely to execute in the current browsing context.",
+            "confidenceDefault": 74
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "location_href_javascript_url_execution",
+          "name": "javascript: URL navigated via location.href",
+          "sinkId": "nav.location.href.javascriptUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL assigned to location.href.",
+            "confidenceDefault": 78
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "iframe_src_javascript_url_execution",
+          "name": "javascript: URL assigned to iframe.src",
+          "sinkId": "nav.iframe.src.javascriptUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL assigned to iframe.src."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "script_src_data_url_execution",
+          "name": "data: URL assigned to script.src",
+          "sinkId": "script.element.src.dataUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL assigned to script.src and treated as executable content.",
+            "confidenceDefault": 76
           },
           "conditions": {
             "requiresTaint": true
@@ -339,6 +544,391 @@
             "kind": "event",
             "objectPath": "navigation",
             "event": "navigate"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_route_controlled_navigation",
+      "type": "runtime",
+      "async": true,
+      "name": "Route-controlled client navigation",
+      "metadata": {
+        "description": "Detect client-side route sources influencing history and navigation APIs.",
+        "recommendation": "<ul><li>Do not derive navigation decisions directly from attacker-controlled route state.</li><li>Normalize and allow-list client routes before mutating browser history or SPA navigation.</li></ul>",
+        "category": "access_control",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+          "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+        },
+        "owasp": [
+          "A01:2025 - Broken Access Control",
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-601"
+        ],
+        "tags": [
+          "iast",
+          "route",
+          "navigation",
+          "spa"
+        ],
+        "severity": "medium",
+        "vulnId": "route_control"
+      },
+      "rules": [
+        {
+          "id": "route_replacestate_navigation",
+          "name": "Route-controlled history.replaceState",
+          "sinkId": "nav.history.replaceState",
+          "severity": "medium",
+          "sources": [
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "hashRoute",
+            "hashQuery",
+            "postMessage"
+          ],
+          "metadata": {
+            "description": "Client route state influenced history.replaceState."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "route_navigation_api_navigation",
+          "name": "Route-controlled Navigation API transition",
+          "sinkId": "nav.navigation.navigate",
+          "severity": "medium",
+          "sources": [
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "hashRoute",
+            "hashQuery",
+            "postMessage"
+          ],
+          "metadata": {
+            "description": "Client route state influenced navigation.navigate."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_form_submission_hijack",
+      "type": "runtime",
+      "async": true,
+      "name": "Form submission target hijack",
+      "metadata": {
+        "description": "Detect attacker-controlled route, message, and request-body values changing form submission targets.",
+        "recommendation": "<ul><li>Allow-list form submission targets.</li><li>Do not derive action or formAction from untrusted route, body, or messaging input.</li></ul>",
+        "category": "access_control",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+          "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+        },
+        "owasp": [
+          "A01:2025 - Broken Access Control",
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-601"
+        ],
+        "tags": [
+          "iast",
+          "form",
+          "navigation",
+          "authz"
+        ],
+        "severity": "medium",
+        "vulnId": "form_target_manipulation"
+      },
+      "rules": [
+        {
+          "id": "form_action_hijack",
+          "name": "Form action manipulated by tainted route or body input",
+          "sinkId": "dom.attr.action",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted route, body, or messaging value changed form action."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "form_formaction_hijack",
+          "name": "formAction manipulated by tainted route or body input",
+          "sinkId": "dom.attr.formaction",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted route, body, or messaging value changed formAction."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_dangerous_form_scheme_execution",
+      "type": "runtime",
+      "async": true,
+      "name": "Dangerous form target URL schemes",
+      "metadata": {
+        "description": "Detect tainted javascript: and data: URLs flowing into form action and formAction sinks.",
+        "recommendation": "<ul><li>Reject javascript: and attacker-controlled data: values in form targets.</li><li>Resolve form destinations through strict allow-lists.</li></ul>",
+        "category": "xss",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-79"
+        ],
+        "tags": [
+          "iast",
+          "form",
+          "javascript-url",
+          "data-url"
+        ],
+        "severity": "high",
+        "vulnId": "dom_xss"
+      },
+      "rules": [
+        {
+          "id": "form_action_javascript_url_execution",
+          "name": "javascript: URL assigned to form action",
+          "sinkId": "dom.attr.action.javascriptUrl",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL assigned to form action."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "form_formaction_javascript_url_execution",
+          "name": "javascript: URL assigned to formAction",
+          "sinkId": "dom.attr.formaction.javascriptUrl",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL assigned to formAction."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_response_field_dom_reachability",
+      "type": "runtime",
+      "async": true,
+      "name": "Response-derived DOM execution reachability",
+      "metadata": {
+        "description": "Detect API and GraphQL response fields being fed into DOM HTML and parser sinks.",
+        "recommendation": "<ul><li>Treat response fields as untrusted when rendering rich HTML or unsafe templates.</li><li>Prefer text rendering or strict allow-listing for any response-driven markup.</li></ul>",
+        "category": "xss",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-79"
+        ],
+        "tags": [
+          "iast",
+          "response",
+          "dom",
+          "xss"
+        ],
+        "severity": "high",
+        "vulnId": "dom_xss"
+      },
+      "rules": [
+        {
+          "id": "response_dom_innerhtml_reachability",
+          "name": "Response field rendered via innerHTML",
+          "sinkId": "dom.innerHTML",
+          "severity": "high",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived data reached innerHTML."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "response_dom_document_write_reachability",
+          "name": "Response field rendered via document.write",
+          "sinkId": "document.write",
+          "severity": "high",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived data reached document.write."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_prototype_pollution_impact",
+      "type": "runtime",
+      "async": true,
+      "name": "Prototype pollution impact confirmation",
+      "metadata": {
+        "description": "Detect dangerous prototype-key writes from tainted input and confirm downstream fetch() init impact.",
+        "recommendation": "<ul><li>Reject __proto__, constructor, and prototype keys during object merge and parsing.</li><li>Use safe merge utilities and create null-prototype maps where appropriate.</li></ul>",
+        "category": "client_side",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Prototype_Pollution",
+          "CWE": "https://cwe.mitre.org/data/definitions/1321.html"
+        },
+        "owasp": [
+          "A05:2025 - Security Misconfiguration",
+          "A08:2021 - Software and Data Integrity Failures"
+        ],
+        "cwe": [
+          "CWE-1321"
+        ],
+        "tags": [
+          "iast",
+          "prototype",
+          "pollution",
+          "runtime"
+        ],
+        "severity": "high",
+        "vulnId": "prototype_pollution"
+      },
+      "rules": [
+        {
+          "id": "prototype_pollution_fetch_init",
+          "name": "Prototype pollution influenced fetch() init",
+          "sinkId": "runtime.prototype.pollution.fetchInit",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "apiResponseField",
+            "graphqlResponseField",
+            "postMessage",
+            "inline"
+          ],
+          "metadata": {
+            "description": "A prior tainted prototype write influenced inherited fetch() init fields."
           },
           "conditions": {
             "requiresTaint": true
