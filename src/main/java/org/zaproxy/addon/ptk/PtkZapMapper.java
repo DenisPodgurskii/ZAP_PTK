@@ -18,14 +18,15 @@ import org.zaproxy.addon.ptk.model.PtkRule;
 import org.zaproxy.addon.ptk.model.ZapMappingDefinition;
 
 /**
- * Maps between PTK module/rule IDs and ZAP alert references (<alert-id>_<sub-id>). Supports
+ * Maps between PTK module/rule IDs and ZAP alert references (baseAlertId-subId). Supports
  * validation that every rule has a unique alert reference.
  */
 public class PtkZapMapper {
 
     private static final String RULE_KEY_SEP = ":";
+    private static final String ALERT_REF_SEP = "-";
 
-    /** (moduleId + ":" + ruleId) → alert reference (e.g. "220000_1"). */
+    /** (moduleId + ":" + ruleId) → alert reference (e.g. "220000-1"). */
     private final Map<String, String> ruleKeyToAlertRef = new HashMap<>();
 
     /** Alert reference → (moduleId, ruleId). */
@@ -42,16 +43,16 @@ public class PtkZapMapper {
                     if (mrm.getRules() == null) continue;
                     int base = mrm.getBaseAlertId();
                     for (Map.Entry<String, Integer> e : mrm.getRules().entrySet()) {
-                        String ref = base + "_" + e.getValue();
+                        String ref = base + ALERT_REF_SEP + e.getValue();
                         String key = ruleKey(mrm.getModuleId(), e.getKey());
                         ruleKeyToAlertRef.put(key, ref);
                         alertRefToRule.put(ref, new ModuleAndRule(mrm.getModuleId(), e.getKey()));
                     }
                 }
             } else if (em.getMappings() != null) {
-                // v1 fallback: each module → baseAlertId_1
+                // v1 fallback: each module → baseAlertId-1
                 for (Map.Entry<String, Integer> e : em.getMappings().entrySet()) {
-                    String ref = e.getValue() + "_1";
+                    String ref = e.getValue() + ALERT_REF_SEP + "1";
                     String key = ruleKey(e.getKey(), null);
                     ruleKeyToAlertRef.put(key, ref);
                     alertRefToRule.put(ref, new ModuleAndRule(e.getKey(), null));
@@ -65,9 +66,9 @@ public class PtkZapMapper {
     }
 
     /**
-     * Returns the ZAP alert reference for the given module and rule/attack id (e.g. "220000_1"), or
+     * Returns the ZAP alert reference for the given module and rule/attack id (e.g. "220000-1"), or
      * null if not mapped. For v1-style mapping without rules, pass ruleId null to get
-     * baseAlertId_1.
+     * baseAlertId-1.
      */
     public String getZapAlertReference(String moduleId, String ruleId) {
         return ruleKeyToAlertRef.get(ruleKey(moduleId, ruleId));
@@ -199,7 +200,7 @@ public class PtkZapMapper {
                 String idStr = MISSING_ALERT_ID;
                 Integer baseId = null;
                 if (ref != null) {
-                    int idx = ref.indexOf('_');
+                    int idx = ref.indexOf(ALERT_REF_SEP);
                     if (idx > 0) {
                         try {
                             baseId = Integer.parseInt(ref.substring(0, idx));
