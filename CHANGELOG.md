@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - Added mapping to and from ZAP alert ids and PTK module names
 - Example alerts
+- Raising ZAP alerts from PTK alerts
 
 ## 0.2.0
 ### Added

@@ -9,6 +9,7 @@ import org.zaproxy.addon.ptk.model.PtkAttack;
 import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.PtkRule;
+import org.zaproxy.addon.ptk.options.PtkParam;
 
 /**
  * Filters PTK module definitions to only include engines, modules, and rules/attacks that are
@@ -27,7 +28,7 @@ public final class PtkConfigFilter {
      * engines/modules/rules that correspond to checked paths are included.
      *
      * @param resources loaded SAST, IAST, DAST definitions
-     * @param checkedPaths path strings from {@link org.zaproxy.addon.ptk.options.PtkParam}
+     * @param checkedPaths path strings from {@link PtkParam}
      * @return map with keys "sast", "iast", "dast" and filtered (or full) definitions; keys with
      *     null definitions are omitted
      */
