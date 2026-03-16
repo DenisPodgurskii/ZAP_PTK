@@ -1,5 +1,7 @@
 package org.zaproxy.addon.ptk;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonElement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,6 +32,8 @@ public final class PtkExampleAlerts {
     /** PTK format: "A05:2025 - Injection" -> ZAP format: "OWASP_2025_A05" */
     private static final Pattern OWASP_PTK_PATTERN = Pattern.compile("A(\\d{1,2}):(\\d{4})");
 
+    private static final Gson GSON = new Gson();
+
     private PtkExampleAlerts() {}
 
     /**
@@ -51,7 +55,7 @@ public final class PtkExampleAlerts {
             for (PtkModule module : def.getModules()) {
                 if (module.getId() == null) continue;
 
-                PtkModuleMetadata meta = module.getMetadata();
+                PtkModuleMetadata meta = parseModuleMetadata(module.getMetadata());
                 String moduleName = module.getName() != null ? module.getName() : module.getId();
 
                 if (module.getRules() != null) {
@@ -60,6 +64,7 @@ public final class PtkExampleAlerts {
                         String alertRef = mapper.getZapAlertReference(module.getId(), rule.getId());
                         if (alertRef == null) continue;
 
+                        String ruleDescription = parseRuleDescription(rule.getMetadata());
                         ExampleAlert alert =
                                 buildAlert(
                                         alertRef,
@@ -68,9 +73,7 @@ public final class PtkExampleAlerts {
                                         rule.getName() != null ? rule.getName() : rule.getId(),
                                         meta,
                                         rule.getSeverity(),
-                                        rule.getMetadata() != null
-                                                ? rule.getMetadata().getDescription()
-                                                : null);
+                                        ruleDescription);
                         if (alert != null) {
                             alerts.add(alert);
                         }
@@ -145,6 +148,23 @@ public final class PtkExampleAlerts {
         String codeLink = CODE_LINK_BASE + engineLower + CODE_LINK_SUFFIX;
         String codeLinkText = CODE_LINK_TEXT_PREFIX + engineLower + CODE_LINK_SUFFIX;
         return new ExampleAlert(baseAlert, moduleName, codeLink, codeLinkText);
+    }
+
+    private static PtkModuleMetadata parseModuleMetadata(JsonElement metadata) {
+        if (metadata == null || !metadata.isJsonObject()) {
+            return null;
+        }
+        return GSON.fromJson(metadata, PtkModuleMetadata.class);
+    }
+
+    private static String parseRuleDescription(JsonElement metadata) {
+        if (metadata == null
+                || !metadata.isJsonObject()
+                || metadata.getAsJsonObject().get("description") == null) {
+            return null;
+        }
+        JsonElement desc = metadata.getAsJsonObject().get("description");
+        return desc.isJsonNull() ? null : desc.getAsString();
     }
 
     private static int parseBaseAlertId(String alertRef) {
