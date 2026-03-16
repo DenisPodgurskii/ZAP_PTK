@@ -27,6 +27,8 @@ public final class PtkExampleAlerts {
 
     private static final Gson GSON = new Gson();
 
+    private static final Gson GSON = new Gson();
+
     private PtkExampleAlerts() {}
 
     /**
