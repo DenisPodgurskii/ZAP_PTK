@@ -125,12 +125,13 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 String json = GSON.toJson(response);
                 msg.getResponseBody().setBody(json);
             } else if (uri.contains(PTK_ALERT_PATH)) {
-                String requestBody = msg.getRequestBody().toString();
-                int raised = PtkAlertHandler.processAlertBatch(requestBody);
-                Map<String, Object> response = new LinkedHashMap<>();
-                response.put("result", "OK");
-                response.put("alertsRaised", raised);
-                msg.getResponseBody().setBody(GSON.toJson(response));
+                // TODO agree definition and raise the alert in ZAP
+                System.out.println("PTK got alert");
+                System.out.println(
+                        msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
+                System.out.println(msg.getRequestBody().toString());
+
+                msg.getResponseBody().setBody("{\"result\": \"OK\"}");
             } else if (uri.contains(PTK_PROGRESS_PATH)) {
                 // TODO agree definition and raise the alert in ZAP
                 // POST with {"progress": 10} maybe?

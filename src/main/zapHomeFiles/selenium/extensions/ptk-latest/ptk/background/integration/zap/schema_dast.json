@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ptk.local/schemas/ptk-zap-dast-finding-v1.json",
+  "title": "PTK -> ZAP DAST Findings Batch (Minimum)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "type", "schema", "ts", "batchId", "payload"],
+  "properties": {
+    "source": { "const": "ptk" },
+    "type": { "const": "dast_findings_batch" },
+    "schema": { "const": "ptk-zap-dast-finding-v1" },
+    "ts": { "type": "integer", "minimum": 0 },
+    "batchId": { "type": "string", "minLength": 1 },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "scanId", "findings"],
+      "properties": {
+        "engine": { "const": "DAST" },
+        "scanId": { "type": "string", "minLength": 1 },
+        "truncated": { "type": "boolean" },
+        "findings": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/finding" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "fingerprint",
+        "moduleId",
+        "ruleId",
+        "severity",
+        "confidence",
+        "summary",
+        "location",
+        "proof",
+        "request",
+        "response"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "moduleId": { "type": "string", "minLength": 1 },
+        "ruleId": { "type": "string", "minLength": 1 },
+        "attackId": { "type": "string", "minLength": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["high", "medium", "low"]
+        },
+        "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "summary": { "type": "string", "minLength": 1 },
+        "location": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "route", "method", "param"],
+          "properties": {
+            "url": { "type": "string", "format": "uri" },
+            "route": { "type": ["string", "null"] },
+            "method": { "type": "string", "minLength": 1 },
+            "param": { "type": ["string", "null"] }
+          }
+        },
+        "proof": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["payload", "proof", "summary"],
+          "properties": {
+            "payload": { "type": ["string", "null"] },
+            "proof": { "type": ["string", "null"] },
+            "summary": { "type": "string", "minLength": 1 }
+          }
+        },
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["timestamp", "method", "url", "raw"],
+          "properties": {
+            "timestamp": { "type": ["integer", "null"], "minimum": 0 },
+            "method": { "type": "string", "minLength": 1 },
+            "url": { "type": "string", "format": "uri" },
+            "raw": { "type": "string", "minLength": 1 }
+          }
+        },
+        "response": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["statusCode", "raw"],
+          "properties": {
+            "statusCode": { "type": "integer", "minimum": 0, "maximum": 999 },
+            "timeMs": { "type": "integer", "minimum": 0 },
+            "raw": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

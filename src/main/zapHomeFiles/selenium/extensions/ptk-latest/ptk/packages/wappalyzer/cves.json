@@ -1,0 +1,293 @@
+{
+  "technologies": {
+    "CVE-2025-55182": {
+      "name": "React2Shell (RSC indicators)",
+      "description": "Passive indicators for React Server Components exposure (React2Shell).",
+      "cats": [],
+      "headers": {
+        "vary": "rsc\\;confidence:100",
+        "content-type": "text/x-component\\;confidence:100"
+      },
+      "html": [
+        "(window|self)\\.__next_f\\s*=",
+        "__next_f\\.push\\(",
+        "react-server-dom-webpack"
+      ],
+      "js": {
+        "__next_f": "^true$\\;confidence:90"
+      },
+      "ptk": {
+        "severity": "Critical",
+        "category": "rce",
+        "cve": [
+          "CVE-2025-55182"
+        ],
+        "aliasCve": [
+          "CVE-2025-66478"
+        ],
+        "references": {
+          "advisory": "https://react.dev/blog/2025/12/03/critical-security-vulnerability-in-react-server-components",
+          "nvd": "https://nvd.nist.gov/vuln/detail/CVE-2025-55182"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2025_55182_react_rsc"
+        }
+      }
+    },
+    "CVE-2015-1635": {
+      "name": "Microsoft Windows 'HTTP.sys' - Remote Code Execution",
+      "description": "HTTP.sys in Microsoft Windows 7 SP1, Windows Server 2008 R2 SP1, Windows 8, Windows 8.1, and Windows Server 2012 Gold and R2 allows remote attackers to execute arbitrary code via crafted HTTP requests, aka \"HTTP.sys Remote Code Execution Vulnerability.\"\n",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "HTTP\\ Error\\ 416",
+        "The\\ requested\\ range\\ is\\ not\\ satisfiable"
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2015-1635"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2015-1635"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2015_1635"
+        }
+      }
+    },
+    "CVE-2018-20062": {
+      "name": "ThinkPHP 5.0.23 - Remote Code Execution",
+      "description": "An issue was discovered in NoneCms V1.3. thinkphp/library/think/App.php allows remote attackers to execute arbitrary PHP code via crafted use of the filter parameter, as demonstrated by the s=index/\\think\\Request/input&filter=phpinfo&data=1 query string.\n",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "PHP\\ Extension",
+        "PHP\\ Version",
+        "ThinkPHP"
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2018-20062"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2018-20062"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2018_20062"
+        }
+      }
+    },
+    "CVE-2019-10692": {
+      "name": "WordPress Google Maps <7.11.18 - SQL Injection",
+      "description": "WordPress Google Maps plugin before 7.11.18 contains a SQL injection vulnerability. The plugin includes /class.rest-api.php in the REST API and does not sanitize field names before a SELECT statement. An attacker can possibly obtain sensitive information from a database, modify data, and execute unauthorized administrative operations in the context of the affected site.\n",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "\"user_login\"",
+        "\"user_nicename\"",
+        "\"user_pass\""
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2019-10692"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2019-10692"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2019_10692"
+        }
+      }
+    },
+    "CVE-2020-14092": {
+      "name": "WordPress PayPal Pro <1.1.65 - SQL Injection",
+      "description": "WordPress PayPal Pro plugin before 1.1.65 is susceptible to SQL injection via the 'query' parameter which allows for any unauthenticated user to perform SQL queries with the results output to a web page in JSON format.",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "\"user_activation_key\"",
+        "\"user_email\"",
+        "\"user_login\"",
+        "\"user_pass\""
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2020-14092"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2020-14092"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2020_14092"
+        }
+      }
+    },
+    "CVE-2020-17530": {
+      "name": "Apache Struts 2.0.0-2.5.25 - Remote Code Execution",
+      "description": "Apache Struts 2.0.0 through Struts 2.5.25 is susceptible to remote code execution because forced OGNL evaluation, when evaluated on raw user input in tag attributes, may allow it.",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "root:.*:0:0:"
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2020-17530"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2020-17530"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2020_17530"
+        }
+      }
+    },
+    "CVE-2021-28918": {
+      "name": "Netmask NPM Package - Server-Side Request Forgery",
+      "description": "Netmask NPM Package is susceptible to server-side request forgery because of improper input validation of octal strings in netmask npm package. This allows unauthenticated remote attackers to perform indeterminate SSRF, remote file inclusion, and local file inclusion attacks on many of the dependent packages. A remote unauthenticated attacker can bypass packages relying on netmask to filter IPs and reach critical VPN or LAN hosts.",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "Apache\\ Server\\ Status",
+        "Server\\ Version",
+        "root:.*:0:0:"
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2021-28918"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2021-28918"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2021_28918"
+        }
+      }
+    },
+    "CVE-2022-47945": {
+      "name": "Thinkphp Lang - Local File Inclusion",
+      "description": "ThinkPHP Framework before 6.0.14 allows local file inclusion via the lang parameter when the language pack feature is enabled (lang_switch_on=true). An unauthenticated and remote attacker can exploit this to execute arbitrary operating system commands, as demonstrated by including pearcmd.php.\n",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "Call\\ Stack",
+        "class=\"trace"
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2022-47945"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2022-47945"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2022_47945"
+        }
+      }
+    },
+    "CVE-2023-34598": {
+      "name": "Gibbon v25.0.0 - Local File Inclusion",
+      "description": "Gibbon v25.0.0 is vulnerable to a Local File Inclusion (LFI) vulnerability where it's possible to include the content of several files present in the installation folder in the server's response.\n",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "gibbon",
+        "phpMyAdmin\\ SQL\\ Dump"
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2023-34598"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2023-34598"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2023_34598"
+        }
+      }
+    },
+    "CVE-2023-5991": {
+      "name": "Hotel Booking Lite < 4.8.5 - Arbitrary File Download & Deletion",
+      "description": "The Hotel Booking Lite WordPress plugin before 4.8.5 does not validate file paths provided via user input, as well as does not have proper CSRF and authorisation checks, allowing unauthenticated users to download and delete arbitrary files on the server\n",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "root:.*:0:0:"
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2023-5991"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2023-5991"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2023_5991"
+        }
+      }
+    },
+    "CVE-2022-1970": {
+      "name": "WordPress Automatic Plugin <3.92.1 - Arbitrary File Download and SSRF",
+      "description": "WordPress Automatic plugin <3.92.1 is vulnerable to unauthenticated Arbitrary File Download and SSRF Located in the downloader.php file, could permit attackers to download any file from a site. Sensitive data, including login credentials and backup files, could fall into the wrong hands. This vulnerability has been patched in version 3.92.1.\n",
+      "cats": [],
+      "headers": {},
+      "html": [
+        "\"link\":\"file:",
+        "root:.*:0:0:"
+      ],
+      "js": {},
+      "ptk": {
+        "severity": "Critical",
+        "category": "cve",
+        "cve": [
+          "CVE-2022-1970"
+        ],
+        "references": {
+          "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2022-1970"
+        },
+        "verify": {
+          "engine": "DAST",
+          "moduleId": "cve_2022_1970_cve_2024_27954"
+        }
+      }
+    }
+  },
+  "categories": []
+}
