@@ -1,0 +1,263 @@
+{
+  "source": "ptk",
+  "type": "sast_findings_batch",
+  "schema": "ptk-zap-sast-finding-v1",
+  "ts": 1773068000002,
+  "batchId": "batch-sast-demo-free",
+  "payload": {
+    "engine": "SAST",
+    "scanId": "00386600-e528-4355-a71a-3f410c751340",
+    "truncated": false,
+    "findings": [
+      {
+        "id": "00386600-e528-4355-a71a-3f410c751340::SAST::dom-xss::dom-xss-taint-angular::59",
+        "fingerprint": "dom-xss-taint-angular@@high@@http://localhost:3001/main.js@@http://localhost:3001/main.js@@{\"start\":{\"line\":1,\"column\":161602},\"end\":{\"line\":1,\"column\":161635}}@@{\"start\":{\"line\":1,\"column\":161794},\"end\":{\"line\":1,\"column\":161835}}",
+        "moduleId": "dom-xss",
+        "ruleId": "dom-xss-taint-angular",
+        "severity": "high",
+        "confidence": 100,
+        "summary": "DOM XSS via innerHTML (Angular) from source this.route.snapshot.queryParams.q to sink this.sanitizer.bypassSecurityTrustHtml",
+        "location": {
+          "url": "http://localhost:3001/#/",
+          "route": "#/",
+          "method": null,
+          "param": "q"
+        },
+        "proof": {
+          "mode": "taint",
+          "payload": null,
+          "proof": null,
+          "summary": "DOM XSS via innerHTML (Angular)"
+        },
+        "source": {
+          "label": "this.route.snapshot.queryParams.q",
+          "file": "http://localhost:3001/main.js",
+          "line": 1,
+          "column": 161602
+        },
+        "sink": {
+          "label": "this.sanitizer.bypassSecurityTrustHtml",
+          "file": "http://localhost:3001/main.js",
+          "line": 1,
+          "column": 161794
+        },
+        "trace": [
+          {
+            "kind": "source",
+            "label": "this.route.snapshot.queryParams.q",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 161602
+          },
+          {
+            "kind": "propagation",
+            "label": "e",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 161600
+          },
+          {
+            "kind": "sink",
+            "label": "this.sanitizer.bypassSecurityTrustHtml",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 161794
+          }
+        ],
+        "codeSnippet": "Source context:\nion&&this.productSubscription.unsubscribe(),this.dataSource&&this.dataSource.disconnect()}filterTable(){let e=this.route.snapshot.queryParams.q;e?(e=e.trim(),this.ngZone.runOutsideAngular(()=>{this.io.socket().emit(\"veri…\n\nSink context:\n{this.io.socket().emit(\"verifyLocalXssChallenge\",e)}),this.dataSource.filter=e.toLowerCase(),this.searchValue=this.sanitizer.bypassSecurityTrustHtml(e),this.gridDataSource.subscribe(o=>{this.emptyState=0===o.length})):(t…"
+      },
+      {
+        "id": "00386600-e528-4355-a71a-3f410c751340::SAST::dom-xss::dom-xss-taint-angular::60",
+        "fingerprint": "dom-xss-taint-angular@@high@@http://localhost:3001/main.js@@http://localhost:3001/main.js@@{\"start\":{\"line\":1,\"column\":249698},\"end\":{\"line\":1,\"column\":249727}}@@{\"start\":{\"line\":1,\"column\":249778},\"end\":{\"line\":1,\"column\":249856}}",
+        "moduleId": "dom-xss",
+        "ruleId": "dom-xss-taint-angular",
+        "severity": "high",
+        "confidence": 89,
+        "summary": "DOM XSS via innerHTML (Angular) from source localStorage.getItem to sink this.sanitizer.bypassSecurityTrustHtml",
+        "location": {
+          "url": "http://localhost:3001/#/",
+          "route": "#/",
+          "method": null,
+          "param": null
+        },
+        "proof": {
+          "mode": "taint",
+          "payload": null,
+          "proof": null,
+          "summary": "DOM XSS via innerHTML (Angular)"
+        },
+        "source": {
+          "label": "localStorage.getItem",
+          "file": "http://localhost:3001/main.js",
+          "line": 1,
+          "column": 249698
+        },
+        "sink": {
+          "label": "this.sanitizer.bypassSecurityTrustHtml",
+          "file": "http://localhost:3001/main.js",
+          "line": 1,
+          "column": 249778
+        },
+        "trace": [
+          {
+            "kind": "source",
+            "label": "localStorage.getItem",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 249698
+          },
+          {
+            "kind": "propagation",
+            "label": "o",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 249696
+          },
+          {
+            "kind": "propagation",
+            "label": "te",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 249734
+          },
+          {
+            "kind": "propagation",
+            "label": "e",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 249732
+          },
+          {
+            "kind": "propagation",
+            "label": "e.data",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 249827
+          },
+          {
+            "kind": "propagation",
+            "label": "age.getItem(\"token\");o&&(e=te(o),e.data.lastLoginIp&&(this.lastLoginIp=this.sanitizer.bypassSecurityTrustHtml(`<small>${e.data.lastLoginIp}</small>`)))}static \\u0275fac=function(o){return new(o||n)};static \\u0275cmp=t.VB…",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 249817
+          },
+          {
+            "kind": "sink",
+            "label": "this.sanitizer.bypassSecurityTrustHtml",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 249778
+          }
+        ],
+        "codeSnippet": "Source context:\nstLoginIp=\"?\";ngOnInit(){try{this.parseAuthToken()}catch(e){console.log(e)}}parseAuthToken(){let e={};const o=localStorage.getItem(\"token\");o&&(e=te(o),e.data.lastLoginIp&&(this.lastLoginIp=this.sanitizer.bypassSecurityT…\n\nSink context:\neAuthToken(){let e={};const o=localStorage.getItem(\"token\");o&&(e=te(o),e.data.lastLoginIp&&(this.lastLoginIp=this.sanitizer.bypassSecurityTrustHtml(`<small>${e.data.lastLoginIp}</small>`)))}static \\u0275fac=function(o){…"
+      },
+      {
+        "id": "00386600-e528-4355-a71a-3f410c751340::SAST::client-injection::client-json-storage-review::134",
+        "fingerprint": "client-json-storage-review@@low@@http://localhost:3001/main.js@@http://localhost:3001/main.js@@{\"start\":{\"line\":1,\"column\":245431},\"end\":{\"line\":1,\"column\":245464}}@@{\"start\":{\"line\":1,\"column\":245413},\"end\":{\"line\":1,\"column\":245466}}",
+        "moduleId": "client-injection",
+        "ruleId": "client-json-storage-review",
+        "severity": "low",
+        "confidence": 74,
+        "summary": "Client-side storage JSON parse review from source localStorage.getItem to sink JSON.parse",
+        "location": {
+          "url": "http://localhost:3001/#/",
+          "route": "#/",
+          "method": null,
+          "param": null
+        },
+        "proof": {
+          "mode": "taint",
+          "payload": null,
+          "proof": null,
+          "summary": "Client-side storage JSON parse review"
+        },
+        "source": {
+          "label": "localStorage.getItem",
+          "file": "http://localhost:3001/main.js",
+          "line": 1,
+          "column": 245431
+        },
+        "sink": {
+          "label": "JSON.parse",
+          "file": "http://localhost:3001/main.js",
+          "line": 1,
+          "column": 245413
+        },
+        "trace": [
+          {
+            "kind": "source",
+            "label": "localStorage.getItem",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 245431
+          },
+          {
+            "kind": "propagation",
+            "label": "String",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 245424
+          },
+          {
+            "kind": "sink",
+            "label": "JSON.parse",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 245413
+          }
+        ],
+        "codeSnippet": "Source context:\n.dataRequest={}}needCaptcha(){const e=new Date,o=localStorage.getItem(\"lstdtxprt\")?new Date(JSON.parse(String(localStorage.getItem(\"lstdtxprt\")))):new Date(0);e.getTime()-o.getTime()<3e5&&(this.getNewCaptcha(),this.prese…\n\nSink context:\nneedCaptcha(),this.dataRequest={}}needCaptcha(){const e=new Date,o=localStorage.getItem(\"lstdtxprt\")?new Date(JSON.parse(String(localStorage.getItem(\"lstdtxprt\")))):new Date(0);e.getTime()-o.getTime()<3e5&&(this.getNewCa…"
+      },
+      {
+        "id": "00386600-e528-4355-a71a-3f410c751340::SAST::client-injection::client-json-storage-review::136",
+        "fingerprint": "client-json-storage-review@@low@@http://localhost:3001/main.js@@http://localhost:3001/main.js@@{\"start\":{\"line\":1,\"column\":293232},\"end\":{\"line\":1,\"column\":293275}}@@{\"start\":{\"line\":1,\"column\":293221},\"end\":{\"line\":1,\"column\":293276}}",
+        "moduleId": "client-injection",
+        "ruleId": "client-json-storage-review",
+        "severity": "low",
+        "confidence": 74,
+        "summary": "Client-side storage JSON parse review from source localStorage.getItem to sink JSON.parse",
+        "location": {
+          "url": "http://localhost:3001/#/",
+          "route": "#/",
+          "method": null,
+          "param": null
+        },
+        "proof": {
+          "mode": "taint",
+          "payload": null,
+          "proof": null,
+          "summary": "Client-side storage JSON parse review"
+        },
+        "source": {
+          "label": "localStorage.getItem",
+          "file": "http://localhost:3001/main.js",
+          "line": 1,
+          "column": 293232
+        },
+        "sink": {
+          "label": "JSON.parse",
+          "file": "http://localhost:3001/main.js",
+          "line": 1,
+          "column": 293221
+        },
+        "trace": [
+          {
+            "kind": "source",
+            "label": "localStorage.getItem",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 293232
+          },
+          {
+            "kind": "sink",
+            "label": "JSON.parse",
+            "file": "http://localhost:3001/main.js",
+            "line": 1,
+            "column": 293221
+          }
+        ],
+        "codeSnippet": "Source context:\nrror:e=>{console.log(e)}}),this.couponPanelExpanded=!!localStorage.getItem(\"couponPanelExpanded\")&&JSON.parse(localStorage.getItem(\"couponPanelExpanded\")),this.paymentPanelExpanded=!!localStorage.getItem(\"paymentPanelExp…\n\nSink context:\nFixed(2)},error:e=>{console.log(e)}}),this.couponPanelExpanded=!!localStorage.getItem(\"couponPanelExpanded\")&&JSON.parse(localStorage.getItem(\"couponPanelExpanded\")),this.paymentPanelExpanded=!!localStorage.getItem(\"paym…"
+      }
+    ]
+  }
+}
