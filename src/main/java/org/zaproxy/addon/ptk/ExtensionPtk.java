@@ -111,7 +111,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     msg.getRequestHeader().getURI() != null
                             ? msg.getRequestHeader().getURI().toString()
                             : "";
+            System.out.println("PTK " + uri); // TODO
             if (uri.contains(PTK_CONFIG_PATH)) {
+                System.out.println("PTK config "); // TODO
                 Map<String, Object> response = new LinkedHashMap<>();
                 response.put("mode", getParam().isAutomatedScanningEnabled() ? "auto" : "manual");
                 PtkResourcesLoader loader = new PtkResourcesLoader();
@@ -125,15 +127,14 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 String json = GSON.toJson(response);
                 msg.getResponseBody().setBody(json);
             } else if (uri.contains(PTK_ALERT_PATH)) {
-                // TODO agree definition and raise the alert in ZAP
-                System.out.println("PTK got alert");
-                System.out.println(
-                        msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
-                System.out.println(msg.getRequestBody().toString());
-
-                msg.getResponseBody().setBody("{\"result\": \"OK\"}");
+                String requestBody = msg.getRequestBody().toString();
+                System.out.println("PTK alerts " + requestBody); // TODO
+                int raised = PtkAlertHandler.processAlertBatch(requestBody);
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("result", "OK");
+                response.put("alertsRaised", raised);
+                msg.getResponseBody().setBody(GSON.toJson(response));
             } else if (uri.contains(PTK_PROGRESS_PATH)) {
-                // TODO agree definition and raise the alert in ZAP
                 // POST with {"progress": 10} maybe?
                 // Where progress is a %, and when it reaches 100 then the window will be closed
                 // when using automation.
