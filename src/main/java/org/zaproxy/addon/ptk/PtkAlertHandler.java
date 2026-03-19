@@ -2,7 +2,10 @@ package org.zaproxy.addon.ptk;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
+import java.util.List;
 import org.apache.commons.httpclient.URI;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.control.Control;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.model.HistoryReference;
@@ -20,6 +23,7 @@ import org.zaproxy.zap.extension.alert.ExtensionAlert;
 public final class PtkAlertHandler {
 
     private static final Gson GSON = new Gson();
+    private static final Logger LOGGER = LogManager.getLogger(PtkAlertHandler.class);
 
     private PtkAlertHandler() {}
 
@@ -58,19 +62,33 @@ public final class PtkAlertHandler {
         if (extAlert == null) {
             return 0;
         }
+        List<PtkFinding> findings = batch.getFindings();
+        LOGGER.debug("PTK alert batch: {} alerts reported", findings.size());
+
         int raised = 0;
-        for (PtkFinding finding : batch.getFindings()) {
+        for (PtkFinding finding : findings) {
             if (finding.getModuleId() == null || finding.getRuleId() == null) {
+                LOGGER.error(
+                        "PTK module or rule not found for id={}, moduleId={}, ruleId={}",
+                        finding.getId(),
+                        finding.getModuleId(),
+                        finding.getRuleId());
                 continue;
             }
             Alert alert = PtkAlertBuilder.buildFromFinding(finding, engine, mapper, resources);
             if (alert == null) {
+                LOGGER.error(
+                        "PTK mapping not found for moduleId={}, ruleId={}",
+                        finding.getModuleId(),
+                        finding.getRuleId());
                 continue;
             }
             if (raiseAlert(alert, finding, extAlert)) {
                 raised++;
             }
         }
+
+        LOGGER.debug("PTK alerts raised: {} of {} reported", raised, findings.size());
         return raised;
     }
 
@@ -90,8 +108,11 @@ public final class PtkAlertHandler {
                             Model.getSingleton().getSession(), HistoryReference.TYPE_SCANNER, msg);
             alert.setMessage(msg);
             extAlert.alertFound(alert, ref);
+            LOGGER.debug("PTK raised alert: {}", alert.getName());
+
             return true;
         } catch (Exception e) {
+            LOGGER.error("PTK failed to raise alert: {}", alert.getName(), e);
             return false;
         }
     }
