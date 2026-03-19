@@ -18,7 +18,6 @@ import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.options.PtkOptionsPanel;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.extension.alert.ExampleAlertProvider;
-import org.zaproxy.zap.extension.selenium.SeleniumScriptUtils;
 
 public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvider {
 
@@ -96,24 +95,12 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         }
 
         @Override
-        public void browserLaunched(SeleniumScriptUtils ssutils) {
-            // FIXME Temporary sleep, will replace with detecting the ping
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                // Ignore
-            }
-        }
-
-        @Override
         public String handleCallBack(HttpMessage msg) {
             String uri =
                     msg.getRequestHeader().getURI() != null
                             ? msg.getRequestHeader().getURI().toString()
                             : "";
-            System.out.println("PTK " + uri); // TODO
             if (uri.contains(PTK_CONFIG_PATH)) {
-                System.out.println("PTK config "); // TODO
                 Map<String, Object> response = new LinkedHashMap<>();
                 response.put("mode", getParam().isAutomatedScanningEnabled() ? "auto" : "manual");
                 PtkResourcesLoader loader = new PtkResourcesLoader();
@@ -128,7 +115,6 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 msg.getResponseBody().setBody(json);
             } else if (uri.contains(PTK_ALERT_PATH)) {
                 String requestBody = msg.getRequestBody().toString();
-                System.out.println("PTK alerts " + requestBody); // TODO
                 int raised = PtkAlertHandler.processAlertBatch(requestBody);
                 Map<String, Object> response = new LinkedHashMap<>();
                 response.put("result", "OK");
