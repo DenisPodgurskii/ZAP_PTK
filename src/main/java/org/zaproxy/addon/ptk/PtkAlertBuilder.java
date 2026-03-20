@@ -12,6 +12,7 @@ import java.util.regex.Pattern;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.zaproxy.addon.ptk.model.PtkAttack;
 import org.zaproxy.addon.ptk.model.PtkFinding;
+import org.zaproxy.addon.ptk.model.PtkFindingSourceSink;
 import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModuleMetadata;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
@@ -27,6 +28,13 @@ public final class PtkAlertBuilder {
     private static final Pattern CWE_PATTERN = Pattern.compile("CWE-(\\d+)");
     private static final Pattern OWASP_PTK_PATTERN = Pattern.compile("A(\\d{1,2}):(\\d{4})");
     private static final Gson GSON = new Gson();
+
+    /** Tag linking PTK alerts to the add-on documentation. */
+    public static final String TAG_TOOL_PTK = "TOOL_PTK";
+
+    /** URL for the TOOL_PTK tag. */
+    public static final String TAG_TOOL_PTK_URL =
+            "https://www.zaproxy.org/docs/desktop/addons/owasp-ptk/";
 
     private PtkAlertBuilder() {}
 
@@ -77,12 +85,14 @@ public final class PtkAlertBuilder {
         String reference = formatReferences(meta);
         int cweId = parseFirstCwe(meta);
         Map<String, String> tags = owaspToZapTags(meta);
+        tags.put(TAG_TOOL_PTK, TAG_TOOL_PTK_URL);
 
         String uri = finding.getUri() != null ? finding.getUri() : "about:blank";
         String param = finding.getParam();
         String attack = buildAttack(finding);
         String evidence = buildEvidence(finding);
         String otherInfo = buildOtherInfo(finding);
+        String inputVector = buildInputVector(finding, engine);
 
         Alert.Builder builder =
                 Alert.builder()
@@ -100,9 +110,10 @@ public final class PtkAlertBuilder {
                         .setEvidence(evidence != null ? evidence : "")
                         .setOtherInfo(otherInfo != null ? otherInfo : "")
                         .setAlertRef(alertRef);
-        if (!tags.isEmpty()) {
-            builder.setTags(tags);
+        if (inputVector != null && !inputVector.isBlank()) {
+            builder.setInputVector(inputVector);
         }
+        builder.setTags(tags);
         return builder.build();
     }
 
@@ -237,6 +248,36 @@ public final class PtkAlertBuilder {
         }
         JsonElement desc = metadata.getAsJsonObject().get("description");
         return desc.isJsonNull() ? null : desc.getAsString();
+    }
+
+    private static String buildInputVector(PtkFinding finding, String engine) {
+        String sourceStr = getSourceString(finding.getSource());
+        if (finding.getSource() == null && finding.getParam() != null) {
+            sourceStr = finding.getParam();
+        }
+        String enginePart = engine != null && !engine.isBlank() ? engine : "";
+        String sourcePart = sourceStr != null && !sourceStr.isBlank() ? sourceStr : "";
+        StringBuilder sb = new StringBuilder("PTK");
+        if (!enginePart.isEmpty()) sb.append(" ").append(enginePart);
+        if (!sourcePart.isEmpty()) sb.append(" ").append(sourcePart);
+        return sb.toString();
+    }
+
+    private static String getSourceString(PtkFindingSourceSink source) {
+        if (source == null) return null;
+        if (source.getLabel() != null && !source.getLabel().isBlank()) {
+            return source.getLabel();
+        }
+        if (source.getKind() != null && !source.getKind().isBlank()) {
+            return source.getKind();
+        }
+        if (source.getFile() != null && source.getLine() != null) {
+            return source.getFile() + ":" + source.getLine();
+        }
+        if (source.getId() != null && !source.getId().isBlank()) {
+            return source.getId();
+        }
+        return null;
     }
 
     private static String buildAttack(PtkFinding finding) {

@@ -5,6 +5,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.control.Control;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.extension.Extension;
@@ -21,6 +23,7 @@ import org.zaproxy.zap.extension.alert.ExampleAlertProvider;
 
 public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvider {
 
+    private static final Logger LOGGER = LogManager.getLogger(ExtensionPtk.class);
     private static final String PREFIX = "ptk";
 
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
@@ -124,19 +127,18 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 // POST with {"progress": 10} maybe?
                 // Where progress is a %, and when it reaches 100 then the window will be closed
                 // when using automation.
-                System.out.println("PTK got progress");
-                System.out.println(
-                        msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
-                System.out.println(msg.getRequestBody().toString());
-
+                LOGGER.debug(
+                        "PTK got progress: {} {} {}",
+                        msg.getRequestHeader().getMethod(),
+                        msg.getRequestHeader().getURI(),
+                        msg.getRequestBody());
                 msg.getResponseBody().setBody("{\"result\": \"OK\"}");
             } else {
-                // TODO temporary code for testing - have full access to the request here
-                System.out.println("PTK unexpected request");
-                System.out.println(
-                        msg.getRequestHeader().getMethod() + " " + msg.getRequestHeader().getURI());
-                System.out.println(msg.getRequestBody().toString());
-
+                LOGGER.warn(
+                        "PTK unexpected request: {} {} {}",
+                        msg.getRequestHeader().getMethod(),
+                        msg.getRequestHeader().getURI(),
+                        msg.getRequestBody());
                 msg.getResponseBody().setBody("{\"result\": \"FAIL\"}");
             }
             msg.getResponseHeader().setHeader(HttpHeader.CONTENT_TYPE, "application/json");
