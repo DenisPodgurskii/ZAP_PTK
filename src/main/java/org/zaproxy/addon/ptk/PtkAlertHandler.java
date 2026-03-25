@@ -25,6 +25,8 @@ public final class PtkAlertHandler {
     private static final Gson GSON = new Gson();
     private static final Logger LOGGER = LogManager.getLogger(PtkAlertHandler.class);
 
+    private static final String HTTP_BOUNDARY = HttpHeader.CRLF + HttpHeader.CRLF;
+
     private PtkAlertHandler() {}
 
     /**
@@ -128,10 +130,13 @@ public final class PtkAlertHandler {
         }
         if (requestRaw != null && responseRaw != null) {
             HttpMessage msg = new HttpMessage();
-            msg.getRequestHeader().setMessage(requestRaw);
-            msg.getRequestBody().setLength(0);
-            msg.getResponseHeader().setMessage(responseRaw);
-            msg.getResponseBody().setLength(0);
+            String[] headBody = splitHeaderBody(requestRaw);
+            msg.setRequestHeader(headBody[0]);
+            msg.setRequestBody(headBody[1]);
+
+            headBody = splitHeaderBody(responseRaw);
+            msg.setResponseHeader(headBody[0]);
+            msg.setResponseBody(headBody[1]);
             return msg;
         }
         String url =
@@ -152,13 +157,20 @@ public final class PtkAlertHandler {
         String host = uri.getHost();
         if (host == null || host.isEmpty()) host = "localhost";
         String request =
-                method + " " + path + " " + HttpHeader.HTTP11 + "\r\nHost: " + host + "\r\n\r\n";
-        String response = HttpHeader.HTTP11 + " 200 OK\r\nContent-Type: text/html\r\n\r\n";
+                method + " " + path + " " + HttpHeader.HTTP11 + "\r\nHost: " + host + HTTP_BOUNDARY;
+        String response = HttpHeader.HTTP11 + " 200 OK\r\nContent-Type: text/html" + HTTP_BOUNDARY;
         HttpMessage msg = new HttpMessage();
         msg.getRequestHeader().setMessage(request);
         msg.getRequestBody().setLength(0);
         msg.getResponseHeader().setMessage(response);
         msg.getResponseBody().setLength(0);
         return msg;
+    }
+
+    private static String[] splitHeaderBody(String full) {
+        if (full.indexOf(HTTP_BOUNDARY) > 0) {
+            return full.split(HTTP_BOUNDARY, 2);
+        }
+        return new String[] {full, ""};
     }
 }
