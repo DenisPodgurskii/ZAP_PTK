@@ -14,8 +14,12 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.core.scanner.Alert;
+import org.parosproxy.paros.network.HttpMessage;
 import org.zaproxy.addon.ptk.model.PtkFinding;
 import org.zaproxy.addon.ptk.model.PtkFindingBatch;
+import org.zaproxy.addon.ptk.model.PtkFindingLocation;
+import org.zaproxy.addon.ptk.model.PtkFindingRequest;
+import org.zaproxy.addon.ptk.model.PtkFindingResponse;
 
 /**
  * Tests for PTK alert handling using the temp-example JSON files. Verifies parsing, mapping to ZAP
@@ -215,6 +219,39 @@ class PtkAlertHandlerTest {
 
         // Even though unmapped, we can verify the finding has the data
         assertEquals("Poison host in headers", hostPoisonFinding.getSummary());
+    }
+
+    @Test
+    void malformedRawResponseIsNormalizedBeforeCreatingHttpMessage() throws Exception {
+        PtkFinding finding = new PtkFinding();
+        finding.setLocation(
+                new PtkFindingLocation(
+                        "http://localhost:3001/rest/admin/application-configuration",
+                        null,
+                        "GET",
+                        null));
+        finding.setRequest(
+                new PtkFindingRequest(
+                        null,
+                        "GET",
+                        "http://localhost:3001/rest/admin/application-configuration",
+                        "GET http://localhost:3001/rest/admin/application-configuration HTTP/1.1\nAccept: application/json"));
+        finding.setResponse(
+                new PtkFindingResponse(
+                        200, 12L, "HTTP/1.1 OK\ncontent-type: application/json\n\n{\"ok\":true}"));
+
+        HttpMessage message = PtkAlertHandler.createHttpMessageForFinding(finding);
+
+        assertTrue(
+                message.getRequestHeader()
+                        .toString()
+                        .startsWith(
+                                "GET http://localhost:3001/rest/admin/application-configuration HTTP/1.1"));
+        assertTrue(message.getRequestHeader().toString().contains("Host: localhost:3001"));
+        assertTrue(message.getResponseHeader().toString().startsWith("HTTP/1.1 200 OK"));
+        assertTrue(
+                message.getResponseHeader().toString().contains("content-type: application/json"));
+        assertEquals("{\"ok\":true}", message.getResponseBody().toString());
     }
 
     private PtkFindingBatch loadBatch(String resourcePath) {
