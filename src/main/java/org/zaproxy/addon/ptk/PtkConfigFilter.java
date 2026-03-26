@@ -106,6 +106,7 @@ public final class PtkConfigFilter {
                 filteredMod.setAsync(mod.isAsync());
                 filteredMod.setName(mod.getName());
                 filteredMod.setMetadata(mod.getMetadata());
+                filteredMod.setRuntime(mod.getRuntime());
                 filteredMod.setRules(ruleList);
                 filteredMod.setAttacks(attackList);
                 filteredModules.add(filteredMod);

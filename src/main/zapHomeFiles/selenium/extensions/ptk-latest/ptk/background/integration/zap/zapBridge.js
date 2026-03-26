@@ -36,7 +36,8 @@ const ZAP_ALLOWED_DEBUG_PREFIXES = [
     '[PTK ZAP] Sending alerts batch:',
     '[PTK ZAP] Sending DAST findings batch:',
     '[PTK ZAP] Sending IAST findings batch:',
-    '[PTK ZAP] Sending SAST findings batch:'
+    '[PTK ZAP] Sending SAST findings batch:',
+    '[PTK ZAP] Publish stats:'
 ]
 
 function createBatchId() {
@@ -69,6 +70,16 @@ function toHttpUrl(value) {
         return null
     }
     return null
+}
+
+function toHostKeyFromUrl(value) {
+    const url = toHttpUrl(value)
+    if (!url) return null
+    try {
+        return new URL(url).host.toLowerCase() || null
+    } catch (_) {
+        return null
+    }
 }
 
 class ZapBridge {
@@ -543,6 +554,16 @@ class ZapBridge {
         } catch (_) {
             return Object.assign({}, config)
         }
+    }
+
+    getActiveTargetUrl() {
+        const observed = this._lastTopLevelTargetObservation?.targetUrl || null
+        if (observed) return observed
+        return this.transport.getLastDetectedPayload?.()?.targetUrl || null
+    }
+
+    getActiveTargetHost() {
+        return toHostKeyFromUrl(this.getActiveTargetUrl())
     }
 
     async _resolveTargetUrl(payload = {}, maxWaitMs = 120000) {
