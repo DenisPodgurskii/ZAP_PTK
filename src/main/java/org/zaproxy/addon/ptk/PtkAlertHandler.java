@@ -6,6 +6,7 @@ import java.util.List;
 import org.apache.commons.httpclient.URI;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.control.Control;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.model.HistoryReference;
@@ -104,14 +105,64 @@ public final class PtkAlertHandler {
 
     private static boolean raiseAlert(Alert alert, PtkFinding finding, ExtensionAlert extAlert) {
         try {
-            HttpMessage msg = createHttpMessageForFinding(finding);
+            HttpMessage msg;
+            String otherInfoNote;
+
+            String requestRaw = finding.getRequest() != null ? finding.getRequest().getRaw() : null;
+            String responseRaw =
+                    finding.getResponse() != null ? finding.getResponse().getRaw() : null;
+
+            if (requestRaw != null && responseRaw != null) {
+                msg = new HttpMessage();
+                String[] headBody = splitHeaderBody(requestRaw);
+                msg.setRequestHeader(headBody[0]);
+                msg.setRequestBody(headBody[1]);
+                headBody = splitHeaderBody(responseRaw);
+                msg.setResponseHeader(headBody[0]);
+                msg.setResponseBody(headBody[1]);
+                otherInfoNote = null;
+            } else {
+                String url = finding.getUri();
+                if (url == null || url.isBlank()) {
+                    LOGGER.error("PTK no URL in finding: {}", alert.getName());
+                    return false;
+                }
+                URI uri;
+                try {
+                    uri = new URI(url, true);
+                    // Strip URL fragment - fragments are client-side only and absent from Sites
+                    // Tree
+                    uri.setFragment(null);
+                } catch (Exception e) {
+                    LOGGER.error("PTK could not parse URL '{}': {}", url, e.getMessage());
+                    return false;
+                }
+                msg = findInSitesTree(uri);
+                if (msg != null) {
+                    otherInfoNote = Constant.messages.getString("ptk.alert.otherinfo.similar");
+                } else {
+                    LOGGER.error(
+                            "PTK no Sites Tree match for alert: name={} url={}",
+                            alert.getName(),
+                            uri);
+                    return false;
+                }
+            }
+
+            if (otherInfoNote != null) {
+                String existing = alert.getOtherInfo();
+                alert.setOtherInfo(
+                        existing != null && !existing.isEmpty()
+                                ? existing + "\n" + otherInfoNote
+                                : otherInfoNote);
+            }
+
             HistoryReference ref =
                     new HistoryReference(
                             Model.getSingleton().getSession(), HistoryReference.TYPE_SCANNER, msg);
             alert.setMessage(msg);
             extAlert.alertFound(alert, ref);
             LOGGER.debug("PTK raised alert: {}", alert.getName());
-
             return true;
         } catch (Exception e) {
             LOGGER.error("PTK failed to raise alert: {}", alert.getName(), e);
@@ -119,52 +170,16 @@ public final class PtkAlertHandler {
         }
     }
 
-    private static HttpMessage createHttpMessageForFinding(PtkFinding finding) throws Exception {
-        String requestRaw = null;
-        String responseRaw = null;
-        if (finding.getRequest() != null && finding.getRequest().getRaw() != null) {
-            requestRaw = finding.getRequest().getRaw();
-        }
-        if (finding.getResponse() != null && finding.getResponse().getRaw() != null) {
-            responseRaw = finding.getResponse().getRaw();
-        }
-        if (requestRaw != null && responseRaw != null) {
-            HttpMessage msg = new HttpMessage();
-            String[] headBody = splitHeaderBody(requestRaw);
-            msg.setRequestHeader(headBody[0]);
-            msg.setRequestBody(headBody[1]);
-
-            headBody = splitHeaderBody(responseRaw);
-            msg.setResponseHeader(headBody[0]);
-            msg.setResponseBody(headBody[1]);
-            return msg;
-        }
-        String url =
-                finding.getUri() != null && !finding.getUri().isBlank()
-                        ? finding.getUri()
-                        : "http://localhost/";
-        String method = finding.getMethod() != null ? finding.getMethod() : "GET";
-        URI uri;
+    private static HttpMessage findInSitesTree(URI uri) {
         try {
-            uri = new URI(url, true);
+            var node = Model.getSingleton().getSession().getSiteTree().findNode(uri);
+            if (node != null && node.getHistoryReference() != null) {
+                return node.getHistoryReference().getHttpMessage();
+            }
         } catch (Exception e) {
-            uri = new URI("http://localhost/", true);
+            LOGGER.debug("PTK could not find '{}' in Sites Tree: {}", uri, e.getMessage());
         }
-        String path = uri.getPath();
-        if (path == null || path.isEmpty()) path = "/";
-        String query = uri.getQuery();
-        if (query != null && !query.isEmpty()) path = path + "?" + query;
-        String host = uri.getHost();
-        if (host == null || host.isEmpty()) host = "localhost";
-        String request =
-                method + " " + path + " " + HttpHeader.HTTP11 + "\r\nHost: " + host + HTTP_BOUNDARY;
-        String response = HttpHeader.HTTP11 + " 200 OK\r\nContent-Type: text/html" + HTTP_BOUNDARY;
-        HttpMessage msg = new HttpMessage();
-        msg.getRequestHeader().setMessage(request);
-        msg.getRequestBody().setLength(0);
-        msg.getResponseHeader().setMessage(response);
-        msg.getResponseBody().setLength(0);
-        return msg;
+        return null;
     }
 
     private static String[] splitHeaderBody(String full) {
