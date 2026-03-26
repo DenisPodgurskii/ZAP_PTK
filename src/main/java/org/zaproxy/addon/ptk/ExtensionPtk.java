@@ -89,6 +89,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
 
         private static final String PTK_ALERT_PATH = "/ptk/alert";
         private static final String PTK_CONFIG_PATH = "/ptk/config";
+        private static final String PTK_PING_PATH = "/ptk/ping";
         private static final String PTK_PROGRESS_PATH = "/ptk/progress";
         private static final Gson GSON = new Gson();
 
@@ -123,6 +124,13 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 response.put("result", "OK");
                 response.put("alertsRaised", raised);
                 msg.getResponseBody().setBody(GSON.toJson(response));
+            } else if (uri.contains(PTK_PING_PATH)) {
+                // Will use in the future
+                LOGGER.debug(
+                        "PTK got ping: {} {} {}",
+                        msg.getRequestHeader().getMethod(),
+                        msg.getRequestHeader().getURI(),
+                        msg.getRequestBody());
             } else if (uri.contains(PTK_PROGRESS_PATH)) {
                 // POST with {"progress": 10} maybe?
                 // Where progress is a %, and when it reaches 100 then the window will be closed
