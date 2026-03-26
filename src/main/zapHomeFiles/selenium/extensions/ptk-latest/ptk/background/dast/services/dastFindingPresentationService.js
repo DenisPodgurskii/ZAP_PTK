@@ -79,13 +79,59 @@ export class DastFindingPresentationService {
         return { moduleMeta, attackMeta: attackRuleMeta, moduleDef, attackDef }
     }
 
+    _metaDocs(meta) {
+        return meta?.docs && typeof meta.docs === "object" ? meta.docs : {}
+    }
+
+    _metaTaxonomy(meta) {
+        return meta?.taxonomy && typeof meta.taxonomy === "object" ? meta.taxonomy : {}
+    }
+
+    _resolveMetaDescription(meta) {
+        return meta?.description || this._metaDocs(meta).description || null
+    }
+
+    _resolveMetaRecommendation(meta) {
+        return meta?.recommendation || this._metaDocs(meta).recommendation || null
+    }
+
+    _resolveMetaLinks(meta) {
+        return meta?.links || this._metaDocs(meta).links || null
+    }
+
+    _resolveMetaSeverity(meta) {
+        return meta?.severity || this._metaTaxonomy(meta).severity || null
+    }
+
+    _resolveMetaCategory(meta) {
+        return meta?.category || this._metaTaxonomy(meta).category || null
+    }
+
+    _resolveMetaVulnId(meta) {
+        return meta?.vulnId || this._metaTaxonomy(meta).vulnId || null
+    }
+
     _enrichAttackMetadata(attack, catalogMeta) {
         if (!attack || typeof attack !== "object") return attack
         const existing = attack.metadata && typeof attack.metadata === "object" ? attack.metadata : {}
         const moduleMeta = catalogMeta?.moduleMeta && typeof catalogMeta.moduleMeta === "object" ? catalogMeta.moduleMeta : {}
         const attackMeta = catalogMeta?.attackMeta && typeof catalogMeta.attackMeta === "object" ? catalogMeta.attackMeta : {}
+        const mergedMeta = Object.assign({}, moduleMeta, attackMeta, existing, {
+            taxonomy: Object.assign({}, moduleMeta.taxonomy || {}, attackMeta.taxonomy || {}, existing.taxonomy || {}),
+            docs: Object.assign({}, moduleMeta.docs || {}, attackMeta.docs || {}, existing.docs || {}),
+            constants: Object.assign({}, moduleMeta.constants || {}, attackMeta.constants || {}, existing.constants || {}),
+            extensions: Object.assign({}, moduleMeta.extensions || {}, attackMeta.extensions || {}, existing.extensions || {})
+        })
+        const docs = this._metaDocs(mergedMeta)
+        const taxonomy = this._metaTaxonomy(mergedMeta)
         return Object.assign({}, attack, {
-            metadata: Object.assign({}, moduleMeta, attackMeta, existing)
+            category: attack.category || taxonomy.category || null,
+            vulnId: attack.vulnId || taxonomy.vulnId || null,
+            severity: attack.severity || taxonomy.severity || null,
+            description: attack.description || docs.description || null,
+            recommendation: attack.recommendation || docs.recommendation || null,
+            links: attack.links || docs.links || null,
+            metadata: mergedMeta
         })
     }
 
@@ -98,12 +144,12 @@ export class DastFindingPresentationService {
             moduleName: attack.moduleName || meta.moduleName || meta.module || null,
             ruleId: attack.ruleId || meta.id || meta.ruleId || null,
             ruleName: attack.ruleName || meta.name || null,
-            vulnId: attack.vulnId || meta.vulnId || meta.category || null,
-            category: attack.category || meta.category || null,
-            severity: attack.severity || meta.severity || null,
-            description: attack.description || meta.description || null,
-            recommendation: attack.recommendation || meta.recommendation || null,
-            links: attack.links || meta.links || null
+            vulnId: attack.vulnId || this._resolveMetaVulnId(meta) || this._resolveMetaCategory(meta) || null,
+            category: attack.category || this._resolveMetaCategory(meta) || null,
+            severity: attack.severity || this._resolveMetaSeverity(meta) || null,
+            description: attack.description || this._resolveMetaDescription(meta) || null,
+            recommendation: attack.recommendation || this._resolveMetaRecommendation(meta) || null,
+            links: attack.links || this._resolveMetaLinks(meta) || null
         }
         Object.keys(fallback).forEach((key) => {
             if (fallback[key] === null || fallback[key] === undefined || fallback[key] === "") delete fallback[key]
@@ -134,18 +180,20 @@ export class DastFindingPresentationService {
         const attackMeta = attackObj.metadata && typeof attackObj.metadata === "object" ? attackObj.metadata : {}
         const moduleMeta = catalogMeta?.moduleMeta && typeof catalogMeta.moduleMeta === "object" ? catalogMeta.moduleMeta : {}
         const attackRuleMeta = catalogMeta?.attackMeta && typeof catalogMeta.attackMeta === "object" ? catalogMeta.attackMeta : {}
+        const moduleDef = catalogMeta?.moduleDef && typeof catalogMeta.moduleDef === "object" ? catalogMeta.moduleDef : {}
+        const attackDef = catalogMeta?.attackDef && typeof catalogMeta.attackDef === "object" ? catalogMeta.attackDef : {}
         const merged = Object.assign({}, fallback)
         if (!merged.moduleId) merged.moduleId = attackObj.moduleId || attackMeta.moduleId || attackMeta.id || null
-        if (!merged.moduleName) merged.moduleName = attackObj.moduleName || attackMeta.moduleName || moduleMeta.name || null
-        if (!merged.ruleId) merged.ruleId = attackObj.ruleId || attackMeta.id || attackMeta.ruleId || attackObj.id || null
-        if (!merged.ruleName) merged.ruleName = attackObj.ruleName || attackMeta.name || attackRuleMeta.name || null
-        if (!merged.category) merged.category = attackObj.category || attackMeta.category || attackRuleMeta.category || moduleMeta.category || null
-        if (!merged.vulnId) merged.vulnId = attackObj.vulnId || attackMeta.vulnId || moduleMeta.vulnId || null
-        if (!merged.severity) merged.severity = attackObj.severity || attackMeta.severity || attackRuleMeta.severity || moduleMeta.severity || null
-        if (!merged.description) merged.description = attackObj.description || attackMeta.description || attackRuleMeta.description || moduleMeta.description || null
-        if (!merged.recommendation) merged.recommendation = attackObj.recommendation || attackMeta.recommendation || attackRuleMeta.recommendation || moduleMeta.recommendation || null
+        if (!merged.moduleName) merged.moduleName = attackObj.moduleName || attackMeta.moduleName || moduleMeta.moduleName || moduleDef.name || null
+        if (!merged.ruleId) merged.ruleId = attackObj.ruleId || attackMeta.id || attackMeta.ruleId || attackObj.id || attackDef.id || null
+        if (!merged.ruleName) merged.ruleName = attackObj.ruleName || attackMeta.name || attackDef.name || null
+        if (!merged.category) merged.category = attackObj.category || this._resolveMetaCategory(attackMeta) || this._resolveMetaCategory(attackRuleMeta) || this._resolveMetaCategory(moduleMeta) || null
+        if (!merged.vulnId) merged.vulnId = attackObj.vulnId || this._resolveMetaVulnId(attackMeta) || this._resolveMetaVulnId(attackRuleMeta) || this._resolveMetaVulnId(moduleMeta) || null
+        if (!merged.severity) merged.severity = attackObj.severity || this._resolveMetaSeverity(attackMeta) || this._resolveMetaSeverity(attackRuleMeta) || this._resolveMetaSeverity(moduleMeta) || null
+        if (!merged.description) merged.description = attackObj.description || this._resolveMetaDescription(attackMeta) || this._resolveMetaDescription(attackRuleMeta) || this._resolveMetaDescription(moduleMeta) || null
+        if (!merged.recommendation) merged.recommendation = attackObj.recommendation || this._resolveMetaRecommendation(attackMeta) || this._resolveMetaRecommendation(attackRuleMeta) || this._resolveMetaRecommendation(moduleMeta) || null
         if (!merged.links || typeof merged.links !== "object" || Array.isArray(merged.links) || Object.keys(merged.links).length === 0) {
-            merged.links = attackObj.links || attackMeta.links || attackRuleMeta.links || moduleMeta.links || null
+            merged.links = attackObj.links || this._resolveMetaLinks(attackMeta) || this._resolveMetaLinks(attackRuleMeta) || this._resolveMetaLinks(moduleMeta) || null
         }
         Object.keys(merged).forEach((key) => {
             if (merged[key] === null || merged[key] === undefined || merged[key] === "") delete merged[key]

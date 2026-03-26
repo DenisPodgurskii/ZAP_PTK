@@ -167,7 +167,7 @@ export class DastSessionCoordinator {
             } catch (_) { }
         }
 
-        this.flushPersistScanResult?.()
+        await this.flushPersistScanResult?.()
         await this.unregisterScript?.()
         this.captureAdapter?.removeListeners?.()
         return scanResult
@@ -208,8 +208,8 @@ export class DastSessionCoordinator {
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks(null)
         }
-        await this.stopBackgroundScan({ runDeferredSeed: false })
-        const stats = this.collectSeverityStats?.()
+        const scanResult = await this.stopBackgroundScan({ runDeferredSeed: false })
+        const stats = this.collectSeverityStats?.(scanResult) || { counts: {}, findingsCount: 0 }
         this.state.automationSession = null
         return {
             findingsCount: stats.findingsCount,

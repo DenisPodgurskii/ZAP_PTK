@@ -11,14 +11,20 @@ import { loadCanonicalIastRulepack } from "./iast/contract/index.js"
 import buildExportScanResult from "./export/buildExportScanResult.js"
 import { compressScanPayload } from "./export/compressScanPayload.js"
 import { ExportChunkStore } from "./export/exportChunkStore.js"
+import { parseDownloadedScanPayload } from "./export/parseDownloadedScanPayload.js"
 import { parseUploadedScanFile } from "./export/parseUploadedScanFile.js"
+import {
+    buildPortalUrl as buildSharedPortalUrl,
+    getPortalBaseUrl,
+    initializePortalRuntimeConfig
+} from "../common/portalConfig.js"
+import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js"
 
 const activeIastTabs = new Set()
 let iastModulesCache = null
 let iastModulesCacheIsCustom = false
 let iastModulesCacheKey = null
 let iastScanStrategy = 'SMART'
-const DEFAULT_PORTAL_POLICIES_ENDPOINT = '/policies'
 function mergeLinks(baseLinks, overrideLinks) {
     const result = Object.assign({}, baseLinks || {})
     if (overrideLinks && typeof overrideLinks === "object") {
@@ -138,34 +144,31 @@ function normalizeIastRulepack(rulepack, label = 'IAST') {
 function buildPortalRulepackLoadOptions(options = {}) {
     const explicitPortal = (options?.portal && typeof options.portal === 'object') ? options.portal : {}
     const profile = worker?.ptk_app?.settings?.profile || {}
-    const profilePolicyId = profile?.iast_policy_id ?? null
-    const profilePolicyName = profile?.iast_policy_name || null
-    const profilePrefersPortal = profile?.iast_prefer_portal === true || profile?.iast_prefer_portal === 'true'
-    const hasPolicySelection =
+    const explicitPolicyId =
         (explicitPortal.policyId !== undefined && explicitPortal.policyId !== null && explicitPortal.policyId !== '')
-        || !!String(explicitPortal.policyName || '').trim()
-        || (options?.policyId !== undefined && options?.policyId !== null && options?.policyId !== '')
-        || !!String(options?.policyName || '').trim()
-        || (profilePolicyId !== undefined && profilePolicyId !== null && profilePolicyId !== '')
-        || !!String(profilePolicyName || '').trim()
+            ? String(explicitPortal.policyId).trim()
+            : ((options?.policyId !== undefined && options?.policyId !== null && options?.policyId !== '')
+                ? String(options.policyId).trim()
+                : null)
+    const hasPolicySelection =
+        !!explicitPolicyId
     const preferPortal = options?.preferPortal === true
         || explicitPortal?.preferPortal === true
-        || profilePrefersPortal
         || hasPolicySelection
     if (!preferPortal) return null
 
-    const baseUrl = String(explicitPortal.baseUrl || profile.base_url || profile.api_url || '').trim()
+    const baseUrl = String(explicitPortal.baseUrl || getPortalBaseUrl() || '').trim()
     const apiKey = String(explicitPortal.apiKey || explicitPortal.token || profile.api_key || '').trim()
     if (!baseUrl || !apiKey) return null
 
     return {
         preferPortal: true,
         baseUrl,
-        apiBase: explicitPortal.apiBase || profile.api_base || '/api/v1',
-        policiesEndpoint: explicitPortal.policiesEndpoint || profile.policies_endpoint || DEFAULT_PORTAL_POLICIES_ENDPOINT,
+        apiBase: explicitPortal.apiBase || "/api/v1",
+        policiesEndpoint: explicitPortal.policiesEndpoint || "/policies",
         apiKey,
-        policyId: explicitPortal.policyId ?? options?.policyId ?? profilePolicyId ?? null,
-        policyName: explicitPortal.policyName || options?.policyName || profilePolicyName || null
+        policyId: explicitPolicyId,
+        policyName: explicitPortal.policyName || options?.policyName || null
     }
 }
 
@@ -272,15 +275,27 @@ function buildIastRulepackSelectionFromScan(scanResult = {}) {
     }
 }
 
+function getIastPortalPolicyState() {
+    return portalPolicyRuntimeStore.getState('IAST')
+}
+
+function getIastPortalSelection() {
+    return portalPolicyRuntimeStore.getRulepackSelection('IAST')
+}
+
+function getIastSelectedPortalPolicy() {
+    return portalPolicyRuntimeStore.getSelectedPolicy('IAST')
+}
+
+function getPortalApiKey() {
+    return String(worker?.ptk_app?.settings?.profile?.api_key || '').trim()
+}
+
 function buildIastRulepackCacheKey(options = {}) {
     const requestedVariant = options?.variant ? String(options.variant).trim() : ''
     const portalOptions = buildPortalRulepackLoadOptions(options)
-    if (portalOptions) {
-        const policyId = portalOptions.policyId !== null && portalOptions.policyId !== undefined && portalOptions.policyId !== ''
-            ? String(portalOptions.policyId).trim()
-            : ''
-        const policyName = portalOptions.policyName ? String(portalOptions.policyName).trim().toLowerCase() : ''
-        return `portal:${policyId || policyName || 'single'}`
+    if (portalOptions?.policyId) {
+        return `portal:${String(portalOptions.policyId).trim()}`
     }
     return `local:${requestedVariant || 'default'}`
 }
@@ -374,8 +389,25 @@ async function sendIastModulesToContent(tabId, attempt = 1, options = {}) {
 
 
 const worker = self
+
+async function refreshFinishedDastAnalysisIfNeeded() {
+    const dast = worker?.ptk_app?.dast || worker?.ptk_app?.rattacker
+    if (!dast || typeof dast !== "object") return
+    if (dast?.engine?.isRunning === true) return
+    const scanResult = dast?.scanResult
+    if (!(scanResult?.finishedAt || scanResult?.finished)) return
+    try {
+        await dast.analysisService?.hydratePersistedRelatedScans?.(scanResult)
+        if (typeof dast._applyAnalysis === "function") {
+            dast._applyAnalysis(scanResult, true)
+        }
+        await dast._flushPersistScanResult?.()
+    } catch (_) { }
+}
 const MAX_HTTP_EVENTS = 1000
 const MAX_TRACKED_REQUESTS = 500
+const IMPORT_TRANSFER_TTL_MS = 10 * 60 * 1000
+const IMPORT_TRANSFER_MAX_ENTRIES = 2
 const SEVERITY_ORDER = {
     info: 0,
     low: 1,
@@ -411,6 +443,7 @@ export class ptk_iast {
         this._persistTimer = null
         this._persistDebounceMs = 1000
         this.exportChunkStore = new ExportChunkStore({ prefix: "iast" })
+        this.importTransfers = new Map()
         this.resetScanResult()
         this.modulesCatalog = null
         this.currentRulepackOverride = null
@@ -419,12 +452,89 @@ export class ptk_iast {
         this.addMessageListeners()
     }
 
+    _cleanupImportTransfers(now = Date.now()) {
+        for (const [id, entry] of this.importTransfers.entries()) {
+            if (!entry || Number(entry.expiresAt || 0) <= now) {
+                this.importTransfers.delete(id)
+            }
+        }
+    }
+
+    _enforceImportTransferLimit() {
+        if (this.importTransfers.size <= IMPORT_TRANSFER_MAX_ENTRIES) return
+        const sorted = Array.from(this.importTransfers.entries()).sort((a, b) => {
+            const left = Number(a?.[1]?.createdAt || 0)
+            const right = Number(b?.[1]?.createdAt || 0)
+            return left - right
+        })
+        while (sorted.length && this.importTransfers.size > IMPORT_TRANSFER_MAX_ENTRIES) {
+            const oldest = sorted.shift()
+            if (oldest?.[0]) this.importTransfers.delete(oldest[0])
+        }
+    }
+
+    _normalizeImportChunk(chunk) {
+        if (chunk instanceof Uint8Array) return chunk
+        if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk)
+        if (ArrayBuffer.isView(chunk)) {
+            return new Uint8Array(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength))
+        }
+        if (Array.isArray(chunk)) return Uint8Array.from(chunk)
+        if (chunk && typeof chunk === "object") return Uint8Array.from(Object.values(chunk))
+        return new Uint8Array(0)
+    }
+
+    _createImportTransfer(fileMeta = {}) {
+        const now = Date.now()
+        const size = Number(fileMeta?.size || 0)
+        const chunkCount = Number(fileMeta?.chunkCount || 0)
+        const importId = `iast-import-${now}-${Math.random().toString(36).slice(2, 10)}`
+        const entry = {
+            id: importId,
+            name: String(fileMeta?.name || ""),
+            type: String(fileMeta?.type || ""),
+            size,
+            chunkCount,
+            createdAt: now,
+            expiresAt: now + IMPORT_TRANSFER_TTL_MS,
+            chunks: new Array(chunkCount).fill(null),
+            receivedChunks: 0,
+            receivedBytes: 0
+        }
+        this.importTransfers.set(importId, entry)
+        this._enforceImportTransferLimit()
+        return entry
+    }
+
+    _getImportTransfer(importId) {
+        this._cleanupImportTransfers()
+        const key = String(importId || "")
+        if (!key) return null
+        return this.importTransfers.get(key) || null
+    }
+
+    _deleteImportTransfer(importId) {
+        const key = String(importId || "")
+        if (key) this.importTransfers.delete(key)
+    }
+
     async init() {
         if (!this.isScanRunning) {
-            await loadIastModules()
             const stored = await ptk_storage.getItem(this.storageKey) || {}
             if (stored && ((stored.scanResult) || Object.keys(stored).length > 0)) {
-                await this.normalizeScanResult(stored)
+                const payload = this._extractPersistedData(stored)
+                const storedScan = payload?.scanResult && typeof payload.scanResult === "object"
+                    ? payload.scanResult
+                    : null
+                const storedScanId = String(storedScan?.scanId || "")
+                const currentScanId = String(this.scanResult?.scanId || this.currentScanId || "")
+                const currentFindings = Array.isArray(this.scanResult?.findings) ? this.scanResult.findings.length : 0
+                const currentRequests = Array.isArray(this.scanResult?.requests) ? this.scanResult.requests.length : 0
+                const currentRuntimeEvents = Array.isArray(this.scanResult?.runtimeEvents) ? this.scanResult.runtimeEvents.length : 0
+                const currentHasRenderableData = currentFindings > 0 || currentRequests > 0 || currentRuntimeEvents > 0
+                if (!currentHasRenderableData || !storedScanId || storedScanId !== currentScanId) {
+                    await this.normalizeScanResult(stored)
+                }
             }
         }
     }
@@ -484,7 +594,7 @@ export class ptk_iast {
         if (Array.isArray(cloned.rawFindings)) {
             delete cloned.rawFindings
         }
-        ptk_storage.setItem(this.storageKey, cloned)
+        return ptk_storage.setItem(this.storageKey, cloned)
     }
 
     _schedulePersistScanResult() {
@@ -501,7 +611,7 @@ export class ptk_iast {
             clearTimeout(this._persistTimer)
             this._persistTimer = null
         }
-        this.persistScanResult()
+        return this.persistScanResult()
     }
 
     _cloneForStorage(value, { dropTabId = false } = {}) {
@@ -734,9 +844,6 @@ export class ptk_iast {
 
     async msg_init(message) {
         await this.init()
-        if (this.scanResult && typeof this.scanResult === "object") {
-            scanResultStore._applyAnalysisSafe(this.scanResult, { force: false })
-        }
         const response = {
             scanResult: this._getPublicScanResult(),
             isScanRunning: this.isScanRunning,
@@ -746,28 +853,102 @@ export class ptk_iast {
         const hasRenderableData = (Array.isArray(scanResult.findings) && scanResult.findings.length > 0)
             || (Array.isArray(scanResult.items) && scanResult.items.length > 0)
             || (Array.isArray(scanResult.vulns) && scanResult.vulns.length > 0)
-        if (!response.isScanRunning && !hasRenderableData) {
-            const configuredRulepackOptions = buildConfiguredIastRulepackLoadOptions()
-            const configuredRulepack = await loadIastModules(configuredRulepackOptions)
-            response.default_modules = await this.getDefaultModules(configuredRulepack)
-            response.rulepackSelection = buildIastRulepackSelectionSummary(configuredRulepack, configuredRulepackOptions)
-        } else {
-            response.rulepackSelection = buildIastRulepackSelectionFromScan(scanResult)
-        }
+        response.policyState = getIastPortalPolicyState()
+        response.rulepackSelection = !response.isScanRunning && !hasRenderableData
+            ? getIastPortalSelection()
+            : buildIastRulepackSelectionFromScan(scanResult)
         return Promise.resolve(response)
+    }
+
+    async msg_get_default_modules(message) {
+        const configuredRulepackOptions = { variant: null }
+        const configuredRulepack = await loadIastModules(configuredRulepackOptions)
+        return Promise.resolve({
+            success: true,
+            default_modules: await this.getDefaultModules(configuredRulepack),
+            rulepackSelection: buildIastRulepackSelectionSummary(
+                configuredRulepack,
+                configuredRulepackOptions
+            ),
+            policyState: getIastPortalPolicyState()
+        })
     }
 
 
     async msg_reset(message) {
         this.reset()
-        const configuredRulepackOptions = buildConfiguredIastRulepackLoadOptions()
-        const configuredRulepack = await loadIastModules(configuredRulepackOptions)
-        const defaultModules = await this.getDefaultModules(configuredRulepack)
         return Promise.resolve({
             scanResult: this._getPublicScanResult(),
             activeTab: worker.ptk_app.proxy.activeTab,
-            default_modules: defaultModules,
-            rulepackSelection: buildIastRulepackSelectionSummary(configuredRulepack, configuredRulepackOptions)
+            rulepackSelection: getIastPortalSelection(),
+            policyState: getIastPortalPolicyState()
+        })
+    }
+
+    async msg_get_policy_state() {
+        return Promise.resolve({
+            success: true,
+            policyState: getIastPortalPolicyState(),
+            rulepackSelection: getIastPortalSelection()
+        })
+    }
+
+    async msg_load_policy_metadata() {
+        const apiKey = getPortalApiKey()
+        if (!apiKey) {
+            return Promise.resolve({
+                success: false,
+                error: "missing_api_key",
+                policyState: getIastPortalPolicyState()
+            })
+        }
+        try {
+            const policyState = await portalPolicyRuntimeStore.loadMetadata({ apiKey, engine: 'IAST' })
+            return {
+                success: true,
+                policyState
+            }
+        } catch (err) {
+            return {
+                success: false,
+                error: err?.message || String(err),
+                policyState: getIastPortalPolicyState()
+            }
+        }
+    }
+
+    async msg_select_policy(message) {
+        try {
+            const apiKey = getPortalApiKey()
+            const policyState = await portalPolicyRuntimeStore.selectPolicy({
+                engine: 'IAST',
+                policyId: message?.policyId,
+                policyName: message?.policyName || null,
+                apiKey: apiKey || null
+            })
+            return {
+                success: true,
+                policyState,
+                rulepackSelection: getIastPortalSelection(),
+                default_modules: await this.getDefaultModules(await loadIastModules({ variant: null }))
+            }
+        } catch (err) {
+            return {
+                success: false,
+                error: err?.message || String(err),
+                policyState: getIastPortalPolicyState()
+            }
+        }
+    }
+
+    async msg_clear_policy() {
+        const policyState = portalPolicyRuntimeStore.clearPolicy('IAST')
+        const configuredRulepack = await loadIastModules({ resetCache: true })
+        return Promise.resolve({
+            success: true,
+            policyState,
+            rulepackSelection: getIastPortalSelection(),
+            default_modules: await this.getDefaultModules(configuredRulepack)
         })
     }
 
@@ -778,6 +959,90 @@ export class ptk_iast {
             return Promise.reject(new Error("Wrong format or empty scan result"))
         }
         return this.msg_save({ json: JSON.stringify(parsed.json) })
+    }
+
+    async msg_loadfile_init(message) {
+        const fileMeta = message?.fileMeta || {}
+        const size = Number(fileMeta?.size || 0)
+        const chunkCount = Number(fileMeta?.chunkCount || 0)
+        if (!size || size <= 0 || !chunkCount || chunkCount <= 0) {
+            throw new Error("Invalid file payload.")
+        }
+        this._cleanupImportTransfers()
+        const entry = this._createImportTransfer(fileMeta)
+        return {
+            success: true,
+            importId: entry.id,
+            chunkCount: entry.chunkCount,
+            size: entry.size
+        }
+    }
+
+    async msg_loadfile_chunk(message) {
+        const entry = this._getImportTransfer(message?.importId)
+        if (!entry) {
+            throw new Error("Import transfer expired.")
+        }
+        const index = Number(message?.index)
+        if (!Number.isInteger(index) || index < 0 || index >= entry.chunkCount) {
+            throw new Error("Invalid file payload.")
+        }
+        const normalized = this._normalizeImportChunk(message?.chunk)
+        if (!normalized?.byteLength) {
+            throw new Error("Invalid file payload.")
+        }
+        const previous = entry.chunks[index]
+        if (previous?.byteLength) {
+            entry.receivedBytes -= previous.byteLength
+        } else {
+            entry.receivedChunks += 1
+        }
+        entry.chunks[index] = normalized
+        entry.receivedBytes += normalized.byteLength
+        entry.expiresAt = Date.now() + IMPORT_TRANSFER_TTL_MS
+        return {
+            success: true,
+            importId: entry.id,
+            index,
+            receivedChunks: entry.receivedChunks,
+            receivedBytes: entry.receivedBytes
+        }
+    }
+
+    async msg_loadfile_finish(message) {
+        const entry = this._getImportTransfer(message?.importId)
+        if (!entry) {
+            throw new Error("Import transfer expired.")
+        }
+        try {
+            if (entry.receivedChunks !== entry.chunkCount || entry.chunks.some(chunk => !chunk?.byteLength)) {
+                throw new Error("Incomplete file payload.")
+            }
+            const totalBytes = entry.chunks.reduce((sum, chunk) => sum + Number(chunk?.byteLength || 0), 0)
+            const combined = new Uint8Array(totalBytes)
+            let offset = 0
+            for (const chunk of entry.chunks) {
+                combined.set(chunk, offset)
+                offset += chunk.byteLength
+            }
+            const parsed = await parseUploadedScanFile({
+                name: entry.name,
+                type: entry.type,
+                size: entry.size || combined.byteLength,
+                bytes: Array.from(combined)
+            })
+            if (!parsed?.ok || !parsed?.json) {
+                throw new Error("Wrong format or empty scan result")
+            }
+            return this.msg_save({ json: JSON.stringify(parsed.json) })
+        } finally {
+            this._deleteImportTransfer(entry.id)
+        }
+    }
+
+    async msg_release_import(message) {
+        this._deleteImportTransfer(message?.importId)
+        return { success: true }
     }
 
     async msg_save(message) {
@@ -855,9 +1120,191 @@ export class ptk_iast {
         return { success: released }
     }
 
+    buildPortalUrl(endpoint, profile = {}) {
+        return buildSharedPortalUrl(endpoint, {
+            baseUrl: profile?.base_url || profile?.api_url || profile?.baseUrl || null,
+            apiBase: profile?.api_base || profile?.apiBase || undefined
+        })
+    }
+
+    async msg_get_projects(message) {
+        await initializePortalRuntimeConfig()
+        const profile = worker.ptk_app.settings.profile || {}
+        const apiKey = profile?.api_key
+        if (!apiKey) {
+            return { success: false, json: { message: "No API key found" } }
+        }
+        const url = this.buildPortalUrl("/projects", profile)
+        if (!url) {
+            return { success: false, json: { message: "Portal endpoint is not configured." } }
+        }
+        return fetch(url, {
+            headers: {
+                Authorization: "Bearer " + apiKey,
+                Accept: "application/json"
+            },
+            credentials: "omit",
+            cache: "no-cache"
+        })
+            .then(async (httpResponse) => {
+                const json = await httpResponse.json().catch(() => null)
+                if (httpResponse.ok) return { success: true, json }
+                return { success: false, json: json || { message: "Unable to load projects" } }
+            })
+            .catch((e) => ({ success: false, json: { message: "Error while loading projects: " + e.message } }))
+    }
+
+    async msg_save_scan(message) {
+        await initializePortalRuntimeConfig()
+        const profile = worker.ptk_app.settings.profile || {}
+        const apiKey = profile?.api_key
+        if (!apiKey) {
+            return { success: false, json: { message: "No API key found" } }
+        }
+        let scanId = this.scanResult?.scanId || this.currentScanId || null
+        let exportedScan = scanId ? scanResultStore.exportScanResult(scanId) : this.scanResult
+        if (!Array.isArray(exportedScan?.findings) || !exportedScan.findings.length) {
+            const stored = await ptk_storage.getItem(this.storageKey) || {}
+            if (stored && ((stored.scanResult) || Object.keys(stored).length > 0)) {
+                await this.normalizeScanResult(stored)
+                scanId = this.scanResult?.scanId || this.currentScanId || null
+                exportedScan = scanId ? scanResultStore.exportScanResult(scanId) : this.scanResult
+            }
+        }
+        const findingCount = Array.isArray(exportedScan?.findings) ? exportedScan.findings.length : 0
+        if (!findingCount) {
+            return { success: false, json: { message: "Scan result is empty" } }
+        }
+        const url = this.buildPortalUrl("/scans", profile)
+        if (!url) {
+            return { success: false, json: { message: "Portal endpoint is not configured." } }
+        }
+        const payload = buildExportScanResult(scanId, {
+            target: "portal",
+            scanResult: exportedScan || this.scanResult
+        })
+        if (!payload) {
+            return { success: false, json: { message: "Scan result is empty" } }
+        }
+        if (message?.projectId) {
+            payload.projectId = message.projectId
+        }
+        let compressed
+        try {
+            compressed = await compressScanPayload(payload)
+        } catch (err) {
+            return {
+                success: false,
+                json: { message: "Unable to compress scan payload: " + (err?.message || "compression_failed") }
+            }
+        }
+        return fetch(url, {
+            method: "POST",
+            headers: {
+                Authorization: "Bearer " + apiKey,
+                Accept: "application/json",
+                "Content-Type": compressed.contentType,
+                "X-PTK-Compression": compressed.compression
+            },
+            credentials: "omit",
+            cache: "no-cache",
+            body: compressed.body
+        })
+            .then(async (httpResponse) => {
+                if (httpResponse.status === 201) return { success: true }
+                const json = await httpResponse.json().catch(() => ({ message: httpResponse.statusText }))
+                return { success: false, json }
+            })
+            .catch((e) => ({ success: false, json: { message: "Error while saving report: " + e.message } }))
+    }
+
+    async msg_download_scans(message) {
+        await initializePortalRuntimeConfig()
+        const profile = worker.ptk_app.settings.profile || {}
+        const apiKey = profile?.api_key
+        if (!apiKey) {
+            return { success: false, json: { message: "No API key found" } }
+        }
+        const baseUrl = this.buildPortalUrl("/scans", profile)
+        if (!baseUrl) {
+            return { success: false, json: { message: "Portal endpoint is not configured." } }
+        }
+        let requestUrl = baseUrl
+        try {
+            const url = new URL(baseUrl)
+            if (message?.projectId) {
+                url.searchParams.set("projectId", message.projectId)
+            }
+            const engine = message?.engine || "iast"
+            if (engine) {
+                url.searchParams.set("engine", engine)
+            }
+            requestUrl = url.toString()
+        } catch (_) {
+            return { success: false, json: { message: "Invalid scans endpoint." } }
+        }
+        return fetch(requestUrl, {
+            headers: {
+                Authorization: "Bearer " + apiKey,
+                Accept: "application/json"
+            },
+            credentials: "omit",
+            cache: "no-cache"
+        })
+            .then(async (httpResponse) => {
+                const json = await httpResponse.json().catch(() => null)
+                if (httpResponse.ok) return { success: true, json }
+                return { success: false, json: json || { message: "Unable to load scans" } }
+            })
+            .catch((e) => ({ success: false, json: { message: "Error while loading scans: " + e.message } }))
+    }
+
+    async msg_download_scan_by_id(message) {
+        await initializePortalRuntimeConfig()
+        const profile = worker.ptk_app.settings.profile || {}
+        const apiKey = profile?.api_key
+        if (!apiKey) {
+            return { success: false, json: { message: "No API key found" } }
+        }
+        if (!message?.scanId) {
+            return { success: false, json: { message: "Scan identifier is required." } }
+        }
+        const baseUrl = this.buildPortalUrl("/scans", profile)
+        if (!baseUrl) {
+            return { success: false, json: { message: "Portal endpoint is not configured." } }
+        }
+        const normalizedBase = baseUrl.replace(/\/+$/, "")
+        const downloadUrl = `${normalizedBase}/${encodeURIComponent(message.scanId)}/download`
+        const response = await fetch(downloadUrl, {
+            headers: {
+                Authorization: "Bearer " + apiKey,
+                Accept: "application/gzip, application/x-gzip"
+            },
+            credentials: "omit",
+            cache: "no-cache"
+        })
+            .then(async (httpResponse) => {
+                if (!httpResponse.ok) {
+                    const json = await httpResponse.json().catch(() => null)
+                    return { success: false, json: json || { message: "Unable to download scan" } }
+                }
+                const parsed = await parseDownloadedScanPayload(httpResponse)
+                if (!parsed?.ok || !parsed?.json) {
+                    return { success: false, json: { message: "Downloaded scan payload is invalid JSON." } }
+                }
+                return { success: true, json: parsed.json }
+            })
+            .catch((e) => ({ success: false, json: { message: "Error while downloading scan: " + e.message } }))
+        if (!response?.success || !response?.json) {
+            return response
+        }
+        return this.msg_save({ json: JSON.stringify(response.json) })
+    }
+
     msg_run_bg_scan(message) {
         return this.runBackgroundScan(message.tabId, message.host, message.scanStrategy, message?.opts || {}).then(async () => {
             const response = {
+                success: true,
                 isScanRunning: this.isScanRunning,
                 scanResult: this._getPublicScanResult()
             }
@@ -865,11 +1312,16 @@ export class ptk_iast {
                 response.default_modules = await this.getDefaultModules()
             }
             return response
-        })
+        }).catch((err) => ({
+            success: false,
+            error: err?.code || err?.message || 'portal_rulepack_fetch_failed',
+            message: err?.portalMessage || err?.message || String(err),
+            rulepackSelection: getIastPortalSelection()
+        }))
     }
 
-    msg_stop_bg_scan(message) {
-        this.stopBackgroundScan()
+    async msg_stop_bg_scan(message) {
+        await this.stopBackgroundScan()
         return Promise.resolve({ scanResult: this._getPublicScanResult() })
     }
 
@@ -891,8 +1343,28 @@ export class ptk_iast {
         const customRulepack = (effectiveOpts && typeof effectiveOpts === 'object' && effectiveOpts.rulepack && typeof effectiveOpts.rulepack === 'object')
             ? effectiveOpts.rulepack
             : null
+        const selectedPortalPolicy = !customRulepack
+            ? getIastSelectedPortalPolicy()
+            : null
+        const shouldUsePortal = !customRulepack && (
+            effectiveOpts?.preferPortal === true
+            || !!effectiveOpts?.policyId
+            || !!selectedPortalPolicy?.id
+        )
+        if (shouldUsePortal && !getPortalApiKey()) {
+            const err = new Error('missing_api_key')
+            err.code = 'missing_api_key'
+            throw err
+        }
         const rulepackLoadOptions = customRulepack
             ? { rulepack: customRulepack }
+            : selectedPortalPolicy
+                ? {
+                    preferPortal: true,
+                    policyId: effectiveOpts?.policyId || selectedPortalPolicy?.id || null,
+                    policyName: effectiveOpts?.policyName || selectedPortalPolicy?.name || null,
+                    apiKey: getPortalApiKey()
+                }
             : {
                 variant: effectiveOpts?.variant || null,
                 preferPortal: effectiveOpts?.preferPortal === true,
@@ -946,7 +1418,7 @@ export class ptk_iast {
         this.broadcastScanUpdate()
     }
 
-    stopBackgroundScan() {
+    async stopBackgroundScan() {
         browser.tabs.sendMessage(this.scanResult.tabId, {
             channel: "ptk_background_iast2content",
             type: "clean iast result"
@@ -968,8 +1440,11 @@ export class ptk_iast {
             scanResultStore.setFinished(this.scanResult.scanId, finished)
             this.scanResult.finishedAt = finished
         }
-        this._flushPersistScanResult()
+        scanResultStore._applyAnalysisSafe(this.scanResult, { force: true })
+        await this._flushPersistScanResult()
         this.broadcastScanUpdate()
+        await refreshFinishedDastAnalysisIfNeeded()
+        return this.scanResult
     }
 
     recordHttpEvent(evt) {
@@ -1815,7 +2290,11 @@ export class ptk_iast {
                 channel: "ptk_background_iast2popup",
                 type: "scan_update",
                 scanResult: this._getPublicScanResult(),
-                isScanRunning: this.isScanRunning
+                isScanRunning: this.isScanRunning,
+                rulepackSelection: this.isScanRunning
+                    ? buildIastRulepackSelectionFromScan(this._getPublicScanResult())
+                    : getIastPortalSelection(),
+                policyState: getIastPortalPolicyState()
             }).catch(() => { })
         } catch (_) { }
     }

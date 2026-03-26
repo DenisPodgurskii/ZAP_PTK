@@ -106,27 +106,31 @@ export class ptk_recorder {
     onUpdated(tabId, info, tab) {
 
         if (info.status != "complete" || !this.isTracking(tabId)) return
+        this.injectScriptsForTab(tabId, tab?.url).catch(e => console.warn(e))
+    }
+
+    async injectScriptsForTab(tabId, tabUrl) {
         let file = null
         if (this.mode == "recording") file = this.recorderJS
         if (this.mode == "replay") file = this.replayerJS
+        if (!file) return
 
-
-        if (file) {
-            if (tab?.url != 'about:blank' && this.trackerJS) {
-
-                if (this.cleanCookieOnStart) {
-                    browser.scripting.executeScript({ func: () => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) { } }, target: { tabId: tabId, allFrames: true } })
-                    this.cleanCookieOnStart = false
-                }
-                const popuJSPath = this.popupJS
-                browser.scripting.executeScript({ files: [this.trackerJS], target: { tabId: tabId, allFrames: false } }).then(function () {
-                    browser.scripting.executeScript({ files: [popuJSPath], target: { tabId: tabId, allFrames: false } })
-                    browser.scripting.executeScript({ files: [file], target: { tabId: tabId, allFrames: true } })
-                }).catch(e => console.warn(e))
-            } else {
-                browser.scripting.executeScript({ files: [file], target: { tabId: tabId, allFrames: true } }).catch(e => e)
+        if (tabUrl != 'about:blank' && this.trackerJS) {
+            if (this.cleanCookieOnStart) {
+                await browser.scripting.executeScript({
+                    func: () => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) { } },
+                    target: { tabId: tabId, allFrames: true }
+                }).catch(() => {})
+                this.cleanCookieOnStart = false
             }
+            const popuJSPath = this.popupJS
+            await browser.scripting.executeScript({ files: [this.trackerJS], target: { tabId: tabId, allFrames: false } })
+            await browser.scripting.executeScript({ files: [popuJSPath], target: { tabId: tabId, allFrames: false } }).catch(e => e)
+            await browser.scripting.executeScript({ files: [file], target: { tabId: tabId, allFrames: true } })
+            return
         }
+
+        await browser.scripting.executeScript({ files: [file], target: { tabId: tabId, allFrames: true } }).catch(e => e)
     }
 
     onRemoved(tabId, info) {
@@ -273,6 +277,12 @@ export class ptk_recorder {
                     })
                 }
             })
+        }
+
+        const skipNavigation = this.mode === 'recording' && this.bootstrap?.skipNavigation === true
+        if (skipNavigation) {
+            await this.injectScriptsForTab(this.openerTabId, activeTab?.url)
+            return
         }
 
         await browser.tabs.update(this.openerTabId, { url: startUrl })
@@ -437,6 +447,10 @@ export class ptk_recorder {
 
     //External access
     msg_start_recording(message) {
+        if (this.mode != null) {
+            ptk_notifications.notify("Recording/playback already started", "Stop recording before start a new one");
+            return Promise.resolve({ success: false, error: 'recording_or_replay_already_started' })
+        }
         ptk_storage.setItem(this.storageKey, {})
         this.startRecording(message.clean_cookie, message.url, message.bootstrap)
         return Promise.resolve({ success: true })
@@ -462,9 +476,18 @@ export class ptk_recorder {
         return Promise.resolve({ success: true })
     }
 
-    msg_replay(message) {
-        this.startReplay(message.clean_cookie, message.url, message.events, message.validate_regex)
-        return Promise.resolve()
+    async msg_replay(message) {
+        await this.startReplay(
+            message.clean_cookie,
+            message.url,
+            message.events,
+            message.validate_regex,
+            {
+                overlay: message?.overlay || null,
+                sessionProfile: message?.session_profile || null
+            }
+        )
+        return Promise.resolve({ success: true })
     }
 
     async msg_select_window(message) {
@@ -540,15 +563,63 @@ export class ptk_recorder {
 
     cleanCookie(startUrl) {
         this.cleanCookieOnStart = true
-        browser.cookies.getAll({ domain: (new URL(startUrl)).hostname }).then(function (cookies) {
-            let url = new URL(startUrl)
-            for (let i = 0; i < cookies.length; i++) {
-                browser.cookies.remove({
-                    url: url.protocol + "//" + cookies[i].domain + cookies[i].path,
-                    name: cookies[i].name
-                })
+        this.clearCookiesForUrl(startUrl).catch(() => {})
+    }
+
+    _buildReplayCookieUrl(startUrl, cookie = {}) {
+        const baseUrl = new URL(startUrl)
+        const rawDomain = String(cookie?.domain || baseUrl.hostname || "").trim().replace(/^\./, "")
+        const path = String(cookie?.path || "/").trim() || "/"
+        const secure = cookie?.secure === true || baseUrl.protocol === "https:"
+        return `${secure ? "https" : "http"}://${rawDomain}${path}`
+    }
+
+    async clearCookiesForUrl(startUrl) {
+        const baseUrl = new URL(startUrl)
+        const cookies = await browser.cookies.getAll({ domain: baseUrl.hostname })
+        await Promise.all((Array.isArray(cookies) ? cookies : []).map((cookie) => {
+            return browser.cookies.remove({
+                url: this._buildReplayCookieUrl(startUrl, cookie),
+                name: cookie.name,
+                storeId: cookie.storeId
+            }).catch(() => null)
+        }))
+    }
+
+    async applySessionProfileSnapshot(startUrl, sessionProfile = null) {
+        const cookies = Array.isArray(sessionProfile?.snapshot?.cookies)
+            ? sessionProfile.snapshot.cookies
+            : []
+        if (!cookies.length) {
+            return 0
+        }
+        await this.clearCookiesForUrl(startUrl)
+        let appliedCount = 0
+        for (const cookie of cookies) {
+            const payload = {
+                url: this._buildReplayCookieUrl(startUrl, cookie),
+                name: cookie?.name,
+                value: cookie?.value || "",
+                path: cookie?.path || "/",
+                secure: cookie?.secure === true,
+                httpOnly: cookie?.httpOnly === true,
+                sameSite: cookie?.sameSite,
+                storeId: cookie?.storeId || "0"
             }
-        })
+            if (!cookie?.hostOnly && cookie?.domain) {
+                payload.domain = cookie.domain
+            }
+            if (cookie?.session === false && Number.isFinite(cookie?.expirationDate)) {
+                payload.expirationDate = cookie.expirationDate
+            }
+            try {
+                await browser.cookies.set(payload)
+                appliedCount += 1
+            } catch (err) {
+                console.warn("Failed to apply replay session cookie", cookie?.name, err)
+            }
+        }
+        return appliedCount
     }
 
     startRecording(cleanCookie, startUrl, bootstrap) {
@@ -660,25 +731,46 @@ export class ptk_recorder {
         }.bind(this))
     }
 
-    startReplay(cleanCookie, startUrl, items, validateRegex) {
+    async startReplay(cleanCookie, startUrl, items, validateRegex, options = {}) {
         if (this.mode == null) {
 
             worker.ptk_recorder_active = true
             this.mode = 'replay'
-            this.cleanCookieOnStart = cleanCookie
+            const overlay = options?.overlay && typeof options.overlay === "object"
+                ? options.overlay
+                : null
+            const sessionProfile = options?.sessionProfile && typeof options.sessionProfile === "object"
+                ? options.sessionProfile
+                : null
+            this.cleanCookieOnStart = cleanCookie || !!sessionProfile
 
             this.replay = {
                 startUrl: startUrl, replayStep: 0, replayEvents: items, validateRegex: validateRegex
             }
 
-            if (cleanCookie) this.cleanCookie(startUrl)
+            if (sessionProfile?.snapshot) {
+                await this.applySessionProfileSnapshot(startUrl, sessionProfile)
+            } else if (cleanCookie) {
+                await this.clearCookiesForUrl(startUrl)
+            }
             this.addListiners()
             let self = this
             return browser.storage.local.set({
                 "ptk_replay_items": items,
                 "ptk_replay_step": 0,
                 "ptk_replay_regex": validateRegex,
-                "ptk_replay": { mode: "replay", startUrl: startUrl },
+                "ptk_replay": {
+                    mode: "replay",
+                    startUrl: startUrl,
+                    overlayPlan: overlay,
+                    session: sessionProfile
+                        ? {
+                            id: sessionProfile?.id || null,
+                            label: sessionProfile?.label || null,
+                            host: sessionProfile?.host || null
+                        }
+                        : null
+                },
                 "ptk_recording_log": "",
                 "ptk_recording_confirm_required": true,
                 "ptk_path_to_icons": this.pathToIcons

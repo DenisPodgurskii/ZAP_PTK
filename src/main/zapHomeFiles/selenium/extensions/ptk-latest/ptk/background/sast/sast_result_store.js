@@ -1,6 +1,5 @@
 /* Author: Denis Podgurskii */
 import { ptk_storage } from "../utils.js";
-import { applyScanAnalysis } from "../analysis/scanAnalysisEngine.js";
 import {
   createScanResultEnvelope,
   addFindingToGroup,
@@ -11,6 +10,47 @@ import {
 import { resolveFindingTaxonomy } from "../common/resolveFindingTaxonomy.js";
 import normalizeFinding from "../common/findingNormalizer.js";
 import { ensureSastCodeArtifacts } from "./sast_artifacts.js";
+
+function toNonEmptyString(value) {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim();
+  return normalized.length ? normalized : null;
+}
+
+function uniqueStringList(values = []) {
+  const seen = new Set();
+  const result = [];
+  const addValue = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(addValue);
+      return;
+    }
+    const normalized = toNonEmptyString(value);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    result.push(normalized);
+  };
+  addValue(values);
+  return result;
+}
+
+function collectObservedPageUrls(...sources) {
+  const collected = [];
+  sources.forEach((source) => {
+    if (!source || typeof source !== "object") return;
+    collected.push(
+      source.pageUrls,
+      source.runtimeUrls,
+      source.urls,
+      source.observedUrls,
+      source.pageUrl,
+      source.runtimeUrl,
+      source.url,
+      source.route
+    );
+  });
+  return uniqueStringList(collected);
+}
 
 export class SastResultStore {
   constructor({
@@ -34,11 +74,6 @@ export class SastResultStore {
   }
 
   cloneForUi() {
-    if (this.scanResult?.analysis == null && this.scanResult?.finishedAt) {
-      try {
-        applyScanAnalysis(this.scanResult, { force: false });
-      } catch (_) { }
-    }
     const clone = JSON.parse(JSON.stringify(this.scanResult || {}));
     if (clone && typeof clone === "object") {
       clone.__normalized = true;
@@ -98,7 +133,7 @@ export class SastResultStore {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
-    ptk_storage.setItem(this.storageKey, this.scanResult);
+    return ptk_storage.setItem(this.storageKey, this.scanResult);
   }
 
   ensureStats() {
@@ -198,13 +233,21 @@ export class SastResultStore {
     const fingerprint = finding.fingerprint || this.buildSastFingerprintFromRaw(finding);
     const pageUrl = locationMeta.pageUrl || locationMeta.url || finding.pageUrl || finding.pageCanon || null;
     const runtimeUrl = locationMeta.runtimeUrl || pageUrl || null;
+    const observedPageUrls = collectObservedPageUrls(locationMeta, {
+      pageUrl,
+      runtimeUrl,
+      url: pageUrl || null
+    });
+    const primaryPageUrl = observedPageUrls[0] || pageUrl || null;
     const location = {
       file: locationMeta.file || finding.codeFile || finding.file || null,
       line: locationMeta.line ?? finding?.sink?.sinkLoc?.start?.line ?? finding?.source?.sourceLoc?.start?.line ?? null,
       column: locationMeta.column ?? finding?.sink?.sinkLoc?.start?.column ?? finding?.source?.sourceLoc?.start?.column ?? null,
-      runtimeUrl,
-      pageUrl,
-      url: pageUrl || null,
+      runtimeUrl: runtimeUrl || primaryPageUrl || null,
+      runtimeUrls: observedPageUrls,
+      pageUrl: primaryPageUrl,
+      pageUrls: observedPageUrls,
+      url: primaryPageUrl || null,
       param: locationMeta.param || finding.param || null
     };
     const tracePayload = Array.isArray(finding.trace)
@@ -368,7 +411,22 @@ export class SastResultStore {
       const prev = this.scanResult.findings[idx];
       const prevSeverity = String(prev?.severity || "info").toLowerCase();
       const nextSeverity = String(finding?.severity || "info").toLowerCase();
-      this.scanResult.findings[idx] = finding;
+      const mergedPageUrls = collectObservedPageUrls(prev?.location, finding?.location);
+      const mergedFinding = {
+        ...prev,
+        ...finding,
+        pageUrl: prev?.pageUrl || finding?.pageUrl || mergedPageUrls[0] || null,
+        location: {
+          ...(prev?.location && typeof prev.location === "object" ? prev.location : {}),
+          ...(finding?.location && typeof finding.location === "object" ? finding.location : {}),
+          pageUrl: prev?.location?.pageUrl || finding?.location?.pageUrl || mergedPageUrls[0] || null,
+          pageUrls: mergedPageUrls,
+          runtimeUrl: prev?.location?.runtimeUrl || finding?.location?.runtimeUrl || mergedPageUrls[0] || null,
+          runtimeUrls: mergedPageUrls,
+          url: prev?.location?.url || finding?.location?.url || mergedPageUrls[0] || null
+        }
+      };
+      this.scanResult.findings[idx] = mergedFinding;
       if (prevSeverity !== nextSeverity) {
         this.applySeverityDelta(prevSeverity, -1);
         this.applySeverityDelta(nextSeverity, 1);
@@ -376,7 +434,7 @@ export class SastResultStore {
       if (prev?.ruleId !== finding?.ruleId) {
         this.trackRuleId(finding?.ruleId);
       }
-      return { finding, isNew: false, isUpdated: true };
+      return { finding: mergedFinding, isNew: false, isUpdated: true };
     }
   }
 

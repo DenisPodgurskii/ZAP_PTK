@@ -4,6 +4,7 @@ import { toAlert } from './zapMapper.js'
 import { toDastFinding } from './zapDastMapper.js'
 import { toIastFinding } from './zapIastMapper.js'
 import { toSastFinding } from './zapSastMapper.js'
+import { isZapExportableFinding } from './zapFindingFilter.js'
 
 const ENGINES = ['DAST', 'IAST', 'SAST']
 const POLL_INTERVAL_MS = 4000
@@ -224,6 +225,8 @@ export default class ZapPublisher {
         const findings = []
 
         for (const finding of deltaFindings) {
+            if (!isZapExportableFinding('DAST', finding)) continue
+
             const mapped = toDastFinding(finding, {
                 scanId,
                 scanResult
@@ -265,6 +268,8 @@ export default class ZapPublisher {
         const findings = []
 
         for (const finding of deltaFindings) {
+            if (!isZapExportableFinding(engine, finding)) continue
+
             const mapped = mapper(finding, { scanId })
             if (!mapped) continue
 

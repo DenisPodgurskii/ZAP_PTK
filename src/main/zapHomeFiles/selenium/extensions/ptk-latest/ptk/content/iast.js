@@ -1,4 +1,12 @@
 /* Author: Denis Podgurskii */
+;(() => {
+if (globalThis.__PTK_IAST_AGENT_LOADED__) {
+    try {
+        globalThis.postMessage({ channel: 'ptk_iast_agent_ready' }, '*');
+    } catch (_) { }
+    return;
+}
+globalThis.__PTK_IAST_AGENT_LOADED__ = true;
 
 const FREE_SAFE_HOOK_GROUPS = Object.freeze([
     'hook.code.exec',
@@ -7191,3 +7199,4 @@ function scanInlineEvents(htmlFragment) {
 try {
     window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*');
 } catch (_) { }
+})();

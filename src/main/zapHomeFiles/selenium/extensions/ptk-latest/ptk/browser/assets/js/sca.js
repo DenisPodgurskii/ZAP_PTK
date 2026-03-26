@@ -263,38 +263,6 @@ jQuery(function () {
 
 
 
-    $(document).on("click", ".delete_scan_by_id", function () {
-        let scanId = $(this).attr("data-scan-id")
-        let scanHost = $(this).attr("data-scan-host")
-        $("#scan_hostname").val("")
-        $("#scan_delete_message").text("")
-        $('#delete_scan_dlg')
-            .modal({
-                allowMultiple: true,
-                onApprove: function () {
-                    if ($("#scan_hostname").val() == scanHost) {
-                        return controller.deleteScanById(scanId).then(function (result) {
-                            if (result?.success === false) {
-                                $("#scan_delete_message").text(result?.json?.message || result?.message || 'Unable to delete scan')
-                                return false
-                            }
-                            $('.cloud_download_scans').trigger("click")
-                            return true
-                        }).catch(err => {
-                            $("#scan_delete_message").text(err?.message || 'Unable to delete scan')
-                            return false
-                        })
-
-                    } else {
-                        $("#scan_delete_message").text("Type scan hostname to confirm delete")
-                        return false
-                    }
-                }
-            })
-            .modal('show')
-    })
-
-
     $(document).on("click", ".reset", function () {
         $("#request_info").html("")
         clearScaPanels()
@@ -671,15 +639,16 @@ function renderScaDownloadScansTable(items) {
         const rawDate = entry.scanDate || entry.raw?.finished_at || entry.raw?.created_at || entry.raw?.started_at
         const dateObj = rawDate ? new Date(rawDate) : null
         const scanDate = dateObj && !isNaN(dateObj.getTime()) ? dateObj.toLocaleString() : ''
-        const link = `<div class="ui mini icon button download_scan_by_id" style="position: relative" data-scan-id="${scanId}"><i class="download alternate large icon"
+        const downloadAvailable = !(entry.raw?.download_available === false || entry.raw?.download_available === 0)
+        const link = downloadAvailable
+            ? `<div class="ui mini icon button download_scan_by_id" style="position: relative" data-scan-id="${scanId}"><i class="download alternate large icon"
                                         title="Download"></i>
                                         <div style="position:absolute; top:1px;right: 2px">
                                              <div class="ui  centered inline inverted loader"></div>
                                         </div>
                                 </div>`
-        const del = ` <div class="ui mini icon button delete_scan_by_id" data-scan-id="${scanId}" data-scan-host="${hostname}"><i  class="trash alternate large icon "
-                    title="Delete"></i></div>`
-        dt.push([hostname, scanId, scanDate, link, del])
+            : `<div class="ui mini icon button disabled" style="position: relative" title="Download unavailable for this scan"><i class="download alternate large icon"></i></div>`
+        dt.push([hostname, scanId, scanDate, link])
     })
     dt.sort((a, b) => {
         if (a[0] === b[0]) return 0
@@ -700,7 +669,7 @@ function renderScaDownloadScansTable(items) {
             api.column(groupColumn, { page: 'current' }).data().each(function (group, i) {
                 if (last !== group) {
                     $(rows).eq(i).before(
-                        '<tr class="group" ><td colspan="4"><div class="ui black ribbon label">' + group + '</div></td></tr>'
+                        '<tr class="group" ><td colspan="3"><div class="ui black ribbon label">' + group + '</div></td></tr>'
                     )
                     last = group
                 }

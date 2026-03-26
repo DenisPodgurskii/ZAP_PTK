@@ -152,6 +152,10 @@ export class DastResultProjector {
             "category",
             "severity",
             "vulnId",
+            "outputKind",
+            "reconKind",
+            "presentationAggregate",
+            "uiSurface",
             "payload"
         ]
         scalarKeys.forEach((key) => {
@@ -261,6 +265,11 @@ export class DastResultProjector {
             "cwe",
             "tags",
             "confidence",
+            "outputKind",
+            "reconKind",
+            "presentationAggregate",
+            "uiSurface",
+            "findingKind",
             "location"
         ]
         allowedKeys.forEach((key) => {
@@ -269,6 +278,51 @@ export class DastResultProjector {
             }
         })
         const dastEvidence = finding?.evidence?.dast
+        if (dastEvidence && typeof dastEvidence === "object") {
+            summary.evidence = {
+                dast: this.sanitizeUiValue({
+                    attackId: dastEvidence.attackId || null,
+                    requestId: dastEvidence.requestId || null,
+                    resolverKey: dastEvidence.resolverKey || null,
+                    param: dastEvidence.param || null,
+                    payload: dastEvidence.payload || null,
+                    proof: dastEvidence.proof || null
+                }, 0, this.limits)
+            }
+        }
+        return summary
+    }
+
+    buildUiReconSummary(observation) {
+        if (!observation || typeof observation !== "object") return null
+        const summary = {}
+        const allowedKeys = [
+            "id",
+            "engine",
+            "scanId",
+            "moduleId",
+            "moduleName",
+            "ruleId",
+            "ruleName",
+            "category",
+            "severity",
+            "outputKind",
+            "reconKind",
+            "presentationAggregate",
+            "uiSurface",
+            "description",
+            "recommendation",
+            "links",
+            "tags",
+            "location",
+            "createdAt"
+        ]
+        allowedKeys.forEach((key) => {
+            if (observation[key] !== undefined && observation[key] !== null) {
+                summary[key] = this.sanitizeUiValue(observation[key], 0, this.limits)
+            }
+        })
+        const dastEvidence = observation?.evidence?.dast
         if (dastEvidence && typeof dastEvidence === "object") {
             summary.evidence = {
                 dast: this.sanitizeUiValue({
@@ -316,7 +370,9 @@ export class DastResultProjector {
             snapshot.analysisVersion = source.analysisVersion
         }
         const findings = Array.isArray(source.findings) ? source.findings : []
+        const recon = Array.isArray(source.recon) ? source.recon : []
         snapshot.findings = findings
+            .concat(recon)
             .slice(0, this.limits.maxFindings)
             .map((finding) => this.buildUiFindingSummary(finding))
             .filter(Boolean)
@@ -391,11 +447,6 @@ export class DastResultProjector {
 
     cloneScanResultForUi(scanResult, { engineIsRunning = false } = {}) {
         const source = scanResult && typeof scanResult === "object" ? scanResult : {}
-        if (source && (source.finishedAt || source.finished)) {
-            try {
-                this.analysisService?.applyAnalysis(source, { force: false, engineIsRunning })
-            } catch (_) { }
-        }
         const snapshot = this.buildScanResultUiSnapshot(source)
         const bounded = this.enforceUiSnapshotSize(snapshot, this.byteLimit)
         if (bounded && typeof bounded === "object") {

@@ -78,16 +78,6 @@ export class ptk_controller_sca {
             return response
         }).catch(e => e)
     }
-
-    async deleteScanById(scanId) {
-        return browser.runtime.sendMessage({
-            channel: "ptk_popup2background_sca",
-            type: "delete_scan_by_id",
-            scanId: scanId
-        }).then(response => {
-            return response
-        }).catch(e => e)
-    }
     
 
     async reset() {
@@ -100,10 +90,19 @@ export class ptk_controller_sca {
     }
 
     async loadfile(file) {
+        if (!file || typeof file.arrayBuffer !== "function") {
+            throw new Error("Invalid file payload")
+        }
+        const buffer = await file.arrayBuffer()
         return browser.runtime.sendMessage({
             channel: "ptk_popup2background_sca",
             type: "loadfile",
-            file: file
+            file: {
+                name: String(file.name || ""),
+                type: String(file.type || ""),
+                size: Number(file.size || buffer.byteLength || 0),
+                buffer
+            }
         }).then(response => {
             return response
         }).catch(e => e)

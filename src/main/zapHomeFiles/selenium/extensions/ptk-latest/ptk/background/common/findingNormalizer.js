@@ -1,3 +1,5 @@
+import CryptoES from "../../packages/crypto-es/index.js"
+
 const VALID_ENGINES = new Set(["DAST", "SAST", "IAST", "SCA"])
 const ENGINE_LOCATION_KIND = {
     DAST: "http",
@@ -36,6 +38,20 @@ function ensureMeaningfulTaxonomyValue(value) {
     if (!str) return null
     if (str.toLowerCase() === "other") return null
     return str
+}
+
+function stableStringify(value) {
+    if (value === null || value === undefined) return ""
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value)
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`
+    if (typeof value === "object") {
+        return `{${Object.keys(value).sort((a, b) => a.localeCompare(b)).map((key) => `${key}:${stableStringify(value[key])}`).join(",")}}`
+    }
+    return String(value)
+}
+
+function hashHex(payload) {
+    return CryptoES.SHA256(String(payload || "")).toString(CryptoES.enc.Hex)
 }
 
 function truncateString(value, maxLength = 250) {
@@ -382,6 +398,27 @@ function normalizeEvidence(evidence, engine, finding) {
     return evidence && typeof evidence === "object" ? evidence : {}
 }
 
+function buildDeterministicFindingId({ normalized = {}, moduleId = "module", ruleId = "rule" } = {}) {
+    const explicitFingerprint = ensureString(normalized?.fingerprint)
+    if (explicitFingerprint) {
+        return `${normalized?.scanId || "scan"}::${normalized?.engine || "ENGINE"}::${explicitFingerprint}`
+    }
+    const payload = [
+        normalized?.scanId || "scan",
+        normalized?.engine || "ENGINE",
+        moduleId,
+        ruleId,
+        normalized?.vulnId || "",
+        normalized?.category || "",
+        normalized?.severity || "",
+        normalized?.title || normalized?.name || normalized?.ruleName || "",
+        stableStringify(normalized?.location || {}),
+        stableStringify(normalized?.evidence || {}),
+        normalized?.correlationKey || ""
+    ].join("|")
+    return `${normalized?.scanId || "scan"}::${normalized?.engine || "ENGINE"}::${moduleId}::${ruleId}::${hashHex(payload).slice(0, 24)}`
+}
+
 export function normalizeFinding({ engine, scanId, finding = {}, moduleMeta = {}, ruleMeta = {} } = {}) {
     if (!finding || typeof finding !== "object") return finding
     const normalizedEngine = (engine || finding.engine || "").toUpperCase()
@@ -398,7 +435,7 @@ export function normalizeFinding({ engine, scanId, finding = {}, moduleMeta = {}
     normalized.ruleId = ruleId
     normalized.ruleName = ensureString(normalized.ruleName) || ensureString(ruleMeta.name) || ruleId
 
-    normalized.id = ensureString(normalized.id) || `${normalized.scanId || "scan"}::${normalized.engine}::${moduleId}::${ruleId}::${Date.now()}`
+    normalized.id = ensureString(normalized.id) || buildDeterministicFindingId({ normalized, moduleId, ruleId })
     normalized.severity = normalizeSeverity(normalized.severity)
 
     normalized.category = resolveTaxonomyField("category", normalized, ruleMeta, moduleMeta, "other")

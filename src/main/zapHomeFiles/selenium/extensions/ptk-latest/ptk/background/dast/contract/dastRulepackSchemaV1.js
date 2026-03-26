@@ -81,6 +81,18 @@ export const DAST_RULEPACK_SCHEMA_V1 = {
                 "per_target"
             ]
         },
+        "httpMethod": {
+            "type": "string",
+            "enum": [
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "HEAD",
+                "OPTIONS"
+            ]
+        },
         "engineCapabilityId": {
             "type": "string",
             "enum": [
@@ -305,6 +317,49 @@ export const DAST_RULEPACK_SCHEMA_V1 = {
                 "ignoreGlobalExcludes": {
                     "type": "boolean",
                     "default": false
+                },
+                "prefilters": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "default": {},
+                    "properties": {
+                        "methods": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/$defs/httpMethod"
+                            },
+                            "uniqueItems": true,
+                            "default": []
+                        },
+                        "requiresBody": {
+                            "type": "boolean",
+                            "default": false
+                        },
+                        "requiresJsonBody": {
+                            "type": "boolean",
+                            "default": false
+                        },
+                        "requiresXmlBody": {
+                            "type": "boolean",
+                            "default": false
+                        },
+                        "requiresQueryParams": {
+                            "type": "boolean",
+                            "default": false
+                        },
+                        "requiresQueryOrBodyParams": {
+                            "type": "boolean",
+                            "default": false
+                        },
+                        "requiresCookies": {
+                            "type": "boolean",
+                            "default": false
+                        },
+                        "requiresHeaders": {
+                            "type": "boolean",
+                            "default": false
+                        }
+                    }
                 }
             }
         },

@@ -1,14 +1,30 @@
 /* Author: Denis Podgurskii */
 import { ptk_controller_settings } from "../../../controller/settings.js"
 import { ptk_controller_dast } from "../../../controller/dast.js"
-
+import {
+    buildPortalLoginUrl,
+    buildPortalRegisterUrl,
+    buildPortalUrl,
+    initializePortalRuntimeConfig
+} from "../../../common/portalConfig.js"
 
 const controller = new ptk_controller_settings()
 const rattacker = new ptk_controller_dast()
+const portalConfigReady = initializePortalRuntimeConfig()
 
 var loginLink, registerLink
 var profileSettings = {}
 var currentApiKey = ""
+
+function refreshPortalLinks() {
+    loginLink = buildPortalLoginUrl()
+    registerLink = buildPortalRegisterUrl()
+}
+
+refreshPortalLinks()
+portalConfigReady.finally(function () {
+    refreshPortalLinks()
+})
 
 jQuery(function () {
 
@@ -86,6 +102,7 @@ jQuery(function () {
         $form = $('#profile_form'), values = $form.form('get values')
         Object.keys(values).map((k) => { if (values[k] === 'on') values[k] = true })
         delete values['api_key']
+        delete values['enable']
         profileSettings = Object.assign({}, profileSettings || {}, values)
         controller.save('profile', profileSettings)
 
@@ -221,6 +238,7 @@ function maskApiToken(token) {
 }
 
 async function activateProToken() {
+    await portalConfigReady
     hideApiMessages()
     let $form = $('#profile_form'), values = $form.form('get values')
     Object.keys(values).map((k) => { if (values[k] === 'on') values[k] = true })
@@ -239,6 +257,7 @@ async function activateProToken() {
     try {
         const response = await fetch(activationUrl, {
             method: "POST",
+            credentials: "omit",
             headers: {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
@@ -282,28 +301,15 @@ async function activateProToken() {
 }
 
 function buildActivationUrl() {
-    if (!profileSettings) return null
-    const baseUrl = (profileSettings.base_url || "").trim()
-    const apiBase = (profileSettings.api_base || "").trim()
-    if (!baseUrl || !apiBase) return null
-    const normalizedBase = baseUrl.replace(/\/+$/, "")
-    let normalizedApiBase = apiBase.replace(/\/+$/, "")
-    if (!normalizedApiBase.startsWith('/')) normalizedApiBase = '/' + normalizedApiBase
-    return normalizedBase + normalizedApiBase + '/tokens/activate'
+    return buildPortalUrl('/tokens/activate')
 }
 
 function buildValidationUrl() {
-    if (!profileSettings) return null
-    const baseUrl = (profileSettings.base_url || "").trim()
-    const apiBase = (profileSettings.api_base || "").trim()
-    if (!baseUrl || !apiBase) return null
-    const normalizedBase = baseUrl.replace(/\/+$/, "")
-    let normalizedApiBase = apiBase.replace(/\/+$/, "")
-    if (!normalizedApiBase.startsWith('/')) normalizedApiBase = '/' + normalizedApiBase
-    return normalizedBase + normalizedApiBase + '/tokens/validate'
+    return buildPortalUrl('/tokens/validate')
 }
 
 async function validateStoredToken(token) {
+    await portalConfigReady
     const normalizedToken = (token || "").trim()
     currentApiKey = normalizedToken
     if (!normalizedToken) {
@@ -319,6 +325,7 @@ async function validateStoredToken(token) {
     try {
         const response = await fetch(validationUrl, {
             method: 'GET',
+            credentials: 'omit',
             headers: {
                 'Authorization': 'Bearer ' + normalizedToken,
                 'Accept': 'application/json'
@@ -393,8 +400,9 @@ $(document).on("init_forms", function (e, s) {
         }
         setFormValueIfExists($profileForm, key, value)
     })
-    loginLink = profileSettings.login_url
-    registerLink = profileSettings.register_url
+    portalConfigReady.finally(function () {
+        refreshPortalLinks()
+    })
 
     // Load automation settings from pentestkit8_settings.automation
     // Use Semantic UI checkbox methods for proper toggle state

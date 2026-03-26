@@ -1135,18 +1135,9 @@ nav.ui.menu.ui.container > .right.menu > a.item:last-child {
   display: block;
   position: absolute;
   z-index: 1;
-  top: 30px;
+  top: 35px;
   width: 100%;
   margin-left: -21px;
-}
-
-.ptk-reload-warning-dast {
-  display: block;
-  position: absolute !important;
-  z-index: 1;
-  top: 98px;
-  width: 100%;
-  margin-left: -21px !important;
 }
 
 .ptk-reload-warning-iast {

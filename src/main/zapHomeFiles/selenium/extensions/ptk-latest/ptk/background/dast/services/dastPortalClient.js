@@ -1,5 +1,9 @@
 import { compressScanPayload } from "../../export/compressScanPayload.js"
 import { parseDownloadedScanPayload } from "../../export/parseDownloadedScanPayload.js"
+import {
+    buildPortalUrl as buildSharedPortalUrl,
+    initializePortalRuntimeConfig
+} from "../../../common/portalConfig.js"
 
 export class DastPortalClient {
     constructor({
@@ -15,19 +19,14 @@ export class DastPortalClient {
     }
 
     buildPortalUrl(endpoint, profile = {}) {
-        const baseUrl = String(profile?.base_url || profile?.api_url || "").trim()
-        const apiBase = String(profile?.api_base || "").trim()
-        const resolvedEndpoint = String(endpoint || "").trim()
-        if (!baseUrl || !apiBase || !resolvedEndpoint) return null
-        const normalizedBase = baseUrl.replace(/\/+$/, "")
-        let normalizedApiBase = apiBase.replace(/\/+$/, "")
-        if (!normalizedApiBase.startsWith("/")) normalizedApiBase = "/" + normalizedApiBase
-        let normalizedEndpoint = resolvedEndpoint
-        if (!normalizedEndpoint.startsWith("/")) normalizedEndpoint = "/" + normalizedEndpoint
-        return normalizedBase + normalizedApiBase + normalizedEndpoint
+        return buildSharedPortalUrl(endpoint, {
+            baseUrl: profile?.base_url || profile?.api_url || profile?.baseUrl || null,
+            apiBase: profile?.api_base || profile?.apiBase || undefined
+        })
     }
 
     async saveScan(profile = {}, scanResult, { projectId = null } = {}) {
+        await initializePortalRuntimeConfig()
         const apiKey = profile?.api_key
         if (!apiKey) {
             return { success: false, json: { message: "No API key found" } }
@@ -35,7 +34,7 @@ export class DastPortalClient {
         if (!scanResult || typeof scanResult !== "object") {
             return { success: false, json: { message: "Scan result is empty" } }
         }
-        const url = this.buildPortalUrl(profile?.scans_endpoint, profile)
+        const url = this.buildPortalUrl("/scans", profile)
         if (!url) {
             return { success: false, json: { message: "Portal endpoint is not configured." } }
         }
@@ -61,23 +60,25 @@ export class DastPortalClient {
                 "Content-Type": compressed.contentType,
                 "X-PTK-Compression": compressed.compression
             },
+            credentials: "omit",
             cache: "no-cache",
             body: compressed.body
         })
             .then(async (response) => {
                 if (response.status === 201) return { success: true }
-                const json = await response.json().catch(() => null)
-                return { success: false, json: json || { message: "Error while saving report" } }
+                const json = await response.json().catch(() => ({ message: response.statusText || "Error while saving report" }))
+                return { success: false, json }
             })
             .catch((e) => ({ success: false, json: { message: "Error while saving report: " + e.message } }))
     }
 
     async getProjects(profile = {}) {
+        await initializePortalRuntimeConfig()
         const apiKey = profile?.api_key
         if (!apiKey) {
             return { success: false, json: { message: "No API key found" } }
         }
-        const url = this.buildPortalUrl(profile?.projects_endpoint, profile)
+        const url = this.buildPortalUrl("/projects", profile)
         if (!url) {
             return { success: false, json: { message: "Portal endpoint is not configured." } }
         }
@@ -86,6 +87,7 @@ export class DastPortalClient {
                 Authorization: "Bearer " + apiKey,
                 Accept: "application/json"
             },
+            credentials: "omit",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {
@@ -97,11 +99,12 @@ export class DastPortalClient {
     }
 
     async downloadScans(profile = {}, { projectId = null, engine = "dast" } = {}) {
+        await initializePortalRuntimeConfig()
         const apiKey = profile?.api_key
         if (!apiKey) {
             return { success: false, json: { message: "No API key found" } }
         }
-        const baseUrl = this.buildPortalUrl(profile?.scans_endpoint, profile)
+        const baseUrl = this.buildPortalUrl("/scans", profile)
         if (!baseUrl) {
             return { success: false, json: { message: "Portal endpoint is not configured." } }
         }
@@ -119,6 +122,7 @@ export class DastPortalClient {
                 Authorization: "Bearer " + apiKey,
                 Accept: "application/json"
             },
+            credentials: "omit",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {
@@ -130,6 +134,7 @@ export class DastPortalClient {
     }
 
     async downloadScanById(profile = {}, scanId) {
+        await initializePortalRuntimeConfig()
         const apiKey = profile?.api_key
         if (!apiKey) {
             return { success: false, json: { message: "No API key found" } }
@@ -137,7 +142,7 @@ export class DastPortalClient {
         if (!scanId) {
             return { success: false, json: { message: "Scan identifier is required." } }
         }
-        const baseUrl = this.buildPortalUrl(profile?.scans_endpoint, profile)
+        const baseUrl = this.buildPortalUrl("/scans", profile)
         if (!baseUrl) {
             return { success: false, json: { message: "Portal endpoint is not configured." } }
         }
@@ -148,6 +153,7 @@ export class DastPortalClient {
                 Authorization: "Bearer " + apiKey,
                 Accept: "application/gzip, application/x-gzip"
             },
+            credentials: "omit",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {
@@ -166,6 +172,7 @@ export class DastPortalClient {
             })
             .catch((e) => ({ success: false, json: { message: "Error while downloading scan: " + e.message } }))
     }
+
 }
 
 export default DastPortalClient

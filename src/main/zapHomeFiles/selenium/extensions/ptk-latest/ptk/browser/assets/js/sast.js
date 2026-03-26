@@ -5,9 +5,11 @@ import { ptk_decoder } from "../../../background/decoder.js";
 import * as rutils from "../js/rutils.js";
 import { normalizeScanResult } from "../js/scanResultViewModel.js";
 import { downloadScanExportResult, readScanFileText } from "../js/scanCompression.js";
+import { buildSastItemFromFinding as buildSharedSastItemFromFinding } from "./sastFindingItem.js";
 
 const controller = new ptk_controller_sast();
 const decoder = new ptk_decoder();
+const PORTAL_ACTIONS_VISIBLE = false;
 const sastFilterState = {
   fileCanon: null,
   ruleKey: null,
@@ -20,6 +22,8 @@ let isRuleDropdownSyncing = false;
 const SAST_DELTA_QUEUE = [];
 const SAST_FLUSH_INTERVAL_MS = 300;
 let sastFlushTimer = null;
+let sastDiscoveryDirty = true;
+let sastDefaultModulesRequest = null;
 const SAST_PROGRESS_RENDER = {
   timer: null,
   flushMs: 150,
@@ -46,6 +50,168 @@ const DISCOVERY_SEVERITY_VISUALS = {
   low: { color: "ptk-sev-low", icon: "exclamation triangle", order: 3, highlight: false },
   info: { color: "ptk-sev-info", icon: "info circle", order: 4, highlight: false },
 };
+
+function escapeSastPolicyHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function setSastPortalPolicyLoading(loading) {
+  const isLoading = !!loading;
+  $("#load_pro_policies_button")
+    .toggleClass("loading", isLoading)
+    .toggleClass("disabled", isLoading);
+  $("#sast-scan-policy").prop("disabled", isLoading);
+}
+
+function openExtensionSettingsWindow() {
+  return browser.windows.create({
+    type: "popup",
+    url: browser.runtime.getURL("/ptk/browser/settings.html"),
+    width: 1100,
+    height: 820
+  }).catch(() => null);
+}
+
+function countEnginePolicies(policyState = {}) {
+  return Array.isArray(policyState?.metadata) ? policyState.metadata.length : 0;
+}
+
+function buildPolicyLoadSuccessMessage(engineLabel, policyState = {}) {
+  const count = countEnginePolicies(policyState);
+  return `Loaded ${count} ${engineLabel} scan polic${count === 1 ? "y" : "ies"}.`;
+}
+
+function buildPolicyLoadErrorMessage(result, scopeLabel = "scan policies") {
+  if (result?.error === "missing_api_key") {
+    return `PTK Pro token is missing. Open Settings -> PTK Pro and add an activation token before loading ${scopeLabel}.`;
+  }
+  const reason = String(result?.message || result?.error || "unknown_error").trim();
+  return `Could not load ${scopeLabel}. Portal returned: ${reason}.`;
+}
+
+function syncSastPortalPolicyDropdown(value) {
+  const $select = $("#sast-scan-policy");
+  if (!$select.length) return;
+  const normalized = value ? String(value) : "";
+  $select.val(normalized);
+  if (typeof $select.dropdown === "function") {
+    $select.dropdown("refresh");
+    $select.dropdown("set selected", normalized);
+  }
+}
+
+function buildSastPortalPolicyEntries(policyState = {}) {
+  const metadata = Array.isArray(policyState?.metadata) ? policyState.metadata.slice() : [];
+  const selected = policyState?.selectedPolicy && typeof policyState.selectedPolicy === "object"
+    ? policyState.selectedPolicy
+    : null;
+  if (selected?.id && !metadata.some((entry) => String(entry?.id || "") === String(selected.id))) {
+    metadata.unshift(selected);
+  }
+  return metadata.filter((entry) => entry && (entry.id || entry.name));
+}
+
+function applySastPortalPolicyState(result = {}) {
+  const policyState = (result?.policyState && typeof result.policyState === "object")
+    ? result.policyState
+    : (controller.policyState || {});
+  controller.policyState = policyState;
+  const entries = buildSastPortalPolicyEntries(policyState);
+  const hasPortalEntries = entries.length > 0;
+  const hasSelectedPortalPolicy = !!policyState?.selectedPolicy?.id;
+  const options = [];
+  if (hasPortalEntries || hasSelectedPortalPolicy) {
+    options.push('<option value="">Select policy</option>');
+  }
+  options.push('<option value="default:0">Default (system)</option>');
+  entries.forEach((entry) => {
+    if (!entry?.id) return;
+    const label = entry.label || entry.name || `Policy #${entry.id}`;
+    options.push(`<option value="policy:${escapeSastPolicyHtml(entry.id)}">${escapeSastPolicyHtml(label)}</option>`);
+  });
+  $("#sast-scan-policy").html(options.join(""));
+  const selectedValue = policyState?.selectedPolicy?.id
+    ? `policy:${policyState.selectedPolicy.id}`
+    : ((hasPortalEntries || hasSelectedPortalPolicy) ? "" : "default:0");
+  syncSastPortalPolicyDropdown(selectedValue);
+}
+
+function resolveSastHelpPopupPosition($icon) {
+  const element = $icon && $icon[0];
+  if (!element || typeof element.getBoundingClientRect !== "function") {
+    return "bottom left";
+  }
+  const rect = element.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 600;
+  const estimatedPopupWidth = Math.min(350, Math.max(220, viewportWidth - 48));
+  const leftSpace = rect.left;
+  const rightSpace = viewportWidth - rect.right;
+  if (rightSpace < estimatedPopupWidth && leftSpace > rightSpace) {
+    return "bottom right";
+  }
+  return "bottom left";
+}
+
+function bindSastHelpPopups() {
+  $("#sast_scans_form .question.circle.icon").each(function () {
+    const $icon = $(this);
+    let $popup = $icon.closest(".ptk-help-label-row").nextAll(".ptk-help-popup").first();
+    if (!$popup.length) {
+      $popup = $icon.closest(".field").find(".ptk-help-popup").first();
+    }
+    if (!$popup.length) return;
+    if ($icon.data("module-popup")) {
+      $icon.popup("destroy");
+    }
+    $icon.popup({
+      popup: $popup,
+      inline: true,
+      hoverable: true,
+      position: resolveSastHelpPopupPosition($icon),
+      delay: {
+        show: 300,
+        hide: 800
+      }
+    });
+  });
+}
+
+function maybeBindSastPortalPreview(result = {}) {
+  const currentScan = result?.scanResult || controller?.scanResult?.scanResult || null;
+  if (result?.isScanRunning || hasRenderableSastData(currentScan)) return;
+  if (Array.isArray(result?.default_modules) && result.default_modules.length) {
+    bindModules(result);
+    showWelcomeForm();
+  }
+}
+
+async function ensureSastDefaultModulesLoaded({ force = false } = {}) {
+  if (!force && Array.isArray(controller?.default_modules) && controller.default_modules.length) {
+    bindModules({ default_modules: controller.default_modules });
+    return { default_modules: controller.default_modules };
+  }
+  if (sastDefaultModulesRequest && !force) {
+    return sastDefaultModulesRequest;
+  }
+  sastDefaultModulesRequest = controller.getDefaultModules()
+    .then((result) => {
+      applySastPortalPolicyState(result || {});
+      if (Array.isArray(result?.default_modules)) {
+        controller.default_modules = result.default_modules;
+        bindModules(result);
+      }
+      return result;
+    })
+    .finally(() => {
+      sastDefaultModulesRequest = null;
+    });
+  return sastDefaultModulesRequest;
+}
 
 function isSastDiscoveryView(view) {
   return view !== "findings" && SAST_DISCOVERY_GROUPS.some((group) => group.key === view);
@@ -227,81 +393,7 @@ function updateSastScopeUI() {
 }
 
 function buildSastItemFromFinding(finding, index) {
-  if (!finding) return null;
-  const loc = finding.location || {};
-  const ev = (finding.evidence && finding.evidence.sast) || {};
-  const findingKind = normalizeSastFindingKind(finding.findingKind || ev.findingKind);
-  const severity = formatSeverityLabel(finding.severity);
-  const owaspArray = Array.isArray(finding.owasp) ? finding.owasp : [];
-  const owaspPrimary = finding.owaspPrimary || (owaspArray.length ? owaspArray[0] : null);
-  const owaspLegacy = finding.owaspLegacy || (owaspPrimary ? `${owaspPrimary.id}:${owaspPrimary.version}-${owaspPrimary.name}` : "");
-  const ruleId = finding.ruleId || finding.id || `rule-${index}`;
-  const description = finding.description || ev.description || "";
-  const recommendation = finding.recommendation || ev.recommendation || "";
-  const metadata = {
-    id: ruleId,
-    rule_id: ruleId,
-    name: finding.ruleName || finding.moduleName || ruleId,
-    severity,
-    findingKind,
-    description,
-    recommendation,
-  };
-  const moduleMeta = {
-    id: finding.moduleId || null,
-    name: finding.moduleName || null,
-    severity,
-    category: finding.category || null,
-    owasp: owaspArray,
-    owaspPrimary,
-    owaspLegacy,
-    cwe: finding.cwe || null,
-    tags: finding.tags || [],
-    links: finding.links || {},
-  };
-  const sourceRaw = ev.source || {};
-  const sinkRaw = ev.sink || {};
-  const source = Object.assign(
-    {
-      sourceName: sourceRaw.sourceName || sourceRaw.label || "Source",
-      label: sourceRaw.label || sourceRaw.sourceName || "Source",
-      sourceFile: sourceRaw.sourceFile || loc.file || "",
-      sourceFileFull: sourceRaw.sourceFileFull || sourceRaw.sourceFile || loc.file || "",
-      sourceLoc: sourceRaw.sourceLoc || null,
-      sourceSnippet: sourceRaw.sourceSnippet || ev.codeSnippet || "",
-    },
-    sourceRaw
-  );
-  const sink = Object.assign(
-    {
-      sinkName: sinkRaw.sinkName || sinkRaw.label || "Sink",
-      label: sinkRaw.label || sinkRaw.sinkName || "Sink",
-      sinkFile: sinkRaw.sinkFile || loc.file || "",
-      sinkFileFull: sinkRaw.sinkFileFull || sinkRaw.sinkFile || loc.file || "",
-      sinkLoc: sinkRaw.sinkLoc || null,
-      sinkSnippet: sinkRaw.sinkSnippet || "",
-    },
-    sinkRaw
-  );
-  return {
-    codeFile: loc.file || sink.sinkFile || source.sourceFile || null,
-    codeSnippet: ev.codeSnippet || "",
-    pageUrl: loc.pageUrl || loc.url || null,
-    pageCanon: loc.pageUrl || loc.url || null,
-    metadata,
-    module_metadata: moduleMeta,
-    owasp: owaspArray,
-    owaspPrimary,
-    owaspLegacy,
-    source,
-    sink,
-    trace: ev.trace || finding.trace || [],
-    nodeType: ev.nodeType || finding.nodeType || null,
-    confidence: Number.isFinite(finding.confidence) ? finding.confidence : null,
-    findingKind,
-    requestId: index,
-    type: "sast",
-  };
+  return buildSharedSastItemFromFinding(finding, index);
 }
 
 function artifactList(values) {
@@ -792,6 +884,15 @@ function renderSastDiscovery(scanResult) {
   $("#discovery_info").html(sections.join(""));
 }
 
+function ensureSastDiscoveryRendered({ force = false } = {}) {
+  if (!force && !sastDiscoveryDirty) return;
+  const raw = controller?.scanResult?.scanResult || controller?.scanViewModel || null;
+  const vm = controller?.scanViewModel || (raw ? normalizeScanResult(raw) : null);
+  if (!vm) return;
+  renderSastDiscovery(vm);
+  sastDiscoveryDirty = false;
+}
+
 function getSastAttackItem(index) {
   if (Number.isNaN(Number(index))) return null;
   const items = Array.isArray(controller?.sastAttackItems)
@@ -889,9 +990,10 @@ jQuery(function () {
   let $sastDownloadProjectDropdown = $('#download_project_select')
   const sastDownloadProjectMap = new Map()
 
-  function showSastResultModal(header, message) {
+  function showSastResultModal(header, message, options = {}) {
     $('#result_header').text(header)
     $('#result_message').text(message || '')
+    $('#result_dialog').find('.result_open_settings_btn').toggle(!!options?.showSettings)
     $('#result_dialog').modal('show')
   }
 
@@ -1142,15 +1244,16 @@ jQuery(function () {
       const rawDate = entry.scanDate || entry.raw?.finished_at || entry.raw?.created_at || entry.raw?.started_at
       const dateObj = rawDate ? new Date(rawDate) : null
       const scanDate = dateObj && !isNaN(dateObj.getTime()) ? dateObj.toLocaleString() : ''
-      const link = `<div class="ui mini icon button download_scan_by_id" style="position: relative" data-scan-id="${scanId}"><i class="download alternate large icon"
+      const downloadAvailable = !(entry.raw?.download_available === false || entry.raw?.download_available === 0)
+      const link = downloadAvailable
+        ? `<div class="ui mini icon button download_scan_by_id" style="position: relative" data-scan-id="${scanId}"><i class="download alternate large icon"
                                         title="Download"></i>
                                         <div style="position:absolute; top:1px;right: 2px">
                                              <div class="ui  centered inline inverted loader"></div>
                                         </div>
                                 </div>`
-      const del = ` <div class="ui mini icon button delete_scan_by_id" data-scan-id="${scanId}" data-scan-host="${hostname}"><i  class="trash alternate large icon "
-                    title="Delete"></i></div>`
-      dt.push([hostname, scanId, scanDate, link, del])
+        : `<div class="ui mini icon button disabled" style="position: relative" title="Download unavailable for this scan"><i class="download alternate large icon"></i></div>`
+      dt.push([hostname, scanId, scanDate, link])
     })
 
     dt.sort(function (a, b) {
@@ -1162,6 +1265,7 @@ jQuery(function () {
     })
     var groupColumn = 0;
     let params = {
+      forceRebuild: true,
       data: dt,
       columnDefs: [{
         "visible": false, "targets": groupColumn
@@ -1175,7 +1279,7 @@ jQuery(function () {
         api.column(groupColumn, { page: 'current' }).data().each(function (group, i) {
           if (last !== group) {
             $(rows).eq(i).before(
-              '<tr class="group" ><td colspan="4"><div class="ui black ribbon label">' + group + '</div></td></tr>'
+              '<tr class="group" ><td colspan="3"><div class="ui black ribbon label">' + group + '</div></td></tr>'
             )
             last = group
           }
@@ -1242,6 +1346,63 @@ jQuery(function () {
     requestSastProjectsAndShowModal($loader)
   });
 
+  $(document).on("click", "#load_pro_policies_button", async function () {
+    setSastPortalPolicyLoading(true);
+    try {
+      const result = await controller.loadPolicyMetadata();
+      applySastPortalPolicyState(result);
+      if (result?.success) {
+        showSastResultModal("Success", buildPolicyLoadSuccessMessage("SAST", result?.policyState || {}));
+      } else {
+        showSastResultModal(
+          "Error",
+          buildPolicyLoadErrorMessage(result, "SAST scan policies"),
+          { showSettings: result?.error === "missing_api_key" }
+        );
+      }
+    } catch (err) {
+      showSastResultModal("Error", buildPolicyLoadErrorMessage({ message: err?.message || "unknown_error" }, "SAST scan policies"));
+    } finally {
+      setSastPortalPolicyLoading(false);
+    }
+    return false;
+  });
+
+  $(document).on("click", "#result_dialog .result_open_settings_btn", function () {
+    openExtensionSettingsWindow();
+    $("#result_dialog").modal("hide");
+    return false;
+  });
+
+  $(document).on("change", "#sast-scan-policy", async function () {
+    const $select = $(this);
+    const rawValue = String($select.val() || "").trim();
+    const policyId = rawValue.startsWith("policy:") ? rawValue.slice("policy:".length).trim() : "";
+    const policyName = policyId ? String($select.find("option:selected").text() || "").trim() : null;
+    setSastPortalPolicyLoading(true);
+    try {
+      const result = policyId
+        ? await controller.selectPolicy(policyId, policyName)
+        : await controller.clearPolicy();
+      applySastPortalPolicyState(result);
+      if (result?.success) {
+        maybeBindSastPortalPreview(result);
+      } else {
+        showSastResultModal(
+          "Error",
+          result?.error === "missing_api_key"
+            ? "PAT required. Activate the portal token in Settings first."
+            : `Failed to update scan policy: ${result?.error || "unknown_error"}`
+        );
+      }
+    } catch (err) {
+      showSastResultModal("Error", `Failed to update scan policy: ${err?.message || "unknown_error"}`);
+    } finally {
+      setSastPortalPolicyLoading(false);
+    }
+    return false;
+  });
+
   $(document).on("click", ".run_scan_runtime", function () {
     controller
       .init()
@@ -1257,6 +1418,7 @@ jQuery(function () {
 
         let h = new URL(result.activeTab.url).host;
         $("#scan_host").text(h);
+        applySastPortalPolicyState(result);
         // $('#scan_domains').text(h)
         window._ptkSastReloadWarningClosed = false;
         let contentReady = true;
@@ -1273,6 +1435,18 @@ jQuery(function () {
                 $("#ptk_scan_reload_warning").show();
                 return false;
               }
+              const selectedPolicyValue = String($("#sast-scan-policy").val() || "").trim();
+              const hasPortalEntries = Array.isArray(controller?.policyState?.metadata) && controller.policyState.metadata.length > 0;
+              if (hasPortalEntries && !selectedPolicyValue) {
+                showSastResultModal("Error", "Select a scan policy.");
+                return false;
+              }
+              const selectedPortalPolicyId = selectedPolicyValue.startsWith("policy:")
+                ? selectedPolicyValue.slice("policy:".length).trim()
+                : "";
+              const selectedPortalPolicyName = selectedPortalPolicyId
+                ? String($("#sast-scan-policy option:selected").text() || "").trim() || null
+                : null;
               let scanStrategy = $("#sast-scan-strategy").val();
               if (scanStrategy === undefined || scanStrategy === null || scanStrategy === '') {
                 scanStrategy = 0;
@@ -1283,23 +1457,25 @@ jQuery(function () {
                 .map((entry) => entry.trim())
                 .filter(Boolean);
               controller
-                .runBackgroundScan(result.activeTab.tabId, h, scanStrategy, pages)
+                .runBackgroundScan(result.activeTab.tabId, h, scanStrategy, pages, selectedPortalPolicyId
+                  ? {
+                    preferPortal: true,
+                    policyId: selectedPortalPolicyId,
+                    policyName: selectedPortalPolicyName
+                  }
+                  : null)
                 .then(function (result) {
+                  if (result?.success === false) {
+                    showSastResultModal("Error", result?.message || result?.error || "Failed to start scan.");
+                    return;
+                  }
                   resetSastLiveState(result);
                   changeView(result);
                 }).catch(e => e)
             },
           })
           .modal("show");
-        $('#sast_scans_form .question')
-          .popup({
-            inline: true,
-            hoverable: true,
-            delay: {
-              show: 300,
-              hide: 800
-            }
-          })
+        bindSastHelpPopups()
       })
       .catch((e) => e);
 
@@ -1361,22 +1537,66 @@ jQuery(function () {
   });
 
   const $exportScanBtn = $(".export_scan_btn");
+  const $importScanFileBtn = $(".import_scan_file_btn");
+  const $importScanTextBtn = $(".import_scan_text_btn");
   const $scanExportProgress = $("#scan_export_progress");
+  const $scanExportProgressTitle = $("#scan_export_progress .ptk-export-progress-title");
   const $scanExportProgressBar = $("#scan_export_progress_bar");
   const $scanExportProgressText = $("#scan_export_progress_text");
   let exportInProgress = false;
+  let importInProgress = false;
 
-  function setExportProgress(percent, text) {
+  function setTransferProgress(title, percent, text) {
     const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
     $scanExportProgress.show();
+    $scanExportProgressTitle.text(title || "Progress");
     $scanExportProgressBar.css("width", `${safePercent}%`);
-    $scanExportProgressText.text(text || `Exporting... ${safePercent}%`);
+    $scanExportProgressText.text(text || `${title || "Working"}... ${safePercent}%`);
+  }
+
+  function setExportProgress(percent, text) {
+    setTransferProgress("Export", percent, text);
   }
 
   function hideExportProgress() {
     $scanExportProgress.hide();
+    $scanExportProgressTitle.text("Export");
     $scanExportProgressBar.css("width", "0%");
     $scanExportProgressText.text("Preparing export...");
+  }
+
+  function setImportProgress(percent, text) {
+    setTransferProgress("Import", percent, text);
+  }
+
+  function updateImportProgressFromEvent(event) {
+    const phase = String(event?.phase || "");
+    const completed = Number(event?.completed || 0);
+    const total = Number(event?.total || 0);
+    if (phase === "read_start") {
+      setImportProgress(5, "Reading scan file...");
+      return;
+    }
+    if (phase === "read_complete") {
+      setImportProgress(35, "Preparing import payload...");
+      return;
+    }
+    if (phase === "upload_start") {
+      setImportProgress(65, total > 1 ? `Uploading import payload... 0/${total}` : "Uploading import payload...");
+      return;
+    }
+    if (phase === "upload_chunk") {
+      const percent = total > 0 ? Math.floor((completed / total) * 25) : 0;
+      setImportProgress(65 + percent, `Uploading import payload... ${completed}/${total}`);
+      return;
+    }
+    if (phase === "finalize_start") {
+      setImportProgress(92, "Finalizing import...");
+      return;
+    }
+    if (phase === "done") {
+      setImportProgress(100, "Import complete.");
+    }
   }
 
   function updateExportProgressFromChunk(event) {
@@ -1445,24 +1665,35 @@ jQuery(function () {
   });
 
   async function loadFile(file) {
+    if (importInProgress) return;
+    importInProgress = true;
+    $exportScanBtn.addClass("disabled");
+    $importScanFileBtn.addClass("disabled loading");
+    $importScanTextBtn.addClass("disabled");
     try {
-      const text = await readScanFileText(file);
-      controller
-        .save(text)
-        .then((result) => {
-          changeView(result);
-          if (hasRenderableSastData(result.scanResult)) {
-            bindScanResult(result);
-          }
-          $("#import_export_dlg").modal("hide");
-        })
-        .catch((e) => {
-          $("#result_message").text("Could not import SAST scan");
-          $("#result_dialog").modal("show");
-        });
+      setImportProgress(2, "Preparing import...");
+      const result = await controller.loadfile(file, {
+        onProgress: updateImportProgressFromEvent
+      });
+      if (result instanceof Error || result?.success === false || !hasRenderableSastData(result?.scanResult)) {
+        $("#result_message").text(result?.message || result?.error || "Could not import SAST scan");
+        $("#result_dialog").modal("show");
+        return;
+      }
+      changeView(result);
+      bindScanResult(result);
+      $("#import_export_dlg").modal("hide");
     } catch (e) {
-      $("#result_message").text("Could not import SAST scan");
+      $("#result_message").text(e?.message || "Could not import SAST scan");
       $("#result_dialog").modal("show");
+    } finally {
+      importInProgress = false;
+      $exportScanBtn.removeClass("disabled");
+      $importScanFileBtn.removeClass("disabled loading");
+      $importScanTextBtn.removeClass("disabled");
+      setTimeout(() => {
+        if (!importInProgress && !exportInProgress) hideExportProgress();
+      }, 800);
     }
   }
 
@@ -1483,32 +1714,6 @@ jQuery(function () {
       });
   });
 
-  $(document).on("click", ".delete_scan_by_id", function () {
-    let scanId = $(this).attr("data-scan-id");
-    let scanHost = $(this).attr("data-scan-host");
-    $("#scan_hostname").val("");
-    $("#scan_delete_message").text("");
-    $("#delete_scan_dlg")
-      .modal({
-        allowMultiple: true,
-        onApprove: function () {
-          if ($("#scan_hostname").val() == scanHost) {
-            return controller.deleteScanById(scanId).then(function (result) {
-              $(".cloud_download_scans").trigger("click");
-              //console.log(result)
-              return true;
-            });
-          } else {
-            $("#scan_delete_message").text(
-              "Type scan hostname to confirm delete"
-            );
-            return false;
-          }
-        },
-      })
-      .modal("show");
-  });
-
   $(document).on("click", ".reset", function () {
     $("#request_info").html("");
     $("#attacks_info").html("");
@@ -1522,9 +1727,8 @@ jQuery(function () {
     showWelcomeForm();
     controller.reset().then(function (result) {
       triggerSastStatsEvent(result.scanResult);
-      if (Array.isArray(result?.default_modules) && result.default_modules.length) {
-        bindModules(result);
-      }
+      applySastPortalPolicyState(result);
+      ensureSastDefaultModulesLoaded({ force: true }).catch(() => {});
     });
   });
 
@@ -1646,6 +1850,7 @@ jQuery(function () {
 
   controller.init().then(function (result) {
     const initCount = Array.isArray(result?.scanResult?.findings) ? result.scanResult.findings.length : 0;
+    applySastPortalPolicyState(result);
     changeView(result);
     if (result.isScanRunning) {
       showRunningForm(result);
@@ -1657,11 +1862,9 @@ jQuery(function () {
       }
     } else if (hasRenderableSastData(result.scanResult)) {
       bindScanResult(result);
-    } else if (Array.isArray(result?.default_modules) && result.default_modules.length) {
-      bindModules(result);
-      showWelcomeForm();
     } else {
       showWelcomeForm();
+      ensureSastDefaultModulesLoaded().catch(() => {});
     }
   }).catch(() => { })
 });
@@ -1802,10 +2005,15 @@ function bindScanResult(result) {
     resetSastProgressRender({ hide: true });
   }
   $(".generate_report").show();
-  $(".save_scan").show();
+  if (PORTAL_ACTIONS_VISIBLE) {
+    $(".save_scan").show();
+  } else {
+    $(".save_scan").hide();
+  }
   $("#request_info").html("");
   $("#attacks_info").html("");
   $("#discovery_info").html("");
+  sastDiscoveryDirty = true;
   hideWelcomeForm();
   SAST_DELTA_QUEUE.length = 0;
   if (sastFlushTimer) {
@@ -1863,7 +2071,6 @@ function bindScanResult(result) {
     }).filter(Boolean);
   }
   controller.sastAttackItems = attackItems;
-  renderSastDiscovery(vm);
 
   const bucketMarkup = {
     critical: [],
@@ -1919,7 +2126,7 @@ function bindScanResult(result) {
 function bindModules(result) {
   const modules = Array.isArray(result?.default_modules)
     ? result.default_modules
-    : (Array.isArray(result) ? result : []);
+    : (Array.isArray(controller?.default_modules) ? controller.default_modules : (Array.isArray(result) ? result : []));
   const rows = [];
   modules.forEach((mod) => {
     if (!mod) return;
@@ -2316,6 +2523,12 @@ function setSastView(view) {
   $("#sast_findings_filters .rule-filter-wrap").toggle(showFindingsFilters);
   $("#attacks_info").toggle(showFindingsFilters);
   $("#discovery_info").toggle(!showFindingsFilters);
+  if (!showFindingsFilters) {
+    ensureSastDiscoveryRendered();
+    const $panels = $("#discovery_info .sast-discovery-panel");
+    $panels.hide();
+    $panels.filter(`[data-discovery-group="${normalized}"]`).show();
+  }
   applySastFilters();
 }
 

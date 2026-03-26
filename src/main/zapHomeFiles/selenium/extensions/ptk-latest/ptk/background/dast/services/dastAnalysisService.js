@@ -1,5 +1,15 @@
-import { applyScanAnalysis } from "../../analysis/scanAnalysisEngine.js"
+import { ANALYSIS_VERSION, applyScanAnalysis } from "../../analysis/scanAnalysisEngine.js"
 import { buildHostCoverageAnalysis } from "../../analysis/hostCoverageAnalysis.js"
+
+const FROZEN_ANALYSIS_CONTEXT_PROP = "__ptkDastFrozenAnalysisContext"
+
+function deepClone(value) {
+    try {
+        return JSON.parse(JSON.stringify(value))
+    } catch (_) {
+        return value
+    }
+}
 
 export class DastAnalysisService {
     constructor({
@@ -66,6 +76,144 @@ export class DastAnalysisService {
         return !!(scanResult.finishedAt || scanResult.finished)
     }
 
+    hasCurrentAnalysis(scanResult) {
+        if (!scanResult || typeof scanResult !== "object") return false
+        if (!(scanResult?.finishedAt || scanResult?.finished)) return false
+        return String(scanResult?.analysis?.version || scanResult?.analysisVersion || "").trim() === ANALYSIS_VERSION
+    }
+
+    ensureRelatedScanAnalysis(scan) {
+        if (!scan || typeof scan !== "object") return scan
+        if (this.scanResultStore?._applyAnalysisSafe) {
+            this.scanResultStore._applyAnalysisSafe(scan, { force: false })
+        }
+        return scan
+    }
+
+    _getFrozenAnalysisContext(scanResult) {
+        if (!scanResult || typeof scanResult !== "object") return null
+        return scanResult[FROZEN_ANALYSIS_CONTEXT_PROP] && typeof scanResult[FROZEN_ANALYSIS_CONTEXT_PROP] === "object"
+            ? scanResult[FROZEN_ANALYSIS_CONTEXT_PROP]
+            : null
+    }
+
+    _getStoredAnalysisContext(scanResult) {
+        if (!scanResult || typeof scanResult !== "object") return null
+        const frozen = this._getFrozenAnalysisContext(scanResult)
+        if (frozen && typeof frozen === "object") {
+            return frozen
+        }
+        const meta = scanResult?.analysis?.meta
+        if (meta && typeof meta === "object") {
+            return meta
+        }
+        return null
+    }
+
+    _setFrozenAnalysisContext(scanResult, snapshot) {
+        if (!scanResult || typeof scanResult !== "object" || !snapshot || typeof snapshot !== "object") return
+        try {
+            Object.defineProperty(scanResult, FROZEN_ANALYSIS_CONTEXT_PROP, {
+                value: snapshot,
+                writable: true,
+                configurable: true,
+                enumerable: false
+            })
+        } catch (_) {
+            scanResult[FROZEN_ANALYSIS_CONTEXT_PROP] = snapshot
+        }
+    }
+
+    _buildRelatedScansIdentitySignature(relatedScans = []) {
+        const entries = (Array.isArray(relatedScans) ? relatedScans : [])
+            .filter((scan) => scan && typeof scan === "object")
+            .map((scan) => [
+                String(scan?.scanId || ""),
+                String(scan?.engine || "").toUpperCase(),
+                String(scan?.host || ""),
+                String(scan?.tabId ?? ""),
+                String(scan?.finishedAt || scan?.finished || scan?.startedAt || ""),
+                Number(Array.isArray(scan?.findings) ? scan.findings.length : 0),
+                Number(Array.isArray(scan?.requests) ? scan.requests.length : 0),
+                Number(Array.isArray(scan?.runtimeEvents) ? scan.runtimeEvents.length : 0),
+                Number(Array.isArray(scan?.files) ? scan.files.length : 0)
+            ].join("|"))
+            .sort((a, b) => a.localeCompare(b))
+        return entries.join("||")
+    }
+
+    _hasSignals(scan = {}) {
+        return (
+            (Array.isArray(scan?.findings) && scan.findings.length > 0)
+            || (Array.isArray(scan?.requests) && scan.requests.length > 0)
+            || (Array.isArray(scan?.runtimeEvents) && scan.runtimeEvents.length > 0)
+            || (Array.isArray(scan?.files) && scan.files.length > 0)
+            || Number(scan?.stats?.findingsCount || 0) > 0
+            || Number(scan?.stats?.attacksCount || 0) > 0
+            || Number(scan?.scanStats?.totalJobsExecuted || 0) > 0
+        )
+    }
+
+    _deriveExtraEnginesPresentFromInputs({ scanResult = null, relatedScans = [], engineIsRunning = this.getEngineIsRunning() === true } = {}) {
+        const engines = new Set(this.deriveCrossEnginePresence({ scanResult, engineIsRunning }))
+        ;(Array.isArray(relatedScans) ? relatedScans : []).forEach((scan) => {
+            if (!scan || typeof scan !== "object") return
+            const engine = String(scan?.engine || "").toUpperCase()
+            if (!engine) return
+            if (this._hasSignals(scan)) {
+                engines.add(engine)
+            }
+        })
+        return Array.from(engines).sort((a, b) => a.localeCompare(b))
+    }
+
+    _buildLiveAnalysisInputs(scanResult = this.getCurrentScanResult?.() || null, { engineIsRunning = this.getEngineIsRunning() === true } = {}) {
+        const relatedScans = this.getRelatedScansForCoverage(scanResult)
+        const extraEnginesPresent = this._deriveExtraEnginesPresentFromInputs({
+            scanResult,
+            relatedScans,
+            engineIsRunning
+        })
+        return {
+            relatedScans,
+            extraEnginesPresent,
+            relatedScansSignature: this._buildRelatedScansIdentitySignature(relatedScans),
+            extraEnginesSignature: extraEnginesPresent.join(",")
+        }
+    }
+
+    _resolveStableAnalysisInputs(scanResult = this.getCurrentScanResult?.() || null, { force = false, engineIsRunning = this.getEngineIsRunning() === true } = {}) {
+        const live = this._buildLiveAnalysisInputs(scanResult, { engineIsRunning })
+        if (!scanResult || typeof scanResult !== "object") {
+            return live
+        }
+        const isCompleted = !!(scanResult?.finishedAt || scanResult?.finished)
+        if (!isCompleted || engineIsRunning) {
+            return live
+        }
+        const existing = this._getStoredAnalysisContext(scanResult)
+        const needsRefresh = !!force
+            || !existing
+            || existing.relatedScansSignature !== live.relatedScansSignature
+            || existing.extraEnginesSignature !== live.extraEnginesSignature
+        if (needsRefresh) {
+            const snapshot = {
+                relatedScans: deepClone(live.relatedScans),
+                extraEnginesPresent: Array.isArray(live.extraEnginesPresent) ? live.extraEnginesPresent.slice() : [],
+                relatedScansSignature: live.relatedScansSignature,
+                extraEnginesSignature: live.extraEnginesSignature
+            }
+            this._setFrozenAnalysisContext(scanResult, snapshot)
+            return snapshot
+        }
+        return {
+            relatedScans: deepClone(existing.relatedScans || []),
+            extraEnginesPresent: Array.isArray(existing.extraEnginesPresent) ? existing.extraEnginesPresent.slice() : [],
+            relatedScansSignature: existing.relatedScansSignature || "",
+            extraEnginesSignature: existing.extraEnginesSignature || ""
+        }
+    }
+
     deriveCrossEnginePresence({ scanResult = null, engineIsRunning = this.getEngineIsRunning() === true } = {}) {
         const engines = new Set()
         const currentScan = scanResult && typeof scanResult === "object"
@@ -91,25 +239,42 @@ export class DastAnalysisService {
         return Array.from(engines)
     }
 
+    normalizeRelatedScanCandidate(candidate, { expectedHost = null, engineFallback = null } = {}) {
+        const envelope = this._unwrapStoredScan(candidate)
+        if (!envelope || typeof envelope !== "object") return null
+        if (!this.isCompletedEngineScan(envelope, { isRunning: false, expectedHost })) return null
+        const engine = String(envelope?.engine || engineFallback || "").toUpperCase()
+        if (!engine || engine === "DAST") return null
+        if (!this.scanResultStore?.hydrateScan) {
+            return envelope
+        }
+        const scanId = envelope?.scanId || envelope?.id || null
+        if (scanId) {
+            const existing = this.scanResultStore.getScan?.(scanId)
+            if (existing && typeof existing === "object") {
+                return this.ensureRelatedScanAnalysis(existing)
+            }
+        }
+        const hydrated = this.scanResultStore.hydrateScan(envelope, { engineFallback: engine }) || envelope
+        return this.ensureRelatedScanAnalysis(hydrated)
+    }
+
     getRelatedScansFromApp(scanResult = this.getCurrentScanResult?.() || null) {
         const currentScan = scanResult && typeof scanResult === "object" ? scanResult : null
         const expectedHost = currentScan?.host || null
         const app = this.getAppState?.()
         if (!app || typeof app !== "object") return []
         const candidates = [
-            app?.iast?.scanResult,
-            app?.sast?.scanResult,
-            app?.sca?.scanResult
+            { scan: app?.iast?.scanResult, engine: "IAST" },
+            { scan: app?.sast?.scanResult, engine: "SAST" },
+            { scan: app?.sca?.scanResult, engine: "SCA" }
         ]
-        return candidates.filter((candidate) => {
-            if (!candidate || typeof candidate !== "object") return false
-            const engine = String(candidate?.engine || "").toUpperCase()
-            if (!engine || engine === "DAST") return false
-            return this.isCompletedEngineScan(candidate, {
-                isRunning: false,
-                expectedHost
-            })
-        })
+        return candidates
+            .map(({ scan, engine }) => this.normalizeRelatedScanCandidate(scan, {
+                expectedHost,
+                engineFallback: engine
+            }))
+            .filter(Boolean)
     }
 
     async hydratePersistedRelatedScans(scanResult = this.getCurrentScanResult?.() || null) {
@@ -130,11 +295,11 @@ export class DastAnalysisService {
                 if (!this.isCompletedEngineScan(envelope, { isRunning: false, expectedHost })) continue
                 const scanId = envelope?.scanId || envelope?.id || null
                 if (scanId && this.scanResultStore.getScan(scanId)) {
-                    hydrated.push(this.scanResultStore.getScan(scanId))
+                    hydrated.push(this.ensureRelatedScanAnalysis(this.scanResultStore.getScan(scanId)))
                     continue
                 }
                 const scan = this.scanResultStore.hydrateScan(envelope, { engineFallback: source.engine })
-                if (scan) hydrated.push(scan)
+                if (scan) hydrated.push(this.ensureRelatedScanAnalysis(scan))
             } catch (_) { }
         }
         return hydrated
@@ -243,22 +408,94 @@ export class DastAnalysisService {
         return []
     }
 
+    clearHostState(host) {
+        const hostKey = this.normalizeAnalysisHostKey(host)
+        if (!hostKey) {
+            return {
+                host: "",
+                diffBaseCleared: false,
+                suppressionsCleared: false
+            }
+        }
+
+        let diffBaseCleared = false
+        if (this.diffBases && typeof this.diffBases === "object" && Object.prototype.hasOwnProperty.call(this.diffBases, hostKey)) {
+            delete this.diffBases[hostKey]
+            diffBaseCleared = true
+            this.storage?.setItem?.(this.diffBaseStorageKey, this.diffBases)
+        }
+
+        let suppressionsCleared = false
+        if (this.suppressions && typeof this.suppressions === "object" && Object.prototype.hasOwnProperty.call(this.suppressions, hostKey)) {
+            delete this.suppressions[hostKey]
+            suppressionsCleared = true
+            this.storage?.setItem?.(this.suppressionsStorageKey, this.suppressions)
+        }
+
+        return {
+            host: hostKey,
+            diffBaseCleared,
+            suppressionsCleared
+        }
+    }
+
     buildAnalysisOptions(scanResult = this.getCurrentScanResult?.() || null, { force = false, engineIsRunning = this.getEngineIsRunning() === true } = {}) {
+        const stableInputs = this._resolveStableAnalysisInputs(scanResult, { force, engineIsRunning })
         return {
             force: !!force,
-            extraEnginesPresent: this.deriveCrossEnginePresence({ scanResult, engineIsRunning }),
-            previousAnalysis: this.getPreviousAnalysisBase(scanResult)
+            extraEnginesPresent: stableInputs.extraEnginesPresent,
+            previousAnalysis: this.getPreviousAnalysisBase(scanResult),
+            relatedScans: stableInputs.relatedScans
+        }
+    }
+
+    buildAnalysisMetadata(scanResult, { force = false, engineIsRunning = this.getEngineIsRunning() === true, relatedScans = [], extraEnginesPresent = [] } = {}) {
+        const coverageEngines = Array.isArray(scanResult?.analysis?.coverage?.enginesPresent)
+            ? scanResult.analysis.coverage.enginesPresent
+            : []
+        const relatedScansSignature = this._buildRelatedScansIdentitySignature(relatedScans)
+        const extraEnginesSignature = (Array.isArray(extraEnginesPresent) ? extraEnginesPresent : []).join(",")
+        const enginesPresent = Array.from(new Set([
+            ...coverageEngines,
+            ...(Array.isArray(extraEnginesPresent) ? extraEnginesPresent : [])
+        ].map((engine) => String(engine || "").trim().toUpperCase()).filter(Boolean))).sort((a, b) => a.localeCompare(b))
+        const relatedScanIds = (Array.isArray(relatedScans) ? relatedScans : [])
+            .map((scan) => String(scan?.scanId || "").trim())
+            .filter(Boolean)
+            .sort((a, b) => a.localeCompare(b))
+        let mode = "partial"
+        if (engineIsRunning) {
+            mode = "live"
+        } else if (scanResult?.finishedAt || scanResult?.finished) {
+            mode = "finalized"
+        }
+        return {
+            computedAt: new Date().toISOString(),
+            enginesPresent,
+            relatedScanCount: relatedScanIds.length,
+            relatedScanIds,
+            relatedScansSignature,
+            extraEnginesSignature,
+            mode,
+            forced: !!force
         }
     }
 
     getRelatedScansForCoverage(scanResult = this.getCurrentScanResult?.() || null) {
         if (!scanResult || typeof scanResult !== "object") return []
-        const relatedFromStore = this.scanResultStore?.getRelatedScansForAnalysis?.({
+        const expectedHost = scanResult?.host || null
+        const relatedFromStoreRaw = this.scanResultStore?.getRelatedScansForAnalysis?.({
             scanId: scanResult?.scanId || null,
             host: scanResult?.host || null,
             tabId: scanResult?.tabId,
             engine: scanResult?.engine || "DAST"
         }) || []
+        const relatedFromStore = relatedFromStoreRaw
+            .map((scan) => this.normalizeRelatedScanCandidate(scan, {
+                expectedHost,
+                engineFallback: scan?.engine || null
+            }))
+            .filter(Boolean)
         const relatedFromApp = this.getRelatedScansFromApp(scanResult)
         const merged = new Map()
         ;[...relatedFromStore, ...relatedFromApp].forEach((scan) => {
@@ -271,7 +508,7 @@ export class DastAnalysisService {
         return Array.from(merged.values())
     }
 
-    applyMergedCoverage(scanResult) {
+    applyMergedCoverage(scanResult, { relatedScans = null } = {}) {
         if (!scanResult || typeof scanResult !== "object") return scanResult
         const analysis = scanResult.analysis && typeof scanResult.analysis === "object"
             ? scanResult.analysis
@@ -279,15 +516,37 @@ export class DastAnalysisService {
         analysis.coverage = buildHostCoverageAnalysis({
             primaryScan: scanResult,
             primaryCoverage: analysis.coverage || {},
-            relatedScans: this.getRelatedScansForCoverage(scanResult)
+            relatedScans: Array.isArray(relatedScans) ? relatedScans : this.getRelatedScansForCoverage(scanResult)
         })
         return scanResult
     }
 
     applyAnalysis(scanResult, { force = false, engineIsRunning = this.getEngineIsRunning() === true } = {}) {
         if (!scanResult || typeof scanResult !== "object") return scanResult
-        applyScanAnalysis(scanResult, this.buildAnalysisOptions(scanResult, { force, engineIsRunning }))
-        this.applyMergedCoverage(scanResult)
+        if (!force && !engineIsRunning && this.hasCurrentAnalysis(scanResult)) {
+            const storedContext = this._getStoredAnalysisContext(scanResult)
+            if (storedContext) {
+                const liveInputs = this._buildLiveAnalysisInputs(scanResult, { engineIsRunning })
+                if (
+                    storedContext.relatedScansSignature === liveInputs.relatedScansSignature
+                    && storedContext.extraEnginesSignature === liveInputs.extraEnginesSignature
+                ) {
+                    return scanResult
+                }
+            }
+        }
+        const options = this.buildAnalysisOptions(scanResult, { force, engineIsRunning })
+        applyScanAnalysis(scanResult, options)
+        this.applyMergedCoverage(scanResult, { relatedScans: options.relatedScans })
+        if (!scanResult.analysis || typeof scanResult.analysis !== "object") {
+            scanResult.analysis = {}
+        }
+        scanResult.analysis.meta = this.buildAnalysisMetadata(scanResult, {
+            force,
+            engineIsRunning,
+            relatedScans: options.relatedScans,
+            extraEnginesPresent: options.extraEnginesPresent
+        })
         this.rememberAnalysisDiffBase(scanResult)
         return scanResult
     }

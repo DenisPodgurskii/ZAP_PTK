@@ -6717,7 +6717,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "source_artifacts",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -7321,7 +7327,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "finding",
+            "reconKind": "error_disclosure",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -7717,7 +7729,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "secret_leads",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -7760,7 +7778,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "outputKind": "finding",
+                "reconKind": "secret_exposure",
+                "uiSurface": "recon"
+              }
+            }
           }
         },
         {
@@ -7846,7 +7870,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "outputKind": "finding",
+                "reconKind": "secret_exposure",
+                "uiSurface": "recon"
+              }
+            }
           }
         },
         {
@@ -7889,7 +7919,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "outputKind": "finding",
+                "reconKind": "secret_exposure",
+                "uiSurface": "recon"
+              }
+            }
           }
         },
         {
@@ -8104,7 +8140,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "outputKind": "finding",
+                "reconKind": "secret_exposure",
+                "uiSurface": "recon"
+              }
+            }
           }
         }
       ]
@@ -8157,7 +8199,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "api_inventory",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -8547,7 +8595,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "metadata_inventory",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -8814,7 +8868,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "finding",
+            "reconKind": "token_exposure",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -9120,7 +9180,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "parameter_leads",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -9612,7 +9678,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "environment_hints",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -9741,7 +9813,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "presentation": {
+                  "aggregate": "scan"
+                }
+              }
+            }
           }
         },
         {
@@ -9837,7 +9915,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "auth_surface",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -10163,7 +10247,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "cache_privacy",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {
@@ -10345,7 +10435,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "presentation": {
+                  "aggregate": "scan"
+                }
+              }
+            }
           }
         },
         {
@@ -10492,7 +10588,13 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {}
+        "extensions": {
+          "ptk": {
+            "outputKind": "recon",
+            "reconKind": "route_inventory",
+            "uiSurface": "recon"
+          }
+        }
       },
       "attacks": [
         {

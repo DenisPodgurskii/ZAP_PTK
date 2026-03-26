@@ -3,6 +3,13 @@ import { normalizeKey, resolveCategory as mapCategory } from "./taxonomy.js"
 function extractMetaValue(source, field, { allowDirectFallback = false } = {}) {
     if (!source || typeof source !== "object") return null
     if (source.metadata && typeof source.metadata === "object") {
+        const taxonomy = source.metadata.taxonomy
+        if (taxonomy && typeof taxonomy === "object") {
+            const taxonomyValue = taxonomy[field]
+            if (taxonomyValue !== undefined && taxonomyValue !== null) {
+                return taxonomyValue
+            }
+        }
         const nested = source.metadata[field]
         if (nested !== undefined && nested !== null) {
             return nested

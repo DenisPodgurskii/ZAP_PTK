@@ -47,6 +47,8 @@ export class CandidateRunStore {
             summary: payload?.summary || existing?.summary || null,
             observations: Array.isArray(payload?.observations) ? payload.observations : (existing?.observations || []),
             artifacts: payload?.artifacts || existing?.artifacts || null,
+            sessionProfile: payload?.sessionProfile || existing?.sessionProfile || null,
+            objectSwap: payload?.objectSwap || existing?.objectSwap || null,
             error: payload?.error || existing?.error || null,
             updatedAt: new Date().toISOString()
         }
@@ -76,6 +78,8 @@ export class CandidateRunStore {
             summary: job?.summary || existing?.summary || null,
             observations: Array.isArray(job?.observations) ? job.observations : (existing?.observations || []),
             artifacts: job?.artifacts || existing?.artifacts || null,
+            sessionProfile: job?.sessionProfile || existing?.sessionProfile || null,
+            objectSwap: job?.objectSwap || existing?.objectSwap || null,
             error: job?.error || existing?.error || null
         })
     }

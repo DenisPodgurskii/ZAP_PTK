@@ -31,8 +31,56 @@ import {
   buildSastProgressSnapshot,
   createSastProgressState,
 } from "./sast/sast_progress.js";
+import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js";
 
 const worker = self;
+
+async function refreshFinishedDastAnalysisIfNeeded() {
+  const dast = worker?.ptk_app?.dast || worker?.ptk_app?.rattacker;
+  if (!dast || typeof dast !== "object") return;
+  if (dast?.engine?.isRunning === true) return;
+  const scanResult = dast?.scanResult;
+  if (!(scanResult?.finishedAt || scanResult?.finished)) return;
+  try {
+    await dast.analysisService?.hydratePersistedRelatedScans?.(scanResult);
+    if (typeof dast._applyAnalysis === "function") {
+      dast._applyAnalysis(scanResult, true);
+    }
+    await dast._flushPersistScanResult?.();
+  } catch (_) { }
+}
+
+function getPortalApiKey() {
+  return String(worker?.ptk_app?.settings?.profile?.api_key || "").trim();
+}
+
+function getSastPolicyState() {
+  return portalPolicyRuntimeStore.getState("SAST");
+}
+
+function getSelectedSastPolicy() {
+  return portalPolicyRuntimeStore.getSelectedPolicy("SAST");
+}
+
+function getSastRulepackSelection() {
+  return portalPolicyRuntimeStore.getRulepackSelection("SAST");
+}
+
+function hasRenderableSastScanData(scanResult = {}) {
+  if (!scanResult || typeof scanResult !== "object") return false;
+  if (Array.isArray(scanResult.findings) && scanResult.findings.length > 0) return true;
+  const items = scanResult.items;
+  if (Array.isArray(items) && items.length > 0) return true;
+  if (items && typeof items === "object" && Object.keys(items).length > 0) return true;
+  const artifacts = scanResult?.codeArtifacts?.sast;
+  if (artifacts && typeof artifacts === "object") {
+    return Object.values(artifacts).some((value) => Array.isArray(value) && value.length > 0);
+  }
+  return false;
+}
+
+const IMPORT_TRANSFER_TTL_MS = 10 * 60 * 1000;
+const IMPORT_TRANSFER_MAX_ENTRIES = 2;
 
 export class ptk_sast {
   constructor(settings) {
@@ -93,10 +141,77 @@ export class ptk_sast {
       startHeartbeat: this.sessionCoordinator.startHeartbeat.bind(this.sessionCoordinator),
       stopHeartbeat: this.sessionCoordinator.stopHeartbeat.bind(this.sessionCoordinator)
     });
+    this.importTransfers = new Map();
     this.resetScanResult();
 
     this.addMessageListeners();
     this.transport.ensureFirefoxWorker();
+  }
+
+  _cleanupImportTransfers(now = Date.now()) {
+    for (const [id, entry] of this.importTransfers.entries()) {
+      if (!entry || Number(entry.expiresAt || 0) <= now) {
+        this.importTransfers.delete(id);
+      }
+    }
+  }
+
+  _enforceImportTransferLimit() {
+    if (this.importTransfers.size <= IMPORT_TRANSFER_MAX_ENTRIES) return;
+    const sorted = Array.from(this.importTransfers.entries()).sort((a, b) => {
+      const left = Number(a?.[1]?.createdAt || 0);
+      const right = Number(b?.[1]?.createdAt || 0);
+      return left - right;
+    });
+    while (sorted.length && this.importTransfers.size > IMPORT_TRANSFER_MAX_ENTRIES) {
+      const oldest = sorted.shift();
+      if (oldest?.[0]) this.importTransfers.delete(oldest[0]);
+    }
+  }
+
+  _normalizeImportChunk(chunk) {
+    if (chunk instanceof Uint8Array) return chunk;
+    if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+    if (ArrayBuffer.isView(chunk)) {
+      return new Uint8Array(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+    }
+    if (Array.isArray(chunk)) return Uint8Array.from(chunk);
+    if (chunk && typeof chunk === "object") return Uint8Array.from(Object.values(chunk));
+    return new Uint8Array(0);
+  }
+
+  _createImportTransfer(fileMeta = {}) {
+    const now = Date.now();
+    const size = Number(fileMeta?.size || 0);
+    const chunkCount = Number(fileMeta?.chunkCount || 0);
+    const importId = `sast-import-${now}-${Math.random().toString(36).slice(2, 10)}`;
+    const entry = {
+      id: importId,
+      name: String(fileMeta?.name || ""),
+      type: String(fileMeta?.type || ""),
+      size,
+      chunkCount,
+      createdAt: now,
+      expiresAt: now + IMPORT_TRANSFER_TTL_MS,
+      chunks: new Array(chunkCount).fill(null),
+      receivedChunks: 0,
+      receivedBytes: 0
+    };
+    this.importTransfers.set(importId, entry);
+    this._enforceImportTransferLimit();
+    return entry;
+  }
+
+  _getImportTransfer(importId) {
+    this._cleanupImportTransfers();
+    const key = String(importId || "");
+    if (!key) return null;
+    return this.importTransfers.get(key) || null;
+  }
+
+  _deleteImportTransfer(importId) {
+    const key = String(importId || "");
+    if (key) this.importTransfers.delete(key);
   }
 
   get scanResult() {
@@ -420,7 +535,7 @@ export class ptk_sast {
   }
 
   _flushPersistScanResult() {
-    this.resultStore.flushPersist();
+    return this.resultStore.flushPersist();
   }
 
   _ensureStats() {
@@ -557,27 +672,102 @@ export class ptk_sast {
 
   async msg_init(message) {
     await this.init();
-    const defaultModules = await this.getDefaultModules();
-    const count = Array.isArray(this.scanResult?.findings) ? this.scanResult.findings.length : 0;
+    const scanResult = this._cloneScanResultForUi();
     return Promise.resolve({
-      scanResult: this._cloneScanResultForUi(),
+      scanResult,
       isScanRunning: this.isScanRunning,
       progress: this._buildSastProgressSnapshot(),
       activeTab: worker.ptk_app.proxy.activeTab,
-      default_modules: defaultModules
+      policyState: getSastPolicyState(),
+      rulepackSelection: getSastRulepackSelection()
+    });
+  }
+
+  async msg_get_default_modules(message) {
+    return Promise.resolve({
+      success: true,
+      default_modules: await this.getDefaultModules(await loadRulepack("SAST")),
+      policyState: getSastPolicyState(),
+      rulepackSelection: getSastRulepackSelection()
     });
   }
 
   async msg_reset(message) {
     await this.reset();
-    const defaultModules = await this.getDefaultModules();
     return Promise.resolve({
       scanResult: this._cloneScanResultForUi(),
       isScanRunning: this.isScanRunning,
       progress: this._buildSastProgressSnapshot(),
       activeTab: worker.ptk_app.proxy.activeTab,
-      default_modules: defaultModules
+      policyState: getSastPolicyState(),
+      rulepackSelection: getSastRulepackSelection()
     });
+  }
+
+  async msg_get_policy_state(message) {
+    return Promise.resolve({
+      success: true,
+      policyState: getSastPolicyState(),
+      rulepackSelection: getSastRulepackSelection()
+    });
+  }
+
+  async msg_load_policy_metadata(message) {
+    const apiKey = getPortalApiKey();
+    if (!apiKey) {
+      return {
+        success: false,
+        error: "missing_api_key",
+        policyState: getSastPolicyState()
+      };
+    }
+    try {
+      const policyState = await portalPolicyRuntimeStore.loadMetadata({ apiKey, engine: "SAST" });
+      return {
+        success: true,
+        policyState
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err?.message || String(err),
+        policyState: getSastPolicyState()
+      };
+    }
+  }
+
+  async msg_select_policy(message) {
+    try {
+      const apiKey = getPortalApiKey();
+      const policyState = await portalPolicyRuntimeStore.selectPolicy({
+        engine: "SAST",
+        policyId: message?.policyId,
+        policyName: message?.policyName || null,
+        apiKey: apiKey || null
+      });
+      return {
+        success: true,
+        policyState,
+        rulepackSelection: getSastRulepackSelection(),
+        default_modules: await this.getDefaultModules(await loadRulepack("SAST"))
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err?.message || String(err),
+        policyState: getSastPolicyState()
+      };
+    }
+  }
+
+  async msg_clear_policy(message) {
+    const policyState = portalPolicyRuntimeStore.clearPolicy("SAST");
+    return {
+      success: true,
+      policyState,
+      rulepackSelection: getSastRulepackSelection(),
+      default_modules: await this.getDefaultModules(await loadRulepack("SAST"))
+    };
   }
 
   async msg_loadfile(message) {
@@ -587,6 +777,90 @@ export class ptk_sast {
       return Promise.reject(new Error("Wrong format or empty scan result"));
     }
     return this.msg_save({ json: JSON.stringify(parsed.json) });
+  }
+
+  async msg_loadfile_init(message) {
+    const fileMeta = message?.fileMeta || {};
+    const size = Number(fileMeta?.size || 0);
+    const chunkCount = Number(fileMeta?.chunkCount || 0);
+    if (!size || size <= 0 || !chunkCount || chunkCount <= 0) {
+      throw new Error("Invalid file payload.");
+    }
+    this._cleanupImportTransfers();
+    const entry = this._createImportTransfer(fileMeta);
+    return {
+      success: true,
+      importId: entry.id,
+      chunkCount: entry.chunkCount,
+      size: entry.size
+    };
+  }
+
+  async msg_loadfile_chunk(message) {
+    const entry = this._getImportTransfer(message?.importId);
+    if (!entry) {
+      throw new Error("Import transfer expired.");
+    }
+    const index = Number(message?.index);
+    if (!Number.isInteger(index) || index < 0 || index >= entry.chunkCount) {
+      throw new Error("Invalid file payload.");
+    }
+    const normalized = this._normalizeImportChunk(message?.chunk);
+    if (!normalized?.byteLength) {
+      throw new Error("Invalid file payload.");
+    }
+    const previous = entry.chunks[index];
+    if (previous?.byteLength) {
+      entry.receivedBytes -= previous.byteLength;
+    } else {
+      entry.receivedChunks += 1;
+    }
+    entry.chunks[index] = normalized;
+    entry.receivedBytes += normalized.byteLength;
+    entry.expiresAt = Date.now() + IMPORT_TRANSFER_TTL_MS;
+    return {
+      success: true,
+      importId: entry.id,
+      index,
+      receivedChunks: entry.receivedChunks,
+      receivedBytes: entry.receivedBytes
+    };
+  }
+
+  async msg_loadfile_finish(message) {
+    const entry = this._getImportTransfer(message?.importId);
+    if (!entry) {
+      throw new Error("Import transfer expired.");
+    }
+    try {
+      if (entry.receivedChunks !== entry.chunkCount || entry.chunks.some((chunk) => !chunk?.byteLength)) {
+        throw new Error("Incomplete file payload.");
+      }
+      const totalBytes = entry.chunks.reduce((sum, chunk) => sum + Number(chunk?.byteLength || 0), 0);
+      const combined = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of entry.chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      const parsed = await parseUploadedScanFile({
+        name: entry.name,
+        type: entry.type,
+        size: entry.size || combined.byteLength,
+        bytes: Array.from(combined)
+      });
+      if (!parsed?.ok || !parsed?.json) {
+        throw new Error("Wrong format or empty scan result");
+      }
+      return this.msg_save({ json: JSON.stringify(parsed.json) });
+    } finally {
+      this._deleteImportTransfer(entry.id);
+    }
+  }
+
+  async msg_release_import(message) {
+    this._deleteImportTransfer(message?.importId);
+    return { success: true };
   }
 
   async msg_save(message) {
@@ -614,10 +888,10 @@ export class ptk_sast {
   async msg_run_bg_scan(message) {
     try {
       const scanStrategyRaw = message.scanStrategy ?? message.policy;
-      const opts = {
+      const opts = await this._resolveSastRunOptions(Object.assign({}, (message?.opts && typeof message.opts === "object") ? message.opts : {}, {
         pages: Array.isArray(message.pages) ? message.pages : null,
         spaDelayMs: message.spaDelayMs || null,
-      };
+      }));
 
       await this.runBackgroundScan(message.tabId, message.host, scanStrategyRaw, opts);
       const defaultModules = await this.getDefaultModules();
@@ -636,8 +910,8 @@ export class ptk_sast {
     }
   }
 
-  msg_stop_bg_scan(message) {
-    this.stopBackgroundScan();
+  async msg_stop_bg_scan(message) {
+    await this.stopBackgroundScan();
     return Promise.resolve({
       scanResult: this._cloneScanResultForUi(),
       isScanRunning: this.isScanRunning,
@@ -650,6 +924,13 @@ export class ptk_sast {
   }
 
   async msg_save_scan(message) {
+    if (!Array.isArray(this.scanResult?.findings) || this.scanResult.findings.length === 0) {
+      const stored = await ptk_storage.getItem(this.storageKey);
+      if (stored && Object.keys(stored).length) {
+        this.scanResult = this._normalizeEnvelope(this._unwrapStoredScanResult(stored));
+        this._seedRulesIndexFromFindings();
+      }
+    }
     return this.portalClient.saveScan({
       scanResult: this.scanResult,
       projectId: message?.projectId || null
@@ -731,10 +1012,6 @@ export class ptk_sast {
       this._flushPersistScanResult();
     }
     return response;
-  }
-
-  async msg_delete_scan_by_id(message) {
-    return this.portalClient.deleteScanById({ scanId: message?.scanId });
   }
 
   buildPortalUrl(endpoint, profile) {
@@ -829,7 +1106,35 @@ export class ptk_sast {
     }
   }
 
-  stopBackgroundScan(opts = {}) {
+  async _resolveSastRunOptions(opts = {}) {
+    const effectiveOpts = Object.assign({}, opts || {});
+    if (effectiveOpts.rulepack && typeof effectiveOpts.rulepack === "object") {
+      return effectiveOpts;
+    }
+    const explicitPolicyId = String(effectiveOpts.policyId || "").trim();
+    const selectedPolicy = getSelectedSastPolicy();
+    const selectedPolicyId = String(selectedPolicy?.id || "").trim();
+    const shouldUsePortal = effectiveOpts.preferPortal === true || !!explicitPolicyId || !!selectedPolicyId;
+    if (!shouldUsePortal) {
+      delete effectiveOpts.preferPortal;
+      delete effectiveOpts.policyId;
+      delete effectiveOpts.policyName;
+      return effectiveOpts;
+    }
+    const apiKey = getPortalApiKey();
+    if (!apiKey) {
+      const err = new Error("missing_api_key");
+      err.code = "missing_api_key";
+      throw err;
+    }
+    effectiveOpts.preferPortal = true;
+    effectiveOpts.policyId = explicitPolicyId || selectedPolicyId;
+    effectiveOpts.policyName = effectiveOpts.policyName || selectedPolicy?.name || null;
+    effectiveOpts.apiKey = apiKey;
+    return effectiveOpts;
+  }
+
+  async stopBackgroundScan(opts = {}) {
     const discardResults = !!opts?.discardResults;
     const scanId = this.scanResult?.scanId || null;
     if (scanId) {
@@ -849,7 +1154,7 @@ export class ptk_sast {
     this.scanBus = null;
     if (discardResults) {
       this.removeListeners();
-      return;
+      return this.scanResult;
     }
     const findingsCount = Array.isArray(this.scanResult?.findings) ? this.scanResult.findings.length : 0;
     const filesCount = Array.isArray(this.scanResult?.files) ? this.scanResult.files.length : 0;
@@ -862,9 +1167,11 @@ export class ptk_sast {
       try {
         applyScanAnalysis(this.scanResult, { force: true });
       } catch (_) { }
-      this._flushPersistScanResult();
+      await this._flushPersistScanResult();
     }
     this.removeListeners();
+    await refreshFinishedDastAnalysisIfNeeded();
+    return this.scanResult;
   }
 
   _addUnifiedFinding(finding, index = 0) {

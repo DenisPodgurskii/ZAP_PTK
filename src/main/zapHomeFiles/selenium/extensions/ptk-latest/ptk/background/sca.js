@@ -19,6 +19,10 @@ import { ExportChunkStore } from "./export/exportChunkStore.js"
 import { parseDownloadedScanPayload } from "./export/parseDownloadedScanPayload.js"
 import { parseUploadedScanFile } from "./export/parseUploadedScanFile.js"
 import retireModule from "../packages/retire/retire.js"
+import {
+    buildPortalUrl as buildSharedPortalUrl,
+    initializePortalRuntimeConfig
+} from "../common/portalConfig.js"
 
 const worker = self
 
@@ -144,11 +148,6 @@ export class ptk_sca {
     }
 
     _cloneScanResultForUi({ ensureAnalysis = false } = {}) {
-        if (ensureAnalysis && this.scanResult && (this.scanResult.finishedAt || !this.isScanRunning)) {
-            try {
-                applyScanAnalysis(this.scanResult, { force: false })
-            } catch (_) { }
-        }
         try {
             return JSON.parse(JSON.stringify(this.scanResult || {}))
         } catch (_) {
@@ -415,7 +414,7 @@ export class ptk_sca {
     async msg_init(message) {
         await this.init()
         return Promise.resolve({
-            scanResult: this._cloneScanResultForUi({ ensureAnalysis: true }),
+            scanResult: this._cloneScanResultForUi({ ensureAnalysis: false }),
             isScanRunning: this.isScanRunning,
             activeTab: worker.ptk_app.proxy.activeTab
         })
@@ -473,12 +472,13 @@ export class ptk_sca {
     }
 
     async msg_get_projects(message) {
+        await initializePortalRuntimeConfig()
         const profile = worker.ptk_app.settings.profile || {}
         const apiKey = profile?.api_key
         if (!apiKey) {
             return { success: false, json: { message: "No API key found" } }
         }
-        const url = this.buildPortalUrl(profile.projects_endpoint, profile)
+        const url = this.buildPortalUrl("/projects")
         if (!url) {
             return { success: false, json: { message: "Portal endpoint is not configured." } }
         }
@@ -487,6 +487,7 @@ export class ptk_sca {
                 'Authorization': 'Bearer ' + apiKey,
                 'Accept': 'application/json'
             },
+            credentials: 'omit',
             cache: 'no-cache'
         })
             .then(async (httpResponse) => {
@@ -501,15 +502,22 @@ export class ptk_sca {
     }
 
     async msg_save_scan(message) {
+        await initializePortalRuntimeConfig()
         const profile = worker.ptk_app.settings.profile || {}
         const apiKey = profile?.api_key
         if (!apiKey) {
             return { success: false, json: { message: "No API key found" } }
         }
         if (!Array.isArray(this.scanResult?.findings) || !this.scanResult.findings.length) {
+            const stored = await ptk_storage.getItem(this.storageKey) || {}
+            if (stored && Object.keys(stored).length > 0) {
+                this.scanResult = this._normalizeEnvelope(stored)
+            }
+        }
+        if (!Array.isArray(this.scanResult?.findings) || !this.scanResult.findings.length) {
             return { success: false, json: { message: "Scan result is empty" } }
         }
-        const url = this.buildPortalUrl(profile.scans_endpoint, profile)
+        const url = this.buildPortalUrl("/scans")
         if (!url) {
             return { success: false, json: { message: "Portal endpoint is not configured." } }
         }
@@ -540,6 +548,7 @@ export class ptk_sca {
                 'Content-Type': compressed.contentType,
                 'X-PTK-Compression': compressed.compression
             },
+            credentials: 'omit',
             cache: 'no-cache',
             body: compressed.body
         })
@@ -604,12 +613,13 @@ export class ptk_sca {
     }
 
     async msg_download_scans(message) {
+        await initializePortalRuntimeConfig()
         const profile = worker.ptk_app.settings.profile || {}
         const apiKey = profile?.api_key
         if (!apiKey) {
             return { success: false, json: { message: "No API key found" } }
         }
-        const baseUrl = this.buildPortalUrl(profile.scans_endpoint, profile)
+        const baseUrl = this.buildPortalUrl("/scans")
         if (!baseUrl) {
             return { success: false, json: { message: "Portal endpoint is not configured." } }
         }
@@ -632,6 +642,7 @@ export class ptk_sca {
                 'Authorization': 'Bearer ' + apiKey,
                 'Accept': 'application/json'
             },
+            credentials: 'omit',
             cache: 'no-cache'
         })
             .then(async (httpResponse) => {
@@ -646,6 +657,7 @@ export class ptk_sca {
     }
 
     async msg_download_scan_by_id(message) {
+        await initializePortalRuntimeConfig()
         const profile = worker.ptk_app.settings.profile || {}
         const apiKey = profile?.api_key
         if (!apiKey) {
@@ -654,7 +666,7 @@ export class ptk_sca {
         if (!message?.scanId) {
             return { success: false, json: { message: "Scan identifier is required." } }
         }
-        const baseUrl = this.buildPortalUrl(profile.scans_endpoint, profile)
+        const baseUrl = this.buildPortalUrl("/scans")
         if (!baseUrl) {
             return { success: false, json: { message: "Portal endpoint is not configured." } }
         }
@@ -665,6 +677,7 @@ export class ptk_sca {
                 'Authorization': 'Bearer ' + apiKey,
                 'Accept': 'application/gzip, application/x-gzip'
             },
+            credentials: 'omit',
             cache: 'no-cache'
         })
             .then(async (httpResponse) => {
@@ -693,52 +706,8 @@ export class ptk_sca {
         return response
     }
 
-    async msg_delete_scan_by_id(message) {
-        const profile = worker.ptk_app.settings.profile || {}
-        const apiKey = profile?.api_key
-        if (!apiKey) {
-            return { success: false, json: { message: "No API key found" } }
-        }
-        if (!message?.scanId) {
-            return { success: false, json: { message: "Scan identifier is required." } }
-        }
-        const baseUrl = this.buildPortalUrl(profile.storage_endpoint, profile)
-        if (!baseUrl) {
-            return { success: false, json: { message: "Storage endpoint is not configured." } }
-        }
-        const normalizedBase = baseUrl.replace(/\/+$/, "")
-        const deleteUrl = `${normalizedBase}/${encodeURIComponent(message.scanId)}`
-        const response = await fetch(deleteUrl, {
-            method: 'DELETE',
-            headers: {
-                'Authorization': 'Bearer ' + apiKey,
-                'Accept': 'application/json'
-            },
-            cache: 'no-cache'
-        })
-            .then(async (httpResponse) => {
-                const json = await httpResponse.json().catch(() => null)
-                if (!httpResponse.ok) {
-                    return { success: false, json: json || { message: 'Unable to delete scan' } }
-                }
-                return json || { success: true }
-            })
-            .catch(e => ({ success: false, json: { message: 'Error while deleting scan: ' + e.message } }))
-        return response
-    }
-
-    buildPortalUrl(endpoint, profile) {
-        profile = profile || worker.ptk_app.settings.profile || {}
-        const baseUrl = (profile.base_url || profile.api_url || "").trim()
-        const apiBase = (profile.api_base || "").trim()
-        const resolvedEndpoint = (endpoint || "").trim()
-        if (!baseUrl || !apiBase || !resolvedEndpoint) return null
-        const normalizedBase = baseUrl.replace(/\/+$/, "")
-        let normalizedApiBase = apiBase.replace(/\/+$/, "")
-        if (!normalizedApiBase.startsWith('/')) normalizedApiBase = '/' + normalizedApiBase
-        let normalizedEndpoint = resolvedEndpoint
-        if (!normalizedEndpoint.startsWith('/')) normalizedEndpoint = '/' + normalizedEndpoint
-        return normalizedBase + normalizedApiBase + normalizedEndpoint
+    buildPortalUrl(endpoint) {
+        return buildSharedPortalUrl(endpoint)
     }
 
     async ensureRepoReady() {

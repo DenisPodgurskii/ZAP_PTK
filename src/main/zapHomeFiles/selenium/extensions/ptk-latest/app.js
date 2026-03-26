@@ -19,6 +19,8 @@ import { ptk_jwt } from "./ptk/background/jwt.js"
 import { ptk_iast } from "./ptk/background/iast.js"
 import { ptk_sast } from "./ptk/background/sast.js"
 import { ptk_automation } from "./ptk/background/automation.js"
+import { loadDevLocalConfig } from "./ptk/common/devLocalConfig.js"
+import { initializePortalRuntimeConfig } from "./ptk/common/portalConfig.js"
 
 const worker = self
 worker.isFirefox = browser.runtime.getBrowserInfo ? true : false
@@ -71,11 +73,28 @@ export class ptk_app {
     }
 
     async bootstrap() {
+        await initializePortalRuntimeConfig()
+        const devLocal = await loadDevLocalConfig()
+        const devAutomationDefaults = devLocal?.automationEnabled === true
+            ? {
+                automation: {
+                    enable: true
+                }
+            }
+            : null
+        if (devAutomationDefaults) {
+            this.settings.mergeSettings(devAutomationDefaults)
+        }
+
         const result = await browser.storage.local.get('pentestkit8_settings')
         if (result.pentestkit8_settings) {
             this.settings.mergeSettings(result.pentestkit8_settings)
         } else {
             await this.settings.resetSettings()
+            if (devAutomationDefaults) {
+                this.settings.mergeSettings(devAutomationDefaults)
+                await browser.storage.local.set({ "pentestkit8_settings": this.settings.toStorageObject() })
+            }
         }
 
         await this.applyPendingLifecycleFlags()

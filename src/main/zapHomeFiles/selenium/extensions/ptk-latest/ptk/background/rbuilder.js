@@ -843,8 +843,12 @@ export class ptk_request {
                 rbSchema.response.statusCode = trackingRequest.response.statusCode
             } else {
                 rbSchema.response.headers = rh
-                rbSchema.response.statusLine = rbSchema.request.protocolVersion + ' ' + response.statusText
                 rbSchema.response.statusCode = response.status
+                const protocolVersion = (rbSchema.request.protocolVersion || 'HTTP/1.1').trim()
+                const statusText = typeof response.statusText === 'string' ? response.statusText.trim() : ''
+                rbSchema.response.statusLine = statusText
+                    ? `${protocolVersion} ${response.status} ${statusText}`
+                    : `${protocolVersion} ${response.status}`
             }
             const endTime = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
             rbSchema.response.timeMs = Math.round(endTime - startTime)

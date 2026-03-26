@@ -1,7 +1,7 @@
 import CryptoES from "../packages/crypto-es/index.js"
 import { createScanResultEnvelope } from "./common/scanResults.js"
 import normalizeFinding from "./common/findingNormalizer.js"
-import { applyScanAnalysis } from "./analysis/scanAnalysisEngine.js"
+import { ANALYSIS_VERSION, applyScanAnalysis } from "./analysis/scanAnalysisEngine.js"
 import { normalizeEngineName } from "./analysis/canonicalize.js"
 
 function deepClone(value) {
@@ -415,10 +415,12 @@ class ScanResultStore {
         scan._groupMap = groups
     }
 
-    exportScanResult(scanId) {
+    exportScanResult(scanId, { ensureAnalysis = false, forceAnalysis = false } = {}) {
         const scan = this.getScan(scanId)
         if (!scan) return null
-        this._applyAnalysisSafe(scan, { force: false })
+        if (ensureAnalysis && !this._hasCurrentAnalysis(scan)) {
+            this._applyAnalysisSafe(scan, { force: !!forceAnalysis })
+        }
         this._assertFindingIntegrity(scan)
         return deepClone(scan)
     }
@@ -451,6 +453,49 @@ class ScanResultStore {
 
     listScans() {
         return Array.from(this._scans.values()).map(entry => deepClone(entry))
+    }
+
+    findFindingById({ findingId = null, host = null, tabId = null, preferredScanId = null } = {}) {
+        const key = ensureNonEmptyString(findingId)
+        if (!key) return { scan: null, finding: null }
+        const hostKey = normalizeHostKey(host)
+        const preferredId = ensureNonEmptyString(preferredScanId)
+        const hasTabHint = tabId !== undefined && tabId !== null
+
+        const search = ({ enforceHost = true } = {}) => {
+            let bestScan = null
+            let bestFinding = null
+            let bestScore = -1
+            this._scans.forEach((scan, scanId) => {
+                if (!scan || typeof scan !== "object") return
+                if (enforceHost && hostKey && normalizeHostKey(scan?.host) !== hostKey) return
+                let finding = null
+                if (scan._findingIdIndex instanceof Map && scan._findingIdIndex.has(key)) {
+                    const idx = scan._findingIdIndex.get(key)
+                    finding = Array.isArray(scan.findings) ? scan.findings[idx] || null : null
+                }
+                if (!finding) {
+                    const findings = Array.isArray(scan?.findings) ? scan.findings : []
+                    finding = findings.find((entry) => String(entry?.id || "") === key) || null
+                }
+                if (!finding) return
+
+                const preferredBoost = preferredId && String(scanId) === preferredId ? 1_000_000_000_000_000 : 0
+                const tabBoost = hasTabHint && scan?.tabId === tabId ? 1_000_000_000_000 : 0
+                const ts = toTimestamp(scan?.finishedAt || scan?.finished || scan?.startedAt || null)
+                const score = preferredBoost + tabBoost + ts
+                if (score > bestScore) {
+                    bestScore = score
+                    bestScan = scan
+                    bestFinding = finding
+                }
+            })
+            return { scan: bestScan, finding: bestFinding }
+        }
+
+        const preferred = search({ enforceHost: true })
+        if (preferred.scan && preferred.finding) return preferred
+        return search({ enforceHost: false })
     }
 
     getRelatedScansForAnalysis({
@@ -587,6 +632,12 @@ class ScanResultStore {
         } catch (err) {
             try { console.warn("[PTK ScanStore] scan analysis failed", err?.message || err) } catch (_) { }
         }
+    }
+
+    _hasCurrentAnalysis(scan) {
+        if (!scan || typeof scan !== "object") return false
+        if (!(scan?.finishedAt || scan?.finished)) return false
+        return String(scan?.analysis?.version || scan?.analysisVersion || "").trim() === ANALYSIS_VERSION
     }
 }
 

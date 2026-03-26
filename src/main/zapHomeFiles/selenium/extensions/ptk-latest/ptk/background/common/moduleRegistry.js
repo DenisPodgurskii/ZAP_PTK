@@ -1,6 +1,11 @@
 import { loadCanonicalDastRulepack } from "../dast/contract/index.js"
 import { loadCanonicalSastRulepack } from "../sast/contract/index.js"
 import { loadCanonicalIastRulepack } from "../iast/contract/index.js"
+import {
+  buildPortalUrl,
+  getPortalBaseUrl,
+  initializePortalRuntimeConfig
+} from "../../common/portalConfig.js"
 
 const runtimeAPI =
   typeof browser !== "undefined"
@@ -8,12 +13,6 @@ const runtimeAPI =
     : typeof chrome !== "undefined"
       ? chrome
       : null
-
-const RULEPACK_CHILD_KEY = {
-  DAST: "attacks",
-  SAST: "rules",
-  IAST: "rules"
-}
 
 const LOCAL_RULEPACK_PATHS = {
   DAST: "ptk/background/dast/modules/modules.json",
@@ -121,157 +120,172 @@ function normalizePathFragment(value, fallback = "") {
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`
 }
 
-function buildPortalPoliciesUrl(engine, opts = {}) {
-  const baseUrl = String(opts.baseUrl || "").trim().replace(/\/+$/, "")
-  if (!baseUrl) return null
-  let apiBase = normalizePathFragment(opts.apiBase, "/api/v1").replace(/\/+$/, "")
-  const endpoint = normalizePathFragment(opts.policiesEndpoint, "/policies")
-  const url = new URL(`${baseUrl}${apiBase}${endpoint}`)
-  url.searchParams.set("engine", String(engine || "").trim().toUpperCase())
-  url.searchParams.set("includeSelections", "true")
-  if (opts.policyId !== undefined && opts.policyId !== null && opts.policyId !== "") {
-    url.searchParams.set("policyId", String(opts.policyId).trim())
+function normalizePortalEngine(engine) {
+  const normalized = String(engine || "").trim().toUpperCase()
+  if (normalized === "DAST" || normalized === "SAST" || normalized === "IAST") {
+    return normalized
   }
-  return url.toString()
-}
-
-function extractPoliciesFromPortalResponse(engine, payload) {
-  if (!payload || typeof payload !== "object") return []
-  const data = payload.data && typeof payload.data === "object" ? payload.data : payload
-  const bucket = data?.[String(engine || "").toLowerCase()]
-  return Array.isArray(bucket) ? bucket : []
-}
-
-function clonePortalModules(modules, childKey) {
-  if (!Array.isArray(modules)) return []
-  return modules
-    .filter((moduleDef) => moduleDef && typeof moduleDef === "object")
-    .map((moduleDef) => {
-      const next = JSON.parse(JSON.stringify(moduleDef))
-      const children = Array.isArray(next?.[childKey]) ? next[childKey] : []
-      next[childKey] = children
-      return next
-    })
-}
-
-function clonePortalValue(value, fallback = null) {
-  if (value === undefined) return fallback
-  try {
-    return JSON.parse(JSON.stringify(value))
-  } catch (_) {
-    return fallback
-  }
-}
-
-function filterActiveIastRules(modules) {
-  return clonePortalModules(modules, "rules")
-    .map((moduleDef) => {
-      const rules = Array.isArray(moduleDef?.rules) ? moduleDef.rules : []
-      moduleDef.rules = rules
-        .filter((ruleDef) => {
-          const status = String(ruleDef?.status || "").trim().toLowerCase()
-          return !status || status === "active"
-        })
-        .map((ruleDef) => {
-          const next = JSON.parse(JSON.stringify(ruleDef))
-          if (next && typeof next === "object" && !Array.isArray(next)) {
-            delete next.status
-          }
-          return next
-        })
-      return moduleDef
-    })
-    .filter((moduleDef) => Array.isArray(moduleDef?.rules) && moduleDef.rules.length > 0)
-}
-
-function selectPortalPolicy(policies, opts = {}) {
-  if (!Array.isArray(policies) || !policies.length) return null
-
-  const requestedId = opts.policyId !== undefined && opts.policyId !== null && opts.policyId !== ""
-    ? String(opts.policyId).trim()
-    : ""
-  if (requestedId) {
-    return policies.find((policy) => String(policy?.id || "").trim() === requestedId) || null
-  }
-
-  const requestedName = String(opts.policyName || "").trim().toLowerCase()
-  if (requestedName) {
-    return policies.find((policy) => String(policy?.name || "").trim().toLowerCase() === requestedName) || null
-  }
-
-  if (policies.length === 1) return policies[0]
   return null
 }
 
-function buildPortalRulepack(engine, policy) {
-  const childKey = RULEPACK_CHILD_KEY[engine] || "rules"
+function buildPortalPoliciesUrl(opts = {}) {
+  const baseUrl = String(opts.baseUrl || "").trim() || getPortalBaseUrl()
+  return buildPortalUrl(
+    normalizePathFragment(opts.policiesEndpoint, "/policies"),
+    {
+      baseUrl,
+      apiBase: normalizePathFragment(opts.apiBase, "/api/v1")
+    }
+  )
+}
+
+function normalizePortalPolicyId(value) {
+  if (value === undefined || value === null) return ""
+  const trimmed = String(value).trim()
+  if (!trimmed) return ""
+  try {
+    return BigInt(trimmed) > 0n ? trimmed : ""
+  } catch (_) {
+    return ""
+  }
+}
+
+function buildPortalPolicyDownloadUrl(opts = {}) {
+  const basePoliciesUrl = buildPortalPoliciesUrl(opts)
+  if (!basePoliciesUrl) return null
+  const policyId = normalizePortalPolicyId(opts.policyId)
+  if (!policyId) return null
+  return new URL(`${basePoliciesUrl.replace(/\/+$/, "")}/${encodeURIComponent(policyId)}`).toString()
+}
+
+function normalizePortalMetadataResponse(payload) {
+  const data = payload && typeof payload === "object" && payload.data && typeof payload.data === "object"
+    ? payload.data
+    : payload
+  return {
+    dast: Array.isArray(data?.dast) ? data.dast : [],
+    sast: Array.isArray(data?.sast) ? data.sast : [],
+    iast: Array.isArray(data?.iast) ? data.iast : []
+  }
+}
+
+async function parsePortalResponseBody(response) {
+  if (!response) return null
+  const text = await response.text().catch(() => "")
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch (_) {
+    return { message: text }
+  }
+}
+
+function buildPortalRequestError(defaultCode, response, payload = null) {
+  const errorCode = String(payload?.error || defaultCode || "portal_request_failed").trim()
+  const errorMessage = String(payload?.message || errorCode).trim() || errorCode
+  const err = new Error(errorMessage)
+  err.code = errorCode
+  err.status = Number(response?.status || 0) || null
+  err.portalMessage = errorMessage
+  return err
+}
+
+function normalizePortalRulepack(engine, rulepack, policyId = null) {
   const engineName = String(engine || "").toUpperCase()
-  const modules = engineName === "IAST"
-    ? filterActiveIastRules(policy?.modules)
-    : clonePortalModules(policy?.modules, childKey)
-  const customModules = engineName === "SAST"
-    ? clonePortalModules(policy?.custom_modules, childKey)
-    : []
-  const effectiveModules = engineName === "SAST"
-    ? (modules.length ? modules : customModules)
-    : modules
-  if (!effectiveModules.length) return null
-  const baseRulepack = {
-    schema: engineName === "SAST" ? "ptk-sast-rulepack/v1" : "ptk-modules-v1",
-    engine,
-    version: 1,
-    policy: {
-      id: policy?.id ? String(policy.id) : null,
-      name: policy?.name || null,
-      description: policy?.description || null,
-      updated_at: policy?.updated_at || null
-    },
-    modules: effectiveModules
+  if (!rulepack || typeof rulepack !== "object" || Array.isArray(rulepack)) {
+    return null
   }
   if (engineName === "DAST") {
-    return loadCanonicalDastRulepack(baseRulepack, {
-      label: `portal-policy:${policy?.id || policy?.name || "single"}`
+    return loadCanonicalDastRulepack(rulepack, {
+      label: `portal-policy:${policyId || "selected"}`
     })
   }
   if (engineName === "IAST") {
-    return loadCanonicalIastRulepack(baseRulepack, {
-      label: `portal-policy:${policy?.id || policy?.name || "single"}`
+    return loadCanonicalIastRulepack(rulepack, {
+      label: `portal-policy:${policyId || "selected"}`
     })
   }
   if (engineName === "SAST") {
-    if (policy?.policy_model) {
-      baseRulepack.policy_model = String(policy.policy_model)
-    }
-    if (policy?.contract && typeof policy.contract === "object" && !Array.isArray(policy.contract)) {
-      baseRulepack.contract = clonePortalValue(policy.contract, {})
-    }
-    if (policy?.builtin_selection && typeof policy.builtin_selection === "object" && !Array.isArray(policy.builtin_selection)) {
-      baseRulepack.builtin_selection = clonePortalValue(policy.builtin_selection, {})
-    }
-    if (customModules.length) {
-      baseRulepack.custom_modules = customModules
-    }
-    return loadCanonicalSastRulepack(baseRulepack, {
-      label: `portal-policy:${policy?.id || policy?.name || "single"}`
+    return loadCanonicalSastRulepack(rulepack, {
+      label: `portal-policy:${policyId || "selected"}`
     })
   }
-  return baseRulepack
+  return rulepack
 }
 
 /**
- * Load a rulepack from PTK Portal policies API.
- * @param {"DAST"|"SAST"|"IAST"} engine
+ * Fetch portal policy metadata for one engine or all engines.
+ * When `opts.engine` is provided, the response contains only that engine bucket.
  * @param {object} [opts]
  * @returns {Promise<object|null>}
  */
-export async function loadPortalRulepack(engine, opts = {}) {
+export async function fetchPortalPolicyMetadata(opts = {}) {
+  await initializePortalRuntimeConfig()
   const apiKey = String(opts.apiKey || opts.token || "").trim()
   if (!apiKey) return null
 
   const fetchImpl = getFetchImplementation(opts.fetchFn)
   if (!fetchImpl) return null
 
-  const url = buildPortalPoliciesUrl(engine, opts)
+  const url = buildPortalPoliciesUrl(opts)
+  if (!url) return null
+
+  const safeEngine = normalizePortalEngine(opts.engine)
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    Accept: "application/json"
+  }
+  const init = {
+    method: "POST",
+    headers,
+    cache: "no-cache",
+    credentials: "omit"
+  }
+  if (safeEngine) {
+    headers["Content-Type"] = "application/json"
+    init.body = JSON.stringify({ engine: safeEngine })
+  }
+
+  try {
+    const response = await fetchImpl(url, init)
+    if (!response?.ok) {
+      const payload = await parsePortalResponseBody(response)
+      throw buildPortalRequestError("portal_policy_metadata_fetch_failed", response, payload)
+    }
+    const payload = await parsePortalResponseBody(response)
+    const metadata = normalizePortalMetadataResponse(payload)
+    if (!safeEngine) return metadata
+    const engineBucket = String(safeEngine).toLowerCase()
+    return { [engineBucket]: metadata[engineBucket] }
+  } catch (err) {
+    console.warn("[PTK] Failed to fetch portal policy metadata", {
+      engine: safeEngine || null,
+      error: err?.portalMessage || err?.message || String(err),
+      code: err?.code || null,
+      status: err?.status || null
+    })
+    throw err
+  }
+}
+
+/**
+ * Download a rulepack snapshot from PTK Portal policy download API.
+ * @param {"DAST"|"SAST"|"IAST"} engine
+ * @param {object} [opts]
+ * @returns {Promise<object|null>}
+ */
+export async function loadPortalRulepack(engine, opts = {}) {
+  await initializePortalRuntimeConfig()
+  const apiKey = String(opts.apiKey || opts.token || "").trim()
+  if (!apiKey) return null
+
+  const fetchImpl = getFetchImplementation(opts.fetchFn)
+  if (!fetchImpl) return null
+
+  const policyId = normalizePortalPolicyId(opts.policyId)
+  if (!policyId) return null
+
+  const url = buildPortalPolicyDownloadUrl({ ...opts, policyId })
   if (!url) return null
 
   try {
@@ -281,18 +295,15 @@ export async function loadPortalRulepack(engine, opts = {}) {
         Authorization: `Bearer ${apiKey}`,
         Accept: "application/json"
       },
-      cache: "no-cache"
+      cache: "no-cache",
+      credentials: "omit"
     })
     if (!response?.ok) {
-      throw new Error(`portal_rulepack_fetch_failed:${response?.status || "unknown"}`)
+      const payload = await parsePortalResponseBody(response)
+      throw buildPortalRequestError("portal_rulepack_fetch_failed", response, payload)
     }
-    const payload = await response.json().catch(() => null)
-    const policies = extractPoliciesFromPortalResponse(engine, payload)
-    const selected = selectPortalPolicy(policies, opts)
-    if (!selected) {
-      return null
-    }
-    const rulepack = buildPortalRulepack(engine, selected)
+    const payload = await parsePortalResponseBody(response)
+    const rulepack = normalizePortalRulepack(engine, payload, policyId)
     if (!rulepack) {
       return null
     }
@@ -300,9 +311,12 @@ export async function loadPortalRulepack(engine, opts = {}) {
   } catch (err) {
     console.warn("[PTK] Failed to load portal rulepack", {
       engine,
-      error: err?.message || String(err)
+      policyId,
+      error: err?.portalMessage || err?.message || String(err),
+      code: err?.code || null,
+      status: err?.status || null
     })
-    return null
+    throw err
   }
 }
 
@@ -313,7 +327,7 @@ export async function loadPortalRulepack(engine, opts = {}) {
  * @returns {Promise<object>}
  */
 export async function loadRulepack(engine, opts = {}) {
-  if (opts?.preferPortal) {
+  if (opts?.preferPortal && normalizePortalPolicyId(opts.policyId)) {
     const portalRulepack = await loadPortalRulepack(engine, opts)
     if (portalRulepack) {
       return portalRulepack

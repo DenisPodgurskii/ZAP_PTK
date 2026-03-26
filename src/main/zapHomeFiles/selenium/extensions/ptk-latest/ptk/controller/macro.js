@@ -57,12 +57,23 @@ export class ptk_controller_macro {
             })
     }
 
-    start(clean_cookie, url) {
+    start(clean_cookie, url, bootstrap = null) {
         return browser.runtime.sendMessage({
             channel: "ptk_popup2background_recorder",
             type: "start_recording",
             clean_cookie: clean_cookie,
-            url: url
+            url: url,
+            bootstrap
+        }).then(response => {
+            return response
+        })
+    }
+
+    stop(params = {}) {
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_recorder",
+            type: "stop_recording",
+            ...params
         }).then(response => {
             return response
         })
@@ -99,4 +110,3 @@ export class ptk_controller_macro {
     }
 
 }
-

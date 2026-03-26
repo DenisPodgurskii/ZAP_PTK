@@ -6,8 +6,9 @@ export class DastTaskPlanner {
         awaitModulesLoaded = async () => {},
         refreshOastProbeDomains = () => {},
         ensureOastCallbackProbe = () => {},
-        executeOriginal = async () => null,
+        resolveOriginal = async () => null,
         getModules = () => [],
+        shouldPlanModule = () => true,
         moduleRuntimeMode = () => "standard",
         buildSpaTasks = () => [],
         shouldUseBulkAttack = () => false,
@@ -23,8 +24,9 @@ export class DastTaskPlanner {
         this.awaitModulesLoaded = awaitModulesLoaded
         this.refreshOastProbeDomains = refreshOastProbeDomains
         this.ensureOastCallbackProbe = ensureOastCallbackProbe
-        this.executeOriginal = executeOriginal
+        this.resolveOriginal = resolveOriginal
         this.getModules = getModules
+        this.shouldPlanModule = shouldPlanModule
         this.moduleRuntimeMode = moduleRuntimeMode
         this.buildSpaTasks = buildSpaTasks
         this.shouldUseBulkAttack = shouldUseBulkAttack
@@ -42,15 +44,20 @@ export class DastTaskPlanner {
         const rawStr = typeof raw === "object" ? raw.raw : raw
         const rawMeta = typeof raw === "object" ? raw : {}
         const uiUrl = rawMeta.ui_url || rawMeta.uiUrl || null
+        const baseSchemaCache = new Map()
         await this.awaitModulesLoaded()
         this.refreshOastProbeDomains()
         this.ensureOastCallbackProbe()
         const parseOpts = uiUrl ? { ui_url: uiUrl } : undefined
         const schema = ptk_request.parseRawRequest(rawStr, parseOpts)
-        const original = await this.executeOriginal(schema)
+        const modules = Array.isArray(this.getModules()) ? this.getModules() : []
+        const planFingerprint = this.fingerprintFromSchema(schema)
+        const original = await this.resolveOriginal(schema, rawMeta, {
+            modules,
+            planFingerprint
+        })
         if (!original) return null
 
-        const planFingerprint = this.fingerprintFromSchema(schema)
         const plan = {
             id: ptk_utils.attackId(),
             raw,
@@ -60,9 +67,12 @@ export class DastTaskPlanner {
             fingerprint: planFingerprint
         }
 
-        const modules = Array.isArray(this.getModules()) ? this.getModules() : []
         for (const module of modules) {
             if (!Array.isArray(module?.attacks)) continue
+            const modulePlanDecision = this.shouldPlanModule(module, schema, original)
+            if (modulePlanDecision === false || modulePlanDecision?.allowed === false) {
+                continue
+            }
             const moduleAllowsStrategyBulk = this.shouldUseBulkAttack(module, { resolveOnly: true })
             for (const attackDef of module.attacks) {
                 let attack = null
@@ -84,10 +94,16 @@ export class DastTaskPlanner {
                     }
 
                     if (module.type === "active") {
-                        const baseSchema = ptk_request.parseRawRequest(original.request.raw, attack.action?.options)
+                        const attackOptions = attack.action?.options
+                        const baseSchemaKey = JSON.stringify(attackOptions || null)
+                        let baseSchema = baseSchemaCache.get(baseSchemaKey)
+                        if (!baseSchema) {
+                            baseSchema = ptk_request.parseRawRequest(original.request.raw, attackOptions)
+                            baseSchemaCache.set(baseSchemaKey, baseSchema)
+                        }
                         const attackMode = this.shouldUseBulkAttack(module, { moduleAllowsStrategyBulk })
-                            ? { mode: "bulk" }
-                            : undefined
+                            ? { mode: "bulk", prepared: true }
+                            : { prepared: true }
                         const attackRequests = module.buildAttacks(baseSchema, attack, attackMode)
                         this.appendSelectorDiagnostics(module, attack, original)
                         for (const req of attackRequests) {

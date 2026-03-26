@@ -48,8 +48,8 @@ export class DastScanResultLifecycleService {
         }
         const hydrated = this.scanStore?.hydrateScan?.(scanResult, { engineFallback: "DAST" }) || null
         const finishedAt = scanResult.finishedAt || scanResult.finished || null
-        if ((markFinished || finishedAt) && this.scanStore?.setFinished) {
-            this.scanStore.setFinished(scanId, finishedAt || new Date().toISOString())
+        if ((markFinished || finishedAt) && hydrated && typeof hydrated === "object") {
+            hydrated.finishedAt = finishedAt || new Date().toISOString()
         }
         return this.scanStore?.getScan?.(scanId) || hydrated || cloneValue(scanResult)
     }
@@ -57,12 +57,13 @@ export class DastScanResultLifecycleService {
     exportScanSnapshot(scanResult, { sync = true, markFinished = false, dropTabId = false } = {}) {
         if (!scanResult || typeof scanResult !== "object") return null
         const scanId = scanResult.scanId || null
+        let syncedScan = scanResult
         if (sync) {
-            this.syncScanResult(scanResult, { markFinished })
+            syncedScan = this.syncScanResult(scanResult, { markFinished }) || scanResult
         }
-        const source = scanId && this.scanStore?.exportScanResult
-            ? this.scanStore.exportScanResult(scanId)
-            : cloneValue(scanResult)
+        const source = scanId
+            ? cloneValue(this.scanStore?.getScan?.(scanId) || syncedScan || scanResult)
+            : cloneValue(syncedScan || scanResult)
         if (!source || typeof source !== "object") return source
         if (dropTabId) {
             delete source.tabId

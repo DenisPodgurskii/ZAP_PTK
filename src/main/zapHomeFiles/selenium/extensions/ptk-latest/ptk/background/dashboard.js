@@ -6,9 +6,25 @@ import { analyzeHeadersForTab } from "./headerAnalysis/headerAnalyzer.js"
 import { setWappalyzerTechnologiesForHeaders } from "./headerAnalysis/wappalyzerHeadersEvaluator.js"
 import { setCveTechnologiesForHeaders } from "./headerAnalysis/cveHeadersEvaluator.js"
 import { ptk_utils, ptk_storage } from "./utils.js"
+import { portalPolicyRuntimeStore, normalizePortalPolicyEngine } from "./common/portalPolicyRuntimeStore.js"
+import {
+    buildPortalUrl as buildSharedPortalUrl,
+    initializePortalRuntimeConfig
+} from "../common/portalConfig.js"
 
 
 const worker = self
+
+function getPortalApiKey() {
+    return String(worker?.ptk_app?.settings?.profile?.api_key || '').trim()
+}
+
+function buildDashboardPortalUrl(endpoint, profile = {}) {
+    return buildSharedPortalUrl(endpoint, {
+        baseUrl: profile?.base_url || profile?.api_url || profile?.baseUrl || null,
+        apiBase: profile?.api_base || profile?.apiBase || undefined
+    })
+}
 
 export class ptk_dashboard {
     constructor() {
@@ -212,12 +228,19 @@ export class ptk_dashboard {
         try {
             const activeUrl = worker.ptk_app?.proxy?.activeTab?.url || null
             const host = activeUrl ? new URL(activeUrl).host : null
-            if (includeStored && (!scans.exportable.any || !this._hasAnyScanForHost(host))) {
+            if (includeStored) {
                 stored = await this._loadStoredScanResults()
             }
             scans.hasAnyScanForHost = this._hasAnyScanForHost(host, stored || {})
-            if (!scans.exportable.any && stored) {
-                scans.exportable = this._buildExportableFlags(stored)
+            if (stored) {
+                const storedExportable = this._buildExportableFlags(stored)
+                scans.exportable = {
+                    dast: !!(scans.exportable?.dast || storedExportable.dast),
+                    iast: !!(scans.exportable?.iast || storedExportable.iast),
+                    sast: !!(scans.exportable?.sast || storedExportable.sast),
+                    sca: !!(scans.exportable?.sca || storedExportable.sca)
+                }
+                scans.exportable.any = Object.values(scans.exportable).some(Boolean)
             }
         } catch (_) {
             scans.hasAnyScanForHost = false
@@ -809,6 +832,42 @@ export class ptk_dashboard {
         }
     }
 
+    async _refreshSelectedPortalPolicies(scans = {}, portalSelections = {}) {
+        const apiKey = getPortalApiKey()
+        const enginesToRefresh = []
+        if (scans?.dast) enginesToRefresh.push('DAST')
+        if (scans?.iast) enginesToRefresh.push('IAST')
+        if (scans?.sast) enginesToRefresh.push('SAST')
+        const selectedPolicies = []
+        enginesToRefresh.forEach((engine) => {
+            const selectionKey = String(engine || '').toLowerCase()
+            if (Object.prototype.hasOwnProperty.call(portalSelections || {}, selectionKey)) {
+                const explicitSelection = portalSelections?.[selectionKey]
+                if (explicitSelection?.policyId) {
+                    selectedPolicies.push({
+                        engine,
+                        policyId: explicitSelection.policyId,
+                        policyName: explicitSelection.policyName || null
+                    })
+                } else {
+                    portalPolicyRuntimeStore.clearPolicy(engine)
+                }
+                return
+            }
+            portalPolicyRuntimeStore.clearPolicy(engine)
+        })
+        await Promise.all(selectedPolicies.map(({ engine, policyId, policyName }) => (
+            portalPolicyRuntimeStore.selectPolicy({
+                engine,
+                policyId,
+                policyName,
+                apiKey: apiKey || null
+            })
+        )))
+
+        return true
+    }
+
     async msg_run_bg_scan(message) {
         const requested = []
         if (message.scans.dast) requested.push('dast')
@@ -819,6 +878,21 @@ export class ptk_dashboard {
             await worker.ptk_app.ensureEngines(requested)
         }
 
+        try {
+            await this._refreshSelectedPortalPolicies(
+                message.scans || {},
+                message?.settings?.portalSelections || {}
+            )
+        } catch (err) {
+            return Promise.resolve({
+                success: false,
+                error: err?.message || String(err),
+                scans: this._buildLiveScansState(),
+                skipped: { dast: false, iast: false, sast: false, sca: false },
+                policyState: portalPolicyRuntimeStore.getState()
+            })
+        }
+
         const engines = this._getScanEngines()
         const running = {
             dast: !!engines.dast?.engine?.isRunning,
@@ -827,24 +901,93 @@ export class ptk_dashboard {
             sca: !!engines.sca?.isScanRunning
         }
         const skipped = { dast: false, iast: false, sast: false, sca: false }
+        const dastPortalSelection = portalPolicyRuntimeStore.getRulepackSelection('DAST')
+        const iastPortalSelection = portalPolicyRuntimeStore.getRulepackSelection('IAST')
+        const sastPortalSelection = portalPolicyRuntimeStore.getRulepackSelection('SAST')
 
         if (message.scans.dast) {
             if (running.dast) skipped.dast = true
-            else engines.dast?.runBackgroundScan(message.tabId, message.host, message.domains, message.settings)
+            else {
+                const dastSettings = Object.assign({}, message.settings || {})
+                if (dastPortalSelection?.policyId && !dastSettings.policyId) {
+                    dastSettings.policyId = dastPortalSelection.policyId
+                }
+                if (dastPortalSelection?.policyName && !dastSettings.policyName) {
+                    dastSettings.policyName = dastPortalSelection.policyName
+                }
+                const response = await engines.dast?.msg_run_bg_scan({
+                    tabId: message.tabId,
+                    host: message.host,
+                    domains: message.domains,
+                    settings: dastSettings
+                })
+                if (response?.success === false) {
+                    return Promise.resolve({
+                        success: false,
+                        error: response?.error || 'scan_start_failed',
+                        message: response?.message || response?.error || 'scan_start_failed',
+                        scans: this._buildLiveScansState(),
+                        skipped: { dast: false, iast: false, sast: false, sca: false },
+                        policyState: portalPolicyRuntimeStore.getState()
+                    })
+                }
+            }
         }
         if (message.scans.iast) {
             if (running.iast) skipped.iast = true
-            else engines.iast?.runBackgroundScan(message.tabId, message.host)
+            else {
+                const iastOpts = {}
+                if (iastPortalSelection?.policyId) {
+                    iastOpts.policyId = iastPortalSelection.policyId
+                }
+                if (iastPortalSelection?.policyName) {
+                    iastOpts.policyName = iastPortalSelection.policyName
+                }
+                const response = await engines.iast?.msg_run_bg_scan({
+                    tabId: message.tabId,
+                    host: message.host,
+                    scanStrategy: message.settings?.scanStrategy,
+                    opts: iastOpts
+                })
+                if (response?.success === false) {
+                    return Promise.resolve({
+                        success: false,
+                        error: response?.error || 'scan_start_failed',
+                        message: response?.message || response?.error || 'scan_start_failed',
+                        scans: this._buildLiveScansState(),
+                        skipped: { dast: false, iast: false, sast: false, sca: false },
+                        policyState: portalPolicyRuntimeStore.getState()
+                    })
+                }
+            }
         }
         if (message.scans.sast) {
             if (running.sast) {
                 skipped.sast = true
             } else {
-                engines.sast?.msg_run_bg_scan({
+                const sastOpts = {}
+                if (sastPortalSelection?.policyId) {
+                    sastOpts.policyId = sastPortalSelection.policyId
+                }
+                if (sastPortalSelection?.policyName) {
+                    sastOpts.policyName = sastPortalSelection.policyName
+                }
+                const response = await engines.sast?.msg_run_bg_scan({
                     tabId: message.tabId,
                     host: message.host,
-                    scanStrategy: message.settings.sastScanStrategy ?? message.settings.policy
+                    scanStrategy: message.settings.sastScanStrategy ?? message.settings.policy,
+                    opts: sastOpts
                 })
+                if (response?.success === false) {
+                    return Promise.resolve({
+                        success: false,
+                        error: response?.error || 'scan_start_failed',
+                        message: response?.message || response?.error || 'scan_start_failed',
+                        scans: this._buildLiveScansState(),
+                        skipped: { dast: false, iast: false, sast: false, sca: false },
+                        policyState: portalPolicyRuntimeStore.getState()
+                    })
+                }
             }
         }
         if (message.scans.sca) {
@@ -857,12 +1000,14 @@ export class ptk_dashboard {
         let payload = {}
         try {
             payload = JSON.parse(JSON.stringify({
+                success: true,
                 activeTab: worker.ptk_app?.proxy?.activeTab || null,
                 scans,
-                skipped
+                skipped,
+                policyState: portalPolicyRuntimeStore.getState()
             }))
         } catch (e) {
-            payload = { activeTab: null, scans, skipped }
+            payload = { success: true, activeTab: null, scans, skipped, policyState: portalPolicyRuntimeStore.getState() }
         }
 
         return Promise.resolve(payload)
@@ -870,26 +1015,30 @@ export class ptk_dashboard {
 
     async msg_stop_bg_scan(message) {
         const engines = this._getScanEngines()
-        const stopTasks = []
+        const dastEngine = engines.dast || engines.rattacker || null
+        const siblingStops = []
 
-        if (message.scans.dast && typeof engines.dast?.stopBackgroundScan === 'function') {
-            stopTasks.push(Promise.resolve(engines.dast.stopBackgroundScan({
-                runDeferredSeed: false,
-                waitForIdleBeforeStop: false
-            })))
-        }
         if (message.scans.iast && typeof engines.iast?.stopBackgroundScan === 'function') {
-            stopTasks.push(Promise.resolve(engines.iast.stopBackgroundScan()))
+            siblingStops.push(Promise.resolve().then(() => engines.iast.stopBackgroundScan()).catch(() => { }))
         }
         if (message.scans.sast && typeof engines.sast?.stopBackgroundScan === 'function') {
-            stopTasks.push(Promise.resolve(engines.sast.stopBackgroundScan()))
+            siblingStops.push(Promise.resolve().then(() => engines.sast.stopBackgroundScan()).catch(() => { }))
         }
         if (message.scans.sca && typeof engines.sca?.stopBackgroundScan === 'function') {
-            stopTasks.push(Promise.resolve(engines.sca.stopBackgroundScan()))
+            siblingStops.push(Promise.resolve().then(() => engines.sca.stopBackgroundScan()).catch(() => { }))
         }
 
-        if (stopTasks.length) {
-            await Promise.allSettled(stopTasks)
+        if (siblingStops.length) {
+            await Promise.allSettled(siblingStops)
+        }
+
+        if (message.scans.dast && typeof dastEngine?.stopBackgroundScan === 'function') {
+            try {
+                await dastEngine.stopBackgroundScan({
+                    runDeferredSeed: false,
+                    waitForIdleBeforeStop: false
+                })
+            } catch (_) { }
         }
 
         let scans = this._buildLiveScansState()
@@ -900,7 +1049,21 @@ export class ptk_dashboard {
     async msg_get(message) {
         return Promise.resolve(Object.assign({},
             this,
-            worker.ptk_app.proxy.activeTab))
+            worker.ptk_app.proxy.activeTab,
+            { policyState: portalPolicyRuntimeStore.getState() }))
+    }
+
+    async msg_get_scans(message) {
+        if (message?.tabId) {
+            worker.ptk_app.proxy.setDashboardTab(message.tabId, message.url || '')
+        }
+        const scans = await this._buildDashboardScansState({ includeStored: true })
+        return Promise.resolve({
+            success: true,
+            activeTab: worker.ptk_app.proxy.activeTab,
+            scans,
+            policyState: portalPolicyRuntimeStore.getState()
+        })
     }
 
     async msg_save(message) {
@@ -965,11 +1128,132 @@ export class ptk_dashboard {
                 worker.ptk_app.proxy.activeTab,
                 { privacy: this.privacy },
                 { scans: scans },
+                { policyState: portalPolicyRuntimeStore.getState() },
                 tabData ? { tab: tabData } : {},
                 { hasAnalysisData: !!hasAnalysisData },
                 perTabCache ? { tabCacheUpdatedAt: perTabCache.updatedAt || null } : {}
             )
         }
+    }
+
+    async msg_get_policy_state(message) {
+        return Promise.resolve({
+            success: true,
+            policyState: portalPolicyRuntimeStore.getState()
+        })
+    }
+
+    async msg_get_projects(message) {
+        await initializePortalRuntimeConfig()
+        const profile = worker.ptk_app?.settings?.profile || {}
+        const apiKey = profile?.api_key
+        if (!apiKey) {
+            return Promise.resolve({
+                success: false,
+                error: "missing_api_key",
+                json: { message: "No API key found" }
+            })
+        }
+        const url = buildDashboardPortalUrl("/projects", profile)
+        if (!url) {
+            return Promise.resolve({
+                success: false,
+                error: "portal_not_configured",
+                json: { message: "Portal endpoint is not configured." }
+            })
+        }
+        return fetch(url, {
+            headers: {
+                Authorization: "Bearer " + apiKey,
+                Accept: "application/json"
+            },
+            credentials: "omit",
+            cache: "no-cache"
+        })
+            .then(async (httpResponse) => {
+                const json = await httpResponse.json().catch(() => null)
+                if (httpResponse.ok) {
+                    return { success: true, json }
+                }
+                return { success: false, json: json || { message: "Unable to load projects" } }
+            })
+            .catch((e) => ({ success: false, json: { message: "Error while loading projects: " + e.message } }))
+    }
+
+    async msg_load_policy_metadata(message) {
+        const apiKey = getPortalApiKey()
+        if (!apiKey) {
+            return Promise.resolve({
+                success: false,
+                error: "missing_api_key",
+                policyState: portalPolicyRuntimeStore.getState()
+            })
+        }
+        try {
+            const engine = normalizePortalPolicyEngine(message?.engine)
+            await portalPolicyRuntimeStore.loadMetadata({
+                apiKey,
+                engine: engine || undefined
+            })
+            return {
+                success: true,
+                policyState: portalPolicyRuntimeStore.getState()
+            }
+        } catch (err) {
+            return {
+                success: false,
+                error: err?.code || err?.message || String(err),
+                message: err?.portalMessage || err?.message || String(err),
+                policyState: portalPolicyRuntimeStore.getState()
+            }
+        }
+    }
+
+    async msg_select_policy(message) {
+        const engine = normalizePortalPolicyEngine(message?.engine)
+        if (!engine) {
+            return Promise.resolve({
+                success: false,
+                error: "invalid_policy_engine",
+                policyState: portalPolicyRuntimeStore.getState()
+            })
+        }
+        try {
+            const apiKey = getPortalApiKey()
+            await portalPolicyRuntimeStore.selectPolicy({
+                engine,
+                policyId: message?.policyId,
+                policyName: message?.policyName || null,
+                apiKey: apiKey || null
+            })
+            return {
+                success: true,
+                policyState: portalPolicyRuntimeStore.getState()
+            }
+        } catch (err) {
+            return {
+                success: false,
+                error: err?.code || err?.message || String(err),
+                message: err?.portalMessage || err?.message || String(err),
+                policyState: portalPolicyRuntimeStore.getState()
+            }
+        }
+    }
+
+    async msg_clear_policy(message) {
+        const engine = normalizePortalPolicyEngine(message?.engine)
+        if (!engine) {
+            return Promise.resolve({
+                success: false,
+                error: "invalid_policy_engine",
+                policyState: portalPolicyRuntimeStore.getState()
+            })
+        }
+        portalPolicyRuntimeStore.clearPolicy(engine)
+        return Promise.resolve({
+            success: true,
+            policyState: portalPolicyRuntimeStore.getState()
+        })
     }
 
     async msg_get_full_dashboard(message) {
@@ -1176,11 +1460,24 @@ export class ptk_dashboard {
                 this.tab.headerAnalysisEvidence = headerAnalysis.evidence
                 this.initCookies(result.urls)
 
-                return Object.assign({}, this, worker.ptk_app.proxy.activeTab, { findings: this.tab.findings }, { scans: scans })
+                return Object.assign(
+                    {},
+                    this,
+                    worker.ptk_app.proxy.activeTab,
+                    { findings: this.tab.findings },
+                    { scans: scans },
+                    { policyState: portalPolicyRuntimeStore.getState() }
+                )
             }
         }
 
-        return Object.assign({}, worker.ptk_app.proxy.activeTab, { privacy: this.privacy }, { scans: scans })
+        return Object.assign(
+            {},
+            worker.ptk_app.proxy.activeTab,
+            { privacy: this.privacy },
+            { scans: scans },
+            { policyState: portalPolicyRuntimeStore.getState() }
+        )
     }
 
     msg_analyze(message, tab) {

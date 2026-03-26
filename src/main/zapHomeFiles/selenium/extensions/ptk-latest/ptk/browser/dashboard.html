@@ -65,6 +65,35 @@
       max-width: calc(100vw - 48px) !important;
       width: max-content;
     }
+
+    .ptk-pro-button-icon {
+      width: 18px;
+      height: 18px;
+      object-fit: contain;
+      vertical-align: text-bottom;
+      margin-right: 8px;
+    }
+
+    #index_scans_form .ptk-inline-policy-field {
+      display: block;
+      width: 100%;
+    }
+
+    #index_scans_form .ptk-inline-policy-field>label {
+      display: block;
+      margin: 0 0 0.28571429rem 0 !important;
+      white-space: normal;
+    }
+
+    #index_scans_form .ptk-inline-policy-field>.ui.dropdown,
+    #index_scans_form .ptk-inline-policy-field>select {
+      width: 100% !important;
+    }
+
+    .ui.grid>.row {
+      padding-top: 6px !important;
+      padding-bottom: 6px !important;
+    }
   </style>
 </head>
 
@@ -256,10 +285,45 @@
 </div>
 
 
-<div id="run_scan_dlg" class="ui modal coupled second fullscreen" style="display: none;">
+<div class="ui mini modal coupled second error" id="result_dialog">
+  <i class="close icon"></i>
+  <div class="header" id="result_header"></div>
+  <div class="content">
+    <span id="result_message"></span>
+  </div>
+  <div class="actions">
+    <div class="ui button result_open_settings_btn" style="display:none;">Open Settings</div>
+    <div class="ui approve primary button">OK</div>
+  </div>
+</div>
+
+<div id="upload_scans_modal" class="ui small modal coupled second" style="display: none;">
+  <i class="close icon"></i>
+  <div class="ui header">Select project</div>
+  <div class="content">
+    <form class="ui small form">
+      <div class="field">
+        <label>Portal project</label>
+        <select class="ui dropdown" id="upload_scans_project_select">
+          <option value="">Select a project</option>
+        </select>
+      </div>
+      <div class="ui tiny negative message" id="upload_scans_modal_error" style="display: none;"></div>
+    </form>
+  </div>
+  <div class="actions">
+    <div class="ui button cancel">Cancel</div>
+    <div class="ui primary button approve">Upload scans</div>
+  </div>
+</div>
+
+<div id="run_scan_dlg" class="ui modal coupled first fullscreen" style="display: none;">
   <i class="close icon" style="top:1px;right: 1px;"></i>
 
-
+  <div class="ui primary button" id="load_pro_policies_button" style="display: none; align-items: center; gap: 8px;padding-top: 0;padding-bottom: 0; position: absolute;top:55px; right: 0px; z-index: 3;">
+    <span>Load Pro</span>
+    <img src="assets/images/PTK_PRO_256.png" alt="PTK Pro" class="ui image" style="width: 100px; height: auto;">
+  </div>
   <div class="content">
     <div class="ui message" style="margin: -20px -20px 0px -20px;">
       <p>Are you sure you want to run scan(s) against <span id="scan_host" style="font-weight: 600;"></span>?</p>
@@ -269,11 +333,14 @@
       Reload this tab to enable runtime scans (IAST/SAST). DAST/SCA can still run.
     </div>
 
+    <div id="ptk_pro_policy_validation" class="ui warning message" style="display:none; z-index:3"></div>
+
 
     <form class="ui small form" id="index_scans_form" style="margin-top: 15px;">
       <div class="ui  four column width grid">
         <div class="row" id="dast_scan_row">
           <div class="one wide column dast_scan_control">
+            <div class="ui small header">DAST</div>
           </div>
           <div class="thirteen wide column dast_scan_control">
             <div class="field">
@@ -289,7 +356,7 @@
                 <br />
                 <i>*.domain.com - to scan all subdomains</i>
               </div>
-              <textarea id="scan_domains" style="width: 100%; min-height: 25px;height: 35px;"></textarea>
+              <textarea id="scan_domains" style="width: 70%; min-height: 25px;height: 35px;"></textarea>
             </div>
 
           </div>
@@ -299,7 +366,7 @@
         </div>
         <div class="row">
           <div class="one wide column dast_scan_control">
-            <div class="ui small header">DAST</div>
+
           </div>
           <div class="four wide column dast_scan_control">
             <div class="field">
@@ -310,10 +377,10 @@
               <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
                 <strong>Strategy:</strong> <br />
                 <ul>
-                  <li>Fast – attack all params in one request, stop after first finding per module/URL
+                  <li><b>Fast</b> – attack all params in one request, stop after first finding per module/URL
                   </li>
-                  <li>Smart (recommended) – one param per request, stop after first finding per module/param</li>
-                  <li>Comprehensive – one param per request, report all findings</li>
+                  <li><b>Smart</b> (recommended) – one param per request, stop after first finding per module/param</li>
+                  <li><b>Comprehensive</b> – one param per request, report all findings</li>
                 </ul>
               </div>
               <select id="dast-scan-strategy" name="dastScanStrategy" class="ui dropdown" style="width: 100%;">
@@ -352,15 +419,15 @@
               </div>
               <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
                 <strong>Scan policy:</strong> <br />
-                <i><b>Reconnaissance</b> is the safest default. It focuses on discovery (URLs, parameters, tech signals, passive checks) with a minimal footprint. <b>Active</b> runs exploit-style tests and can generate a lot more requests — use it only when you have permission and the target can handle it.</i>
                 <ul>
-                  <li><b>Reconnaissance</b> if you’re exploring a new target, doing bug bounty recon, or scanning “live” production apps and want low noise</li>
-                  <li><b>Active</b> for dev/test environments, dedicated staging, or authorized pentests where you want to validate real vulnerabilities</li>
+                  <li><b>Recon (system)</b> - focuses on discovery (URLs, parameters, tech signals, passive checks) with a minimal footprint</li>
+                  <li><b>Active (system)</b> - runs exploit-style tests and can generate a lot more requests — use it only when you have permission and the target can handle it</li>
+                  <li><b>PTK Pro policies</b> can appear here when available, offering advanced and customizable scanning options for Pro users.</li>
                 </ul>
               </div>
-              <select id="dast-scan-policy" name="dastScanPolicy" class="ui dropdown" style="width: 100%;">
-                <option value="RECON">Reconnaissance</option>
-                <option value="ACTIVE" selected>Active</option>
+              <select id="dast-scan-policy" name="dastScanPolicy" class="ui dropdown dashboard-pro-policy-select" data-engine="DAST" style="width: 100%;">
+                <option value="RECON">Recon (system)</option>
+                <option value="ACTIVE" selected>Active (system)</option>
               </select>
             </div>
           </div>
@@ -378,10 +445,10 @@
           <div class="one wide column dast_scan_control">
 
           </div>
-          <div class="five wide column dast_scan_control">
+          <div class="four wide column dast_scan_control">
             <div class="field">
               <div class="ptk-help-label-row">
-                <label>Attack requests per second:</label>
+                <label>Attack RPS:</label>
                 <i class="request_per_second_example question circle icon"></i>
               </div>
               <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
@@ -449,6 +516,21 @@
               </div>
             </div>
           </div>
+          <div class="three wide column dast_scan_control" style="display: none;">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Record macro during scan:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Record macro during scan:</strong> <br />
+                Starts the macro recorder on the current tab without reloading it, so the same runtime scan flow is captured as a reusable macro.
+              </div>
+              <div class="ui checkbox">
+                <input type="checkbox" id="dashboard_dast_record_macro">
+              </div>
+            </div>
+          </div>
         </div>
 
 
@@ -457,15 +539,51 @@
           <div class="one wide column iast_scan_control">
             <div class="ui small header">IAST</div>
           </div>
-          <div class="two wide column iast_scan_control">
-
+          <div class="six wide column iast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Scan strategy:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Scan strategy:</strong> <br />
+                <ul>
+                  <li><b>Smart</b> (recommended) keeps runtime analysis lighter, reduces startup noise, and limits expensive DOM/runtime processing.</li>
+                  <li><b>Comprehensive</b> runs deeper runtime tracking and broader DOM analysis, which can increase coverage, noise, and overhead.</li>
+                </ul>
+              </div>
+              <div>
+                <select id="iast-scan-strategy" class="ui fluid dropdown" style="width: 100%;">
+                  <option value="SMART">Smart (recommended)</option>
+                  <option value="COMPREHENSIVE">Comprehensive</option>
+                </select>
+              </div>
+            </div>
           </div>
-          <div class="ten wide column iast_scan_control">
+          <div class="six wide column iast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Scan policy:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Scan policy:</strong> <br />
+                <ul>
+                  <li><b>Default (system)</b> - built-in default IAST moddules/rules</li>
+                  <li><b>PTK Pro policies</b> can appear here when available, offering advanced and customizable scanning options for Pro users.</li>
+                </ul>
+              </div>
+              <div>
+                <select id="iast-scan-policy" class="ui fluid dropdown dashboard-pro-policy-select" data-engine="IAST" style="width: 100%;">
+                  <option value="default:0" selected>Default (system)</option>
+                </select>
+              </div>
+            </div>
           </div>
           <div class="one wide column">
 
           </div>
-          <div class="one wide column">
+          <div class="two wide column">
             <div class="ui toggle checkbox iast_scan">
               <input type="checkbox" name="iast_scan" checked="checked">
             </div>
@@ -477,21 +595,51 @@
             <div class="ui small header">SAST</div>
           </div>
 
-          <div class="twelve wide column sast_scan_control">
-            <div class="ui small fluid selection dropdown">
-              <input type="hidden" name="scanStrategy" id="sast-scan-strategy">
-              <i class="dropdown icon"></i>
-              <div class="default text">Scan strategy</div>
-              <div class="menu">
-                <div class="item" data-value="0">All rules</div>
-                <div class="item" data-value="1">Taint flow rules</div>
+          <div class="six wide column sast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Scan strategy:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Scan strategy:</strong> <br />
+                <ul>
+                  <li><b>Taint and pattern rules</b> (recommended) - run the full built-in SAST execution mode.</li>
+                  <li><b>Taint rules only</b> - run only taint/dataflow rules, which is narrower and usually faster.</li>
+                </ul>
+              </div>
+              <select id="sast-scan-strategy" class="ui fluid dropdown" style="width: 100%;">
+                <option value="0" selected>Taint and pattern rules</option>
+                <option value="1">Taint rules only</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="six wide column sast_scan_control">
+            <div class="field">
+              <div class="ptk-inline-policy-field">
+                <div class="ptk-help-label-row">
+                  <label>Scan policy:</label>
+                  <i class="question circle icon"></i>
+                </div>
+                <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                  <strong>Scan policy:</strong> <br />
+                  <ul>
+                    <li><b>Default (system)</b> - built-in SAST modules/rules.</li>
+                    <li><b>PTK Pro policies</b> can appear here when available, offering advanced and customizable scanning options for Pro users.</li>
+                  </ul>
+                </div>
+
+                <select id="sast-scan-policy" class="ui fluid dropdown dashboard-pro-policy-select" data-engine="SAST" style="width: 100%;">
+                  <option value="default:0" selected>Default (system)</option>
+                </select>
               </div>
             </div>
           </div>
           <div class="one wide column">
 
           </div>
-          <div class="one wide column">
+          <div class="two wide column">
             <div class="ui toggle checkbox sast_scan">
               <input type="checkbox" name="sast_scan" checked="checked">
             </div>
@@ -524,7 +672,7 @@
 
 
   </div>
-  <div class="content" style="padding-top: 0;">
+  <div class="content" style="padding: 0;">
     <div id="dashboard_export_progress" class="ptk-export-progress-dialog" style="display:none;">
       <div class="ptk-export-progress-title">Export</div>
       <div class="ui tiny progress ptk-export-progress-track">
@@ -536,6 +684,7 @@
   <div class="actions">
     <div id="stop_all_scans" class="ui button secondary disabled">Stop all scans</div>
     <div id="export_all_scans" class="ui button secondary disabled">Export all scans</div>
+    <div id="upload_all_scans" class="ui button secondary disabled" style="display:none;">Upload all scans</div>
     <div class="ui cancel button left floated">Cancel</div>
     <div class="ui approve button secondary confirm_scan_run">Run scans</div>
   </div>

@@ -17,6 +17,14 @@ function bindTable(id, params) {
 
     let table
     if ($.fn.dataTable.isDataTable(id)) {
+        if (params.forceRebuild) {
+            table = $(id).DataTable()
+            table.clear().destroy()
+            $(id).find('tbody').empty()
+            $(id).find('tr.group').remove()
+            table = $(id).DataTable(params)
+            return table
+        }
         table = $(id).DataTable()
 
         // Support incremental updates if keyColumn is specified

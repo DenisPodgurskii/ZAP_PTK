@@ -63,6 +63,7 @@ function buildEvidenceRefs(finding = {}, routeKey = "unknown-host|GET|/") {
             loc: {
                 module: finding?.moduleId || null,
                 rule: finding?.ruleId || null,
+                title: finding?.title || finding?.ruleName || null,
                 severity: finding?.severity || null
             }
         } : null,

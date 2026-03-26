@@ -14,6 +14,7 @@ import { pdfTheme, setH1, setH2, setBody, setCode, setSmall } from "./report/pdf
 import { createPdfLayout, clampCellText, formatUrlForTable } from "./report/pdfLayout.js"
 import { buildEvidenceRows } from "./report/evidenceRenderer.js"
 import { drawBadge, drawFlagIcon, drawReplayIcon, drawCheckIcon, drawRiskBarList, drawKeyValueBlock, normalizeEvidenceSummary, drawCodeBlock, drawHostBanner, drawSummaryCard, drawMutedText } from "./report/pdfComponents.js"
+import { renderEvidencePackageDetailHtml } from "./dastBugBountyWorkspace.js"
 
 const jwtHelper = new ptk_jwtHelper()
 const decoder = new ptk_decoder()
@@ -23,6 +24,7 @@ var tokenAdded = false
 let index_controller = null
 let reportLogoDataUrl = null
 let severitySyncGuard = false
+let bugBountyReportState = null
 
 const SAST_ALLOWED_TAGS = ['p', 'ul', 'li', 'code', 'strong', 'em', 'a', 'br', 'pre'];
 const SAST_ALLOWED_ATTRS = ['href', 'target', 'rel'];
@@ -903,6 +905,20 @@ function buildReferenceList(links) {
 }
 
 function updateExportButtons() {
+    if (hasBugBountyReportData()) {
+        $('#export_pdf_btn').addClass('disabled').hide()
+        $('#export_md_btn').removeClass('disabled')
+        const $preset = $('#report_preset')
+        $preset.prop('disabled', true).toggleClass('disabled', true)
+        $preset.closest('.ui.dropdown').hide()
+        $('#pdf_include_sensitive').prop('disabled', true)
+        $('#pdf_include_sensitive').closest('.ui.checkbox').hide()
+        $('#export_loader').removeClass('active').hide()
+        return
+    }
+    $('#export_pdf_btn').show()
+    $('#report_preset').closest('.ui.dropdown').show()
+    $('#pdf_include_sensitive').closest('.ui.checkbox').show()
     const ready = exportModelReady
     const enabled = ready && hasExportData()
     $('#export_pdf_btn').toggleClass('disabled', !enabled)
@@ -1145,6 +1161,7 @@ function buildReportModel(sourceModel, options = {}) {
 }
 
 function hasExportData() {
+    if (hasBugBountyReportData()) return true
     if (exportModel.findings.length) return true
     if ((exportModel.discoveries?.sast || []).length) return true
     const dashboard = exportModel.dashboard || {}
@@ -3293,6 +3310,10 @@ function sanitizeFilename(value) {
     return String(value).replace(/[^a-zA-Z0-9._-]/g, "_")
 }
 
+function hasBugBountyReportData() {
+    return !!(bugBountyReportState?.evidencePackage || bugBountyReportState?.reportDraft)
+}
+
 function setExportStatus(message, { error = false } = {}) {
     const $status = $("#export_status")
     if (!message) {
@@ -3307,6 +3328,22 @@ function setExportStatus(message, { error = false } = {}) {
 
 function exportMarkdown(options = {}) {
     try {
+        if (hasBugBountyReportData()) {
+            const draft = bugBountyReportState?.reportDraft || {}
+            const evidencePackage = bugBountyReportState?.evidencePackage || {}
+            const content = String(draft?.markdown || "").trim()
+            if (!content) {
+                throw new Error("No bug bounty markdown draft is available.")
+            }
+            const filename = `PTK_BugBounty_${sanitizeFilename(evidencePackage?.title || evidencePackage?.routeKey || "report")}_${new Date().toISOString().replace(/[:]/g, "-")}.md`
+            const blob = new Blob([content], { type: "text/markdown" })
+            const link = document.createElement("a")
+            link.download = filename
+            link.href = window.URL.createObjectURL(blob)
+            link.click()
+            setExportStatus("")
+            return
+        }
         exportModel.meta.generatedAt = exportModel.meta.generatedAt || new Date().toISOString()
         const filteredModel = getFilteredExportModel()
         filteredModel.meta.generatedAt = exportModel.meta.generatedAt
@@ -3355,6 +3392,14 @@ async function exportPdf() {
 
 
 function exportSelected(format) {
+    if (hasBugBountyReportData()) {
+        if (format === "markdown") {
+            exportMarkdown({})
+            return
+        }
+        setExportStatus("PDF export is not available for bug bounty evidence reports yet.", { error: true })
+        return
+    }
     if ($('#export_pdf_btn').hasClass('disabled') || $('#export_md_btn').hasClass('disabled')) return
     const preset = $('#report_preset').val() || "executive"
     const includeSensitiveEvidence = $('#pdf_include_sensitive').is(':checked')
@@ -5282,7 +5327,9 @@ jQuery(function () {
     }
 
     const params = new URLSearchParams(window.location.search)
-    const reportType = params.has('full_report')
+    const reportType = params.has('bugbounty_report')
+        ? 'bugbounty'
+        : (params.has('full_report')
         ? 'full'
         : ((params.has('dast_report') || params.has('rattacker_report'))
             ? 'rattacker'
@@ -5290,7 +5337,7 @@ jQuery(function () {
                 ? 'iast'
                 : (params.has('sast_report')
                     ? 'sast'
-                    : (params.has('sca_report') ? 'sca' : 'full'))))
+                    : (params.has('sca_report') ? 'sca' : 'full')))))
     initExportModel(reportType)
 
     const normalizeHost = (value) => {
@@ -5314,7 +5361,84 @@ jQuery(function () {
         return normalizedLeft === normalizedRight
     }
 
-    if (params.has('dast_report') || params.has('rattacker_report')) {
+    const resolveBugBountyReportHost = (evidencePackage = null) => {
+        const requestUrl = String(evidencePackage?.request?.url || "").trim()
+        if (requestUrl) {
+            return normalizeHost(requestUrl)
+        }
+        const routeKey = String(evidencePackage?.routeKey || "").trim()
+        if (routeKey.includes("|")) {
+            const host = routeKey.split("|")[0]
+            return normalizeHost(host)
+        }
+        return null
+    }
+
+    const renderBugBountyReportState = ({
+        evidencePackage = null,
+        reportDraft = null,
+        error = ""
+    } = {}) => {
+        if (error) {
+            $('#bugbounty_report_content').html(`
+                <div class="ui negative message">
+                    <div class="header">Bug bounty report could not be loaded</div>
+                    <p>${ptk_utils.escapeHtml(error)}</p>
+                </div>
+            `)
+            return
+        }
+        $('#bugbounty_report_content').html(renderEvidencePackageDetailHtml(evidencePackage, {
+            reportDraft
+        }))
+    }
+
+    const loadBugBountyReport = async (evidencePackageId = null) => {
+        const id = String(evidencePackageId || "").trim()
+        if (!id) {
+            bugBountyReportState = null
+            renderBugBountyReportState({
+                error: "Evidence package id is missing."
+            })
+            updateExportButtons()
+            return
+        }
+        const response = await dast_controller.getEvidencePackage({
+            evidencePackageId: id
+        })
+        if (!response?.success || !response?.evidencePackage) {
+            bugBountyReportState = null
+            renderBugBountyReportState({
+                error: response?.error || "Evidence package could not be loaded."
+            })
+            updateExportButtons()
+            return
+        }
+        bugBountyReportState = {
+            evidencePackage: response.evidencePackage,
+            reportDraft: response.reportDraft || null
+        }
+        renderBugBountyReportState(bugBountyReportState)
+        bindInfo(resolveBugBountyReportHost(response.evidencePackage))
+        updateExportButtons()
+    }
+
+    if (params.has('bugbounty_report')) {
+        $('#summary_segment').hide()
+        $('#dashboard').hide()
+        $('#rattacker_report').hide()
+        $('#iast_report').hide()
+        $('#sast_report').hide()
+        $('#sca_report').hide()
+        $('#executive_view').hide()
+        $('#export_pdf_btn').addClass('disabled').hide()
+        $('#export_md_btn').addClass('disabled')
+        $('#report_preset').closest('.ui.dropdown').hide()
+        $('#pdf_include_sensitive').closest('.ui.checkbox').hide()
+        $('#export_loader').removeClass('active').hide()
+        $('#bugbounty_report').show()
+        loadBugBountyReport(params.get('evidence_package_id') || params.get('evidencePackageId') || null)
+    } else if (params.has('dast_report') || params.has('rattacker_report')) {
         $('#dashboard').hide()
         $('#rattacker_report').show()
         dast_controller.init().then(function (result) {

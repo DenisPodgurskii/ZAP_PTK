@@ -669,6 +669,7 @@ export class ptk_automation {
 
         const warnings = []
         const exports = []
+        const allowChunked = options.allowChunked !== false
 
         for (const engine of enginesToExport) {
             let scanId = session.scanIds[engine]
@@ -688,7 +689,15 @@ export class ptk_automation {
             }
 
             try {
-                const scanExport = await this._buildEngineExport(engine, scanId, session, options)
+                let scanExport = null
+                try {
+                    scanExport = await this._buildEngineExport(engine, scanId, session, options)
+                } catch (err) {
+                    if (!allowChunked || String(err?.message || '') !== 'export_too_large') {
+                        throw err
+                    }
+                    scanExport = await this._buildEngineChunkedExport(engine, session, options)
+                }
                 exports.push(scanExport)
             } catch (err) {
                 warnings.push(`export_failed:${engine}:${err.message}`)
@@ -705,6 +714,129 @@ export class ptk_automation {
             truncatedAny: exports.some(e => e.truncated),
             warnings,
             requestId
+        }
+    }
+
+    async msg_export_scan_chunk(message) {
+        const { requestId, options = {} } = message
+        const engine = String(options.engine || '').trim().toUpperCase()
+        if (!engine) {
+            return { ok: false, error: 'engine_required', requestId }
+        }
+        const exportModule = this._getEngineExportModule(engine)
+        if (!exportModule?.msg_export_scan_chunk) {
+            return { ok: false, error: 'chunked_export_not_supported', requestId, engine }
+        }
+        try {
+            const result = await exportModule.msg_export_scan_chunk({
+                exportId: options.exportId,
+                index: options.index
+            })
+            return {
+                ...(result || {}),
+                ok: result?.success !== false,
+                requestId
+            }
+        } catch (err) {
+            return { ok: false, error: err?.message || 'chunk_read_failed', requestId, engine }
+        }
+    }
+
+    async msg_release_export_scan(message) {
+        const { requestId, options = {} } = message
+        const engine = String(options.engine || '').trim().toUpperCase()
+        if (!engine) {
+            return { ok: false, error: 'engine_required', requestId }
+        }
+        const exportModule = this._getEngineExportModule(engine)
+        if (!exportModule?.msg_release_export_scan) {
+            return { ok: false, error: 'chunked_export_not_supported', requestId, engine }
+        }
+        try {
+            const result = await exportModule.msg_release_export_scan({
+                exportId: options.exportId
+            })
+            return {
+                ...(result || {}),
+                ok: result?.success !== false,
+                requestId
+            }
+        } catch (err) {
+            return { ok: false, error: err?.message || 'chunk_release_failed', requestId, engine }
+        }
+    }
+
+    async msg_get_engine_snapshot(message, sender) {
+        const { requestId, options = {} } = message
+        const tabId = sender?.tab?.id
+
+        let sessionId = options.sessionId
+        if (!sessionId && tabId) {
+            sessionId = this.lastCompletedSessionByTabId.get(tabId)
+        }
+        if (!sessionId) {
+            sessionId = this.lastCompletedSessionGlobal
+        }
+
+        const session = this.sessions.get(sessionId)
+        if (!session) {
+            return { ok: false, error: 'session_not_found', requestId }
+        }
+
+        const engine = String(options.engine || '').trim().toUpperCase()
+        if (!engine) {
+            return { ok: false, error: 'engine_required', requestId }
+        }
+
+        let scanId = session.scanIds?.[engine] || null
+        if (!scanId) {
+            scanId = resultsRegistry.findScanIdForEngine(engine, {
+                tabId: session.tabId,
+                host: session.host
+            })
+            if (scanId) {
+                session.scanIds[engine] = scanId
+            }
+        }
+
+        if (!scanId) {
+            return { ok: false, error: 'scan_id_not_found', requestId, engine }
+        }
+
+        let scanResult = this._getEngineScanResult(engine)
+        if (scanResult?.scanId !== scanId) {
+            scanResult = resultsRegistry.get(engine, scanId)
+        }
+        if (!scanResult || typeof scanResult !== 'object') {
+            return { ok: false, error: 'scan_result_not_found', requestId, engine, scanId }
+        }
+
+        const findings = Array.isArray(scanResult.findings) ? scanResult.findings : []
+        const groups = Array.isArray(scanResult.groups) ? scanResult.groups : []
+        const requests = Array.isArray(scanResult.requests) ? scanResult.requests : []
+        const runtimeEvents = Array.isArray(scanResult.runtimeEvents) ? scanResult.runtimeEvents : []
+        const stats = scanResult.stats && typeof scanResult.stats === 'object'
+            ? {
+                findingsCount: Number(scanResult.stats.findingsCount || findings.length || 0),
+                bySeverity: Object.assign({ critical: 0, high: 0, medium: 0, low: 0, info: 0 }, scanResult.stats.bySeverity || {})
+            }
+            : this._extractStats(scanResult)
+        const perfKey = engine.toLowerCase()
+
+        return {
+            ok: true,
+            requestId,
+            engine,
+            scanId,
+            sessionId: session.id,
+            status: session.status,
+            startedAt: scanResult.startedAt || session.startedAt || null,
+            finishedAt: scanResult.finishedAt || scanResult.finished || session.finishedAt || null,
+            stats,
+            groupsCount: groups.length,
+            requestsCount: requests.length,
+            runtimeEventsCount: runtimeEvents.length,
+            performance: scanResult.performance?.[perfKey] || null
         }
     }
 
@@ -766,7 +898,8 @@ export class ptk_automation {
             try {
                 // Adapter.stop() now waits for idle and returns stats
                 const engineStats = await adapter.stop(session.id, 180000)
-                this._mergeStats(stats, engineStats)
+                const resolvedStats = this._resolveStoppedEngineStats(engineName, session, engineStats)
+                this._mergeStats(stats, resolvedStats)
                 session.engineStates[engineName] = { status: 'stopped' }
             } catch (err) {
                 session.engineStates[engineName] = { status: 'error', error: err.message }
@@ -800,12 +933,13 @@ export class ptk_automation {
 
             try {
                 const engineStats = await adapter.stop(session.id)
+                const resolvedStats = this._resolveStoppedEngineStats(engineName, session, engineStats)
                 session.engineStates[engineName].status = 'stopped'
 
                 // Aggregate stats
-                stats.findingsCount += engineStats?.findingsCount || 0
+                stats.findingsCount += resolvedStats?.findingsCount || 0
                 for (const sev of Object.keys(stats.bySeverity)) {
-                    stats.bySeverity[sev] += engineStats?.bySeverity?.[sev] || 0
+                    stats.bySeverity[sev] += resolvedStats?.bySeverity?.[sev] || 0
                 }
             } catch (err) {
                 console.error('[PTK Automation] Engine stop failed', engineName, err)
@@ -823,6 +957,62 @@ export class ptk_automation {
             findingsCount: 0,
             bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
         }
+    }
+
+    _extractStatsFromScanResult(scanResult) {
+        const findings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
+        const stats = this._createEmptyStats()
+        for (const finding of findings) {
+            stats.findingsCount += 1
+            const sev = String(finding?.severity || finding?.effectiveSeverity || 'info').toLowerCase()
+            if (Object.prototype.hasOwnProperty.call(stats.bySeverity, sev)) {
+                stats.bySeverity[sev] += 1
+            } else {
+                stats.bySeverity.info += 1
+            }
+        }
+        return stats
+    }
+
+    _resolveStoppedEngineStats(engineName, session, initialStats = null) {
+        const best = {
+            findingsCount: Number(initialStats?.findingsCount || 0),
+            bySeverity: Object.assign(
+                { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+                initialStats?.bySeverity || {}
+            )
+        }
+
+        const maybeAdopt = (scanResult) => {
+            if (!scanResult || typeof scanResult !== 'object') return
+            const derived = this._extractStatsFromScanResult(scanResult)
+            if (Number(derived?.findingsCount || 0) > Number(best.findingsCount || 0)) {
+                best.findingsCount = Number(derived.findingsCount || 0)
+                best.bySeverity = Object.assign(
+                    { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+                    derived.bySeverity || {}
+                )
+            }
+        }
+
+        maybeAdopt(this._getEngineScanResult(engineName))
+
+        const adapter = this.engines?.getAdapter(engineName) || null
+        let scanId = session?.scanIds?.[engineName] || adapter?.getScanId?.() || null
+        if (!scanId && session) {
+            scanId = resultsRegistry.findScanIdForEngine(engineName, {
+                tabId: session.tabId,
+                host: session.host
+            })
+        }
+        if (scanId) {
+            if (session?.scanIds) {
+                session.scanIds[engineName] = scanId
+            }
+            maybeAdopt(resultsRegistry.get(engineName, scanId))
+        }
+
+        return best
     }
 
     /**
@@ -992,6 +1182,48 @@ export class ptk_automation {
             scan: exported,
             estimatedBytes,
             truncated
+        }
+    }
+
+    async _buildEngineChunkedExport(engine, session, options = {}) {
+        const exportModule = this._getEngineExportModule(engine)
+        if (!exportModule?.msg_export_scan_result) {
+            throw new Error('chunked_export_not_supported')
+        }
+        const result = await exportModule.msg_export_scan_result({
+            target: options?.target || 'download',
+            fileName: options?.fileName || `PTK_${String(engine || 'scan').toUpperCase()}_scan.json`
+        })
+        if (!result || result.success === false) {
+            throw new Error(result?.error || 'chunked_export_failed')
+        }
+        if (result.exportMode !== 'chunked') {
+            throw new Error('chunked_export_not_available')
+        }
+        return {
+            engine,
+            exportMode: 'chunked',
+            exportId: result.exportId,
+            fileName: result.fileName,
+            size: result.size,
+            chunkSize: result.chunkSize,
+            chunkCount: result.chunkCount,
+            contentType: result.contentType,
+            compression: result.compression,
+            expiresAt: result.expiresAt,
+            truncated: false,
+            chunked: true,
+            meta: {
+                automation: {
+                    sessionId: session?.id || null,
+                    testRunId: session?.testRunId || null,
+                    project: session?.project || null,
+                    policyCode: session?.policyCode || null,
+                    startedAt: session?.startedAt || null,
+                    finishedAt: session?.finishedAt || null,
+                    schemaVersion: 1
+                }
+            }
         }
     }
 
@@ -1350,9 +1582,17 @@ export class ptk_automation {
      */
     _getEngineProgress(engineName, engineState) {
         const engineUpper = engineName.toUpperCase()
+        const adapter = this.engines?.getAdapter(engineUpper) || null
+        let liveIsRunning = false
+        try {
+            liveIsRunning = !!adapter?.isRunning?.()
+        } catch (_) {
+            liveIsRunning = false
+        }
 
         const result = {
             status: engineState.status || 'unknown',
+            isRunning: liveIsRunning,
             progress: { done: null, total: null },
             findingsCount: 0,
             bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
@@ -1385,27 +1625,50 @@ export class ptk_automation {
 
         // Engine-specific progress
         if (engineUpper === 'DAST') {
-            result.phase = this._getDastPhase()
-            const scanStats = scanResult.scanStats || {}
+            const liveProgress = this._getDastAutomationProgress()
+            result.phase = liveProgress?.phase || this._getDastPhase()
+            if (liveProgress) {
+                result.progress = {
+                    done: liveProgress.executed ?? null,
+                    total: liveProgress.planned ?? null,
+                    remaining: liveProgress.remaining ?? null
+                }
+                result.isRunning = liveProgress.isRunning === true
+                result.idle = liveProgress.isIdle === true
+                result.remaining = liveProgress.remaining ?? null
+                result.activeTasks = liveProgress.activeTasks ?? 0
+                result.taskQueue = liveProgress.taskQueue ?? 0
+                result.requestQueue = liveProgress.requestQueue ?? 0
+                result.pendingPlans = liveProgress.pendingPlans ?? 0
+                result.planning = liveProgress.planning ?? 0
+                result.lastActivityAt = liveProgress.lastActivityAt || result.lastActivityAt
+                if (engineState.status === 'running' && result.idle) {
+                    result.status = 'idle'
+                }
+            } else {
+                const scanStats = scanResult.scanStats || {}
 
-            // Try various counter fields
-            const total = scanStats.totalJobsPlanned
-                ?? scanStats.total
-                ?? scanStats.queued
-                ?? null
-            const done = scanStats.totalJobsExecuted
-                ?? scanStats.processed
-                ?? scanStats.executed
-                ?? scanResult.requestCount
-                ?? null
+                const total = scanStats.totalJobsPlanned
+                    ?? scanStats.total
+                    ?? scanStats.queued
+                    ?? null
+                const done = scanStats.totalJobsExecuted
+                    ?? scanStats.processed
+                    ?? scanStats.executed
+                    ?? scanResult.requestCount
+                    ?? null
 
-            result.progress = { done, total }
+                result.progress = { done, total, remaining: null }
+                result.idle = !result.isRunning
+                result.remaining = null
+            }
         } else {
             // IAST/SAST/SCA: limited progress info
             result.progress = {
                 done: result.findingsCount,
                 total: null
             }
+            result.idle = !result.isRunning
         }
 
         return result
@@ -1416,10 +1679,23 @@ export class ptk_automation {
      */
     _getEngineScanResult(engineUpper) {
         const sources = {
-            DAST: () => (this.app?.dast || this.app?.rattacker)?.scanResult,
+            DAST: () => this.app?.dast?.engine?.scanResult
+                || this.app?.rattacker?.engine?.scanResult
+                || this.app?.dast?.scanResult
+                || this.app?.rattacker?.scanResult,
             IAST: () => this.app?.iast?.scanResult,
             SAST: () => this.app?.sast?.scanResult,
             SCA: () => this.app?.sca?.scanResult
+        }
+        return sources[engineUpper]?.() || null
+    }
+
+    _getEngineExportModule(engineUpper) {
+        const sources = {
+            DAST: () => this.app?.dast || this.app?.rattacker || null,
+            IAST: () => this.app?.iast || null,
+            SAST: () => this.app?.sast || null,
+            SCA: () => this.app?.sca || null
         }
         return sources[engineUpper]?.() || null
     }
@@ -1440,5 +1716,11 @@ export class ptk_automation {
         if (isRunning(dast.engine?.isRunning) || dast.isRunning) return 'scanning'
 
         return 'idle'
+    }
+
+    _getDastAutomationProgress() {
+        const dast = this.app?.dast || this.app?.rattacker
+        const snapshot = dast?.engine?.getProgressSnapshot?.()
+        return snapshot && typeof snapshot === 'object' ? snapshot : null
     }
 }

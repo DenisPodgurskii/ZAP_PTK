@@ -293,6 +293,34 @@ function extractSourceName(entry = {}) {
 
 function normalizeRuntimeEventRefs(entry = {}, routeKey = "unknown-host|GET|/") {
     const routeParts = splitRouteKey(routeKey)
+    const source = extractSourceName({
+        sourceKind: entry?.sourceKind,
+        sourceKey: entry?.sourceKey,
+        storageKey: entry?.storageKey,
+        cookieName: entry?.cookieName,
+        headerName: entry?.headerName,
+        attribute: entry?.attribute
+    })
+    const descriptor = deriveBucketDescriptor({
+        signalFamily: entry?.signalFamily,
+        sinkId: entry?.sinkId,
+        sourceKind: entry?.sourceKind,
+        category: entry?.category,
+        detectionReason: entry?.detection?.reason || entry?.signalCode,
+        primaryClass: entry?.primaryClass,
+        trustLevel: entry?.trust?.level,
+        moduleId: entry?.moduleId,
+        ruleId: entry?.ruleId
+    })
+    const paramLabel = (
+        toNonEmptyString(entry?.sourceName)
+        || toNonEmptyString(entry?.sourceKey)
+        || 
+        (source?.name && source.name !== "<none>" ? source.name : null)
+        || toNonEmptyString(entry?.sinkId)
+        || toNonEmptyString(entry?.signalCode)
+        || null
+    )
     return normalizeEvidenceRefs([
         entry?.evidenceRef || null,
         entry?.id ? {
@@ -301,7 +329,11 @@ function normalizeRuntimeEventRefs(entry = {}, routeKey = "unknown-host|GET|/") 
             loc: {
                 method: entry?.method || routeParts.method || "GET",
                 path: routeParts.pathTemplate || "/",
-                kind: entry?.bucket || entry?.legacyFamily || "iast_runtime"
+                route: routeKey,
+                kind: entry?.bucket || entry?.legacyFamily || descriptor.bucket || descriptor.legacyFamily || "iast_runtime",
+                module: entry?.moduleId || null,
+                rule: entry?.ruleId || null,
+                param: paramLabel
             }
         } : null,
         ...(Array.isArray(entry?.evidenceRefs) ? entry.evidenceRefs : [])
@@ -494,6 +526,15 @@ function normalizeRuntimeEventInput(event = {}, hostHint = null) {
         routeFamilyKey: buildRouteFamilyKey(routeKey),
         paramKey: normalizeParamKey(source.name || "<none>", source.location || "param"),
         sourceKind: toNonEmptyString(event?.sourceKind),
+        sourceName: source?.name,
+        sourceLocation: source?.location,
+        sourceKey: toNonEmptyString(event?.sourceKey),
+        storageKey: toNonEmptyString(event?.storageKey),
+        cookieName: toNonEmptyString(event?.cookieName),
+        headerName: toNonEmptyString(event?.headerName),
+        attribute: toNonEmptyString(event?.attribute),
+        moduleId: toNonEmptyString(event?.moduleId),
+        ruleId: toNonEmptyString(event?.ruleId),
         bucket: descriptor.bucket,
         subtype: descriptor.subtype,
         legacyFamily: descriptor.legacyFamily,
@@ -587,6 +628,7 @@ function normalizeFindingInput(finding = {}, hostHint = null) {
         loc: {
             module: finding?.moduleId || null,
             rule: finding?.ruleId || null,
+            title: finding?.title || finding?.ruleName || null,
             severity: finding?.severity || null,
             method
         }
@@ -599,6 +641,24 @@ function normalizeFindingInput(finding = {}, hostHint = null) {
         routeFamilyKey: buildRouteFamilyKey(routeKey),
         paramKey: normalizeParamKey(source.name || "<none>", source.location || "param"),
         sourceKind: toNonEmptyString(evidence?.sourceKind || primarySource?.sourceKind || primarySource?.kind),
+        sourceName: source?.name,
+        sourceLocation: source?.location,
+        sourceKey: toNonEmptyString(
+            evidence?.sourceKey
+            || evidence?.primarySource?.key
+            || evidence?.primarySource?.source
+            || primarySource?.key
+            || primarySource?.source
+            || primarySource?.sourceId
+            || evidence?.sourceId
+            || evidence?.taintSource
+        ),
+        storageKey: toNonEmptyString(context?.storageKey || sinkContext?.storageKey || context?.key),
+        cookieName: toNonEmptyString(context?.cookieName || sinkContext?.cookieName),
+        headerName: toNonEmptyString(context?.headerName || sinkContext?.headerName),
+        attribute: toNonEmptyString(context?.attribute || sinkContext?.attribute),
+        moduleId: toNonEmptyString(finding?.moduleId),
+        ruleId: toNonEmptyString(finding?.ruleId),
         bucket: descriptor.bucket,
         subtype: descriptor.subtype,
         legacyFamily: descriptor.legacyFamily,

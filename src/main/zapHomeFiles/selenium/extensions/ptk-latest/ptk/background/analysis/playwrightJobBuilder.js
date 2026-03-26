@@ -103,13 +103,58 @@ function resolveJobId(candidate = {}, scanId = null) {
     return `mcpjob_${hashHex(payload).slice(0, 24)}`
 }
 
+function normalizeCookieEntry(cookie = {}) {
+    return {
+        name: String(cookie?.name || "").trim(),
+        value: String(cookie?.value || ""),
+        domain: String(cookie?.domain || "").trim(),
+        path: String(cookie?.path || "/").trim() || "/",
+        secure: cookie?.secure === true,
+        httpOnly: cookie?.httpOnly === true,
+        sameSite: String(cookie?.sameSite || "no_restriction").trim() || "no_restriction",
+        expires: Number.isFinite(Number(cookie?.expirationDate)) ? Number(cookie.expirationDate) : null
+    }
+}
+
+function resolveAuthContext({
+    authMode = "reuse_storage_state",
+    authContext = null
+} = {}) {
+    if (!authContext || typeof authContext !== "object") {
+        return {
+            mode: String(authMode || "reuse_storage_state"),
+            storageStateRef: "ptk_profile_default"
+        }
+    }
+    const mode = String(authContext?.mode || authMode || "reuse_storage_state").trim() || "reuse_storage_state"
+    const resolved = { mode }
+    if (authContext?.storageStateRef) {
+        resolved.storageStateRef = String(authContext.storageStateRef)
+    } else if (mode === "reuse_storage_state") {
+        resolved.storageStateRef = "ptk_profile_default"
+    }
+    if (authContext?.sessionProfileId) {
+        resolved.sessionProfileId = String(authContext.sessionProfileId)
+    }
+    if (authContext?.sessionProfileLabel) {
+        resolved.sessionProfileLabel = String(authContext.sessionProfileLabel)
+    }
+    if (Array.isArray(authContext?.cookieSnapshot) && authContext.cookieSnapshot.length) {
+        resolved.cookieSnapshot = authContext.cookieSnapshot
+            .map(normalizeCookieEntry)
+            .filter((cookie) => cookie.name && cookie.domain)
+    }
+    return resolved
+}
+
 export function buildPlaywrightCandidateJob({
     scanResult = {},
     candidate = {},
     requestSeed = null,
     profile = "smoke",
     authMode = "reuse_storage_state",
-    constraints = {}
+    constraints = {},
+    authContext = null
 } = {}) {
     const route = parseRouteKey(candidate?.routeKey, scanResult?.host)
     if (!route.host) {
@@ -162,10 +207,7 @@ export function buildPlaywrightCandidateJob({
         requestSeed: normalizedSeed,
         playbook: {
             mode: "hybrid",
-            authContext: {
-                mode: String(authMode || "reuse_storage_state"),
-                storageStateRef: "ptk_profile_default"
-            },
+            authContext: resolveAuthContext({ authMode, authContext }),
             steps: [
                 { kind: "goto", url: `${baseUrl}/` },
                 { kind: "request", from: "requestSeed" }

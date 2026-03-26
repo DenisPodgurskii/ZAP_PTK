@@ -1,6 +1,7 @@
 import CryptoES from "../../packages/crypto-es/index.js"
 import { scanResultStore } from "../scanResultStore.js"
 import { applyScanAnalysis } from "../analysis/scanAnalysisEngine.js"
+import { normalizeEngineName } from "../analysis/canonicalize.js"
 import { shouldIncludeScanAnalysisInExport } from "../analysis/featureFlags.js"
 
 const textEncoder = new TextEncoder()
@@ -64,6 +65,8 @@ const JWT_REGEX = /\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]
 const OPENAI_REGEX = /\bsk-[A-Za-z0-9]{16,}\b/g
 const GOOGLE_REGEX = /\bAIza[0-9A-Za-z_\-]{30,}\b/g
 const HEX_TOKEN_REGEX = /\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{40,}\b/gi
+const BUG_BOUNTY_SECRET_KEY_REGEX = /(?:^|[_-])(secret|token|password|passwd|pwd|api(?:[_-]?key)?|auth(?:orization)?|bearer|credential|credentials|csrf(?:[_-]?token)?|session(?:[_-]?(?:state|storage|token|id))|storage(?:[_-]?state)?|localstorage|sessionstorage|cookie(?:s)?|setcookie|request(?:[_-]?body)?|response(?:[_-]?body)?|raw(?:[_-]?(?:request|response))?|headers?|body)$/i
+const BUG_BOUNTY_SAFE_STRING_LIMIT = 8 * 1024
 
 function cloneValue(value) {
     if (typeof globalThis.structuredClone === "function") {
@@ -81,6 +84,26 @@ function resolveScanResult(scanId, provided) {
     if (!scanId) return null
     const scan = scanResultStore.getScan(scanId)
     return scan || null
+}
+
+function resolveRelatedScans(scanId, provided, scanResult = null) {
+    if (Array.isArray(provided)) return provided
+    if (!scanResultStore?.getRelatedScansForAnalysis) return []
+    return scanResultStore.getRelatedScansForAnalysis({
+        scanId: scanId || scanResult?.scanId || null,
+        host: scanResult?.host || null,
+        tabId: scanResult?.tabId,
+        engine: scanResult?.engine || null
+    })
+}
+
+function deriveExtraEnginesPresent(relatedScans = []) {
+    const engines = new Set()
+    ;(Array.isArray(relatedScans) ? relatedScans : []).forEach((scan) => {
+        const engine = normalizeEngineName(scan?.engine)
+        if (engine) engines.add(engine)
+    })
+    return Array.from(engines)
 }
 
 function maskSecret(value) {
@@ -877,6 +900,46 @@ function sanitizeCodeArtifacts(codeArtifacts) {
     })
 }
 
+function shouldIncludeBugBountyData(opts = {}) {
+    return opts?.includeBugBountyData === true || opts?.includeBugBounty === true
+}
+
+function isBugBountySecretKey(key) {
+    if (!key) return false
+    const raw = String(key)
+    const normalized = raw
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+        .replace(/[\s.]+/g, "_")
+    return BUG_BOUNTY_SECRET_KEY_REGEX.test(raw) || BUG_BOUNTY_SECRET_KEY_REGEX.test(normalized)
+}
+
+function sanitizeBugBountyValue(value, label = "bugbounty", depth = 8) {
+    if (value === null || value === undefined) return value
+    if (typeof value === "string") {
+        return sanitizeString(redactSensitiveStrings(value), BUG_BOUNTY_SAFE_STRING_LIMIT, label)
+    }
+    if (Array.isArray(value)) {
+        if (depth <= 0) return value
+        return value.map((entry, index) => sanitizeBugBountyValue(entry, `${label}[${index}]`, depth - 1))
+    }
+    if (typeof value === "object") {
+        if (depth <= 0) return value
+        const clone = {}
+        Object.keys(value).forEach((key) => {
+            if (isBugBountySecretKey(key)) return
+            clone[key] = sanitizeBugBountyValue(value[key], label ? `${label}.${key}` : key, depth - 1)
+        })
+        return clone
+    }
+    return value
+}
+
+function sanitizeBugBountyPayload(bugBounty, opts = {}) {
+    if (!bugBounty || typeof bugBounty !== "object") return bugBounty
+    const clone = cloneValue(bugBounty)
+    return sanitizeBugBountyValue(clone, "bugbounty")
+}
+
 function sanitizeRequests(requests = []) {
     if (!Array.isArray(requests)) return
     const limits = DEFAULT_TRUNCATE_LIMITS.dast
@@ -966,13 +1029,36 @@ export function sanitizeScanResult(scanResult, opts = {}) {
     if (attacksCount) stats.attacksCount = attacksCount
     scanResult.stats = stats
     try {
-        applyScanAnalysis(scanResult, { force: true })
+        const relatedScans = Array.isArray(opts.relatedScans) ? opts.relatedScans : []
+        const extraEnginesPresent = Array.isArray(opts.extraEnginesPresent)
+            ? opts.extraEnginesPresent
+            : deriveExtraEnginesPresent(relatedScans)
+        applyScanAnalysis(scanResult, {
+            force: true,
+            relatedScans,
+            extraEnginesPresent
+        })
     } catch (err) {
         try { console.warn("[PTK Export] scan analysis failed", err?.message || err) } catch (_) { }
     }
     if (!shouldIncludeScanAnalysisInExport(scanResult)) {
         delete scanResult.analysis
         delete scanResult.analysisVersion
+    }
+    if (shouldIncludeBugBountyData(opts)) {
+        if (scanResult.bugbounty && typeof scanResult.bugbounty === "object") {
+            scanResult.bugbounty = sanitizeBugBountyPayload(scanResult.bugbounty, opts)
+        } else {
+            delete scanResult.bugbounty
+        }
+        if (scanResult.bugBounty && typeof scanResult.bugBounty === "object") {
+            scanResult.bugBounty = sanitizeBugBountyPayload(scanResult.bugBounty, opts)
+        } else {
+            delete scanResult.bugBounty
+        }
+    } else {
+        delete scanResult.bugbounty
+        delete scanResult.bugBounty
     }
     sanitizeCodeArtifacts(scanResult.codeArtifacts)
     return scanResult
@@ -982,7 +1068,15 @@ export function buildExportScanResult(scanId, opts = {}) {
     const source = resolveScanResult(scanId, opts.scanResult)
     if (!source) return null
     const cloned = cloneValue(source)
-    return sanitizeScanResult(cloned, opts)
+    const relatedScans = resolveRelatedScans(scanId, opts.relatedScans, source)
+    const extraEnginesPresent = Array.isArray(opts.extraEnginesPresent)
+        ? opts.extraEnginesPresent
+        : deriveExtraEnginesPresent(relatedScans)
+    return sanitizeScanResult(cloned, {
+        ...opts,
+        relatedScans,
+        extraEnginesPresent
+    })
 }
 
 export default buildExportScanResult

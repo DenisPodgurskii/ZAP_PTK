@@ -37,7 +37,8 @@ const defaultSettings = {
         ],
         enable_external_integration: false,
         maxRequestsPerSecond: 5,
-        concurrency: 1,
+        concurrency: 3,
+        planningConcurrency: 2,
         dastScanStrategy: "SMART",
         runCve: true
     },
@@ -73,19 +74,7 @@ const defaultSettings = {
         format: "har"
     },
     profile: {
-        base_url: "",
-        login_url: "/login",
-        register_url: "/register",
-        api_key: "",
-        api_base: "/api/v1",
-        policies_endpoint: "/policies",
-        iast_prefer_portal: false,
-        iast_policy_id: "",
-        iast_policy_name: "",
-        attacks_endpoint: "/api/rules/rules?ids=modules",
-        storage_endpoint: "/api/assessment",
-        scans_endpoint: "/scans",
-        projects_endpoint: "/projects"
+        api_key: ""
     },
     history: {
         route: "index",

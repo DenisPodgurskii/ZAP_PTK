@@ -1,8 +1,10 @@
 /* Author: Denis Podgurskii */
 import { ptk_controller_index } from "../../../controller/index.js"
+import { ptk_controller_macro } from "../../../controller/macro.js"
 import { ptk_jwtHelper } from "../../../background/utils.js"
 import * as rutils from "../js/rutils.js"
 const controller = new ptk_controller_index()
+const macro_controller = new ptk_controller_macro()
 const jwtHelper = new ptk_jwtHelper()
 var tokens = new Array()
 var tokenAdded = false
@@ -41,6 +43,38 @@ let $runCveInput = null
 let $runCveCheckboxWrapper = null
 let runCveState = false
 let dashboardActionInProgress = false
+const DASHBOARD_DAST_MACRO_STATE = {
+    requested: false,
+    started: false
+}
+const DASHBOARD_POLICY_ENGINES = Object.freeze(['dast', 'iast', 'sast'])
+const DASHBOARD_POLICY_SELECTORS = Object.freeze({
+    dast: '#dast-scan-policy',
+    iast: '#iast-scan-policy',
+    sast: '#sast-scan-policy'
+})
+const DASHBOARD_POLICY_BUILTIN_OPTIONS = Object.freeze({
+    dast: Object.freeze([
+        { value: 'RECON', label: 'Recon (system)' },
+        { value: 'ACTIVE', label: 'Active (system)' }
+    ]),
+    iast: Object.freeze([
+        { value: 'default:0', label: 'Default (system)' }
+    ]),
+    sast: Object.freeze([
+        { value: 'default:0', label: 'Default (system)' }
+    ])
+})
+const DASHBOARD_POLICY_DEFAULT_VALUES = Object.freeze({
+    dast: 'ACTIVE',
+    iast: 'default:0',
+    sast: 'default:0'
+})
+const dashboardPolicyUiValues = {
+    dast: DASHBOARD_POLICY_DEFAULT_VALUES.dast,
+    iast: DASHBOARD_POLICY_DEFAULT_VALUES.iast,
+    sast: DASHBOARD_POLICY_DEFAULT_VALUES.sast
+}
 
 function setRunCveState(enabled, { updateUi = true } = {}) {
     runCveState = !!enabled
@@ -57,6 +91,58 @@ function setRunCveState(enabled, { updateUi = true } = {}) {
 
 function isRunCveEnabled() {
     return !!runCveState
+}
+
+function setDashboardDastRecordMacro(enabled, { updateUi = true } = {}) {
+    const next = !!enabled
+    DASHBOARD_DAST_MACRO_STATE.requested = next
+    if (!updateUi) return
+    const $input = $('#dashboard_dast_record_macro')
+    const $wrapper = $input.closest('.ui.checkbox')
+    if ($wrapper.length && typeof $wrapper.checkbox === 'function') {
+        $wrapper.checkbox(next ? 'set checked' : 'set unchecked')
+        return
+    }
+    $input.prop('checked', next)
+}
+
+function isDashboardDastRecordMacroEnabled() {
+    return $('#dashboard_dast_record_macro').is(':checked')
+}
+
+async function startDashboardDastMacroRecording(activeTab = null) {
+    if (!DASHBOARD_DAST_MACRO_STATE.requested || DASHBOARD_DAST_MACRO_STATE.started) {
+        return { success: true, skipped: true }
+    }
+    const startUrl = activeTab?.url || controller?.activeTab?.url || window.location.href
+    const recordingResult = await macro_controller.start(false, startUrl, {
+        skipNavigation: true,
+        source: 'dashboard_manage_scans'
+    })
+    if (recordingResult?.success === false) {
+        DASHBOARD_DAST_MACRO_STATE.requested = false
+        setDashboardDastRecordMacro(false)
+        return recordingResult
+    }
+    DASHBOARD_DAST_MACRO_STATE.started = true
+    return recordingResult
+}
+
+async function stopDashboardDastMacroRecording(reason = 'dashboard_manage_scans_stopped') {
+    if (!DASHBOARD_DAST_MACRO_STATE.started) {
+        DASHBOARD_DAST_MACRO_STATE.requested = false
+        setDashboardDastRecordMacro(false)
+        return null
+    }
+    try {
+        return await macro_controller.stop({ reason })
+    } catch (_) {
+        return null
+    } finally {
+        DASHBOARD_DAST_MACRO_STATE.requested = false
+        DASHBOARD_DAST_MACRO_STATE.started = false
+        setDashboardDastRecordMacro(false)
+    }
 }
 
 let dashboardExportInProgress = false
@@ -133,9 +219,386 @@ function updateManageScanActions(scans) {
     const actionBusy = dashboardActionInProgress || dashboardExportInProgress
     $('#stop_all_scans').toggleClass('disabled', !isRunning || actionBusy)
     $('#export_all_scans').toggleClass('disabled', isRunning || !anyExportable || actionBusy)
+    $('#upload_all_scans').toggleClass('disabled', isRunning || !anyExportable || actionBusy)
     $('#run_scan_dlg .confirm_scan_run').toggleClass('disabled', actionBusy)
     $('#run_scan_dlg .dast_scan_stop, #run_scan_dlg .iast_scan_stop, #run_scan_dlg .sast_scan_stop, #run_scan_dlg .sca_scan_stop')
         .toggleClass('disabled', actionBusy)
+}
+
+function hideDashboardHelpPopups() {
+    const $icons = $('#index_scans_form .question.circle.icon')
+    if ($icons.length && typeof $icons.popup === 'function') {
+        try {
+            $icons.each(function () {
+                try {
+                    $(this).popup('hide')
+                } catch (_) { }
+            })
+        } catch (_) { }
+    }
+}
+
+function showDashboardResultModal(header, message, options = {}) {
+    hideDashboardHelpPopups()
+    const type = String(options?.type || 'error').trim().toLowerCase()
+    const allowedTypes = new Set(['error', 'success', 'info', 'warning'])
+    const modalType = allowedTypes.has(type) ? type : 'error'
+    const $dialog = $('#result_dialog')
+    $dialog.removeClass('error success info warning').addClass(modalType)
+    $('#result_header').text(header || 'Info')
+    $('#result_message').text(message || '')
+    $dialog.find('.result_open_settings_btn').toggle(!!options?.showSettings)
+    $dialog.modal('show')
+}
+
+const $dashboardUploadScansModal = $('#upload_scans_modal')
+let $dashboardUploadProjectDropdown = $('#upload_scans_project_select')
+const $dashboardUploadScansModalError = $('#upload_scans_modal_error')
+const dashboardUploadProjectMap = new Map()
+
+function openExtensionSettingsWindow() {
+    return browser.windows.create({
+        type: 'popup',
+        url: browser.runtime.getURL('/ptk/browser/settings.html'),
+        width: 1100,
+        height: 820
+    }).catch(() => null)
+}
+
+function countDashboardPolicies(bucket = {}) {
+    return Array.isArray(bucket?.metadata) ? bucket.metadata.length : 0
+}
+
+function buildDashboardPolicyLoadSuccessMessage(policyState = {}) {
+    const dastCount = countDashboardPolicies(policyState?.dast)
+    const iastCount = countDashboardPolicies(policyState?.iast)
+    const sastCount = countDashboardPolicies(policyState?.sast)
+    return `Scan policies loaded. DAST: ${dastCount}. IAST: ${iastCount}. SAST: ${sastCount}.`
+}
+
+function buildPolicyLoadErrorMessage(result, scopeLabel = 'scan policies') {
+    if (result?.error === 'missing_api_key') {
+        return `PTK Pro token is missing. Open Settings -> PTK Pro and add an activation token before loading ${scopeLabel}.`
+    }
+    const reason = String(result?.message || result?.error || 'unknown_error').trim()
+    return `Could not load ${scopeLabel}. Portal returned: ${reason}.`
+}
+
+function buildDashboardScanUploadErrorMessage(result, scopeLabel = 'projects') {
+    if (result?.error === 'missing_api_key') {
+        return `PTK Pro token is missing. Open Settings -> PTK Pro and add an activation token before loading ${scopeLabel}.`
+    }
+    const reason = String(result?.json?.message || result?.message || result?.error || 'unknown_error').trim()
+    return `Could not load ${scopeLabel}. Portal returned: ${reason}.`
+}
+
+function escapeDashboardPolicyHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;')
+}
+
+function syncDashboardPolicyDropdown($select, value) {
+    if (!$select || !$select.length) return
+    const normalized = value ? String(value) : ''
+    $select.val(normalized)
+    if (typeof $select.dropdown === 'function') {
+        $select.dropdown('refresh')
+        $select.dropdown('set selected', normalized)
+    }
+}
+
+function extractProjectsFromPayload(payload) {
+    if (!payload) return []
+    if (Array.isArray(payload)) return payload
+    if (typeof payload !== 'object') return []
+    const containers = ['projects', 'data', 'items', 'results']
+    for (const key of containers) {
+        const value = payload[key]
+        if (!value) continue
+        if (Array.isArray(value)) {
+            return value
+        }
+        const nested = extractProjectsFromPayload(value)
+        if (nested.length) {
+            return nested
+        }
+    }
+    return []
+}
+
+function normalizeProjectOption(project) {
+    if (project === null || project === undefined) return null
+    if (typeof project === 'string' || typeof project === 'number' || typeof project === 'boolean') {
+        const value = project
+        return { value: String(value), text: String(value), raw: value }
+    }
+    if (typeof project !== 'object') return null
+    const idFields = ['id', 'projectId', 'project_id', '_id', 'uuid', 'slug', 'key']
+    let value = null
+    for (const field of idFields) {
+        if (project[field] !== undefined && project[field] !== null && project[field] !== '') {
+            value = project[field]
+            break
+        }
+    }
+    if (!value && project?.name) {
+        value = project.name
+    }
+    if (!value) return null
+    const text = project.name || project.title || project.projectName || project.display_name || project.displayName || project.slug || project.key || String(value)
+    return { value: String(value), text, raw: value }
+}
+
+function buildProjectOptions(payload) {
+    const rawProjects = extractProjectsFromPayload(payload)
+    const options = []
+    rawProjects.forEach((project) => {
+        const option = normalizeProjectOption(project)
+        if (option) {
+            options.push(option)
+        }
+    })
+    return options
+}
+
+function resetSemanticDropdown($dropdown) {
+    if (!$dropdown || !$dropdown.length) {
+        return $dropdown
+    }
+    const id = $dropdown.attr('id') || ''
+    const classes = $dropdown.attr('class') || 'ui dropdown'
+    const $newDropdown = $(`<select id="${id}" class="${classes}"></select>`)
+    const $existingWrapper = $dropdown.closest('.ui.dropdown.selection')
+    if ($existingWrapper.length) {
+        $existingWrapper.replaceWith($newDropdown)
+    } else {
+        $dropdown.replaceWith($newDropdown)
+    }
+    return $newDropdown
+}
+
+function rebuildDashboardUploadProjectDropdown(projectOptions) {
+    let $target = resetSemanticDropdown($dashboardUploadProjectDropdown)
+    dashboardUploadProjectMap.clear()
+    if (!$target) return
+    $target.empty()
+    const placeholder = document.createElement('option')
+    placeholder.value = ''
+    placeholder.textContent = 'Select a project'
+    $target.append(placeholder)
+    projectOptions.forEach((opt) => {
+        const option = document.createElement('option')
+        option.value = opt.value
+        option.textContent = opt.text
+        dashboardUploadProjectMap.set(opt.value, opt.raw)
+        $target.append(option)
+    })
+    $target.dropdown()
+    $target.dropdown('clear')
+    $dashboardUploadProjectDropdown = $target
+}
+
+function hideDashboardUploadModalError() {
+    $dashboardUploadScansModalError.hide().text('')
+}
+
+function showDashboardUploadModalError(message) {
+    $dashboardUploadScansModalError.text(message || '').show()
+}
+
+function fetchDashboardPortalProjects() {
+    return controller.getProjects().then((result) => {
+        if (!result?.success) {
+            throw Object.assign(new Error(buildDashboardScanUploadErrorMessage(result, 'projects')), { result })
+        }
+        const projectOptions = buildProjectOptions(result.json)
+        if (!projectOptions.length) {
+            throw new Error('No projects available. Create a project in the portal and try again.')
+        }
+        return projectOptions
+    })
+}
+
+function buildDashboardUploadSummaryMessage({ completed = [], skipped = [], errors = [] } = {}) {
+    const parts = []
+    if (completed.length) {
+        parts.push(`Uploaded: ${completed.join(', ')}.`)
+    }
+    if (skipped.length) {
+        parts.push(`Skipped: ${skipped.join(', ')}.`)
+    }
+    if (errors.length) {
+        parts.push(`Failed: ${errors.join('; ')}.`)
+    }
+    return parts.join(' ') || 'No scans were uploaded.'
+}
+
+function getDashboardPolicyDefaultValue(engine) {
+    return DASHBOARD_POLICY_DEFAULT_VALUES[String(engine || '').toLowerCase()] || ''
+}
+
+function getDashboardPolicyUiValue(engine) {
+    const key = String(engine || '').toLowerCase()
+    return Object.prototype.hasOwnProperty.call(dashboardPolicyUiValues, key)
+        ? String(dashboardPolicyUiValues[key] || '')
+        : getDashboardPolicyDefaultValue(key)
+}
+
+function setDashboardPolicyUiValue(engine, value) {
+    const key = String(engine || '').toLowerCase()
+    if (!Object.prototype.hasOwnProperty.call(dashboardPolicyUiValues, key)) return
+    const fallback = getDashboardPolicyDefaultValue(key)
+    dashboardPolicyUiValues[key] = value === ''
+        ? ''
+        : String(value || '').trim() || fallback
+}
+
+function getDashboardBuiltinPolicyOptions(engine) {
+    return DASHBOARD_POLICY_BUILTIN_OPTIONS[String(engine || '').toLowerCase()] || []
+}
+
+function buildDashboardPortalOptionValue(entry = {}) {
+    const id = String(entry?.id || '').trim()
+    return id ? `policy:${id}` : ''
+}
+
+function parseDashboardPortalOptionValue(value) {
+    const rawValue = String(value || '').trim()
+    if (!rawValue.startsWith('policy:')) return null
+    const policyId = rawValue.slice('policy:'.length).trim()
+    return policyId || null
+}
+
+function collectDashboardPortalSelections() {
+    const selections = {}
+    DASHBOARD_POLICY_ENGINES.forEach((engine) => {
+        const $select = $(DASHBOARD_POLICY_SELECTORS[engine])
+        if (!$select.length) {
+            selections[engine] = null
+            return
+        }
+        const rawValue = String($select.val() || '').trim()
+        const policyId = parseDashboardPortalOptionValue(rawValue)
+        if (!policyId) {
+            selections[engine] = null
+            return
+        }
+        const policyName = String($select.find('option:selected').text() || '').trim() || null
+        selections[engine] = {
+            policyId,
+            policyName
+        }
+    })
+    return selections
+}
+
+function buildDashboardPolicyEntries(bucket = {}) {
+    const metadata = Array.isArray(bucket?.metadata) ? bucket.metadata.slice() : []
+    const selected = bucket?.selectedPolicy && typeof bucket.selectedPolicy === 'object'
+        ? bucket.selectedPolicy
+        : null
+    if (selected?.id && !metadata.some((entry) => String(entry?.id || '') === String(selected.id))) {
+        metadata.unshift(selected)
+    }
+    return metadata.filter((entry) => entry && (entry.id || entry.name))
+}
+
+function defaultDashboardPolicyLabel(engine, bucket = {}) {
+    const hasLoadedOptions = Array.isArray(bucket?.metadata) && bucket.metadata.length > 0
+    if (hasLoadedOptions) return 'Select policy'
+    return 'Default'
+}
+
+function clearDashboardProPolicyValidation() {
+    $('#ptk_pro_policy_validation').hide().text('')
+}
+
+function showDashboardPolicyDialog(message, options = {}) {
+    clearDashboardProPolicyValidation()
+    showDashboardResultModal(
+        options?.header || 'Error',
+        message || 'Select a scan policy.',
+        { type: options?.type || 'error' }
+    )
+}
+
+function getDashboardPortalErrorMessage(result, fallback = 'unknown_error') {
+    if (result?.error === 'missing_api_key') {
+        return 'PAT required. Activate the portal token in Settings first.'
+    }
+    return result?.message || result?.error || fallback
+}
+
+function renderDashboardPortalPolicyState(policyState = null) {
+    const nextState = (policyState && typeof policyState === 'object') ? policyState : (controller.policyState || {})
+    controller.policyState = nextState
+    DASHBOARD_POLICY_ENGINES.forEach((engine) => {
+        const $select = $(DASHBOARD_POLICY_SELECTORS[engine])
+        if (!$select.length) return
+        const bucket = nextState?.[engine] || {}
+        const entries = buildDashboardPolicyEntries(bucket)
+        const hasPortalEntries = entries.length > 0
+        const hasSelectedPortalPolicy = !!bucket?.selectedPolicy?.id
+        if (!hasPortalEntries && !hasSelectedPortalPolicy) {
+            const builtinOptions = getDashboardBuiltinPolicyOptions(engine)
+            $select.html(builtinOptions.map((entry) => (
+                `<option value="${escapeDashboardPolicyHtml(entry.value)}">${escapeDashboardPolicyHtml(entry.label)}</option>`
+            )).join(''))
+            syncDashboardPolicyDropdown($select, getDashboardPolicyUiValue(engine) || getDashboardPolicyDefaultValue(engine))
+            return
+        }
+
+        const options = []
+        options.push(`<option value="">${escapeDashboardPolicyHtml(defaultDashboardPolicyLabel(engine, bucket))}</option>`)
+        getDashboardBuiltinPolicyOptions(engine).forEach((entry) => {
+            options.push(`<option value="${escapeDashboardPolicyHtml(entry.value)}">${escapeDashboardPolicyHtml(entry.label)}</option>`)
+        })
+        entries.forEach((entry) => {
+            if (!entry?.id) return
+            const label = entry.label || entry.name || `Policy #${entry.id}`
+            options.push(`<option value="${escapeDashboardPolicyHtml(buildDashboardPortalOptionValue(entry))}">${escapeDashboardPolicyHtml(label)}</option>`)
+        })
+        $select.html(options.join(''))
+        const selectedValue = hasSelectedPortalPolicy
+            ? buildDashboardPortalOptionValue(bucket.selectedPolicy)
+            : (hasPortalEntries ? getDashboardPolicyUiValue(engine) : getDashboardPolicyDefaultValue(engine))
+        syncDashboardPolicyDropdown($select, selectedValue)
+    })
+}
+
+async function clearDashboardLoadedPolicySelections() {
+    let latestState = controller.policyState || {}
+    for (const engine of DASHBOARD_POLICY_ENGINES) {
+        const response = await controller.clearPolicy(engine.toUpperCase()).catch(() => null)
+        if (response?.success && response?.policyState) {
+            latestState = response.policyState
+        }
+    }
+    return latestState
+}
+
+function getDashboardMissingPolicySelections(selectedScans = {}) {
+    const policyState = controller.policyState || {}
+    return DASHBOARD_POLICY_ENGINES.filter((engine) => {
+        if (!selectedScans?.[engine]) return false
+        const bucket = policyState?.[engine] || {}
+        const hasLoadedOptions = Array.isArray(bucket?.metadata) && bucket.metadata.length > 0
+        if (!hasLoadedOptions) return false
+        const currentValue = String($(DASHBOARD_POLICY_SELECTORS[engine]).val() || '').trim()
+        return !currentValue
+    }).map((engine) => engine.toUpperCase())
+}
+
+function setDashboardPortalPolicyLoading(loading) {
+    const isLoading = !!loading
+    $('#load_pro_policies_button')
+        .toggleClass('loading', isLoading)
+        .toggleClass('disabled', isLoading)
+    $('.dashboard-pro-policy-select').prop('disabled', isLoading)
 }
 
 function resolveDashboardHelpPopupPosition($icon) {
@@ -157,19 +620,25 @@ function resolveDashboardHelpPopupPosition($icon) {
 function bindDashboardHelpPopups() {
     $('#index_scans_form .question.circle.icon').each(function () {
         const $icon = $(this)
-        const $popup = $icon.closest('.field').children('.ptk-help-popup').first()
+        let $popup = $icon.closest('.ptk-help-label-row').nextAll('.ptk-help-popup').first()
+        if (!$popup.length) {
+            $popup = $icon.closest('.field').find('.ptk-help-popup').first()
+        }
         if (!$popup.length) return
-        if ($icon.data('module-popup')) {
+        if (!String($popup.html() || '').trim()) return
+        const existingPopupInstance = $icon.data('module-popup')
+        if (existingPopupInstance && typeof existingPopupInstance === 'object') {
             $icon.popup('destroy')
         }
         $icon.popup({
             popup: $popup,
-            inline: true,
+            on: 'hover',
             hoverable: true,
             position: resolveDashboardHelpPopupPosition($icon),
+            preserve: true,
             delay: {
-                show: 300,
-                hide: 800
+                show: 80,
+                hide: 120
             }
         })
     })
@@ -177,9 +646,125 @@ function bindDashboardHelpPopups() {
 
 async function refreshDashboardScanState(activeTab = null) {
     const resolvedTab = activeTab || controller.activeTab || (controller.tabId ? { tabId: controller.tabId, url: controller.url } : null)
-    const refreshed = await controller.init(resolvedTab ? { tabId: resolvedTab.tabId, url: resolvedTab.url } : {})
+    const refreshed = await controller.getScans(resolvedTab ? { tabId: resolvedTab.tabId, url: resolvedTab.url } : {})
     applyDashboardScanControls(refreshed?.scans)
+    renderDashboardPortalPolicyState(refreshed?.policyState)
     return refreshed
+}
+
+function getDashboardCachedActiveTab() {
+    if (controller.activeTab?.url && typeof controller.activeTab?.tabId !== 'undefined' && !isExtensionUrl(controller.activeTab.url)) {
+        return controller.activeTab
+    }
+    if (controller.url && typeof controller.tabId !== 'undefined' && !isExtensionUrl(controller.url)) {
+        return { url: controller.url, tabId: controller.tabId }
+    }
+    return null
+}
+
+function getDashboardCachedScans() {
+    const fallbackSettings = {
+        maxRequestsPerSecond: 5,
+        concurrency: 3,
+        dastScanStrategy: 'SMART',
+        dastScanPolicy: getDashboardPolicyDefaultValue('dast'),
+        dastRecordMacro: false,
+        scanControls: { profile: 'safe' }
+    }
+    const raw = controller.scans && typeof controller.scans === 'object' ? controller.scans : {}
+    const exportable = raw.exportable && typeof raw.exportable === 'object' ? raw.exportable : {}
+    const dastSettings = raw.dastSettings && typeof raw.dastSettings === 'object' ? raw.dastSettings : {}
+    return {
+        dast: !!raw.dast,
+        iast: !!raw.iast,
+        sast: !!raw.sast,
+        sca: !!raw.sca,
+        hasAnyScanForHost: !!raw.hasAnyScanForHost,
+        exportable: {
+            dast: !!exportable.dast,
+            iast: !!exportable.iast,
+            sast: !!exportable.sast,
+            sca: !!exportable.sca,
+            any: !!exportable.any
+        },
+        dastSettings: Object.assign({}, fallbackSettings, dastSettings, {
+            scanControls: Object.assign({}, fallbackSettings.scanControls, dastSettings.scanControls || {})
+        })
+    }
+}
+
+async function populateManageScansDialog(result = {}, activeTab = null, options = {}) {
+    const updateRuntime = options?.updateRuntime === true
+    const scans = result?.scans && typeof result.scans === 'object' ? result.scans : getDashboardCachedScans()
+    const policyState = result?.policyState && typeof result.policyState === 'object'
+        ? result.policyState
+        : (controller.policyState || {})
+    const resolvedActiveTab = activeTab || getDashboardCachedActiveTab()
+
+    if (!resolvedActiveTab?.url || typeof resolvedActiveTab?.tabId === 'undefined') {
+        $('#result_header').text("Error")
+        $('#result_message').text("Active tab not set. Reload required tab to activate tracking.")
+        $('#result_dialog').modal('show')
+        return false
+    }
+
+    controller.activeTab = resolvedActiveTab
+    controller.tabId = resolvedActiveTab.tabId
+    controller.url = resolvedActiveTab.url
+    controller.scans = scans
+    controller.policyState = policyState
+
+    const host = new URL(resolvedActiveTab.url).host
+    $('#scan_host').text(host)
+    $('#scan_domains').text(host)
+    applyDashboardScanControls(scans)
+    renderDashboardPortalPolicyState(policyState)
+    clearDashboardProPolicyValidation()
+
+    const settings = scans.dastSettings || getDashboardCachedScans().dastSettings
+    $('#maxRequestsPerSecond').val(settings.maxRequestsPerSecond)
+    $('#concurrency').val(settings.concurrency)
+    $('#dast-scan-strategy').val(settings.dastScanStrategy || 'SMART')
+    setDashboardDastRecordMacro(!!settings.dastRecordMacro)
+    setDashboardPolicyUiValue('dast', settings.dastScanPolicy || getDashboardPolicyDefaultValue('dast'))
+    setDashboardPolicyUiValue('iast', getDashboardPolicyUiValue('iast') || getDashboardPolicyDefaultValue('iast'))
+    setDashboardPolicyUiValue('sast', getDashboardPolicyUiValue('sast') || getDashboardPolicyDefaultValue('sast'))
+    DASHBOARD_POLICY_ENGINES.forEach((engine) => {
+        const bucket = controller?.policyState?.[engine] || {}
+        const hasPortalEntries = Array.isArray(bucket?.metadata) && bucket.metadata.length > 0
+        if (hasPortalEntries && !bucket?.selectedPolicy?.id) {
+            setDashboardPolicyUiValue(engine, '')
+        }
+    })
+    syncDashboardPolicyDropdown($('#dast-scan-policy'), getDashboardPolicyUiValue('dast'))
+    syncDashboardPolicyDropdown($('#iast-scan-policy'), getDashboardPolicyUiValue('iast'))
+    syncDashboardPolicyDropdown($('#sast-scan-policy'), getDashboardPolicyUiValue('sast'))
+    renderDashboardPortalPolicyState(controller.policyState)
+    const dashboardSafetyProfile = (
+        settings?.scanControls?.profile ||
+        settings?.safetyProfile ||
+        'safe'
+    )
+    $('#dast-safety-profile').val(String(dashboardSafetyProfile).toLowerCase())
+    setRunCveState(false)
+
+    const cachedReady = controller._contentReadyByTabId?.[resolvedActiveTab.tabId]
+    if (cachedReady === true) {
+        setReloadWarning($('#ptk_reload_warning'), false)
+        updateRuntimeScanToggles(true)
+    } else if (cachedReady === false) {
+        setReloadWarning($('#ptk_reload_warning'), true)
+        updateRuntimeScanToggles(false)
+    } else {
+        updateRuntimeScanToggles(false)
+    }
+
+    if (updateRuntime) {
+        const contentReady = await rutils.pingContentScript(resolvedActiveTab.tabId, { timeoutMs: 1800 })
+        setReloadWarning($('#ptk_reload_warning'), !contentReady)
+        updateRuntimeScanToggles(contentReady)
+    }
+    return true
 }
 
 async function runDashboardProgressAction({ title, initialMessage, jobs, successMessage, emptyMessage, activeTab = null, trigger = null } = {}) {
@@ -197,10 +782,11 @@ async function runDashboardProgressAction({ title, initialMessage, jobs, success
         if (!queue.length) {
             setDashboardExportProgress(100, emptyMessage || 'No scans selected.', { title })
             const refreshed = await refreshDashboardScanState(activeTab)
-            return refreshed
+            return { refreshed, completed: [], errors: [] }
         }
 
         const errors = []
+        const completed = []
         const total = queue.length
         for (let i = 0; i < total; i += 1) {
             const job = queue[i]
@@ -209,6 +795,7 @@ async function runDashboardProgressAction({ title, initialMessage, jobs, success
             setDashboardExportProgress(base, `${job.label}: in progress...`, { title })
             try {
                 await Promise.resolve(job.run())
+                completed.push(job.label)
                 setDashboardExportProgress(done, `${job.label}: complete`, { title })
             } catch (err) {
                 errors.push(`${job.label}: ${err?.message || 'action_failed'}`)
@@ -224,7 +811,7 @@ async function runDashboardProgressAction({ title, initialMessage, jobs, success
         }
 
         const refreshed = await refreshDashboardScanState(activeTab)
-        return refreshed
+        return { refreshed, completed, errors }
     } finally {
         dashboardActionInProgress = false
         if (trigger && trigger.length) {
@@ -452,6 +1039,9 @@ function scheduleNoAccessFallback(tabId, delayMs = 2500) {
 
 
 jQuery(function () {
+    $('.modal.coupled').modal({
+        allowMultiple: true
+    })
 
     $runCveInput = $('#ptk_dast_run_cve')
     $runCveCheckboxWrapper = $runCveInput.closest('.ui.checkbox')
@@ -1082,7 +1672,11 @@ $(document).on("click", ".dast_scan_stop, .iast_scan_stop, .sast_scan_stop, .sca
     if ($button.hasClass('dast_scan_stop')) {
         jobs.push({
             label: 'DAST',
-            run: async () => controller.stopBackgroundScan({ dast: true, iast: false, sast: false, sca: false })
+            run: async () => {
+                const response = await controller.stopBackgroundScan({ dast: true, iast: false, sast: false, sca: false })
+                await stopDashboardDastMacroRecording()
+                return response
+            }
         })
     }
     if ($button.hasClass('iast_scan_stop')) {
@@ -1121,17 +1715,31 @@ $(document).on("click", "#stop_all_scans", function () {
     const activeTab = controller.activeTab || (controller.tabId ? { tabId: controller.tabId, url: controller.url } : null)
     const scans = controller.scans || {}
     const jobs = []
+    const siblingSelection = {
+        dast: false,
+        iast: !!scans.iast,
+        sast: !!scans.sast,
+        sca: !!scans.sca
+    }
+    const siblingLabels = []
+    if (siblingSelection.iast) siblingLabels.push('IAST')
+    if (siblingSelection.sast) siblingLabels.push('SAST')
+    if (siblingSelection.sca) siblingLabels.push('SCA')
+    if (siblingLabels.length) {
+        jobs.push({
+            label: `${siblingLabels.join(' + ')}`,
+            run: async () => controller.stopBackgroundScan(siblingSelection)
+        })
+    }
     if (scans.dast) {
-        jobs.push({ label: 'DAST', run: async () => controller.stopBackgroundScan({ dast: true, iast: false, sast: false, sca: false }) })
-    }
-    if (scans.iast) {
-        jobs.push({ label: 'IAST', run: async () => controller.stopBackgroundScan({ dast: false, iast: true, sast: false, sca: false }) })
-    }
-    if (scans.sast) {
-        jobs.push({ label: 'SAST', run: async () => controller.stopBackgroundScan({ dast: false, iast: false, sast: true, sca: false }) })
-    }
-    if (scans.sca) {
-        jobs.push({ label: 'SCA', run: async () => controller.stopBackgroundScan({ dast: false, iast: false, sast: false, sca: true }) })
+        jobs.push({
+            label: 'DAST',
+            run: async () => {
+                const response = await controller.stopBackgroundScan({ dast: true, iast: false, sast: false, sca: false })
+                await stopDashboardDastMacroRecording()
+                return response
+            }
+        })
     }
     runDashboardProgressAction({
         title: 'Stop scans',
@@ -1207,123 +1815,329 @@ $(document).on("click", "#export_all_scans", function () {
     return false
 })
 
-$(document).on("click", "#manage_scans", function () {
-    window._ptkReloadWarningClosed = false
-    const initOpts = controller.tabId ? { tabId: controller.tabId, url: controller.url } : {}
-    controller.init(initOpts).then(function (result) {
-        const resolvedTabPromise = controller.tabId
-            ? Promise.resolve({ tabId: controller.tabId, url: controller.url })
-            : resolveActiveTab(result)
-        return resolvedTabPromise.then(async function (activeTab) {
-            if (!activeTab?.url || typeof activeTab?.tabId === 'undefined') {
-                $('#result_header').text("Error")
-                $('#result_message').text("Active tab not set. Reload required tab to activate tracking.")
-                $('#result_dialog').modal('show')
-                return false
-            }
-            result.activeTab = activeTab
-            controller.activeTab = activeTab
-
-            let h = new URL(result.activeTab.url).host
-            $('#scan_host').text(h)
-            $('#scan_domains').text(h)
-            applyDashboardScanControls(result?.scans)
-
-            let settings = result.scans.dastSettings
-            $('#maxRequestsPerSecond').val(settings.maxRequestsPerSecond)
-            $('#concurrency').val(settings.concurrency)
-            $('#dast-scan-strategy').val(settings.dastScanStrategy || 'SMART')
-            $('#dast-scan-policy').val(settings.dastScanPolicy || 'ACTIVE')
-            const dashboardSafetyProfile = (
-                settings?.scanControls?.profile ||
-                settings?.safetyProfile ||
-                'safe'
-            )
-            $('#dast-safety-profile').val(String(dashboardSafetyProfile).toLowerCase())
-            setRunCveState(false)
-            const contentReady = await rutils.pingContentScript(activeTab.tabId, { timeoutMs: 1800 })
-            setReloadWarning($('#ptk_reload_warning'), !contentReady)
-            updateRuntimeScanToggles(contentReady)
-
-            $('#run_scan_dlg')
+$(document).on("click", "#upload_all_scans", function () {
+    if ($(this).hasClass('disabled') || dashboardActionInProgress || dashboardExportInProgress) return false
+    hideDashboardUploadModalError()
+    const $button = $(this)
+    $button.addClass('loading')
+    fetchDashboardPortalProjects()
+        .then((projectOptions) => {
+            rebuildDashboardUploadProjectDropdown(projectOptions)
+            $dashboardUploadScansModal
                 .modal({
                     allowMultiple: true,
                     onApprove: function () {
-                        const $approve = $('#run_scan_dlg .confirm_scan_run')
-                        if ($approve.hasClass('disabled') || dashboardActionInProgress || dashboardExportInProgress) {
+                        const projectId = $dashboardUploadProjectDropdown.val()
+                        if (!projectId) {
+                            showDashboardUploadModalError('Select a project to continue.')
                             return false
                         }
-                        let $form = $('#index_scans_form'), values = $form.form('get values')
-                        let s = {
-                            dast: values['dast_scan'] == 'on' ? true : false,
-                            iast: values['iast_scan'] == 'on' ? true : false,
-                            sast: values['sast_scan'] == 'on' ? true : false,
-                            sca: values['sca_scan'] == 'on' ? true : false,
-                        }
-                        let sastScanStrategy = $('#sast-scan-strategy').val()
-                        const safetyProfile = ($('#dast-safety-profile').val() || 'safe').toLowerCase()
-                        const settings = {
-                            maxRequestsPerSecond: $('#maxRequestsPerSecond').val(),
-                            concurrency: $('#concurrency').val(),
-                            sastScanStrategy: sastScanStrategy || 0,
-                            scanStrategy: $('#dast-scan-strategy').val() || 'SMART',
-                            dastScanPolicy: $('#dast-scan-policy').val() || 'ACTIVE',
-                            safetyProfile,
-                            scanControls: {
-                                profile: safetyProfile
-                            },
-                            runCve: isRunCveEnabled()
-                        }
-                        if (!contentReady && (s.iast || s.sast)) {
-                            setReloadWarning($('#ptk_reload_warning'), true)
-                            return false
-                        }
+                        const payloadProjectId = dashboardUploadProjectMap.get(projectId) ?? projectId
+                        const exportable = controller.scans?.exportable || {}
+                        const engineLabels = { dast: 'DAST', iast: 'IAST', sast: 'SAST', sca: 'SCA' }
+                        const skipped = []
                         const jobs = []
-                        if (s.dast) {
-                            jobs.push({
-                                label: 'DAST',
-                                run: async () => controller.runBackgroundScan(result.activeTab.tabId, h, $('#scan_domains').val(), { dast: true, iast: false, sast: false, sca: false }, settings)
+                        const uploadEngines = ['dast', 'iast', 'sast', 'sca']
+                        const uploadTask = async () => {
+                            for (const engine of uploadEngines) {
+                                if (!exportable?.[engine]) {
+                                    skipped.push(`${engineLabels[engine]} (no scan data)`)
+                                    continue
+                                }
+                                const scanController = await getExportController(engine)
+                                if (typeof scanController?.saveScan !== 'function') {
+                                    skipped.push(`${engineLabels[engine]} (upload not supported)`)
+                                    continue
+                                }
+                                jobs.push({
+                                    label: engineLabels[engine],
+                                    run: async () => {
+                                        const response = await scanController.saveScan(payloadProjectId)
+                                        if (!response?.success) {
+                                            throw new Error(response?.json?.message || response?.message || 'upload_failed')
+                                        }
+                                        return response
+                                    }
+                                })
+                            }
+                            const uploadResult = await runDashboardProgressAction({
+                                title: 'Upload',
+                                initialMessage: 'Preparing selected scans for upload...',
+                                jobs,
+                                successMessage: 'Scan upload complete.',
+                                emptyMessage: 'No scans available to upload.',
+                                activeTab: controller.activeTab,
+                                trigger: $('#upload_all_scans')
                             })
+                            const errors = Array.isArray(uploadResult?.errors) ? uploadResult.errors : []
+                            const completed = Array.isArray(uploadResult?.completed) ? uploadResult.completed : []
+                            showDashboardResultModal(
+                                errors.length ? 'Upload complete with errors' : 'Success',
+                                buildDashboardUploadSummaryMessage({ completed, skipped, errors }),
+                                { type: errors.length ? 'warning' : 'success' }
+                            )
                         }
-                        if (s.iast) {
-                            jobs.push({
-                                label: 'IAST',
-                                run: async () => controller.runBackgroundScan(result.activeTab.tabId, h, $('#scan_domains').val(), { dast: false, iast: true, sast: false, sca: false }, settings)
-                            })
-                        }
-                        if (s.sast) {
-                            jobs.push({
-                                label: 'SAST',
-                                run: async () => controller.runBackgroundScan(result.activeTab.tabId, h, $('#scan_domains').val(), { dast: false, iast: false, sast: true, sca: false }, settings)
-                            })
-                        }
-                        if (s.sca) {
-                            jobs.push({
-                                label: 'SCA',
-                                run: async () => controller.runBackgroundScan(result.activeTab.tabId, h, $('#scan_domains').val(), { dast: false, iast: false, sast: false, sca: true }, settings)
-                            })
-                        }
-                        runDashboardProgressAction({
-                            title: 'Run scans',
-                            initialMessage: 'Preparing selected scans...',
-                            jobs,
-                            successMessage: 'Selected scans started.',
-                            emptyMessage: 'No scans selected to run.',
-                            activeTab: result.activeTab,
-                            trigger: $approve
-                        }).then(() => {
-                            setTimeout(() => {
-                                $('#run_scan_dlg').modal('hide')
-                            }, 350)
-                        }).catch(() => { })
+                        uploadTask().finally(() => {
+                            $dashboardUploadScansModal.modal('hide')
+                        })
                         return false
                     }
                 })
                 .modal('show')
-            bindDashboardHelpPopups()
         })
-    })
+        .catch((err) => {
+            const result = err?.result || null
+            showDashboardResultModal(
+                'Error',
+                err?.message || buildDashboardScanUploadErrorMessage(result, 'projects'),
+                { type: 'error', showSettings: result?.error === 'missing_api_key' }
+            )
+        })
+        .finally(() => {
+            $button.removeClass('loading')
+        })
+    return false
+})
 
+$(document).on("click", "#manage_scans", function () {
+    window._ptkReloadWarningClosed = false
+    ; (async () => {
+        const activeTab = getDashboardCachedActiveTab() || await resolveActiveTab({ activeTab: controller.activeTab })
+        const opened = await populateManageScansDialog({
+            scans: getDashboardCachedScans(),
+            policyState: controller.policyState || {}
+        }, activeTab, { updateRuntime: false })
+        if (opened === false) return
+
+        $('#run_scan_dlg')
+            .modal({
+                allowMultiple: true,
+                onApprove: function () {
+                    const $approve = $('#run_scan_dlg .confirm_scan_run')
+                    if ($approve.hasClass('disabled') || dashboardActionInProgress || dashboardExportInProgress) {
+                        return false
+                    }
+                    const currentActiveTab = controller.activeTab || activeTab
+                    if (!currentActiveTab?.url || typeof currentActiveTab?.tabId === 'undefined') {
+                        $('#result_header').text("Error")
+                        $('#result_message').text("Active tab not set. Reload required tab to activate tracking.")
+                        $('#result_dialog').modal('show')
+                        return false
+                    }
+                    const contentReady = controller._contentReadyByTabId?.[currentActiveTab.tabId] === true
+                    const host = new URL(currentActiveTab.url).host
+                    let $form = $('#index_scans_form'), values = $form.form('get values')
+                    let s = {
+                        dast: values['dast_scan'] == 'on' ? true : false,
+                        iast: values['iast_scan'] == 'on' ? true : false,
+                        sast: values['sast_scan'] == 'on' ? true : false,
+                        sca: values['sca_scan'] == 'on' ? true : false,
+                    }
+                    const missingPolicies = getDashboardMissingPolicySelections(s)
+                    if (missingPolicies.length) {
+                        showDashboardPolicyDialog(`Select scan policy for: ${missingPolicies.join(', ')}`, { header: 'Error', type: 'error' })
+                        return false
+                    }
+                    clearDashboardProPolicyValidation()
+                    const sastPolicyValue = String($('#sast-scan-policy').val() || '').trim()
+                    let sastScanStrategy = Number($('#sast-scan-strategy').val() || 0)
+                    if (!Number.isFinite(sastScanStrategy)) {
+                        sastScanStrategy = 0
+                    }
+                    const dastPolicyValue = String($('#dast-scan-policy').val() || '').trim()
+                    const safetyProfile = ($('#dast-safety-profile').val() || 'safe').toLowerCase()
+                    const portalSelections = collectDashboardPortalSelections()
+                    const settings = {
+                        maxRequestsPerSecond: $('#maxRequestsPerSecond').val(),
+                        concurrency: $('#concurrency').val(),
+                        sastScanStrategy: sastScanStrategy || 0,
+                        scanStrategy: $('#dast-scan-strategy').val() || 'SMART',
+                        dastRecordMacro: isDashboardDastRecordMacroEnabled(),
+                        dastScanPolicy: parseDashboardPortalOptionValue(dastPolicyValue)
+                            ? 'PORTAL'
+                            : (dastPolicyValue || getDashboardPolicyDefaultValue('dast')),
+                        safetyProfile,
+                        scanControls: {
+                            profile: safetyProfile
+                        },
+                        runCve: isRunCveEnabled(),
+                        portalSelections
+                    }
+                    if (!contentReady && (s.iast || s.sast)) {
+                        setReloadWarning($('#ptk_reload_warning'), true)
+                        return false
+                    }
+                    const jobs = []
+                    if (s.dast) {
+                        DASHBOARD_DAST_MACRO_STATE.requested = !!settings.dastRecordMacro
+                        DASHBOARD_DAST_MACRO_STATE.started = false
+                        jobs.push({
+                            label: 'DAST',
+                            run: async () => {
+                                const response = await controller.runBackgroundScan(currentActiveTab.tabId, host, $('#scan_domains').val(), { dast: true, iast: false, sast: false, sca: false }, settings)
+                                if (response?.success === false) {
+                                    DASHBOARD_DAST_MACRO_STATE.requested = false
+                                    DASHBOARD_DAST_MACRO_STATE.started = false
+                                    throw new Error(response?.message || response?.error || 'scan_start_failed')
+                                }
+                                if (settings.dastRecordMacro) {
+                                    const recordingResult = await startDashboardDastMacroRecording(currentActiveTab)
+                                    if (recordingResult?.success === false) {
+                                        showDashboardResultModal('Warning', recordingResult?.error || 'DAST scan started, but macro recording could not be started.', {
+                                            header: 'Warning',
+                                            type: 'warning'
+                                        })
+                                    }
+                                }
+                                return response
+                            }
+                        })
+                    }
+                    if (s.iast) {
+                        jobs.push({
+                            label: 'IAST',
+                            run: async () => {
+                                const response = await controller.runBackgroundScan(currentActiveTab.tabId, host, $('#scan_domains').val(), { dast: false, iast: true, sast: false, sca: false }, settings)
+                                if (response?.success === false) {
+                                    throw new Error(response?.message || response?.error || 'scan_start_failed')
+                                }
+                                return response
+                            }
+                        })
+                    }
+                    if (s.sast) {
+                        jobs.push({
+                            label: 'SAST',
+                            run: async () => {
+                                const response = await controller.runBackgroundScan(currentActiveTab.tabId, host, $('#scan_domains').val(), { dast: false, iast: false, sast: true, sca: false }, settings)
+                                if (response?.success === false) {
+                                    throw new Error(response?.message || response?.error || 'scan_start_failed')
+                                }
+                                return response
+                            }
+                        })
+                    }
+                    if (s.sca) {
+                        jobs.push({
+                            label: 'SCA',
+                            run: async () => {
+                                const response = await controller.runBackgroundScan(currentActiveTab.tabId, host, $('#scan_domains').val(), { dast: false, iast: false, sast: false, sca: true }, settings)
+                                if (response?.success === false) {
+                                    throw new Error(response?.message || response?.error || 'scan_start_failed')
+                                }
+                                return response
+                            }
+                        })
+                    }
+                    runDashboardProgressAction({
+                        title: 'Run scans',
+                        initialMessage: 'Preparing selected scans...',
+                        jobs,
+                        successMessage: 'Selected scans started.',
+                        emptyMessage: 'No scans selected to run.',
+                        activeTab: currentActiveTab,
+                        trigger: $approve
+                    }).then(() => {
+                        setTimeout(() => {
+                            $('#run_scan_dlg').modal('hide')
+                        }, 350)
+                    }).catch(() => { })
+                    return false
+                }
+            })
+            .modal('show')
+        bindDashboardHelpPopups()
+
+        refreshDashboardScanState(activeTab)
+            .then((refreshed) => populateManageScansDialog(
+                refreshed,
+                refreshed?.activeTab || controller.activeTab || activeTab,
+                { updateRuntime: true }
+            ))
+            .catch(() => { })
+    })().catch(() => { })
+
+    return false
+})
+
+$(document).on('click', '#load_pro_policies_button', async function () {
+    if (dashboardActionInProgress || dashboardExportInProgress) return false
+    setDashboardPortalPolicyLoading(true)
+    try {
+        const result = await controller.loadPolicyMetadata()
+        if (result?.success) {
+            const clearedState = await clearDashboardLoadedPolicySelections()
+            DASHBOARD_POLICY_ENGINES.forEach((engine) => {
+                const bucket = clearedState?.[engine] || {}
+                const hasPortalEntries = Array.isArray(bucket?.metadata) && bucket.metadata.length > 0
+                if (hasPortalEntries) {
+                    setDashboardPolicyUiValue(engine, '')
+                }
+            })
+            renderDashboardPortalPolicyState(clearedState)
+            clearDashboardProPolicyValidation()
+            showDashboardResultModal(
+                'Success',
+                buildDashboardPolicyLoadSuccessMessage(clearedState || {}),
+                { type: 'success' }
+            )
+        } else {
+            renderDashboardPortalPolicyState(result?.policyState || controller.policyState)
+            showDashboardResultModal(
+                'Error',
+                buildPolicyLoadErrorMessage(result),
+                { type: 'error', showSettings: result?.error === 'missing_api_key' }
+            )
+        }
+    } catch (err) {
+        showDashboardResultModal(
+            'Error',
+            buildPolicyLoadErrorMessage({ message: err?.message || 'unknown_error' }),
+            { type: 'error' }
+        )
+    } finally {
+        setDashboardPortalPolicyLoading(false)
+    }
+    return false
+})
+
+$(document).on('click', '#result_dialog .result_open_settings_btn', function () {
+    openExtensionSettingsWindow()
+    $('#result_dialog').modal('hide')
+    return false
+})
+
+$(document).on('click', '#manage_scans, #run_scan_dlg .close, #result_dialog .close, #result_dialog .approve, #result_dialog .cancel', function () {
+    hideDashboardHelpPopups()
+})
+
+$(document).on('change', '.dashboard-pro-policy-select', async function () {
+    if (dashboardActionInProgress || dashboardExportInProgress) return false
+    const $select = $(this)
+    const engine = String($select.data('engine') || '').trim().toUpperCase()
+    if (!engine) return false
+    const rawValue = String($select.val() || '').trim()
+    setDashboardPolicyUiValue(engine, rawValue)
+    const policyId = parseDashboardPortalOptionValue(rawValue)
+    const policyName = policyId ? String($select.find('option:selected').text() || '').trim() : null
+    setDashboardPortalPolicyLoading(true)
+    try {
+        const shouldSelectPolicy = !!policyId
+        const result = shouldSelectPolicy
+            ? await controller.selectPolicy(engine, policyId, policyName)
+            : await controller.clearPolicy(engine)
+        if (result?.success) {
+            renderDashboardPortalPolicyState(result.policyState)
+            clearDashboardProPolicyValidation()
+        } else {
+            renderDashboardPortalPolicyState(result?.policyState || controller.policyState)
+            showDashboardPolicyDialog(`Failed to update ${engine} scan policy: ${getDashboardPortalErrorMessage(result)}`, { header: 'Error', type: 'error' })
+        }
+    } catch (err) {
+        showDashboardPolicyDialog(`Failed to update ${engine} scan policy: ${err?.message || 'unknown_error'}`, { header: 'Error', type: 'error' })
+    } finally {
+        setDashboardPortalPolicyLoading(false)
+    }
     return false
 })
 

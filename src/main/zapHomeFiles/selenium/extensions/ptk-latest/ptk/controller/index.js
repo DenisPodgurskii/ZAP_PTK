@@ -46,6 +46,26 @@ export class ptk_controller_index {
             }).catch(e => e)
     }
 
+    async getScans(options = {}) {
+        let self = this
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_dashboard",
+            type: "get_scans",
+            ...options
+        }).then(function (result) {
+            if (result && typeof result === "object") {
+                if (result.activeTab) self.activeTab = result.activeTab
+                if (result.scans) self.scans = result.scans
+                if (result.policyState) self.policyState = result.policyState
+                if (options?.tabId) {
+                    self.tabId = options.tabId
+                    if (options?.url) self.url = options.url
+                }
+            }
+            return result
+        }).catch(e => e)
+    }
+
     async save(items) {
         return browser.runtime.sendMessage({ channel: "ptk_popup2background_dashboard", type: "save", items: items }).catch(e => e)
     }
@@ -90,6 +110,46 @@ export class ptk_controller_index {
             type: "request_tab_analysis",
             tabId,
             url
+        }).catch(e => e)
+    }
+
+    async getPolicyState() {
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_dashboard",
+            type: "get_policy_state"
+        }).catch(e => e)
+    }
+
+    async loadPolicyMetadata(engine = null) {
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_dashboard",
+            type: "load_policy_metadata",
+            engine
+        }).catch(e => e)
+    }
+
+    async selectPolicy(engine, policyId, policyName = null) {
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_dashboard",
+            type: "select_policy",
+            engine,
+            policyId,
+            policyName
+        }).catch(e => e)
+    }
+
+    async clearPolicy(engine) {
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_dashboard",
+            type: "clear_policy",
+            engine
+        }).catch(e => e)
+    }
+
+    async getProjects() {
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_dashboard",
+            type: "get_projects"
         }).catch(e => e)
     }
 

@@ -213,6 +213,7 @@ export class dastEngine {
         this.settings = settings
         this.maxRequestsPerSecond = settings.maxRequestsPerSecond
         this.concurrency = settings.concurrency
+        this.planningConcurrency = settings.planningConcurrency
         this.requestTimeoutMs = this._resolveTimeoutMs(
             settings.requestTimeoutMs,
             DEFAULT_DAST_REQUEST_TIMEOUT_MS
@@ -243,8 +244,9 @@ export class dastEngine {
             },
             refreshOastProbeDomains: () => this._refreshOastProbeDomains(),
             ensureOastCallbackProbe: () => this._ensureOastCallbackProbe(),
-            executeOriginal: async (schema) => this.executeOriginal(schema),
+            resolveOriginal: async (schema, rawMeta, options) => this._resolveOriginalForPlan(schema, rawMeta, options),
             getModules: () => this.modules,
+            shouldPlanModule: (module, schema, original) => this._shouldPlanModuleForRequest(module, schema, original),
             moduleRuntimeMode: (module) => this._moduleRuntimeMode(module),
             buildSpaTasks: (original, module, attack, rawMeta, planFingerprint) => this._buildSpaTasks(original, module, attack, rawMeta, planFingerprint),
             shouldUseBulkAttack: (module, options = {}) => this._shouldUseBulkAttack(module, options),
@@ -299,16 +301,26 @@ export class dastEngine {
         this.activeCount = 0
         this._requestQueue = new ptk_queue()
         this.scanResult = this.getEmptyScanResult()
-        this._taskQueue = []
+        this._resetTaskQueues()
         this._activePlans = new Map()
         this._taskWorkers = new Set()
         this._moduleLocks = new Set()
         this._planLocks = new Set()
+        this._modulePlanningCache = new WeakMap()
+        this._requestPlanningSummaryCache = new WeakMap()
+        this._requestPlanningSummaryByFingerprint = new Map()
+        this._planningDecisionCache = new Map()
+        this._resolvedOriginalCache = new Map()
         this._uniqueAttackSuccess = new Set()
         this._passiveUniqueFindingKeys = new Set()
         this._activeUniqueFindingKeys = new Set()
         this._spaSeenSinks = new Set()
         this._fingerprintMeta = new Map()
+        this._familyActiveCounts = new Map()
+        this._familyFairnessState = {
+            lastDequeuedFamily: null,
+            consecutiveDequeues: 0
+        }
         this._idleResolvers = new Set()
         this._runtimeEventsDropped = 0
         this._runtimeEventsDropMarked = false
@@ -322,6 +334,8 @@ export class dastEngine {
         }
         this._deferredProgressPayload = null
         this._initializeStrategyState(this.strategyConfig)
+        this._performanceTelemetry = this._createPerformanceTelemetry()
+        this.scanResult.performance = { dast: this._performanceTelemetry }
         this._requestSeq = 0
         this._attackSeq = 0
         ptk_request.clearStoredHeaders()
@@ -364,6 +378,654 @@ export class dastEngine {
     _moduleRuntimeMode(module) {
         const runtime = this._moduleRuntime(module)
         return String(runtime.mode || '').toLowerCase()
+    }
+
+    _resetTaskQueues() {
+        this._taskQueueGroups = new Map()
+        this._taskQueueGroupPriority = new Map()
+        this._taskReadyGroups = []
+        this._taskReadyGroupSet = new Set()
+        this._taskQueueLength = 0
+    }
+
+    _taskQueueCount() {
+        return Number(this._taskQueueLength || 0)
+    }
+
+    _createPerformanceTelemetry() {
+        return {
+            planner: {
+                plansBuilt: 0,
+                totalMs: 0,
+                maxMs: 0,
+                tasksPlanned: 0,
+                tasksPlannedMax: 0,
+                baselineReplayCount: 0,
+                baselineCapturedReuseCount: 0,
+                moduleSkips: 0,
+                moduleSkipReasons: Object.create(null)
+            },
+            queue: {
+                tasksQueued: 0,
+                tasksDequeued: 0,
+                depthMax: 0,
+                readyGroupsMax: 0,
+                waitMsTotal: 0,
+                waitMsMax: 0
+            },
+            execution: {
+                tasksCompleted: 0,
+                totalMs: 0,
+                maxMs: 0,
+                byModule: Object.create(null),
+                byFamily: Object.create(null)
+            }
+        }
+    }
+
+    _perfModuleBucket(moduleId = "module") {
+        const store = this._performanceTelemetry?.execution?.byModule
+        if (!store) return null
+        if (!store[moduleId]) {
+            store[moduleId] = {
+                planned: 0,
+                dequeued: 0,
+                completed: 0,
+                queueWaitMsTotal: 0,
+                queueWaitMsMax: 0,
+                executionMsTotal: 0,
+                executionMsMax: 0
+            }
+        }
+        return store[moduleId]
+    }
+
+    _perfFamilyBucket(family = "unknown") {
+        const store = this._performanceTelemetry?.execution?.byFamily
+        if (!store) return null
+        if (!store[family]) {
+            store[family] = {
+                planned: 0,
+                completed: 0,
+                executionMsTotal: 0,
+                executionMsMax: 0
+            }
+        }
+        return store[family]
+    }
+
+    _taskFamilyKey(task = null) {
+        const module = task?.module || null
+        const moduleId = String(task?.moduleId || module?.id || task?.moduleName || "").toLowerCase()
+        const taxonomy = this._moduleTaxonomy(module)
+        const vulnId = String(taxonomy?.vulnId || "").toLowerCase()
+        const category = String(taxonomy?.category || "").toLowerCase()
+        const tags = Array.isArray(taxonomy?.tags)
+            ? taxonomy.tags.map((value) => String(value || "").toLowerCase())
+            : []
+        const runtimeMode = this._moduleRuntimeMode(module)
+        if (runtimeMode === "spa" || moduleId.startsWith("spa_") || tags.includes("spa")) return "spa"
+        if (moduleId.includes("graphql") || vulnId.includes("graphql") || tags.includes("graphql")) return "graphql"
+        if (moduleId.includes("jwt") || vulnId.includes("jwt") || tags.includes("jwt")) return "jwt"
+        if (moduleId.includes("request_smuggling") || vulnId.includes("request_smuggling")) return "smuggling"
+        if (moduleId.includes("host_header") || vulnId.includes("host_header")) return "host"
+        if (moduleId.includes("cors") || vulnId.includes("cors") || tags.includes("cors")) return "cors"
+        if (moduleId.includes("ssrf") || vulnId.includes("ssrf") || category === "ssrf" || tags.includes("ssrf")) return "ssrf"
+        if (moduleId.includes("api_testing") || tags.includes("api")) return "api"
+        if (moduleId.includes("dom_based") || moduleId.includes("dom_") || vulnId.includes("dom_") || tags.includes("dom")) return "dom"
+        if (moduleId.includes("deserial") || vulnId.includes("deserial")) return "deserialization"
+        if (moduleId.includes("xss") || vulnId.includes("xss") || category === "xss" || tags.includes("xss")) return "xss"
+        if (moduleId.includes("sql") || moduleId.includes("sqli") || moduleId.includes("bsql") || vulnId.includes("sql") || vulnId.includes("injection")) return "sqli"
+        if (typeof task?.module?._selectorFamily === "function") {
+            try {
+                const family = String(task.module._selectorFamily(task?.attack?.action || null) || "").trim().toLowerCase()
+                if (family && family !== "unknown") return family
+            } catch (_) {
+                // fall through
+            }
+        }
+        return moduleId || "unknown"
+    }
+
+    _boundedMapSet(map, key, value, limit = 256) {
+        if (!(map instanceof Map) || key == null) return
+        if (map.has(key)) {
+            map.delete(key)
+        }
+        map.set(key, value)
+        while (map.size > limit) {
+            const firstKey = map.keys().next().value
+            map.delete(firstKey)
+        }
+    }
+
+    _clonePlanningDecision(decision) {
+        if (!decision || typeof decision !== "object") return decision
+        return {
+            allowed: decision.allowed !== false,
+            reason: decision.reason || null
+        }
+    }
+
+    _familyConcurrencyQuota(family = "unknown") {
+        const key = String(family || "unknown").toLowerCase()
+        if (key === "sqli") return 1
+        return 2
+    }
+
+    _familyBurstQuota(family = "unknown") {
+        const key = String(family || "unknown").toLowerCase()
+        if (key === "sqli") return 24
+        return 48
+    }
+
+    _hasRunnableAlternativeFamily(excludedFamily, currentGroupKey = null) {
+        const targetFamily = String(excludedFamily || "unknown")
+        const readyGroups = Array.isArray(this._taskReadyGroups) ? this._taskReadyGroups : []
+        for (const groupKey of readyGroups) {
+            if (!groupKey || groupKey === currentGroupKey) continue
+            const queue = this._taskQueueGroups.get(groupKey)
+            if (!Array.isArray(queue) || !queue.length) continue
+            const task = queue[0]
+            if (!task) continue
+            if (!task.moduleAsync && task.moduleId && this._moduleLocks.has(task.moduleId)) continue
+            const planLockKey = task._runtimePlanLockKey || this._resolvePlanLockKey(task)
+            if (planLockKey && this._planLocks.has(planLockKey)) continue
+            if (!this._activePlans.has(task.planId)) continue
+            const family = this._taskFamilyKey(task)
+            if (family !== targetFamily) return true
+        }
+        return false
+    }
+
+    _shouldYieldForFamilyFairness(task, groupKey = null) {
+        if (!task) return false
+        const family = this._taskFamilyKey(task)
+        const hasAlternativeFamily = this._hasRunnableAlternativeFamily(family, groupKey)
+        if (!hasAlternativeFamily) return false
+
+        const activeCount = Number(this._familyActiveCounts?.get(family) || 0)
+        if (activeCount >= this._familyConcurrencyQuota(family)) {
+            return true
+        }
+
+        const state = this._familyFairnessState || {}
+        if (state.lastDequeuedFamily === family && Number(state.consecutiveDequeues || 0) >= this._familyBurstQuota(family)) {
+            return true
+        }
+
+        return false
+    }
+
+    _markTaskFamilyDequeued(task) {
+        if (!task) return
+        const family = this._taskFamilyKey(task)
+        const activeCount = Number(this._familyActiveCounts?.get(family) || 0)
+        this._familyActiveCounts?.set(family, activeCount + 1)
+        if (!this._familyFairnessState) {
+            this._familyFairnessState = {
+                lastDequeuedFamily: family,
+                consecutiveDequeues: 1
+            }
+        } else if (this._familyFairnessState.lastDequeuedFamily === family) {
+            this._familyFairnessState.consecutiveDequeues = Number(this._familyFairnessState.consecutiveDequeues || 0) + 1
+        } else {
+            this._familyFairnessState.lastDequeuedFamily = family
+            this._familyFairnessState.consecutiveDequeues = 1
+        }
+        task._familyKey = family
+    }
+
+    _releaseTaskFamily(task) {
+        if (!task) return
+        const family = task._familyKey || this._taskFamilyKey(task)
+        const activeCount = Number(this._familyActiveCounts?.get(family) || 0)
+        if (activeCount <= 1) {
+            this._familyActiveCounts?.delete(family)
+            return
+        }
+        this._familyActiveCounts?.set(family, activeCount - 1)
+    }
+
+    _taskPriority(task = null) {
+        const module = task?.module || null
+        const moduleId = String(task?.moduleId || module?.id || '').toLowerCase()
+        const runtimeMode = this._moduleRuntimeMode(module)
+        const taxonomy = this._moduleTaxonomy(module)
+        const vulnId = String(taxonomy?.vulnId || '').toLowerCase()
+        const tags = Array.isArray(taxonomy?.tags)
+            ? taxonomy.tags.map((value) => String(value || '').toLowerCase())
+            : []
+
+        let priority = 0
+        const isSpa = runtimeMode === 'spa' || moduleId.startsWith('spa_') || tags.includes('spa')
+        if (isSpa) priority += 1000
+
+        const topTierModules = new Set([
+            'graphql_introspection',
+            'graphql_advanced',
+            'api_testing_coverage',
+            'ssrf_coverage',
+            'dom_based_vuln_coverage',
+            'jwt_attacks_coverage',
+            'jwt_injection'
+        ])
+        if (topTierModules.has(moduleId)) priority += 800
+
+        const midTierModules = new Set([
+            'host_header_poisoning',
+            'cors_misconfig',
+            'cors_coverage',
+            'request_smuggling'
+        ])
+        if (midTierModules.has(moduleId)) priority += 550
+
+        if (/\b(dom_xss|open_redirect|token_exposure|ssrf)\b/.test(vulnId)) {
+            priority += 150
+        }
+
+        const isSqlHeavy = /\b(sql|sqli|bsql|union)\b/.test(moduleId) || /\b(sql|sqli|bsql|union)\b/.test(vulnId)
+        if (isSqlHeavy) priority -= 400
+
+        if (task?.moduleAsync === false) {
+            priority += 25
+        }
+
+        return priority
+    }
+
+    _insertReadyGroup(groupKey) {
+        if (!groupKey) return
+        const priority = Number(this._taskQueueGroupPriority?.get(groupKey) || 0)
+        let insertAt = this._taskReadyGroups.length
+        for (let index = 0; index < this._taskReadyGroups.length; index += 1) {
+            const currentKey = this._taskReadyGroups[index]
+            const currentPriority = Number(this._taskQueueGroupPriority?.get(currentKey) || 0)
+            if (priority > currentPriority) {
+                insertAt = index
+                break
+            }
+        }
+        this._taskReadyGroups.splice(insertAt, 0, groupKey)
+    }
+
+    _requeueReadyGroup(groupKey) {
+        if (!groupKey || !this._taskReadyGroupSet?.has(groupKey)) return
+        const currentIndex = this._taskReadyGroups.indexOf(groupKey)
+        if (currentIndex >= 0) {
+            this._taskReadyGroups.splice(currentIndex, 1)
+        }
+        this._insertReadyGroup(groupKey)
+    }
+
+    _recordPlanBuild(plan, durationMs = 0) {
+        const planner = this._performanceTelemetry?.planner
+        if (!planner) return
+        const tasksPlanned = Array.isArray(plan?.tasks) ? plan.tasks.length : 0
+        planner.plansBuilt += 1
+        planner.totalMs += Math.max(0, Number(durationMs || 0))
+        planner.maxMs = Math.max(planner.maxMs || 0, Math.max(0, Number(durationMs || 0)))
+        planner.tasksPlanned += tasksPlanned
+        planner.tasksPlannedMax = Math.max(planner.tasksPlannedMax || 0, tasksPlanned)
+        if (plan && (durationMs >= 50 || tasksPlanned >= 10)) {
+            this._appendRuntimeEvent({
+                type: "dast_plan_metrics",
+                phase: "plan_build",
+                url: plan?.original?.request?.url || null,
+                method: plan?.original?.request?.method || null,
+                durationMs: Math.max(0, Number(durationMs || 0)),
+                tasksPlanned
+            })
+        }
+    }
+
+    _recordModulePlanningSkip(module, reason = "prefilter") {
+        const planner = this._performanceTelemetry?.planner
+        if (!planner) return
+        planner.moduleSkips += 1
+        const key = String(reason || "prefilter")
+        planner.moduleSkipReasons[key] = Number(planner.moduleSkipReasons[key] || 0) + 1
+        const moduleId = module?.id || module?.name || "module"
+        const bucket = this._perfModuleBucket(moduleId)
+        if (bucket) {
+            bucket.skipped = Number(bucket.skipped || 0) + 1
+        }
+    }
+
+    _recordBaselineResolution(kind = "replay") {
+        const planner = this._performanceTelemetry?.planner
+        if (!planner) return
+        if (kind === "captured") {
+            planner.baselineCapturedReuseCount += 1
+            return
+        }
+        planner.baselineReplayCount += 1
+    }
+
+    _recordTaskQueued(task) {
+        if (!task) return
+        task._queuedAt = Date.now()
+        const queue = this._performanceTelemetry?.queue
+        if (queue) {
+            queue.tasksQueued += 1
+            queue.depthMax = Math.max(queue.depthMax || 0, this._taskQueueCount())
+            queue.readyGroupsMax = Math.max(queue.readyGroupsMax || 0, this._taskReadyGroups?.length || 0)
+        }
+        const moduleBucket = this._perfModuleBucket(task.moduleId || task.module?.id || task.moduleName || "module")
+        if (moduleBucket) {
+            moduleBucket.planned += 1
+        }
+        const familyBucket = this._perfFamilyBucket(this._taskFamilyKey(task))
+        if (familyBucket) {
+            familyBucket.planned += 1
+        }
+    }
+
+    _recordTaskDequeued(task, waitMs = 0) {
+        const queue = this._performanceTelemetry?.queue
+        if (queue) {
+            queue.tasksDequeued += 1
+            queue.waitMsTotal += Math.max(0, Number(waitMs || 0))
+            queue.waitMsMax = Math.max(queue.waitMsMax || 0, Math.max(0, Number(waitMs || 0)))
+        }
+        const moduleBucket = this._perfModuleBucket(task?.moduleId || task?.module?.id || task?.moduleName || "module")
+        if (moduleBucket) {
+            moduleBucket.dequeued += 1
+            moduleBucket.queueWaitMsTotal += Math.max(0, Number(waitMs || 0))
+            moduleBucket.queueWaitMsMax = Math.max(moduleBucket.queueWaitMsMax || 0, Math.max(0, Number(waitMs || 0)))
+        }
+    }
+
+    _recordTaskExecution(task, durationMs = 0) {
+        const execution = this._performanceTelemetry?.execution
+        if (execution) {
+            execution.tasksCompleted += 1
+            execution.totalMs += Math.max(0, Number(durationMs || 0))
+            execution.maxMs = Math.max(execution.maxMs || 0, Math.max(0, Number(durationMs || 0)))
+        }
+        const moduleBucket = this._perfModuleBucket(task?.moduleId || task?.module?.id || task?.moduleName || "module")
+        if (moduleBucket) {
+            moduleBucket.completed += 1
+            moduleBucket.executionMsTotal += Math.max(0, Number(durationMs || 0))
+            moduleBucket.executionMsMax = Math.max(moduleBucket.executionMsMax || 0, Math.max(0, Number(durationMs || 0)))
+        }
+        const familyBucket = this._perfFamilyBucket(this._taskFamilyKey(task))
+        if (familyBucket) {
+            familyBucket.completed += 1
+            familyBucket.executionMsTotal += Math.max(0, Number(durationMs || 0))
+            familyBucket.executionMsMax = Math.max(familyBucket.executionMsMax || 0, Math.max(0, Number(durationMs || 0)))
+        }
+    }
+
+    _normalizePlanningMethods(values) {
+        return Array.isArray(values)
+            ? values.map((value) => String(value || "").toUpperCase()).filter(Boolean)
+            : []
+    }
+
+    _planningFingerprintFromSchema(schema) {
+        if (!schema) return null
+        const request = schema?.request || {}
+        const base = this._fingerprintFromSchema(schema) || this._fingerprintFromRequest(request) || "request"
+        const headers = Array.isArray(request?.headers) ? request.headers : []
+        const queryNames = new Set()
+        const bodyParamNames = new Set()
+        const jsonKeys = new Set()
+        const cookieNames = new Set()
+
+        try {
+            const targetUrl = request?.url || request?.path || "/"
+            const baseUrl = this._guessRequestBase(request)
+            const resolved = new URL(targetUrl, targetUrl && targetUrl.startsWith("http") ? undefined : baseUrl || "http://localhost")
+            resolved.searchParams.forEach((_, key) => queryNames.add(String(key || "").toLowerCase()))
+        } catch (_) {
+            // Ignore malformed targets for cache-key purposes.
+        }
+
+        if (Array.isArray(request?.queryParams)) {
+            for (const param of request.queryParams) {
+                if (param?.name) queryNames.add(String(param.name).toLowerCase())
+            }
+        }
+        if (Array.isArray(request?.body?.params)) {
+            for (const param of request.body.params) {
+                if (param?.name) bodyParamNames.add(String(param.name).toLowerCase())
+            }
+        }
+        if (request?.body?.json && typeof request.body.json === "object" && !Array.isArray(request.body.json)) {
+            Object.keys(request.body.json).forEach((key) => jsonKeys.add(String(key || "").toLowerCase()))
+        }
+        if (Array.isArray(request?.cookies)) {
+            for (const cookie of request.cookies) {
+                if (cookie?.name) cookieNames.add(String(cookie.name).toLowerCase())
+            }
+        } else {
+            const cookieHeader = headers.find((header) => String(header?.name || "").toLowerCase() === "cookie")
+            const cookieText = String(cookieHeader?.value || "")
+            cookieText.split(";").forEach((entry) => {
+                const name = String(entry || "").split("=")[0].trim().toLowerCase()
+                if (name) cookieNames.add(name)
+            })
+        }
+
+        const hasNonCookieHeaders = headers.some((header) => String(header?.name || "").toLowerCase() !== "cookie")
+        const contentTypeHeader = headers.find((header) => String(header?.name || "").toLowerCase() === "content-type")
+        const contentType = String(contentTypeHeader?.value || request?.body?.mimeType || "").toLowerCase()
+        const bodyText = typeof request?.body?.text === "string" ? request.body.text : ""
+        const hasJsonBody = !!(
+            (request?.body?.json && typeof request.body.json === "object")
+            || contentType.includes("application/json")
+            || contentType.includes("text/json")
+            || contentType.includes("+json")
+        )
+        const hasXmlBody = !!(
+            bodyText
+            && (contentType.includes("/xml") || contentType.includes("+xml") || /^\s*<[\w:.-]+[\s>]/.test(bodyText))
+        )
+        const parts = [
+            base,
+            `body:${bodyText || Array.isArray(request?.body?.params) ? 1 : 0}`,
+            `json:${hasJsonBody ? 1 : 0}`,
+            `xml:${hasXmlBody ? 1 : 0}`,
+            `cookies:${cookieNames.size ? 1 : 0}`,
+            `headers:${hasNonCookieHeaders ? 1 : 0}`
+        ]
+        const querySig = Array.from(queryNames).sort().join(",")
+        const bodySig = Array.from(bodyParamNames).sort().join(",")
+        const jsonSig = Array.from(jsonKeys).sort().join(",")
+        const cookieSig = Array.from(cookieNames).sort().join(",")
+        if (querySig) parts.push(`qp:${querySig}`)
+        if (bodySig) parts.push(`bp:${bodySig}`)
+        if (jsonSig) parts.push(`jk:${jsonSig}`)
+        if (cookieSig) parts.push(`ck:${cookieSig}`)
+        return parts.join("|")
+    }
+
+    _requestPlanningSummary(schema) {
+        if (schema && typeof schema === "object") {
+            const cached = this._requestPlanningSummaryCache?.get(schema)
+            if (cached) return cached
+        }
+        const planningFingerprint = this._planningFingerprintFromSchema(schema)
+        if (planningFingerprint && this._requestPlanningSummaryByFingerprint?.has(planningFingerprint)) {
+            const reused = this._requestPlanningSummaryByFingerprint.get(planningFingerprint)
+            if (schema && typeof schema === "object") {
+                this._requestPlanningSummaryCache?.set(schema, reused)
+            }
+            return reused
+        }
+        const request = schema?.request || {}
+        const method = String(request?.method || "GET").toUpperCase()
+        const headers = Array.isArray(request?.headers) ? request.headers : []
+        const hasNonCookieHeaders = headers.some((header) => String(header?.name || "").toLowerCase() !== "cookie")
+        const hasCookies = Array.isArray(request?.cookies)
+            ? request.cookies.length > 0
+            : headers.some((header) => String(header?.name || "").toLowerCase() === "cookie" && String(header?.value || "").trim().length > 0)
+        const queryParams = Array.isArray(request?.queryParams) ? request.queryParams : []
+        const bodyParams = Array.isArray(request?.body?.params) ? request.body.params : []
+        const contentTypeHeader = headers.find((header) => String(header?.name || "").toLowerCase() === "content-type")
+        const contentType = String(contentTypeHeader?.value || request?.body?.mimeType || "").toLowerCase()
+        const bodyText = typeof request?.body?.text === "string" ? request.body.text : ""
+        const hasQueryParams = queryParams.length > 0
+        const hasBodyParams = bodyParams.length > 0
+        const hasJsonObject = request?.body?.json && typeof request.body.json === "object"
+        let hasJsonBody = !!hasJsonObject
+        if (!hasJsonBody && bodyText) {
+            if (contentType.includes("application/json") || contentType.includes("text/json") || contentType.includes("+json")) {
+                hasJsonBody = true
+            } else {
+                try {
+                    const parsed = JSON.parse(bodyText)
+                    hasJsonBody = !!(parsed && typeof parsed === "object")
+                } catch (_) {
+                    hasJsonBody = false
+                }
+            }
+        }
+        const hasXmlBody = !!(
+            bodyText
+            && (contentType.includes("/xml") || contentType.includes("+xml") || /^\s*<[\w:.-]+[\s>]/.test(bodyText))
+        )
+        const hasBody = hasBodyParams || hasJsonBody || hasXmlBody || bodyText.length > 0
+        const summary = {
+            method,
+            hasBody,
+            hasQueryParams,
+            hasBodyParams,
+            hasJsonBody,
+            hasXmlBody,
+            hasCookies,
+            hasNonCookieHeaders,
+            hasAnyParamSurface: hasQueryParams || hasBodyParams || hasJsonBody || hasXmlBody
+        }
+        if (schema && typeof schema === "object") {
+            this._requestPlanningSummaryCache?.set(schema, summary)
+        }
+        if (planningFingerprint) {
+            this._boundedMapSet(this._requestPlanningSummaryByFingerprint, planningFingerprint, summary, 512)
+        }
+        return summary
+    }
+
+    _modulePlanningHints(module) {
+        if (!module || typeof module !== "object") {
+            return {
+                surfaces: new Set(),
+                hasGenericAttack: false,
+                prefilters: {}
+            }
+        }
+        let cached = this._modulePlanningCache?.get(module)
+        if (cached) return cached
+        const surfaces = new Set()
+        let hasGenericAttack = false
+        const attacks = Array.isArray(module?.attacks) ? module.attacks : []
+        for (const attack of attacks) {
+            const action = attack?.action || {}
+            const target = attack?.target || {}
+            const hasParams = Array.isArray(action?.params) && action.params.length > 0
+            const hasCookies = Array.isArray(action?.cookies) && action.cookies.length > 0
+            const hasHeaders = Array.isArray(action?.headers) && action.headers.some((entry) => String(entry?.name || "").toLowerCase() !== "cookie")
+            const hasCookieHeader = Array.isArray(action?.headers) && action.headers.some((entry) => String(entry?.name || "").toLowerCase() === "cookie")
+            const hasTargetParams = target?.params && typeof target.params === "object" && Object.keys(target.params).length > 0
+            const hasTargetCookies = target?.cookies && typeof target.cookies === "object" && Object.keys(target.cookies).length > 0
+            const hasTargetHeaders = target?.headers && typeof target.headers === "object" && Object.keys(target.headers).length > 0
+            const hasTargetJson = target?.json && typeof target.json === "object" && Object.keys(target.json).length > 0
+            const hasTargetXml = target?.xml && typeof target.xml === "object" && Object.keys(target.xml).length > 0
+            if (hasParams || hasTargetParams || hasTargetJson || hasTargetXml) surfaces.add("params")
+            if (hasCookies || hasCookieHeader || hasTargetCookies) surfaces.add("cookies")
+            if (hasHeaders || hasTargetHeaders) surfaces.add("headers")
+            if (!hasParams && !hasCookies && !hasHeaders && !hasCookieHeader && !hasTargetParams && !hasTargetCookies && !hasTargetHeaders && !hasTargetJson && !hasTargetXml) {
+                hasGenericAttack = true
+            }
+        }
+        const execution = this._moduleExecution(module)
+        const prefilters = execution?.prefilters && typeof execution.prefilters === "object"
+            ? execution.prefilters
+            : {}
+        cached = { surfaces, hasGenericAttack, prefilters }
+        this._modulePlanningCache?.set(module, cached)
+        return cached
+    }
+
+    _shouldPlanModuleForRequest(module, schema, _original = null) {
+        if (!module || typeof module !== "object") return { allowed: false, reason: "invalid_module" }
+        const planningFingerprint = this._planningFingerprintFromSchema(schema) || this._fingerprintFromSchema(schema) || "request"
+        const moduleId = String(module?.id || module?.name || "module")
+        const cacheKey = `${planningFingerprint}|${moduleId}`
+        const cachedDecision = this._planningDecisionCache?.get(cacheKey)
+        if (cachedDecision) {
+            if (cachedDecision.allowed === false) {
+                this._recordModulePlanningSkip(module, cachedDecision.reason || "prefilter_cached")
+            }
+            return this._clonePlanningDecision(cachedDecision)
+        }
+        const summary = this._requestPlanningSummary(schema)
+        const hints = this._modulePlanningHints(module)
+        const methods = this._normalizePlanningMethods(hints.prefilters?.methods)
+        if (methods.length && !methods.includes(summary.method)) {
+            this._recordModulePlanningSkip(module, "prefilter_methods")
+            const decision = { allowed: false, reason: "prefilter_methods" }
+            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+            return decision
+        }
+        if (hints.prefilters?.requiresBody && !summary.hasBody) {
+            this._recordModulePlanningSkip(module, "prefilter_body")
+            const decision = { allowed: false, reason: "prefilter_body" }
+            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+            return decision
+        }
+        if (hints.prefilters?.requiresJsonBody && !summary.hasJsonBody) {
+            this._recordModulePlanningSkip(module, "prefilter_json_body")
+            const decision = { allowed: false, reason: "prefilter_json_body" }
+            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+            return decision
+        }
+        if (hints.prefilters?.requiresXmlBody && !summary.hasXmlBody) {
+            this._recordModulePlanningSkip(module, "prefilter_xml_body")
+            const decision = { allowed: false, reason: "prefilter_xml_body" }
+            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+            return decision
+        }
+        if (hints.prefilters?.requiresQueryParams && !summary.hasQueryParams) {
+            this._recordModulePlanningSkip(module, "prefilter_query_params")
+            const decision = { allowed: false, reason: "prefilter_query_params" }
+            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+            return decision
+        }
+        if (hints.prefilters?.requiresQueryOrBodyParams && !(summary.hasQueryParams || summary.hasBodyParams || summary.hasJsonBody || summary.hasXmlBody)) {
+            this._recordModulePlanningSkip(module, "prefilter_query_or_body_params")
+            const decision = { allowed: false, reason: "prefilter_query_or_body_params" }
+            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+            return decision
+        }
+        if (hints.prefilters?.requiresCookies && !summary.hasCookies) {
+            this._recordModulePlanningSkip(module, "prefilter_cookies")
+            const decision = { allowed: false, reason: "prefilter_cookies" }
+            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+            return decision
+        }
+        if (hints.prefilters?.requiresHeaders && !summary.hasNonCookieHeaders) {
+            this._recordModulePlanningSkip(module, "prefilter_headers")
+            const decision = { allowed: false, reason: "prefilter_headers" }
+            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+            return decision
+        }
+        if (module?.type === "active" && !hints.hasGenericAttack && hints.surfaces.size > 0) {
+            let hasRelevantSurface = false
+            if (hints.surfaces.has("params") && summary.hasAnyParamSurface) hasRelevantSurface = true
+            if (hints.surfaces.has("cookies") && summary.hasCookies) hasRelevantSurface = true
+            if (hints.surfaces.has("headers") && summary.hasNonCookieHeaders) hasRelevantSurface = true
+            if (!hasRelevantSurface) {
+                this._recordModulePlanningSkip(module, "prefilter_inferred_surfaces")
+                const decision = { allowed: false, reason: "prefilter_inferred_surfaces" }
+                this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+                return decision
+            }
+        }
+        const decision = { allowed: true, reason: null }
+        this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+        return decision
     }
 
     _moduleMetadataView(module) {
@@ -565,6 +1227,7 @@ export class dastEngine {
         delete envelope.items
         delete envelope.type
         delete envelope.tabId
+        envelope.recon = []
         envelope.requests = []
         envelope.pages = []
         envelope.runtimeEvents = []
@@ -620,12 +1283,138 @@ export class dastEngine {
         return score
     }
 
-    _normalizeQueuedRequestPayload(rawRequest, dedupeKey) {
+    _normalizeCapturedResponse(response) {
+        if (!response || typeof response !== 'object') return null
+        const headers = this._normalizeHttpHeaders(response.headers || response.responseHeaders)
+        const statusCode = response.statusCode ?? response.status ?? null
+        const body = typeof response.body === 'string' ? response.body : null
+        const length = typeof response.length === 'number'
+            ? response.length
+            : (typeof body === 'string' ? body.length : null)
+        const normalized = {
+            url: response.url || null,
+            ui_url: response.ui_url || response.uiUrl || response.url || null,
+            method: response.method || null,
+            type: response.type || response.responseType || null,
+            statusCode,
+            status: response.status ?? statusCode,
+            statusMessage: response.statusMessage || null,
+            statusText: response.statusText || null,
+            statusLine: response.statusLine || null,
+            mimeType: response.mimeType || null,
+            headers: headers || [],
+            body,
+            length,
+            timeMs: typeof response.timeMs === 'number' ? response.timeMs : null
+        }
+        if (normalized.statusCode == null && !normalized.headers.length && !normalized.body) {
+            return null
+        }
+        return normalized
+    }
+
+    _normalizeQueuedRequestPayload(rawRequest, dedupeKey, response = null) {
         const payload = (rawRequest && typeof rawRequest === 'object')
             ? Object.assign({}, rawRequest)
             : { raw: rawRequest }
         payload.__dedupeKey = dedupeKey
+        const capturedResponse = this._normalizeCapturedResponse(response)
+        if (capturedResponse) {
+            payload.capturedResponse = capturedResponse
+        }
         return payload
+    }
+
+    _capturedOriginalSatisfiesRequirements(capturedResponse, modules = []) {
+        if (!capturedResponse || typeof capturedResponse !== 'object') return false
+        const hasStatus = Number.isFinite(Number(capturedResponse.statusCode))
+        const hasHeaders = Array.isArray(capturedResponse.headers) && capturedResponse.headers.length > 0
+        const hasBody = typeof capturedResponse.body === 'string'
+        for (const module of (Array.isArray(modules) ? modules : [])) {
+            const attacks = Array.isArray(module?.attacks) ? module.attacks : []
+            for (const attack of attacks) {
+                if (typeof module?.getAttackOriginalRequirements !== 'function') {
+                    return false
+                }
+                const requirements = module.getAttackOriginalRequirements(attack)
+                if (requirements?.needsOtherResponseData) return false
+                if (requirements?.needsStatus && !hasStatus) return false
+                if (requirements?.needsHeaders && !hasHeaders) return false
+                if (requirements?.needsBody && !hasBody) return false
+            }
+        }
+        return true
+    }
+
+    _buildCapturedOriginalFromMeta(schema, rawMeta, modules = []) {
+        const capturedResponse = this._normalizeCapturedResponse(rawMeta?.capturedResponse || null)
+        if (!this._capturedOriginalSatisfiesRequirements(capturedResponse, modules)) {
+            return null
+        }
+        const request = cloneValue(schema?.request || {})
+        request.raw = request.raw || rawMeta?.raw || null
+        if (!request.ui_url && (rawMeta?.ui_url || rawMeta?.uiUrl)) {
+            request.ui_url = rawMeta?.ui_url || rawMeta?.uiUrl
+        }
+        if (!request.url && capturedResponse?.url) {
+            request.url = capturedResponse.url
+        }
+        const response = {
+            statusCode: capturedResponse.statusCode,
+            status: capturedResponse.status ?? capturedResponse.statusCode,
+            headers: cloneValue(capturedResponse.headers || [])
+        }
+        if (capturedResponse.statusMessage) {
+            response.statusMessage = capturedResponse.statusMessage
+        }
+        if (capturedResponse.statusText) {
+            response.statusText = capturedResponse.statusText
+        }
+        if (capturedResponse.statusLine) {
+            response.statusLine = capturedResponse.statusLine
+        }
+        if (capturedResponse.mimeType) {
+            response.mimeType = capturedResponse.mimeType
+        }
+        if (typeof capturedResponse.body === 'string') {
+            response.body = capturedResponse.body
+            response.length = capturedResponse.body.length
+        } else if (typeof capturedResponse.length === 'number') {
+            response.length = capturedResponse.length
+        }
+        if (typeof capturedResponse.timeMs === 'number') {
+            response.timeMs = capturedResponse.timeMs
+        }
+        return {
+            request,
+            response
+        }
+    }
+
+    async _resolveOriginalForPlan(schema, rawMeta = {}, options = {}) {
+        const modules = Array.isArray(options?.modules) ? options.modules : []
+        const originalCacheKey = ptk_request.fingerprintRawRequest(rawMeta?.raw || schema?.request?.raw || "")
+            || rawMeta?.__dedupeKey
+            || null
+        const cachedOriginal = originalCacheKey ? this._resolvedOriginalCache?.get(originalCacheKey) : null
+        if (cachedOriginal) {
+            this._recordBaselineResolution("captured")
+            return cloneValue(cachedOriginal)
+        }
+        const capturedOriginal = this._buildCapturedOriginalFromMeta(schema, rawMeta, modules)
+        if (capturedOriginal) {
+            this._recordBaselineResolution("captured")
+            if (originalCacheKey) {
+                this._boundedMapSet(this._resolvedOriginalCache, originalCacheKey, cloneValue(capturedOriginal), 256)
+            }
+            return capturedOriginal
+        }
+        this._recordBaselineResolution("replay")
+        const original = await this.executeOriginal(schema)
+        if (originalCacheKey && original) {
+            this._boundedMapSet(this._resolvedOriginalCache, originalCacheKey, cloneValue(original), 256)
+        }
+        return original
     }
 
     _replacePendingQueuedRequest(dedupeKey, payload) {
@@ -658,7 +1447,7 @@ export class dastEngine {
         const quality = this._requestHeaderRichnessScore(rawRequest)
         const existing = this._fingerprintMeta.get(dedupeKey)
         const qualityDelta = 8
-        const payload = this._normalizeQueuedRequestPayload(rawRequest, dedupeKey)
+        const payload = this._normalizeQueuedRequestPayload(rawRequest, dedupeKey, response)
         if (!existing) {
             this._fingerprintMeta.set(dedupeKey, {
                 quality,
@@ -732,7 +1521,11 @@ export class dastEngine {
             stats.attacksCount = (stats.attacksCount || 0) + attacks.length
             attacks.forEach((attack, index) => {
                 if (attack?.success) {
-                    this._addUnifiedFinding(result.requestRecord || { original: result.original }, attack, index)
+                    if (this._isReconAttackResult(attack)) {
+                        this._addReconObservation(result.requestRecord || { original: result.original }, attack, index)
+                    } else {
+                        this._addUnifiedFinding(result.requestRecord || { original: result.original }, attack, index)
+                    }
                 }
             })
         }
@@ -958,6 +1751,10 @@ export class dastEngine {
             category: attack.category || null,
             severity: attack.severity || null,
             vulnId: attack.vulnId || null,
+            outputKind: attack.outputKind || null,
+            reconKind: attack.reconKind || null,
+            presentationAggregate: attack.presentationAggregate || null,
+            uiSurface: attack.uiSurface || null,
             statusCode: response.statusCode ?? attack.statusCode ?? null,
             timeMs: response.timeMs ?? attack.timeMs ?? null,
             length: response.length ?? attack.length ?? null
@@ -973,7 +1770,16 @@ export class dastEngine {
     }
 
     async start(tabId, host, domains, settings = {}) {
-        this.settings = Object.assign({}, this.settings || {}, settings || {})
+        const nextSettings = Object.assign({}, this.settings || {}, settings || {})
+        // Rulepack overrides are per-run inputs. If a new run does not provide
+        // them, clear any previous snapshot so scans fall back to the built-in pack.
+        if (!Object.prototype.hasOwnProperty.call(settings || {}, 'rulepack')) {
+            nextSettings.rulepack = null
+        }
+        if (!Object.prototype.hasOwnProperty.call(settings || {}, 'cveRulepack')) {
+            nextSettings.cveRulepack = null
+        }
+        this.settings = nextSettings
         this.requestTimeoutMs = this._resolveTimeoutMs(
             this.settings?.requestTimeoutMs,
             DEFAULT_DAST_REQUEST_TIMEOUT_MS
@@ -1002,6 +1808,7 @@ export class dastEngine {
 
         this.maxRequestsPerSecond = this.settings.maxRequestsPerSecond || this.maxRequestsPerSecond || 5
         this.concurrency = this.settings.concurrency || this.concurrency || 1
+        this.planningConcurrency = this.settings.planningConcurrency || this.planningConcurrency || Math.min(2, Math.max(1, this.concurrency || 1))
         const requestedStrategy = this.settings.scanStrategy || this.settings.dastScanStrategy
         this._applyScanStrategy(requestedStrategy)
         this._applyScanControls(
@@ -1018,7 +1825,8 @@ export class dastEngine {
             runCve: runCveEnabled,
             dastScanPolicy,
             requestTimeoutMs: this.requestTimeoutMs,
-            originalRequestTimeoutMs: this.originalRequestTimeoutMs
+            originalRequestTimeoutMs: this.originalRequestTimeoutMs,
+            planningConcurrency: this.planningConcurrency
         })
 
         this.inProgress = false
@@ -1042,7 +1850,7 @@ export class dastEngine {
         }
         if (this._activePlans) this._activePlans.clear()
         if (this._taskWorkers) this._taskWorkers.clear()
-        this._taskQueue = []
+        this._resetTaskQueues()
         if (this._moduleLocks) this._moduleLocks.clear()
         this._resolveIdleResolvers()
         if (this.scanResult) {
@@ -1059,7 +1867,8 @@ export class dastEngine {
         if (this.inProgress) return
         this.inProgress = true
         try {
-            if (this.concurrency === 1) {
+            const planningConcurrency = Math.max(1, this.planningConcurrency || 1)
+            if (planningConcurrency === 1 && this.concurrency === 1) {
                 await this.runSequential()
             } else {
                 await this.runParallel()
@@ -1080,7 +1889,13 @@ export class dastEngine {
     }
 
     async runParallel() {
-        await this.runSequential()
+        const planningConcurrency = Math.max(1, this.planningConcurrency || this.concurrency || 1)
+        const workers = []
+        for (let i = 0; i < planningConcurrency; i++) {
+            workers.push(this._drainRequestQueue())
+        }
+        await Promise.all(workers)
+        this._ensureTaskWorkers()
     }
 
     async onetimeScanRequest(raw) {
@@ -1088,7 +1903,7 @@ export class dastEngine {
         let stats = { findingsCount: 0, high: 0, medium: 0, low: 0, attacksCount: 0 }
         for (let i in result.attacks) {
             stats.attacksCount++
-            if (result.attacks[i].success) {
+            if (result.attacks[i].success && !this._isReconAttackResult(result.attacks[i])) {
                 stats.findingsCount++
                 if (result.attacks[i].metadata.severity == 'High') stats.high++
                 if (result.attacks[i].metadata.severity == 'Medium') stats.medium++
@@ -1099,7 +1914,10 @@ export class dastEngine {
     }
 
     async buildAttackPlan(raw) {
-        return this.taskPlanner.buildAttackPlan(raw)
+        const startedAt = Date.now()
+        const plan = await this.taskPlanner.buildAttackPlan(raw)
+        this._recordPlanBuild(plan, Date.now() - startedAt)
+        return plan
     }
 
     _enrichAttackPayload(schema, module, attack) {
@@ -1110,18 +1928,21 @@ export class dastEngine {
     }
 
     _createTask({ module, attack, payload, type, fingerprint }) {
+        const moduleId = module?.id || null
+        const moduleName = module?.name || null
         return {
             id: ptk_utils.attackId(),
             type,
             module,
-            moduleId: module?.id,
-            moduleName: module?.name,
+            moduleId,
+            moduleName,
             moduleAsync: module?.async !== false,
             attack,
             attackKey: attack?.id || attack?.name || `${module?.id || 'module'}:${ptk_utils.attackId()}`,
             payload,
             target: payload?.metadata?.attacked || null,
             urlFingerprint: fingerprint || null,
+            planLockGroup: moduleId || moduleName || attack?.id || attack?.name || null,
             deferCondition: module?.async === false && !!attack?.condition
         }
     }
@@ -1164,6 +1985,7 @@ export class dastEngine {
         const attackId = `atk-${this._attackSeq}`
         const mutation = Array.isArray(attackResult?.metadata?.mutations) ? attackResult.metadata.mutations[0] : null
         const classification = this._buildAttackClassification(attackResult, attackId)
+        const reconMeta = this._resolveAttackPtkMeta(attackResult)
         const payloadValue = attackResult?.metadata?.payload || attackResult?.payload || mutation?.after || null
         const attackedParam = attackResult?.param
             || attackResult?.metadata?.attacked?.name
@@ -1207,7 +2029,11 @@ export class dastEngine {
             ruleName: classification.ruleName,
             category: classification.category,
             severity: classification.severity || null,
-            vulnId: classification.vulnId || null
+            vulnId: classification.vulnId || null,
+            outputKind: reconMeta.outputKind || classification.outputKind || null,
+            reconKind: reconMeta.reconKind || classification.reconKind || null,
+            presentationAggregate: reconMeta?.presentation?.aggregate || classification.presentationAggregate || null,
+            uiSurface: reconMeta.uiSurface || classification.uiSurface || null
         }
         if (requestData) attackMeta.request = requestData
         if (responseData) attackMeta.response = responseData
@@ -1379,8 +2205,29 @@ export class dastEngine {
         return this.taskScheduler.shouldSkipTaskDueToScanControls(task, context, this.scanControls)
     }
 
+    _shouldCountSuccessAsFindingCandidate(task, result) {
+        if (!result?.success) return false
+        const ruleId = String(result?.ruleId || task?.attack?.id || '').toLowerCase()
+        if (ruleId.includes('baseline')) return false
+        if (this._isReconAttackResult(result) || this._isReconAttackResult(task?.attack)) return false
+        return true
+    }
+
     _recordScanControlFinding(task, context, result) {
+        if (!this._shouldCountSuccessAsFindingCandidate(task, result)) {
+            return
+        }
         return this.taskScheduler.recordScanControlFinding(task, context, result)
+    }
+
+    _taskConditionRequiresModuleExecuted(task) {
+        const condition = task?.attack?.condition || null
+        if (!condition) return false
+        try {
+            return JSON.stringify(condition).includes("module.executed")
+        } catch (_) {
+            return false
+        }
     }
 
     _confirmConfig() {
@@ -1461,6 +2308,18 @@ export class dastEngine {
                 task.module.executed = executedHistory
             }
             if (task.deferCondition && task.attack?.condition) {
+                const deferNeedsHistory = this._taskConditionRequiresModuleExecuted(task)
+                const executedCount = Array.isArray(task.module?.executed) ? task.module.executed.length : 0
+                const deferRetryCount = Number(task._deferRetryCount || 0)
+                if (deferNeedsHistory && executedCount === 0 && deferRetryCount < 1) {
+                    task._deferRetryCount = deferRetryCount + 1
+                    this._appendTaskRuntimeEvent(task, context, {
+                        type: 'dast_deferred_condition_waiting',
+                        phase: 'condition_eval',
+                        reason: 'awaiting_module_executed'
+                    })
+                    return { __ptkRequeueTask: true }
+                }
                 const conditionPayload = { metadata: this._attackMetadataView(task.module, task.attack) }
                 const shouldRun = task.module.validateAttackConditions(conditionPayload, context.original)
                 if (!shouldRun) {
@@ -1594,15 +2453,17 @@ export class dastEngine {
                         combined.response ||
                         context.original?.response ||
                         null
+                    this._decorateAttackResult(combined, task)
                     if (!this._shouldRecordSuccess(task)) {
                         return null
                     }
                     if (!this._shouldRecordPassiveUnique(combined, task, context.original)) {
                         return null
                     }
-                    this._recordStrategyFinding(task, combined)
-                    this._recordScanControlFinding(task, context, combined)
-                    this._decorateAttackResult(combined, task)
+                    if (!this._isReconAttackResult(combined)) {
+                        this._recordStrategyFinding(task, combined)
+                        this._recordScanControlFinding(task, context, combined)
+                    }
                     this._tagResultOrder(combined, task)
                     return combined
                 }
@@ -1639,7 +2500,7 @@ export class dastEngine {
         const planned = Number(this.scanStats?.totalJobsPlanned || 0)
         const executed = Number(this.scanStats?.totalJobsExecuted || 0)
         const activeTasks = Math.max(0, Number(this.activeCount || 0))
-        const taskQueue = Array.isArray(this._taskQueue) ? this._taskQueue.length : 0
+        const taskQueue = this._taskQueueCount()
         const requestQueue = this._requestQueue?.size ? this._requestQueue.size() : 0
         const pendingPlans = this._activePlans?.size || 0
         const nonExecuted = Math.max(planned - executed, 0)
@@ -1658,8 +2519,14 @@ export class dastEngine {
             pendingPlans,
             planning,
             isRunning: !!this.isRunning,
-            isIdle
+            isIdle,
+            phase: this.isRunning ? (isIdle ? 'idle' : 'scanning') : 'stopped',
+            lastActivityAt: this._lastProgressAt ? new Date(this._lastProgressAt).toISOString() : null
         }
+    }
+
+    getProgressSnapshot() {
+        return this._buildProgressSnapshot()
     }
 
     _emitProgress(update = {}, options = {}) {
@@ -1841,6 +2708,42 @@ export class dastEngine {
         return false
     }
 
+    _markTaskGroupReady(groupKey) {
+        if (!groupKey) return
+        if (!this._taskQueueGroups?.has(groupKey)) return
+        if (this._taskReadyGroupSet?.has(groupKey)) return
+        this._insertReadyGroup(groupKey)
+        this._taskReadyGroupSet.add(groupKey)
+        const queue = this._performanceTelemetry?.queue
+        if (queue) {
+            queue.readyGroupsMax = Math.max(queue.readyGroupsMax || 0, this._taskReadyGroups.length)
+        }
+    }
+
+    _enqueueTask(task) {
+        if (!task) return
+        const groupKey = this._resolvePlanLockKey(task) || task.planId || task.id
+        task._taskGroupKey = groupKey
+        task._runtimePlanLockKey = groupKey
+        task.priority = this._taskPriority(task)
+        const existing = this._taskQueueGroups.get(groupKey) || []
+        existing.push(task)
+        this._taskQueueGroups.set(groupKey, existing)
+        const previousGroupPriority = Number(this._taskQueueGroupPriority?.get(groupKey) || Number.NEGATIVE_INFINITY)
+        if (!this._taskQueueGroupPriority) this._taskQueueGroupPriority = new Map()
+        if (task.priority > previousGroupPriority) {
+            this._taskQueueGroupPriority.set(groupKey, task.priority)
+            if (this._taskReadyGroupSet?.has(groupKey)) {
+                this._requeueReadyGroup(groupKey)
+            }
+        }
+        this._taskQueueLength += 1
+        this._recordTaskQueued(task)
+        if (existing.length === 1) {
+            this._markTaskGroupReady(groupKey)
+        }
+    }
+
     _enqueuePlan(plan) {
         if (!plan) return
         if (!this.isRunning) {
@@ -1892,7 +2795,7 @@ export class dastEngine {
             if (typeof task.order !== 'number') {
                 task.order = index
             }
-            this._taskQueue.push(task)
+            this._enqueueTask(task)
         })
         plan.tasks = []
         this._ensureTaskWorkers()
@@ -1941,6 +2844,18 @@ export class dastEngine {
         }
     }
 
+    _resolvePlanLockKey(task) {
+        if (!task?.planId) return null
+        const stopRules = typeof this._scanStopRules === 'function'
+            ? this._scanStopRules()
+            : (this.scanControls?.stopRules || {})
+        if (stopRules?.stopOnFirstFindingPerRequest) {
+            return task.planId
+        }
+        const group = task.planLockGroup || task.moduleId || task.moduleName || task.attackKey || task.id || "__plan__"
+        return `${task.planId}:${group}`
+    }
+
     async _taskWorkerLoop() {
         while (this.isRunning) {
             const task = this._dequeueRunnableTask()
@@ -1956,11 +2871,16 @@ export class dastEngine {
                 continue
             }
 
+            const startedAt = Date.now()
+            let requeued = false
             try {
                 this.activeCount = Math.max(0, this.activeCount)
                 this.activeCount++
                 const res = await this._runTask(task, plan.context)
-                if (res) {
+                if (res?.__ptkRequeueTask === true) {
+                    requeued = true
+                    this._enqueueTask(task)
+                } else if (res) {
                     plan.attacks.push(res)
                     this._emitLiveAttackDelta(plan, res)
                 }
@@ -1974,10 +2894,14 @@ export class dastEngine {
                     cause: err?.cause?.message || err?.cause || null
                 }, err)
             } finally {
+                this._recordTaskExecution(task, Date.now() - startedAt)
                 this.activeCount = Math.max(0, this.activeCount - 1)
+                this._releaseTaskFamily(task)
                 this._releaseModuleLock(task)
                 this._releasePlanLock(task)
-                plan.pending = Math.max(0, (plan.pending || 0) - 1)
+                if (!requeued) {
+                    plan.pending = Math.max(0, (plan.pending || 0) - 1)
+                }
                 if (plan.pending === 0) {
                     this._finalizePlan(plan)
                 }
@@ -1987,36 +2911,80 @@ export class dastEngine {
         }
     }
 
-    _dequeueRunnableTask() {
-        if (!this._taskQueue?.length) return null
-        for (let i = 0; i < this._taskQueue.length; i++) {
-            const task = this._taskQueue[i]
+    _dequeueRunnableTask(ignoreFairness = false) {
+        const task = this._dequeueRunnableTaskInternal(ignoreFairness)
+        if (task) return task
+        if (!ignoreFairness) {
+            return this._dequeueRunnableTaskInternal(true)
+        }
+        return null
+    }
+
+    _dequeueRunnableTaskInternal(ignoreFairness = false) {
+        if (!this._taskQueueCount()) return null
+        const attempts = this._taskReadyGroups?.length || 0
+        for (let i = 0; i < attempts; i++) {
+            const groupKey = this._taskReadyGroups.shift()
+            this._taskReadyGroupSet.delete(groupKey)
+            const queue = this._taskQueueGroups.get(groupKey)
+            if (!Array.isArray(queue) || !queue.length) {
+                this._taskQueueGroups.delete(groupKey)
+                this._taskQueueGroupPriority?.delete(groupKey)
+                continue
+            }
+            const task = queue[0]
             if (!task) {
-                this._taskQueue.splice(i, 1)
-                i--
+                queue.shift()
+                this._taskQueueLength = Math.max(0, this._taskQueueLength - 1)
+                if (queue.length) this._markTaskGroupReady(groupKey)
+                else {
+                    this._taskQueueGroups.delete(groupKey)
+                    this._taskQueueGroupPriority?.delete(groupKey)
+                }
                 continue
             }
             if (!task.moduleAsync && task.moduleId && this._moduleLocks.has(task.moduleId)) {
+                this._markTaskGroupReady(groupKey)
                 continue
             }
-            if (task.planId && this._planLocks.has(task.planId)) {
+            const planLockKey = task._runtimePlanLockKey || this._resolvePlanLockKey(task)
+            if (planLockKey && this._planLocks.has(planLockKey)) {
+                this._markTaskGroupReady(groupKey)
+                continue
+            }
+            if (!ignoreFairness && this._shouldYieldForFamilyFairness(task, groupKey)) {
+                this._markTaskGroupReady(groupKey)
                 continue
             }
             const planExists = this._activePlans.has(task.planId)
             if (!planExists) {
-                this._taskQueue.splice(i, 1)
-                i--
+                queue.shift()
+                this._taskQueueLength = Math.max(0, this._taskQueueLength - 1)
+                if (queue.length) this._markTaskGroupReady(groupKey)
+                else {
+                    this._taskQueueGroups.delete(groupKey)
+                    this._taskQueueGroupPriority?.delete(groupKey)
+                }
                 continue
             }
-            this._taskQueue.splice(i, 1)
+            queue.shift()
+            this._taskQueueLength = Math.max(0, this._taskQueueLength - 1)
+            if (!queue.length) {
+                this._taskQueueGroups.delete(groupKey)
+                this._taskQueueGroupPriority?.delete(groupKey)
+            }
             if (!task.moduleAsync && task.moduleId) {
                 this._moduleLocks.add(task.moduleId)
                 task._lockedModule = task.moduleId
             }
-            if (task.planId) {
-                this._planLocks.add(task.planId)
+            if (planLockKey) {
+                this._planLocks.add(planLockKey)
                 task._planLocked = true
+                task._planLockKey = planLockKey
             }
+            this._markTaskFamilyDequeued(task)
+            const waitMs = task._queuedAt ? Math.max(0, Date.now() - task._queuedAt) : 0
+            this._recordTaskDequeued(task, waitMs)
             return task
         }
         return null
@@ -2030,9 +2998,14 @@ export class dastEngine {
     }
 
     _releasePlanLock(task) {
-        if (task && task._planLocked && task.planId) {
-            this._planLocks.delete(task.planId)
+        if (task && task._planLocked && task._planLockKey) {
+            this._planLocks.delete(task._planLockKey)
+            const groupKey = task._taskGroupKey || task._runtimePlanLockKey || null
             delete task._planLocked
+            delete task._planLockKey
+            if (groupKey && this._taskQueueGroups?.has(groupKey)) {
+                this._markTaskGroupReady(groupKey)
+            }
         }
     }
 
@@ -2765,6 +3738,9 @@ export class dastEngine {
     }
 
     _recordStrategyFinding(task, result) {
+        if (!this._shouldCountSuccessAsFindingCandidate(task, result)) {
+            return
+        }
         if (!this._strategyFindingKeys) {
             this._strategyFindingKeys = new Set()
         }
@@ -3933,6 +4909,7 @@ export class dastEngine {
     _buildAttackClassification(attack, fallbackRuleId = null) {
         const moduleMeta = attack?.__moduleMetadata || attack?.metadata || {}
         const attackMeta = attack?.metadata || {}
+        const ptkMeta = this._resolveAttackPtkMeta(attack)
         const moduleId = attack?.__moduleId
             || attack?.moduleId
             || moduleMeta.id
@@ -3982,14 +4959,155 @@ export class dastEngine {
             description,
             recommendation,
             links,
+            outputKind: ptkMeta.outputKind || null,
+            reconKind: ptkMeta.reconKind || null,
+            presentationAggregate: ptkMeta?.presentation?.aggregate || null,
+            uiSurface: ptkMeta.uiSurface || null,
             moduleMeta,
             ruleMeta: attackMeta
         }
     }
 
+    _resolveAttackPtkMeta(attack = null) {
+        const normalize = (value) => (
+            value && typeof value === 'object' && !Array.isArray(value)
+                ? cloneValue(value)
+                : {}
+        )
+        const attackMeta = attack?.metadata && typeof attack.metadata === 'object'
+            ? attack.metadata
+            : {}
+        const moduleLevel = normalize(attackMeta?.extensions?.ptk)
+        const attackLevel = normalize(attackMeta?.metadata?.extensions?.ptk)
+        return Object.assign({}, moduleLevel, attackLevel)
+    }
+
+    _isReconAttackResult(attack = null) {
+        const ptkMeta = this._resolveAttackPtkMeta(attack)
+        return String(ptkMeta.outputKind || '').toLowerCase() === 'recon'
+    }
+
+    _ensureReconSink() {
+        if (!Array.isArray(this.scanResult?.recon)) {
+            this.scanResult.recon = []
+        }
+        return this.scanResult.recon
+    }
+
+    _normalizeReconObservationRoute(location = {}) {
+        const method = String(location?.method || 'GET').trim().toUpperCase() || 'GET'
+        const rawUrl = location?.url || location?.runtimeUrl || location?.route || null
+        if (!rawUrl) {
+            return `${method}|/`
+        }
+        try {
+            const parsed = new URL(String(rawUrl), this.host ? `http://${String(this.host).trim()}` : undefined)
+            const pathname = String(parsed.pathname || '/').trim().toLowerCase() || '/'
+            return `${method}|${pathname}`
+        } catch (_) {
+            const normalized = String(rawUrl || '')
+                .replace(/[?#].*$/, '')
+                .trim()
+                .toLowerCase() || '/'
+            return `${method}|${normalized}`
+        }
+    }
+
+    _buildReconObservationDedupeKey(classification = {}, location = {}, param = null) {
+        const normalizedRoute = this._normalizeReconObservationRoute(location)
+        const normalizedParam = String(param || '').trim().toLowerCase()
+        return [
+            String(classification.moduleId || ''),
+            String(classification.ruleId || ''),
+            normalizedRoute,
+            normalizedParam
+        ].join('|')
+    }
+
+    _addReconObservation(requestRecord, attack, index = 0) {
+        if (!requestRecord || !attack || !attack.success || attack.__reconRecorded) return
+        const classification = this._buildAttackClassification(attack, `attack-${index}`)
+        if (String(classification.outputKind || '').toLowerCase() !== 'recon') {
+            return
+        }
+        const ptkMeta = this._resolveAttackPtkMeta(attack)
+        const reqSchema = attack.request && attack.request.request ? attack.request.request : attack.request
+        const originalReq = requestRecord?.original?.request || requestRecord?.original || {}
+        const mutation = Array.isArray(attack?.metadata?.mutations) ? attack.metadata.mutations[0] : null
+        const payloadValue = attack?.metadata?.payload || attack?.payload || mutation?.after || null
+        const location = {
+            url: reqSchema?.url || attack?.request?.url || attack?.request?.ui_url || originalReq?.url || null,
+            method: reqSchema?.method || attack?.request?.method || originalReq?.method || null,
+            param: attack?.param || attack?.metadata?.attacked?.name || (Array.isArray(attack?.metadata?.mutations) && attack.metadata.mutations[0]?.name) || null
+        }
+        const sink = this._ensureReconSink()
+        const dedupeKey = this._buildReconObservationDedupeKey(classification, location, location.param)
+        const existing = sink.find((entry) => entry?.dedupeKey === dedupeKey)
+        if (existing) {
+            existing.count = Number(existing.count || 1) + 1
+            existing.lastSeenAt = new Date().toISOString()
+            const existingEvidence = existing?.evidence?.dast && typeof existing.evidence.dast === 'object'
+                ? existing.evidence.dast
+                : null
+            if (existingEvidence && !existingEvidence.requestId && requestRecord?.id) {
+                existingEvidence.requestId = requestRecord.id
+            }
+            if (existingEvidence && !existingEvidence.attackId) {
+                existingEvidence.attackId = attack.id || attack.__requestRecordEntry?.id || attack.__attackKey || null
+            }
+            attack.__reconRecorded = true
+            if (attack.__requestRecordEntry && attack.__requestRecordEntry !== attack) {
+                attack.__requestRecordEntry.__reconRecorded = true
+            }
+            return
+        }
+        const logAttackId = attack.id || attack.__requestRecordEntry?.id || attack.__attackKey || null
+        const resolverKey = (requestRecord?.id && logAttackId)
+            ? `${requestRecord.id}::${logAttackId}`
+            : null
+        sink.push({
+            id: `${this.scanResult.scanId || 'scan'}::DAST::RECON::${classification.moduleId}::${classification.ruleId}::${resolverKey || `attack-${index}`}`,
+            engine: "DAST",
+            scanId: this.scanResult.scanId || null,
+            moduleId: classification.moduleId,
+            moduleName: classification.moduleName,
+            ruleId: classification.ruleId,
+            ruleName: classification.ruleName,
+            category: classification.category || 'recon',
+            severity: classification.severity || null,
+            outputKind: "recon",
+            reconKind: ptkMeta.reconKind || classification.reconKind || null,
+            presentationAggregate: ptkMeta?.presentation?.aggregate || classification.presentationAggregate || null,
+            uiSurface: ptkMeta.uiSurface || classification.uiSurface || null,
+            tags: classification.tags || [],
+            description: classification.description || null,
+            recommendation: classification.recommendation || null,
+            links: classification.links || null,
+            dedupeKey,
+            count: 1,
+            location,
+            createdAt: new Date().toISOString(),
+            lastSeenAt: new Date().toISOString(),
+            evidence: {
+                dast: {
+                    attackId: logAttackId,
+                    requestId: requestRecord?.id || null,
+                    resolverKey,
+                    param: location.param || null,
+                    payload: payloadValue || null,
+                    proof: attack?.proof || null
+                }
+            }
+        })
+        attack.__reconRecorded = true
+        if (attack.__requestRecordEntry && attack.__requestRecordEntry !== attack) {
+            attack.__requestRecordEntry.__reconRecorded = true
+        }
+    }
+
     _isIdle() {
         const queueEmpty = !this._requestQueue?.size || this._requestQueue.size() === 0
-        const noTaskQueue = !this._taskQueue?.length
+        const noTaskQueue = this._taskQueueCount() === 0
         const noPlans = !this._activePlans?.size
         const noActiveTasks = (this.activeCount || 0) === 0
         const notBuilding = this.inProgress === false

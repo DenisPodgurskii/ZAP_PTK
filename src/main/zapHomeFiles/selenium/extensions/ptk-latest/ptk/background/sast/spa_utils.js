@@ -31,9 +31,22 @@ export function applyRouteToFinding(finding, routeUrl) {
   if (!finding.location || typeof finding.location !== "object") {
     finding.location = {};
   }
+  const existingPageUrls = Array.isArray(finding.location.pageUrls)
+    ? finding.location.pageUrls.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const existingRuntimeUrls = Array.isArray(finding.location.runtimeUrls)
+    ? finding.location.runtimeUrls.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const mergedPageUrls = Array.from(new Set([
+    ...existingPageUrls,
+    ...existingRuntimeUrls,
+    String(routeUrl || "").trim()
+  ].filter(Boolean)));
   finding.location.url = routeUrl;
   finding.location.pageUrl = routeUrl;
   finding.location.runtimeUrl = routeUrl;
+  finding.location.pageUrls = mergedPageUrls;
+  finding.location.runtimeUrls = mergedPageUrls;
   finding.pageUrl = routeUrl;
   return finding;
 }

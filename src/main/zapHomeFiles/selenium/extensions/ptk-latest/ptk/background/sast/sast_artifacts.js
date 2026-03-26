@@ -8,6 +8,34 @@ function mergeStringList(left = [], right = []) {
   ).sort((a, b) => a.localeCompare(b))
 }
 
+function toNonEmptyString(value) {
+  if (value === undefined || value === null) return null
+  const normalized = String(value).trim()
+  return normalized.length ? normalized : null
+}
+
+function mergeObservedPageUrls(...sources) {
+  const urls = []
+  sources.forEach((source) => {
+    if (!source || typeof source !== "object") return
+    urls.push(
+      source.pageUrl,
+      source.pageUrls,
+      source.runtimeUrl,
+      source.runtimeUrls,
+      source.observedUrls
+    )
+  })
+  return Array.from(
+    new Set(
+      urls
+        .flat(Infinity)
+        .map((value) => toNonEmptyString(value))
+        .filter(Boolean)
+    )
+  )
+}
+
 export function ensureSastCodeArtifacts(target) {
   if (!target || typeof target !== "object") return
   if (!target.codeArtifacts || typeof target.codeArtifacts !== "object") {
@@ -49,7 +77,13 @@ export function mergeSastArtifactList(current = [], incoming = [], annotator = n
       return
     }
     const existing = map.get(id)
+    const mergedPageUrls = mergeObservedPageUrls(existing, next)
     map.set(id, Object.assign({}, existing, next, {
+      pageUrl: existing.pageUrl || next.pageUrl || mergedPageUrls[0] || null,
+      pageUrls: mergedPageUrls,
+      runtimeUrl: existing.runtimeUrl || next.runtimeUrl || mergedPageUrls[0] || null,
+      runtimeUrls: mergedPageUrls,
+      observedUrls: mergedPageUrls,
       authHints: mergeStringList(existing.authHints, next.authHints),
       protocolHints: mergeStringList(existing.protocolHints, next.protocolHints),
       discoveryTags: mergeStringList(existing.discoveryTags, next.discoveryTags),
@@ -85,6 +119,13 @@ export function mergeSastArtifacts(targetEnvelope, artifacts = null, { pageUrl =
   const annotate = (entry) => {
     if (!entry.pageUrl && pageUrl) entry.pageUrl = pageUrl
     if (!entry.pageCanon && pageCanon) entry.pageCanon = pageCanon
+    const mergedPageUrls = mergeObservedPageUrls(entry, { pageUrl })
+    if (mergedPageUrls.length) {
+      entry.pageUrls = mergedPageUrls
+      entry.runtimeUrls = mergedPageUrls
+      entry.observedUrls = mergedPageUrls
+      if (!entry.runtimeUrl) entry.runtimeUrl = mergedPageUrls[0]
+    }
   }
   target.routes = mergeSastArtifactList(target.routes, next.routes, annotate)
   target.endpoints = mergeSastArtifactList(target.endpoints, next.endpoints, annotate)

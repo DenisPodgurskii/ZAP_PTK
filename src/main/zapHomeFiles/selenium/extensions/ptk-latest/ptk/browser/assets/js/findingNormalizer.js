@@ -1,3 +1,5 @@
+import { resolveFindingTaxonomy } from "../../../background/common/resolveFindingTaxonomy.js"
+
 const VALID_ENGINES = new Set(["DAST", "SAST", "IAST"])
 const ENGINE_LOCATION_KIND = {
     DAST: "http",
@@ -389,11 +391,7 @@ export function normalizeFinding(finding = {}, { engine, moduleMeta = {}, ruleMe
     finding.id = ensureString(finding.id) || `${finding.scanId || "scan"}::${finding.engine}::${moduleId}::${ruleId}::${Date.now()}`
     finding.severity = normalizeSeverity(finding.severity)
 
-    const resolvedCategory = ensureString(finding.category) || ensureString(ruleMeta.category) || ensureString(moduleMeta.category) || "other"
-    finding.category = resolvedCategory
-
-    const resolvedVulnId = ensureString(finding.vulnId) || ensureString(ruleMeta.vulnId) || ensureString(moduleMeta.vulnId) || "other"
-    finding.vulnId = resolvedVulnId
+    resolveFindingTaxonomy({ finding, ruleMeta, moduleMeta })
 
     finding.description = finding.description || ruleMeta.description || moduleMeta.description || ""
     finding.recommendation = finding.recommendation || ruleMeta.recommendation || moduleMeta.recommendation || ""

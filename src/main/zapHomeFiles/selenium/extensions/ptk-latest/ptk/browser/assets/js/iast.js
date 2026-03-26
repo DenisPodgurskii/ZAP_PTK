@@ -7,10 +7,12 @@ import * as rutils from "../js/rutils.js"
 import { normalizeScanResult } from "../js/scanResultViewModel.js"
 import { normalizeCwe, normalizeOwasp, toLegacyOwaspString } from "../../../background/common/normalizeMappings.js"
 import { downloadScanExportResult, readScanFileText } from "../js/scanCompression.js"
+import { buildIastItemFromFinding as buildSharedIastItemFromFinding } from "./iastFindingItem.js"
 
 const controller = new ptk_controller_iast()
 const request_controller = new ptk_controller_rbuilder()
 const decoder = new ptk_decoder()
+const PORTAL_ACTIONS_VISIBLE = false
 const iastFilterState = {
     scope: 'all',
     requestKey: null,
@@ -46,6 +48,7 @@ const IAST_DELTA_QUEUE = []
 const IAST_FLUSH_INTERVAL_MS = 300
 let iastFlushTimer = null
 let iastRequestFilterDirty = false
+let iastDefaultModulesRequest = null
 const IAST_PROGRESS_RENDER = {
     timer: null,
     flushMs: 150,
@@ -53,6 +56,85 @@ const IAST_PROGRESS_RENDER = {
     status: "",
     snapshot: null,
     scanning: false
+}
+let iastDiscoveryDirty = true
+
+function escapeIastPolicyHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;')
+}
+
+function setIastPortalPolicyStatus(message, { error = false } = {}) {
+    $('#iast-portal-policy-status')
+        .text(message || 'Runtime only. Default (system) is used by default.')
+        .toggleClass('red', !!error)
+        .toggleClass('grey', !error)
+}
+
+function setIastPortalPolicyLoading(loading) {
+    const isLoading = !!loading
+    $('#load_pro_policies_button')
+        .toggleClass('loading', isLoading)
+        .toggleClass('disabled', isLoading)
+    $('#iast-scan-policy').prop('disabled', isLoading)
+}
+
+function openExtensionSettingsWindow() {
+    return browser.windows.create({
+        type: 'popup',
+        url: browser.runtime.getURL('/ptk/browser/settings.html'),
+        width: 1100,
+        height: 820
+    }).catch(() => null)
+}
+
+function countEnginePolicies(policyState = {}) {
+    return Array.isArray(policyState?.metadata) ? policyState.metadata.length : 0
+}
+
+function buildPolicyLoadSuccessMessage(engineLabel, policyState = {}) {
+    const count = countEnginePolicies(policyState)
+    return `Loaded ${count} ${engineLabel} scan polic${count === 1 ? 'y' : 'ies'}.`
+}
+
+function buildPolicyLoadErrorMessage(result, scopeLabel = 'scan policies') {
+    if (result?.error === 'missing_api_key') {
+        return `PTK Pro token is missing. Open Settings -> PTK Pro and add an activation token before loading ${scopeLabel}.`
+    }
+    const reason = String(result?.message || result?.error || 'unknown_error').trim()
+    return `Could not load ${scopeLabel}. Portal returned: ${reason}.`
+}
+
+function syncIastPortalPolicyDropdown(value) {
+    const $select = $('#iast-scan-policy')
+    if (!$select.length) return
+    const normalized = value ? String(value) : ''
+    $select.val(normalized)
+    if (typeof $select.dropdown === 'function') {
+        $select.dropdown('refresh')
+        $select.dropdown('set selected', normalized)
+    }
+}
+
+function buildIastPortalPolicyEntries(policyState = {}, selection = null) {
+    const metadata = Array.isArray(policyState?.metadata) ? policyState.metadata.slice() : []
+    const selected = policyState?.selectedPolicy && typeof policyState.selectedPolicy === 'object'
+        ? policyState.selectedPolicy
+        : (selection?.source === 'portal' && selection?.policyId
+            ? {
+                id: selection.policyId,
+                name: selection.policyName || null,
+                label: selection.label || (selection.policyName || `Policy #${selection.policyId}`)
+            }
+            : null)
+    if (selected?.id && !metadata.some((entry) => String(entry?.id || '') === String(selected.id))) {
+        metadata.unshift(selected)
+    }
+    return metadata.filter((entry) => entry && (entry.id || entry.name))
 }
 
 function normalizeIastSelectionValue(value) {
@@ -73,12 +155,12 @@ function normalizeIastRulepackSelection(selection = {}) {
             label = 'Custom rulepack'
         } else if (preferPortal && (policyId || policyName)) {
             label = policyName
-                ? `Portal policy: ${policyName}`
-                : `Portal policy #${policyId}`
+                ? `Scan policy: ${policyName}`
+                : `Scan policy #${policyId}`
         } else {
             label = variant
-                ? `Built-in ${variant} rulepack`
-                : 'Built-in rulepack'
+                ? `Default (system) ${variant}`
+                : 'Default (system)'
         }
     }
     return {
@@ -123,7 +205,110 @@ function buildIastRulepackRunOptions(selection = {}) {
 
 function updateIastRulepackUi(result = {}) {
     const selection = getIastRulepackSelection(result)
+    const policyState = (result?.policyState && typeof result.policyState === 'object')
+        ? result.policyState
+        : (controller.policyState || {})
+    controller.policyState = policyState
+    const entries = buildIastPortalPolicyEntries(policyState, selection)
+    const hasPortalEntries = entries.length > 0
+    const hasSelectedPortalPolicy = !!policyState?.selectedPolicy?.id
+    const options = []
+    if (hasPortalEntries || hasSelectedPortalPolicy) {
+        options.push('<option value="">Select policy</option>')
+    }
+    options.push('<option value="default:0">Default (system)</option>')
+    entries.forEach((entry) => {
+        if (!entry?.id) return
+        const label = entry.label || entry.name || `Policy #${entry.id}`
+        options.push(`<option value="policy:${escapeIastPolicyHtml(entry.id)}">${escapeIastPolicyHtml(label)}</option>`)
+    })
+    $('#iast-scan-policy').html(options.join(''))
+    const selectedValue = policyState?.selectedPolicy?.id
+        ? `policy:${policyState.selectedPolicy.id}`
+        : (selection?.source === 'portal' && selection?.policyId
+            ? `policy:${selection.policyId}`
+            : ((hasPortalEntries || hasSelectedPortalPolicy) ? '' : 'default:0'))
+    syncIastPortalPolicyDropdown(selectedValue)
+    if (selection?.source === 'portal' && selection?.label) {
+        setIastPortalPolicyStatus(`Selected: ${selection.label}`)
+    } else if (Array.isArray(policyState?.metadata) && policyState.metadata.length) {
+        setIastPortalPolicyStatus(`Loaded ${policyState.metadata.length} scan polic${policyState.metadata.length === 1 ? 'y' : 'ies'}. Default (system) is used unless a PTK Pro policy is selected.`)
+    } else {
+        setIastPortalPolicyStatus('Runtime only. Default (system) is used by default.')
+    }
     return selection
+}
+
+function resolveIastHelpPopupPosition($icon) {
+    const element = $icon && $icon[0]
+    if (!element || typeof element.getBoundingClientRect !== 'function') {
+        return 'bottom left'
+    }
+    const rect = element.getBoundingClientRect()
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 600
+    const estimatedPopupWidth = Math.min(350, Math.max(220, viewportWidth - 48))
+    const leftSpace = rect.left
+    const rightSpace = viewportWidth - rect.right
+    if (rightSpace < estimatedPopupWidth && leftSpace > rightSpace) {
+        return 'bottom right'
+    }
+    return 'bottom left'
+}
+
+function bindIastHelpPopups() {
+    $('#iast_scans_form .question.circle.icon').each(function () {
+        const $icon = $(this)
+        let $popup = $icon.closest('.ptk-help-label-row').nextAll('.ptk-help-popup').first()
+        if (!$popup.length) {
+            $popup = $icon.closest('.field').find('.ptk-help-popup').first()
+        }
+        if (!$popup.length) return
+        if ($icon.data('module-popup')) {
+            $icon.popup('destroy')
+        }
+        $icon.popup({
+            popup: $popup,
+            inline: true,
+            hoverable: true,
+            position: resolveIastHelpPopupPosition($icon),
+            delay: {
+                show: 300,
+                hide: 800
+            }
+        })
+    })
+}
+
+function maybeBindIastPortalPreview(result = {}) {
+    const currentScan = result?.scanResult || controller?.scanResult?.scanResult || null
+    if (result?.isScanRunning || hasRenderableIastData(currentScan)) return
+    if (Array.isArray(result?.default_modules) && result.default_modules.length) {
+        bindModules(result)
+        showWelcomeForm()
+    }
+}
+
+async function ensureIastDefaultModulesLoaded({ force = false } = {}) {
+    if (!force && Array.isArray(controller?.default_modules) && controller.default_modules.length) {
+        bindModules({ default_modules: controller.default_modules })
+        return { default_modules: controller.default_modules }
+    }
+    if (iastDefaultModulesRequest && !force) {
+        return iastDefaultModulesRequest
+    }
+    iastDefaultModulesRequest = controller.getDefaultModules()
+        .then((result) => {
+            updateIastRulepackUi(result || {})
+            if (Array.isArray(result?.default_modules)) {
+                controller.default_modules = result.default_modules
+                bindModules(result)
+            }
+            return result
+        })
+        .finally(() => {
+            iastDefaultModulesRequest = null
+        })
+    return iastDefaultModulesRequest
 }
 
 function buildIastCounters() {
@@ -846,10 +1031,355 @@ function renderIastDiscovery(scanResult) {
     $("#discovery_info").html(sections.join(""))
 }
 
-function showResultModal(header, message) {
+function ensureIastDiscoveryRendered({ force = false } = {}) {
+    if (!force && !iastDiscoveryDirty) return
+    const raw = controller?.scanResult?.scanResult || controller?.scanViewModel || null
+    const vm = controller?.scanViewModel || (raw ? normalizeScanResult(raw) : null)
+    if (!vm) return
+    renderIastDiscovery(vm)
+    iastDiscoveryDirty = false
+}
+
+function showResultModal(header, message, options = {}) {
     $('#result_header').text(header)
     $('#result_message').text(message || '')
+    $('#result_dialog').find('.result_open_settings_btn').toggle(!!options?.showSettings)
     $('#result_dialog').modal('show')
+}
+
+const $iastSaveScanModal = $('#save_scan_modal')
+let $iastSaveScanProjectDropdown = $('#save_scan_project_select')
+const $iastSaveScanModalError = $('#save_scan_modal_error')
+const iastSaveScanProjectMap = new Map()
+const $downloadScansModal = $('#download_scans')
+let $iastDownloadProjectDropdown = $('#download_project_select')
+const iastDownloadProjectMap = new Map()
+
+function handleIastSaveScanResponse(result) {
+    if (result instanceof Error) {
+        showResultModal('Error', result.message || 'Unable to save scan')
+        return
+    }
+    if (result?.success) {
+        showResultModal('Success', 'Scan saved')
+    } else {
+        const message = result?.json?.message || result?.message || 'Unable to save scan'
+        showResultModal('Error', message, { showSettings: result?.error === 'missing_api_key' })
+    }
+}
+
+function extractProjectsFromPayload(payload) {
+    if (!payload) return []
+    if (Array.isArray(payload)) return payload
+    if (typeof payload !== 'object') return []
+    const containers = ['projects', 'data', 'items', 'results']
+    for (const key of containers) {
+        const value = payload[key]
+        if (!value) continue
+        if (Array.isArray(value)) {
+            return value
+        }
+        const nested = extractProjectsFromPayload(value)
+        if (nested.length) {
+            return nested
+        }
+    }
+    return []
+}
+
+function normalizeProjectOption(project) {
+    if (project === null || project === undefined) return null
+    if (typeof project === 'string' || typeof project === 'number' || typeof project === 'boolean') {
+        const value = project
+        return { value: String(value), text: String(value), raw: value }
+    }
+    if (typeof project !== 'object') return null
+    const idFields = ['id', 'projectId', 'project_id', '_id', 'uuid', 'slug', 'key']
+    let value = null
+    for (const field of idFields) {
+        if (project[field] !== undefined && project[field] !== null && project[field] !== '') {
+            value = project[field]
+            break
+        }
+    }
+    if (!value && project?.name) {
+        value = project.name
+    }
+    if (!value) return null
+    const text = project.name || project.title || project.projectName || project.display_name || project.displayName || project.slug || project.key || String(value)
+    return { value: String(value), text, raw: value }
+}
+
+function buildProjectOptions(payload) {
+    const rawProjects = extractProjectsFromPayload(payload)
+    const options = []
+    rawProjects.forEach((project) => {
+        const option = normalizeProjectOption(project)
+        if (option) {
+            options.push(option)
+        }
+    })
+    return options
+}
+
+function resetSemanticDropdown($dropdown) {
+    if (!$dropdown || !$dropdown.length) {
+        return $dropdown
+    }
+    const id = $dropdown.attr('id') || ''
+    const classes = $dropdown.attr('class') || 'ui dropdown'
+    const $newDropdown = $(`<select id="${id}" class="${classes}"></select>`)
+    const $existingWrapper = $dropdown.closest('.ui.dropdown.selection')
+    if ($existingWrapper.length) {
+        $existingWrapper.replaceWith($newDropdown)
+    } else {
+        $dropdown.replaceWith($newDropdown)
+    }
+    return $newDropdown
+}
+
+function rebuildProjectDropdown($dropdown, projectMap, projectOptions, placeholderText) {
+    let $target = resetSemanticDropdown($dropdown)
+    projectMap.clear()
+    if (!$target) return $dropdown
+    $target.empty()
+    const placeholder = document.createElement('option')
+    placeholder.value = ''
+    placeholder.textContent = placeholderText || 'Select a project'
+    $target.append(placeholder)
+    projectOptions.forEach((opt) => {
+        const option = document.createElement('option')
+        option.value = opt.value
+        option.textContent = opt.text
+        projectMap.set(opt.value, opt.raw)
+        $target.append(option)
+    })
+    $target.dropdown()
+    $target.dropdown('clear')
+    return $target
+}
+
+function rebuildIastProjectDropdown(projectOptions) {
+    $iastSaveScanProjectDropdown = rebuildProjectDropdown($iastSaveScanProjectDropdown, iastSaveScanProjectMap, projectOptions, 'Select a project')
+}
+
+function rebuildIastDownloadProjectDropdown(projectOptions) {
+    $iastDownloadProjectDropdown = rebuildProjectDropdown($iastDownloadProjectDropdown, iastDownloadProjectMap, projectOptions, 'Select a project')
+    if (!$iastDownloadProjectDropdown) return
+    $iastDownloadProjectDropdown.off('change').on('change', function () {
+        const selected = $(this).val()
+        if (!selected) {
+            clearDownloadScansTable()
+            setDownloadScansError('')
+            return
+        }
+        const projectId = iastDownloadProjectMap.get(selected) ?? selected
+        loadIastScansForProject(projectId)
+    })
+}
+
+function hideIastSaveScanModalError() {
+    $iastSaveScanModalError.hide().text('')
+}
+
+function showIastSaveScanModalError(message) {
+    $iastSaveScanModalError.text(message || '').show()
+}
+
+function fetchIastPortalProjects() {
+    return controller.getProjects().then((result) => {
+        if (!result?.success) {
+            const message = result?.json?.message || result?.message || 'Unable to load projects. Check your PTK Pro configuration.'
+            throw new Error(message)
+        }
+        const projectOptions = buildProjectOptions(result.json)
+        if (!projectOptions.length) {
+            throw new Error('No projects available. Create a project in the portal and try again.')
+        }
+        return projectOptions
+    })
+}
+
+function runIastSaveScan(projectId, $loader) {
+    hideIastSaveScanModalError()
+    if ($loader) {
+        $loader.addClass('active')
+    }
+    $iastSaveScanModal.addClass('loading')
+    controller.saveScan(projectId).then((result) => {
+        handleIastSaveScanResponse(result)
+        $iastSaveScanModal.modal('hide')
+    }).catch((err) => {
+        showResultModal('Error', err?.message || 'Unable to save scan')
+    }).finally(() => {
+        if ($loader) {
+            $loader.removeClass('active')
+        }
+        $iastSaveScanModal.removeClass('loading')
+    })
+}
+
+function showIastSaveScanModal($loader) {
+    hideIastSaveScanModalError()
+    $iastSaveScanModal
+        .modal({
+            allowMultiple: true,
+            onApprove: function () {
+                const projectId = $iastSaveScanProjectDropdown.val()
+                if (!projectId) {
+                    showIastSaveScanModalError('Select a project to continue.')
+                    return false
+                }
+                const payloadProjectId = iastSaveScanProjectMap.get(projectId) ?? projectId
+                runIastSaveScan(payloadProjectId, $loader)
+                return false
+            }
+        })
+        .modal('show')
+}
+
+function requestIastProjectsAndShowModal($loader) {
+    if ($loader) {
+        $loader.addClass('active')
+    }
+    fetchIastPortalProjects()
+        .then((projectOptions) => {
+            rebuildIastProjectDropdown(projectOptions)
+            showIastSaveScanModal($loader)
+        })
+        .catch((err) => {
+            showResultModal('Error', err?.message || 'Unable to load projects. Check your PTK Pro configuration.')
+        })
+        .finally(() => {
+            if ($loader) {
+                $loader.removeClass('active')
+            }
+        })
+}
+
+function setDownloadScansError(message) {
+    if (message) {
+        $('#download_error').text(message)
+        $('#download_scans_error').show()
+    } else {
+        $('#download_error').text('')
+        $('#download_scans_error').hide()
+    }
+}
+
+function extractDownloadScans(payload, inheritedHost = '') {
+    if (!payload) return []
+    if (Array.isArray(payload)) {
+        return payload.reduce((acc, item) => acc.concat(extractDownloadScans(item, inheritedHost)), [])
+    }
+    if (typeof payload !== 'object') return []
+    const host = payload.hostname || payload.host || payload.domain || payload.project || payload.name || inheritedHost || ''
+    if (Array.isArray(payload.scans)) {
+        return payload.scans.reduce((acc, item) => acc.concat(extractDownloadScans(item, host)), [])
+    }
+    const scanId = payload.scanId || payload.id
+    if (scanId) {
+        const rawDate = payload.scanDate || payload.finished_at || payload.created_at || payload.started_at || payload.meta?.scanDate
+        return [{ hostname: host, scanId, scanDate: rawDate, raw: payload }]
+    }
+    const containers = ['items', 'data', 'results', 'entries', 'projects', 'records']
+    return containers.reduce((acc, key) => {
+        if (!payload[key]) return acc
+        return acc.concat(extractDownloadScans(payload[key], host))
+    }, [])
+}
+
+function renderDownloadScansTable(items) {
+    const entries = extractDownloadScans(items)
+    const dt = []
+    entries.forEach((entry) => {
+        if (!entry) return
+        const scanId = entry.scanId || ''
+        const hostname = entry.hostname || entry.raw?.meta?.hostname || ''
+        const rawDate = entry.scanDate || entry.raw?.finished_at || entry.raw?.created_at || entry.raw?.started_at
+        const dateObj = rawDate ? new Date(rawDate) : null
+        const scanDate = dateObj && !isNaN(dateObj.getTime()) ? dateObj.toLocaleString() : ''
+        const downloadAvailable = !(entry.raw?.download_available === false || entry.raw?.download_available === 0)
+        const link = downloadAvailable
+            ? `<div class="ui mini icon button download_scan_by_id" style="position: relative" data-scan-id="${scanId}"><i class="download alternate large icon" title="Download"></i><div style="position:absolute; top:1px;right: 2px"><div class="ui centered inline inverted loader"></div></div></div>`
+            : `<div class="ui mini icon button disabled" style="position: relative" title="Download unavailable for this scan"><i class="download alternate large icon"></i></div>`
+        dt.push([hostname, scanId, scanDate, link])
+    })
+
+    dt.sort(function (a, b) {
+        if (a[0] === b[0]) {
+            return 0
+        }
+        return a[0] < b[0] ? -1 : 1
+    })
+    const groupColumn = 0
+    const params = {
+        forceRebuild: true,
+        data: dt,
+        columnDefs: [{
+            visible: false, targets: groupColumn
+        }],
+        order: [[groupColumn, 'asc']],
+        drawCallback: function () {
+            const api = this.api()
+            const rows = api.rows({ page: 'current' }).nodes()
+            let last = null
+            api.column(groupColumn, { page: 'current' }).data().each(function (group, i) {
+                if (last !== group) {
+                    $(rows).eq(i).before(
+                        `<tr class="group"><td colspan="3"><div class="ui black ribbon label">${group}</div></td></tr>`
+                    )
+                    last = group
+                }
+            })
+        }
+    }
+    bindTable('#tbl_scans', params)
+}
+
+function clearDownloadScansTable() {
+    renderDownloadScansTable([])
+}
+
+function loadIastDownloadProjects() {
+    setDownloadScansError('')
+    clearDownloadScansTable()
+    $downloadScansModal.addClass('loading')
+    fetchIastPortalProjects()
+        .then((options) => {
+            rebuildIastDownloadProjectDropdown(options)
+        })
+        .catch((err) => {
+            setDownloadScansError(err?.message || 'Unable to load projects. Check your PTK Pro configuration.')
+        })
+        .finally(() => {
+            $downloadScansModal.removeClass('loading')
+        })
+}
+
+function loadIastScansForProject(projectId) {
+    if (!projectId) {
+        setDownloadScansError('Select a project to load scans.')
+        clearDownloadScansTable()
+        return
+    }
+    setDownloadScansError('')
+    $downloadScansModal.addClass('loading')
+    controller.downloadScans(projectId, 'iast').then((result) => {
+        if (!result?.success) {
+            const message = result?.json?.message || result?.message || 'Unable to load scans.'
+            setDownloadScansError(message)
+            clearDownloadScansTable()
+            return
+        }
+        setDownloadScansError('')
+        renderDownloadScansTable(result.json)
+    }).catch((err) => {
+        setDownloadScansError(err?.message || 'Unable to load scans.')
+        clearDownloadScansTable()
+    }).finally(() => {
+        $downloadScansModal.removeClass('loading')
+    })
 }
 
 function convertLegacyVulnToFinding(vuln, index) {
@@ -917,149 +1447,7 @@ function extractPrimaryIastEvidence(finding) {
 }
 
 function buildIastItemFromFinding(finding, index) {
-    if (!finding) return null
-    const loc = finding.location || {}
-    const evidenceEntry = extractPrimaryIastEvidence(finding)
-    const ev = evidenceEntry || {}
-    const severity = formatIastSeverityLabel(finding.severity || 'info')
-    const metaRule =
-        finding.ruleName
-        || finding.metadata?.name
-        || finding.module_metadata?.name
-        || finding.moduleName
-        || ev.message
-        || finding.category
-        || finding.ruleId
-        || finding.id
-        || `Finding ${index + 1}`
-    const taintSource = ev.taintSource || finding.taintSource || finding.source || null
-    const sinkId = ev.sinkId || finding.sinkId || finding.sink || null
-    const baseContext = Object.assign({}, ev.context || {}, finding.context || {})
-    const flow = Array.isArray(baseContext.flow) ? baseContext.flow : []
-    const tracePayload = ev.trace || baseContext.trace || finding.trace || null
-    const description = finding.description || finding.metadata?.description || ev.message || ''
-    const recommendation = finding.recommendation || finding.metadata?.recommendation || ''
-    const links = mergeLinkMaps(
-        finding.links,
-        finding.metadata?.links,
-        finding.module_metadata?.links
-    )
-    const contextPayload = Object.assign(
-        {
-            flow,
-            domPath: baseContext.domPath || ev.domPath || loc.domPath || null,
-            elementOuterHTML: baseContext.elementOuterHTML || ev.elementOuterHTML || null,
-            value: baseContext.value || ev.value || null,
-            url: baseContext.url || loc.url || null,
-            elementId: baseContext.elementId || loc.elementId || null,
-            tagName: baseContext.tagName || ev.tagName || null
-        },
-        baseContext
-    )
-    const owaspArray = Array.isArray(finding.owasp) ? finding.owasp : []
-    const owaspPrimary = finding.owaspPrimary || (owaspArray.length ? owaspArray[0] : null)
-    const owaspLegacy = finding.owaspLegacy || toLegacyOwaspString(owaspArray)
-    const normalizedEvidenceEntry = {
-        source: 'IAST',
-        taintSource,
-        sinkId,
-        schemaVersion: ev.schemaVersion || null,
-        primaryClass: ev.primaryClass || null,
-        sourceRole: ev.sourceRole || null,
-        origin: ev.origin || null,
-        observedAt: ev.observedAt || null,
-        operation: ev.operation || null,
-        detection: ev.detection || null,
-        routing: ev.routing || null,
-        context: contextPayload,
-        matched: ev.matched || finding.matched || null,
-        trace: tracePayload,
-        traceSummary: ev.traceSummary || null,
-        flowSummary: ev.flowSummary || null,
-        sourceKind: ev.sourceKind || null,
-        sourceKey: ev.sourceKey || null,
-        sourceValuePreview: ev.sourceValuePreview || null,
-        sources: ev.sources || null,
-        primarySource: ev.primarySource || null,
-        secondarySources: ev.secondarySources || null,
-        sinkContext: ev.sinkContext || null,
-        sinkSummary: ev.sinkSummary || finding.sinkSummary || null,
-        taintSummary: ev.taintSummary || finding.taintSummary || null,
-        allowedSources: ev.allowedSources || finding.allowedSources || null,
-        raw: {
-            severity,
-            meta: { ruleName: metaRule },
-            sinkId,
-            source: taintSource,
-            type: finding.category || null,
-            owasp: owaspArray,
-            cwe: Array.isArray(finding.cwe) ? finding.cwe : [],
-            tags: finding.tags || [],
-            location: loc,
-            context: contextPayload
-        }
-    }
-    const affectedUrls = []
-    const seenUrls = new Set()
-    const addUrl = (value, { prepend = false } = {}) => {
-        if (!value) return
-        const str = String(value).trim()
-        if (!str || seenUrls.has(str)) return
-        seenUrls.add(str)
-        if (prepend) {
-            affectedUrls.unshift(str)
-        } else {
-            affectedUrls.push(str)
-        }
-    }
-    addUrl(loc.url, { prepend: true })
-    if (Array.isArray(ev.affectedUrls)) {
-        ev.affectedUrls.forEach(url => addUrl(url))
-    }
-    if (Array.isArray(finding.affectedUrls)) {
-        finding.affectedUrls.forEach(url => addUrl(url))
-    }
-    addUrl(ev?.context?.url)
-    addUrl(ev?.context?.location)
-    return {
-        id: finding.id || `iast-${index}`,
-        ruleId: finding.ruleId || finding.id || `rule-${index}`,
-        ruleName: metaRule,
-        severity,
-        category: finding.category || null,
-        confidence: Number.isFinite(finding.confidence) ? finding.confidence : null,
-        owasp: owaspArray,
-        owaspPrimary,
-        owaspLegacy,
-        cwe: Array.isArray(finding.cwe) ? finding.cwe : [],
-        tags: finding.tags || [],
-        location: loc,
-        affectedUrls: affectedUrls.filter(Boolean),
-        evidence: [normalizedEvidenceEntry],
-        context: contextPayload,
-        trace: tracePayload,
-        description,
-        recommendation,
-        links,
-        metadata: {
-            id: finding.ruleId || finding.id || `rule-${index}`,
-            name: metaRule,
-            severity,
-            description,
-            recommendation,
-            links
-        },
-        module_metadata: {
-            id: finding.module_metadata?.id || finding.moduleId || null,
-            name: finding.module_metadata?.name || finding.moduleName || null,
-            links: finding.module_metadata?.links || links
-        },
-        requestId: index,
-        __index: index,
-        type: 'iast',
-        source: taintSource,
-        sink: sinkId
-    }
+    return buildSharedIastItemFromFinding(finding, index)
 }
 
 function getIastAttackItem(index) {
@@ -1175,22 +1563,66 @@ jQuery(function () {
         })
     })
 
-    $(document).on("click", ".save_report", function () {
-        let el = $(this).parent().find(".loader")
-        el.addClass("active")
-        controller.saveReport().then(function (result) {
-            if (result?.success) {
-                $('#result_header').text("Success")
-                $('#result_message').text("Scan saved")
-                $('#result_dialog').modal('show')
-            } else {
-                $('#result_header').text("Error")
-                $('#result_message').text(result?.json?.message)
-                $('#result_dialog').modal('show')
-            }
+    $(document).on("click", ".save_scan", function () {
+        const $loader = $(this).find('.loader')
+        requestIastProjectsAndShowModal($loader)
+    })
 
-            el.removeClass("active")
-        })
+    $(document).on('click', '#load_pro_policies_button', async function () {
+        setIastPortalPolicyLoading(true)
+        try {
+            const result = await controller.loadPolicyMetadata()
+            updateIastRulepackUi(result)
+            if (result?.success) {
+                showResultModal('Success', buildPolicyLoadSuccessMessage('IAST', result?.policyState || {}))
+            } else {
+                showResultModal(
+                    'Error',
+                    buildPolicyLoadErrorMessage(result, 'IAST scan policies'),
+                    { showSettings: result?.error === 'missing_api_key' }
+                )
+            }
+        } catch (err) {
+            showResultModal('Error', buildPolicyLoadErrorMessage({ message: err?.message || 'unknown_error' }, 'IAST scan policies'))
+        } finally {
+            setIastPortalPolicyLoading(false)
+        }
+        return false
+    })
+
+    $(document).on('click', '#result_dialog .result_open_settings_btn', function () {
+        openExtensionSettingsWindow()
+        $('#result_dialog').modal('hide')
+        return false
+    })
+
+    $(document).on('change', '#iast-scan-policy', async function () {
+        const $select = $(this)
+        const rawValue = String($select.val() || '').trim()
+        const policyId = rawValue.startsWith('policy:') ? rawValue.slice('policy:'.length).trim() : ''
+        const policyName = policyId ? String($select.find('option:selected').text() || '').trim() : null
+        setIastPortalPolicyLoading(true)
+        try {
+            const result = policyId
+                ? await controller.selectPolicy(policyId, policyName)
+                : await controller.clearPolicy()
+            updateIastRulepackUi(result)
+            if (result?.success) {
+                maybeBindIastPortalPreview(result)
+            } else {
+                showResultModal(
+                    'Error',
+                    result?.error === 'missing_api_key'
+                        ? 'PAT required. Activate the portal token in Settings first.'
+                        : `Failed to update scan policy: ${result?.error || 'unknown_error'}`
+                )
+            }
+        } catch (err) {
+            showResultModal('Error', `Failed to update scan policy: ${err?.message || 'unknown_error'}`)
+        } finally {
+            setIastPortalPolicyLoading(false)
+        }
+        return false
     })
 
     $(document).on("click", ".run_scan_runtime", function () {
@@ -1220,6 +1652,12 @@ jQuery(function () {
                     allowMultiple: true,
                     onApprove: function () {
                         const scanStrategy = $('#iast-scan-strategy').val() || 'SMART'
+                        const selectedPolicyValue = String($('#iast-scan-policy').val() || '').trim()
+                        const hasPortalEntries = Array.isArray(controller?.policyState?.metadata) && controller.policyState.metadata.length > 0
+                        if (hasPortalEntries && !selectedPolicyValue) {
+                            showResultModal('Error', 'Select a scan policy.')
+                            return false
+                        }
                         if (!contentReady) {
                             $('#ptk_scan_reload_warning').show()
                             return false
@@ -1246,6 +1684,10 @@ jQuery(function () {
                             scanStrategy,
                             buildIastRulepackRunOptions(rulepackSelection)
                         ).then(function (result) {
+                            if (result?.success === false) {
+                                showResultModal('Error', result?.message || result?.error || 'Failed to start scan.')
+                                return
+                            }
                             $("#request_info").html("")
                             $("#attacks_info").html("")
                             $("#discovery_info").html("")
@@ -1255,15 +1697,7 @@ jQuery(function () {
                     }
                 })
                 .modal('show')
-            $('#iast_scans_form .question')
-                .popup({
-                    inline: true,
-                    hoverable: true,
-                    delay: {
-                        show: 300,
-                        hide: 800
-                    }
-                })
+            bindIastHelpPopups()
         })
 
         return false
@@ -1288,75 +1722,27 @@ jQuery(function () {
     })
 
     $('.cloud_download_scans').on('click', function () {
-        $('#download_scans').modal('show')
-        controller.downloadScans().then(function (result) {
-
-            if (!result?.success) {
-                $("#download_error").text(result.json.message)
-                $("#download_scans_error").show()
-                return
-            }
-
-            $("#download_scans_error").hide()
-            let dt = new Array()
-            result?.json.forEach(item => {
-                item.scans.forEach(scan => {
-                    let link = `<div class="ui mini icon button download_scan_by_id" style="position: relative" data-scan-id="${scan.scanId}"><i class="download alternate large icon"
-                                        title="Download"></i>
-                                        <div style="position:absolute; top:1px;right: 2px">
-                                             <div class="ui  centered inline inverted loader"></div>
-                                        </div>
-                                </div>`
-                    let del = ` <div class="ui mini icon button delete_scan_by_id" data-scan-id="${scan.scanId}" data-scan-host="${item.hostname}"><i  class="trash alternate large icon "
-                    title="Delete"></i></div>`
-                    let d = new Date(scan.scanDate)
-                    dt.push([item.hostname, scan.scanId, d.toLocaleString(), link, del])
-                })
-            })
-
-            dt.sort(function (a, b) {
-                if (a[0] === b[0]) { return 0; }
-                else { return (a[0] < b[0]) ? -1 : 1; }
-            })
-            var groupColumn = 0;
-            let params = {
-                data: dt,
-                columnDefs: [{
-                    "visible": false, "targets": groupColumn
-                }],
-                "order": [[groupColumn, 'asc']],
-                "drawCallback": function (settings) {
-                    var api = this.api();
-                    var rows = api.rows({ page: 'current' }).nodes();
-                    var last = null;
-
-                    api.column(groupColumn, { page: 'current' }).data().each(function (group, i) {
-                        if (last !== group) {
-                            $(rows).eq(i).before(
-                                '<tr class="group" ><td colspan="4"><div class="ui black ribbon label">' + group + '</div></td></tr>'
-                            );
-                            last = group;
-                        }
-                    });
-                }
-            }
-
-            bindTable('#tbl_scans', params)
-
-
-        })
+        $downloadScansModal.modal('show')
+        loadIastDownloadProjects()
     })
 
     $(document).on("click", ".download_scan_by_id", function () {
         $(this).parent().find(".loader").addClass("active")
         let scanId = $(this).attr("data-scan-id")
         controller.downloadScanById(scanId).then(function (result) {
-            let info = { isScanRunning: false, scanResult: result }
+            if (result?.success === false) {
+                const message = result?.json?.message || result?.message || 'Unable to download scan'
+                showResultModal('Error', message, { showSettings: result?.error === 'missing_api_key' })
+                return
+            }
+            const info = result?.scanResult ? result : { isScanRunning: false, scanResult: result }
             changeView(info)
             if (hasRenderableIastData(info.scanResult)) {
                 bindScanResult(info)
             }
             $('#download_scans').modal('hide')
+        }).catch((err) => {
+            showResultModal('Error', err?.message || 'Unable to download scan')
         })
     })
 
@@ -1375,22 +1761,66 @@ jQuery(function () {
     })
 
     const $exportScanBtn = $('.export_scan_btn')
+    const $importScanFileBtn = $('.import_scan_file_btn')
+    const $importScanTextBtn = $('.import_scan_text_btn')
     const $scanExportProgress = $('#scan_export_progress')
+    const $scanExportProgressTitle = $('#scan_export_progress .ptk-export-progress-title')
     const $scanExportProgressBar = $('#scan_export_progress_bar')
     const $scanExportProgressText = $('#scan_export_progress_text')
     let exportInProgress = false
+    let importInProgress = false
 
-    function setExportProgress(percent, text) {
+    function setTransferProgress(title, percent, text) {
         const safePercent = Math.max(0, Math.min(100, Number(percent) || 0))
         $scanExportProgress.show()
+        $scanExportProgressTitle.text(title || 'Progress')
         $scanExportProgressBar.css('width', `${safePercent}%`)
-        $scanExportProgressText.text(text || `Exporting... ${safePercent}%`)
+        $scanExportProgressText.text(text || `${title || 'Working'}... ${safePercent}%`)
+    }
+
+    function setExportProgress(percent, text) {
+        setTransferProgress('Export', percent, text)
     }
 
     function hideExportProgress() {
         $scanExportProgress.hide()
+        $scanExportProgressTitle.text('Export')
         $scanExportProgressBar.css('width', '0%')
         $scanExportProgressText.text('Preparing export...')
+    }
+
+    function setImportProgress(percent, text) {
+        setTransferProgress('Import', percent, text)
+    }
+
+    function updateImportProgressFromEvent(event) {
+        const phase = String(event?.phase || '')
+        const completed = Number(event?.completed || 0)
+        const total = Number(event?.total || 0)
+        if (phase === 'read_start') {
+            setImportProgress(5, 'Reading scan file...')
+            return
+        }
+        if (phase === 'read_complete') {
+            setImportProgress(35, 'Preparing import payload...')
+            return
+        }
+        if (phase === 'upload_start') {
+            setImportProgress(65, total > 1 ? `Uploading import payload... 0/${total}` : 'Uploading import payload...')
+            return
+        }
+        if (phase === 'upload_chunk') {
+            const percent = total > 0 ? Math.floor((completed / total) * 25) : 0
+            setImportProgress(65 + percent, `Uploading import payload... ${completed}/${total}`)
+            return
+        }
+        if (phase === 'finalize_start') {
+            setImportProgress(92, 'Finalizing import...')
+            return
+        }
+        if (phase === 'done') {
+            setImportProgress(100, 'Import complete.')
+        }
     }
 
     function updateExportProgressFromChunk(event) {
@@ -1459,19 +1889,33 @@ jQuery(function () {
     })
 
     async function loadFile(file) {
+        if (importInProgress) return
+        importInProgress = true
+        $exportScanBtn.addClass('disabled')
+        $importScanFileBtn.addClass('disabled loading')
+        $importScanTextBtn.addClass('disabled')
         try {
-            const text = await readScanFileText(file)
-            controller.save(text).then(result => {
-                changeView(result)
-                if (hasRenderableIastData(result.scanResult)) {
-                    bindScanResult(result)
-                }
-                $('#import_export_dlg').modal('hide')
-            }).catch(e => {
-                showResultModal("Error", "Could not import IAST scan")
+            setImportProgress(2, 'Preparing import...')
+            const result = await controller.loadfile(file, {
+                onProgress: updateImportProgressFromEvent
             })
+            if (result instanceof Error || result?.success === false || !hasRenderableIastData(result?.scanResult)) {
+                showResultModal("Error", result?.message || result?.error || "Could not import IAST scan")
+                return
+            }
+            changeView(result)
+            bindScanResult(result)
+            $('#import_export_dlg').modal('hide')
         } catch (e) {
-            showResultModal("Error", "Could not import IAST scan")
+            showResultModal("Error", e?.message || "Could not import IAST scan")
+        } finally {
+            importInProgress = false
+            $exportScanBtn.removeClass('disabled')
+            $importScanFileBtn.removeClass('disabled loading')
+            $importScanTextBtn.removeClass('disabled')
+            setTimeout(() => {
+                if (!importInProgress && !exportInProgress) hideExportProgress()
+            }, 800)
         }
     }
 
@@ -1493,38 +1937,12 @@ jQuery(function () {
 
 
 
-    $(document).on("click", ".delete_scan_by_id", function () {
-        let scanId = $(this).attr("data-scan-id")
-        let scanHost = $(this).attr("data-scan-host")
-        $("#scan_hostname").val("")
-        $("#scan_delete_message").text("")
-        $('#delete_scan_dlg')
-            .modal({
-                allowMultiple: true,
-                onApprove: function () {
-                    if ($("#scan_hostname").val() == scanHost) {
-                        return controller.deleteScanById(scanId).then(function (result) {
-                            $('.cloud_download_scans').trigger("click")
-                            //console.log(result)
-                            return true
-                        })
-
-                    } else {
-                        $("#scan_delete_message").text("Type scan hostname to confirm delete")
-                        return false
-                    }
-                }
-            })
-            .modal('show')
-    })
-
-
     $(document).on("click", ".reset", function () {
         $("#request_info").html("")
         $("#attacks_info").html("")
         $("#discovery_info").html("")
         $('.generate_report').hide()
-        $('.save_report').hide()
+        $('.save_scan').hide()
         //$('.exchange').hide()
 
         hideRunningForm()
@@ -1532,9 +1950,7 @@ jQuery(function () {
         controller.reset().then(function (result) {
             updateIastRulepackUi(result)
             triggerIastStatsEvent(result.scanResult)
-            if (Array.isArray(result?.default_modules) && result.default_modules.length) {
-                bindModules(result)
-            }
+            ensureIastDefaultModulesLoaded({ force: true }).catch(() => { })
         })
     })
 
@@ -1660,11 +2076,9 @@ jQuery(function () {
         changeView(result)
         if (hasRenderableIastData(result.scanResult)) {
             bindScanResult(result)
-        } else if (!result.isScanRunning && Array.isArray(result?.default_modules) && result.default_modules.length) {
-            bindModules(result)
-            showWelcomeForm()
         } else if (!result.isScanRunning) {
             showWelcomeForm()
+            ensureIastDefaultModulesLoaded().catch(() => { })
         }
     }).catch(() => { })
 
@@ -1767,10 +2181,15 @@ function bindScanResult(result) {
         resetIastProgressRender({ hide: true })
     }
     $('.generate_report').show()
-    $('.save_report').show()
+    if (PORTAL_ACTIONS_VISIBLE) {
+        $('.save_scan').show()
+    } else {
+        $('.save_scan').hide()
+    }
     $('#request_info').html("")
     $('#attacks_info').html("")
     $('#discovery_info').html("")
+    iastDiscoveryDirty = true
     hideWelcomeForm()
     IAST_DELTA_QUEUE.length = 0
     if (iastFlushTimer) {
@@ -1856,7 +2275,6 @@ function bindScanResult(result) {
         bucketMarkup[bucket].push(rutils.bindIASTAttack(item, index))
         updateIastCountersForFinding(item, item.requestKey)
     })
-    renderIastDiscovery(vm)
     const bucketHtml = bucketOrder
         .map((bucket) => `<div class="iast_bucket${bucketMarkup[bucket].length ? ' has-items' : ''}" data-bucket="${bucket}">${bucketMarkup[bucket].join('')}</div>`)
         .join('')
@@ -2029,7 +2447,7 @@ function getIastBucket(item) {
 function bindModules(result) {
     const modules = Array.isArray(result?.default_modules)
         ? result.default_modules
-        : (Array.isArray(result) ? result : [])
+        : (Array.isArray(controller?.default_modules) ? controller.default_modules : (Array.isArray(result) ? result : []))
     const rows = []
     modules.forEach((mod) => {
         if (!mod) return
@@ -2432,6 +2850,7 @@ function setIastView(view) {
     $("#attacks_info").toggle(showFindings)
     $("#discovery_info").toggle(!showFindings)
     if (!showFindings) {
+        ensureIastDiscoveryRendered()
         const $panels = $("#discovery_info .iast-discovery-panel")
         $panels.hide()
         $panels.filter(`[data-discovery-group="${normalized}"]`).show()
@@ -2450,11 +2869,15 @@ browser.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         if (message?.type === 'scan_update') {
             const info = {
                 scanResult: message.scanResult || {},
-                isScanRunning: !!message.isScanRunning
+                isScanRunning: !!message.isScanRunning,
+                policyState: message.policyState || controller.policyState || {},
+                rulepackSelection: message.rulepackSelection || null
             }
             changeView(info)
             if (hasRenderableIastData(info.scanResult)) {
                 bindScanResult(info)
+            } else {
+                updateIastRulepackUi(info)
             }
         }
         if (message?.type === 'scan_delta') {

@@ -207,8 +207,33 @@ function normalizeModuleExecution(moduleDef = {}) {
         allowStrategyBulk: normalizeAllowStrategyBulk(moduleDef),
         allowAuthLikeTargets: meta.allowAuthLikeTargets === true,
         allowHardDeniedTargets: clonePlainObject(meta.allowHardDeniedTargets, {}),
-        ignoreGlobalExcludes: meta.ignoreGlobalExcludes === true
+        ignoreGlobalExcludes: meta.ignoreGlobalExcludes === true,
+        prefilters: normalizeExecutionPrefilters(moduleDef)
     }
+}
+
+function normalizeExecutionPrefilters(moduleDef = {}) {
+    const meta = moduleDef?.metadata || {}
+    const source = (
+        meta?.execution?.prefilters && typeof meta.execution.prefilters === "object"
+    )
+        ? meta.execution.prefilters
+        : (
+            meta?.prefilters && typeof meta.prefilters === "object"
+                ? meta.prefilters
+                : {}
+        )
+    const methods = uniqueStrings(source?.methods || []).map((value) => value.toUpperCase())
+    const out = {}
+    if (methods.length) out.methods = methods
+    if (source?.requiresBody === true) out.requiresBody = true
+    if (source?.requiresJsonBody === true) out.requiresJsonBody = true
+    if (source?.requiresXmlBody === true) out.requiresXmlBody = true
+    if (source?.requiresQueryParams === true) out.requiresQueryParams = true
+    if (source?.requiresQueryOrBodyParams === true) out.requiresQueryOrBodyParams = true
+    if (source?.requiresCookies === true) out.requiresCookies = true
+    if (source?.requiresHeaders === true) out.requiresHeaders = true
+    return out
 }
 
 function normalizeRequestGrouping(attackDef = {}) {

@@ -68,6 +68,11 @@ function normalizeFinding(f) {
         ...base,
         engine: engine || null,
         severity: (base.severity || "").toLowerCase() || "medium",
+        outputKind: base.outputKind || f.outputKind || null,
+        reconKind: base.reconKind || f.reconKind || null,
+        presentationAggregate: base.presentationAggregate || f.presentationAggregate || null,
+        uiSurface: base.uiSurface || f.uiSurface || null,
+        findingKind: base.findingKind || f.findingKind || null,
         owasp: normalizedOwasp,
         owaspPrimary,
         owaspLegacy,
@@ -90,6 +95,61 @@ function normalizeFinding(f) {
         taintSource,
         source
     }
+}
+
+function normalizeReconObservationAsFinding(observation) {
+    if (!observation || typeof observation !== "object") return null
+    const location = observation.location && typeof observation.location === "object"
+        ? observation.location
+        : {}
+    return normalizeFinding({
+        ...observation,
+        engine: observation.engine || "DAST",
+        severity: observation.severity || "info",
+        findingKind: "recon",
+        title: observation.ruleName || observation.moduleName || observation.name || "Recon observation",
+        name: observation.ruleName || observation.moduleName || observation.name || "Recon observation",
+        vulnId: observation.vulnId || observation.category || "recon",
+        location: {
+            url: location.url || location.runtimeUrl || null,
+            method: location.method || null,
+            param: location.param || null
+        }
+    })
+}
+
+function buildDastFindingMergeKey(finding = {}) {
+    if (!finding || typeof finding !== "object") return ""
+    const evidence = finding?.evidence?.dast && typeof finding.evidence.dast === "object"
+        ? finding.evidence.dast
+        : {}
+    const location = finding.location && typeof finding.location === "object" ? finding.location : {}
+    const parts = [
+        String(finding.engine || ""),
+        String(finding.outputKind || ""),
+        String(evidence.attackId || ""),
+        String(evidence.requestId || ""),
+        String(finding.ruleId || ""),
+        String(finding.moduleId || ""),
+        String(location.url || ""),
+        String(location.method || ""),
+        String(location.param || "")
+    ]
+    return parts.join("|")
+}
+
+function mergeDastFindings(primaryFindings = [], extraFindings = []) {
+    const merged = []
+    const seen = new Set()
+    ;[...(Array.isArray(primaryFindings) ? primaryFindings : []), ...(Array.isArray(extraFindings) ? extraFindings : [])]
+        .forEach((finding) => {
+            if (!finding || typeof finding !== "object") return
+            const key = buildDastFindingMergeKey(finding) || String(finding.id || "")
+            if (key && seen.has(key)) return
+            if (key) seen.add(key)
+            merged.push(finding)
+        })
+    return merged
 }
 
 function normalizeGroup(g) {
@@ -197,13 +257,18 @@ function buildFindingsFromNormalizedDastRequests(requests = [], result = {}) {
                 vulnId: attack.vulnId || meta.vulnId || meta.category || null,
                 category: attack.category || meta.category || null,
                 severity: attack.severity || meta.severity || "medium",
+                outputKind: attack.outputKind || meta.outputKind || null,
+                reconKind: attack.reconKind || meta.reconKind || null,
+                presentationAggregate: attack.presentationAggregate || meta.presentationAggregate || null,
+                uiSurface: attack.uiSurface || meta.uiSurface || null,
+                findingKind: String(attack.outputKind || meta.outputKind || "").toLowerCase() === "recon" ? "recon" : null,
                 owasp: meta.owasp || null,
                 cwe: meta.cwe || null,
                 tags: meta.tags || [],
                 confidence: attack.confidence ?? meta.confidence ?? null,
-                description: meta.description || "",
-                recommendation: meta.recommendation || "",
-                links: meta.links || {},
+                description: attack.description || meta.description || meta.docs?.description || "",
+                recommendation: attack.recommendation || meta.recommendation || meta.docs?.recommendation || "",
+                links: attack.links || meta.links || meta.docs?.links || {},
                 location: {
                     url: req.url || req.href || null,
                     method: req.method || originalRequest?.method || null,
@@ -331,8 +396,85 @@ function normalizeDiscovery(discovery) {
     }
 }
 
+function normalizeAttackMapItem(item) {
+    if (!item || typeof item !== "object") return null
+    return {
+        id: item.id || null,
+        source: item.source || null,
+        title: item.title || "Attack map item",
+        itemType: item.itemType || null,
+        routeKey: item.routeKey || null,
+        path: item.path || null,
+        paramKey: item.paramKey || null,
+        priority: Number.isFinite(item.priority) ? Number(item.priority) : 0,
+        suggestedChecks: Array.isArray(item.suggestedChecks) ? item.suggestedChecks : [],
+        evidenceRefs: Array.isArray(item.evidenceRefs) ? item.evidenceRefs : []
+    }
+}
+
+function normalizeAttackMap(attackMap) {
+    if (!attackMap || typeof attackMap !== "object") return null
+    return {
+        total: Number.isFinite(attackMap.total) ? Number(attackMap.total) : 0,
+        items: Array.isArray(attackMap.items)
+            ? attackMap.items.map(normalizeAttackMapItem).filter(Boolean)
+            : []
+    }
+}
+
+function normalizeInventoryIdentifier(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        name: entry.name || null,
+        kind: entry.kind || null,
+        hits: Number.isFinite(entry.hits) ? Number(entry.hits) : 0,
+        routeKeys: Array.isArray(entry.routeKeys) ? entry.routeKeys : [],
+        sources: Array.isArray(entry.sources) ? entry.sources : [],
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+    }
+}
+
+function normalizeObjectInventory(objectInventory) {
+    if (!objectInventory || typeof objectInventory !== "object") return null
+    return {
+        total: Number.isFinite(objectInventory.total) ? Number(objectInventory.total) : 0,
+        identifiers: Array.isArray(objectInventory.identifiers)
+            ? objectInventory.identifiers.map(normalizeInventoryIdentifier).filter(Boolean)
+            : []
+    }
+}
+
+function normalizeOpportunity(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        source: entry.source || null,
+        title: entry.title || "Opportunity",
+        type: entry.type || null,
+        routeKey: entry.routeKey || null,
+        path: entry.path || null,
+        paramKey: entry.paramKey || null,
+        priority: Number.isFinite(entry.priority) ? Number(entry.priority) : 0,
+        confidence: entry.confidence || "low",
+        confidenceRank: Number.isFinite(entry.confidenceRank) ? Number(entry.confidenceRank) : 1,
+        suggestedChecks: Array.isArray(entry.suggestedChecks) ? entry.suggestedChecks : [],
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+    }
+}
+
 function normalizeAnalysis(analysis, topLevelVersion = null) {
     if (!analysis || typeof analysis !== "object") return null
+    const meta = analysis.meta && typeof analysis.meta === "object"
+        ? {
+            computedAt: analysis.meta.computedAt || null,
+            enginesPresent: Array.isArray(analysis.meta.enginesPresent) ? analysis.meta.enginesPresent : [],
+            relatedScanCount: Number.isFinite(analysis.meta.relatedScanCount) ? Number(analysis.meta.relatedScanCount) : 0,
+            relatedScanIds: Array.isArray(analysis.meta.relatedScanIds) ? analysis.meta.relatedScanIds : [],
+            mode: analysis.meta.mode || null,
+            forced: analysis.meta.forced === true
+        }
+        : null
     const diff = analysis.diff && typeof analysis.diff === "object"
         ? {
             baseScanId: analysis.diff.baseScanId || null,
@@ -364,6 +506,18 @@ function normalizeAnalysis(analysis, topLevelVersion = null) {
         discovery: normalizeDiscovery(analysis.discovery) || {
             iastBuckets: []
         },
+        attackMap: normalizeAttackMap(analysis.attackMap) || {
+            total: 0,
+            items: []
+        },
+        objectInventory: normalizeObjectInventory(analysis.objectInventory) || {
+            total: 0,
+            identifiers: []
+        },
+        opportunities: Array.isArray(analysis.opportunities)
+            ? analysis.opportunities.map(normalizeOpportunity).filter(Boolean)
+            : [],
+        meta,
         diff
     }
 }
@@ -409,9 +563,17 @@ function normalizeLegacyDast(result) {
                 vulnId: meta.vulnId || meta.category || null,
                 category: meta.category || null,
                 severity: meta.severity || "medium",
+                outputKind: attackRecord.outputKind || meta.outputKind || null,
+                reconKind: attackRecord.reconKind || meta.reconKind || null,
+                presentationAggregate: attackRecord.presentationAggregate || meta.presentationAggregate || null,
+                uiSurface: attackRecord.uiSurface || meta.uiSurface || null,
+                findingKind: String(attackRecord.outputKind || meta.outputKind || "").toLowerCase() === "recon" ? "recon" : null,
                 owasp: meta.owasp || null,
                 cwe: meta.cwe || null,
                 tags: meta.tags || [],
+                description: attackRecord.description || meta.description || meta.docs?.description || "",
+                recommendation: attackRecord.recommendation || meta.recommendation || meta.docs?.recommendation || "",
+                links: attackRecord.links || meta.links || meta.docs?.links || {},
                 location: {
                     url: req.url || req.href || null,
                     method: req.method || null,
@@ -562,13 +724,20 @@ export function normalizeScanResult(scanResult) {
     const engine = raw.engine || inferEngineFromType(raw.type)
     const normalizedAnalysis = normalizeAnalysis(raw.analysis, raw.analysisVersion)
     const rawFindings = Array.isArray(raw.findings) ? raw.findings : []
+    const rawRecon = Array.isArray(raw.recon) ? raw.recon : []
     const groups = Array.isArray(raw.groups) ? raw.groups : []
     const normalizedRequests = engine === "DAST"
         ? normalizeRequests(raw.requests || [])
         : (engine === "IAST" ? normalizeIastRequests(raw.requests || []) : [])
-    const findings = engine === "DAST" && rawFindings.length === 0 && normalizedRequests.length > 0
+    const synthesizedFindings = engine === "DAST" && rawFindings.length === 0 && normalizedRequests.length > 0
         ? buildFindingsFromNormalizedDastRequests(normalizedRequests, raw)
         : rawFindings.map(normalizeFinding)
+    const reconFindings = engine === "DAST"
+        ? rawRecon.map(normalizeReconObservationAsFinding).filter(Boolean)
+        : []
+    const findings = engine === "DAST"
+        ? mergeDastFindings(synthesizedFindings, reconFindings)
+        : synthesizedFindings
     if (findings.length || groups.length || (engine === "DAST" && normalizedRequests.length)) {
         return {
             engine,

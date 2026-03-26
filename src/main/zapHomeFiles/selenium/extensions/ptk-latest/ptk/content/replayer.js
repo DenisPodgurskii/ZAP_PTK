@@ -3,6 +3,17 @@
 (function () {
     if (window.ptk_replayer || typeof browser === typeof undefined) return
 
+    function cloneReplayValue(value) {
+        if (typeof globalThis.structuredClone === 'function') {
+            try {
+                return globalThis.structuredClone(value)
+            } catch (e) {
+                // fall back to JSON clone
+            }
+        }
+        return JSON.parse(JSON.stringify(value ?? null))
+    }
+
     let isIframe = false
     try {
         isIframe = window.self !== window.top
@@ -29,6 +40,8 @@
                     this.items = result.ptk_replay_items
                     this.step = result.ptk_replay_step
                     this.regex = result.ptk_replay_regex
+                    this.replayEnvelope = result.ptk_replay || null
+                    this.overlayPlan = result.ptk_replay?.overlayPlan || null
                     this.paused = false
                     this.forward = false
                     this.log = result.ptk_recording_log
@@ -92,15 +105,25 @@
         }
 
         async execute(item) {
+            const resolution = this.resolveOverlayItem(this.step, item)
+            if (resolution.skip) {
+                this.debugLog('step_skipped_overlay', {
+                    step: this.step,
+                    reason: resolution.overlay?.reason || 'overlay'
+                })
+                this.logEvent(item, `Skipped by workflow overlay (${resolution.overlay?.reason || 'overlay'})`)
+                return
+            }
+            const effectiveItem = resolution.item
             let frames = document.getElementsByTagName('iframe')
-            if (!isIframe && item.WindowIndex == windowIndex) {
-                if (item.ElementPath.includes('//IFRAME')) {
-                    this.executeFrame(item)
+            if (!isIframe && effectiveItem.WindowIndex == windowIndex) {
+                if (effectiveItem.ElementPath.includes('//IFRAME')) {
+                    this.executeFrame(effectiveItem)
                 } else {
-                    await this.doStep(this.step, item)
+                    await this.doStep(this.step, effectiveItem)
                 }
             } else if (!isIframe && this.childWindow) {
-                this.childWindow.postMessage({ channel: "2child", message: 'doStep', step: this.step, item: item }, '*')
+                this.childWindow.postMessage({ channel: "2child", message: 'doStep', step: this.step, item: effectiveItem }, '*')
             }
         }
 
@@ -231,6 +254,44 @@
                 await this.handler(item)
             } else {
                 this.debugLog('missing_handler', { step: this.step, eventType })
+            }
+        }
+
+        getOverlayEntry(step) {
+            const overlays = Array.isArray(this.overlayPlan?.stepOverlays)
+                ? this.overlayPlan.stepOverlays
+                : []
+            return overlays.find((entry) => Number(entry?.stepIndex) === Number(step)) || null
+        }
+
+        resolveOverlayItem(step, item) {
+            const overlay = this.getOverlayEntry(step)
+            const effectiveItem = cloneReplayValue(item)
+            if (!overlay) {
+                return {
+                    overlay: null,
+                    skip: false,
+                    item: effectiveItem
+                }
+            }
+            if (overlay.skip) {
+                return {
+                    overlay,
+                    skip: true,
+                    item: effectiveItem
+                }
+            }
+            if (overlay.mutatedItem && typeof overlay.mutatedItem === 'object') {
+                return {
+                    overlay,
+                    skip: false,
+                    item: cloneReplayValue(overlay.mutatedItem)
+                }
+            }
+            return {
+                overlay,
+                skip: false,
+                item: effectiveItem
             }
         }
 

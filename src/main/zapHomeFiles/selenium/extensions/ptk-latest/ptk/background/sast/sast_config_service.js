@@ -41,7 +41,7 @@ export class SastConfigService {
     let catalog = opts?.catalog;
 
     if (!rulepack || typeof rulepack !== "object") {
-      rulepack = await this.loadRulepackFn("SAST");
+      rulepack = await this.loadRulepackFn("SAST", opts);
     }
 
     if (!catalog || typeof catalog !== "object") {

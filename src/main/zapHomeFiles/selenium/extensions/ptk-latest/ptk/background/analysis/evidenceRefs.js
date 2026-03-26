@@ -7,7 +7,7 @@ function toNonEmptyString(value) {
 function normalizeLoc(loc) {
     if (!loc || typeof loc !== "object") return null
     const out = {}
-    const allowed = ["method", "path", "route", "module", "rule", "kind", "host", "param"]
+    const allowed = ["method", "path", "route", "module", "rule", "kind", "host", "param", "severity", "title"]
     allowed.forEach((key) => {
         const value = toNonEmptyString(loc[key])
         if (value) out[key] = value
@@ -50,17 +50,23 @@ function stableEvidenceKey(ref) {
 export function normalizeEvidenceRefs(refs = [], { maxRefs = 12 } = {}) {
     if (!Array.isArray(refs) || !refs.length) return []
     const out = []
+    const seen = new Set()
     refs.forEach((ref) => {
         if (!ref || typeof ref !== "object") return
         const type = toNonEmptyString(ref.type) || "evidence"
         const id = toNonEmptyString(ref.id)
         const loc = normalizeLoc(ref.loc)
         if (!id && !loc) return
-        out.push({
+        const normalizedRef = {
             type,
             id: id || null,
             ...(loc ? { loc } : {})
-        })
+        }
+        const stableKey = stableEvidenceKey(normalizedRef)
+            || `${type}:${id || ""}:${locToStableString(loc) || ""}`
+        if (seen.has(stableKey)) return
+        seen.add(stableKey)
+        out.push(normalizedRef)
     })
     out.sort((a, b) => {
         const aType = `${a.type || ""}`
@@ -87,4 +93,3 @@ export function buildStableEvidenceKeySet(refs = []) {
     })
     return Array.from(keys).sort((a, b) => a.localeCompare(b)).join("|")
 }
-

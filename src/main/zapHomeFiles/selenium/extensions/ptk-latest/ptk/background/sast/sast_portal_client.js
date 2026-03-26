@@ -2,6 +2,10 @@
 import buildExportScanResult from "../export/buildExportScanResult.js";
 import { compressScanPayload } from "../export/compressScanPayload.js";
 import { parseDownloadedScanPayload } from "../export/parseDownloadedScanPayload.js";
+import {
+  buildPortalUrl as buildSharedPortalUrl,
+  initializePortalRuntimeConfig
+} from "../../common/portalConfig.js";
 
 export class SastPortalClient {
   constructor({ getProfile } = {}) {
@@ -9,26 +13,20 @@ export class SastPortalClient {
   }
 
   buildPortalUrl(endpoint, profile = null) {
-    profile = profile || this.getProfile() || {};
-    const baseUrl = (profile.base_url || profile.api_url || "").trim();
-    const apiBase = (profile.api_base || "").trim();
-    const resolvedEndpoint = (endpoint || "").trim();
-    if (!baseUrl || !apiBase || !resolvedEndpoint) return null;
-    const normalizedBase = baseUrl.replace(/\/+$/, "");
-    let normalizedApiBase = apiBase.replace(/\/+$/, "");
-    if (!normalizedApiBase.startsWith('/')) normalizedApiBase = '/' + normalizedApiBase;
-    let normalizedEndpoint = resolvedEndpoint;
-    if (!normalizedEndpoint.startsWith('/')) normalizedEndpoint = '/' + normalizedEndpoint;
-    return normalizedBase + normalizedApiBase + normalizedEndpoint;
+    return buildSharedPortalUrl(endpoint, {
+      baseUrl: profile?.base_url || profile?.api_url || profile?.baseUrl || null,
+      apiBase: profile?.api_base || profile?.apiBase || undefined
+    });
   }
 
   async getProjects() {
+    await initializePortalRuntimeConfig();
     const profile = this.getProfile() || {};
     const apiKey = profile?.api_key;
     if (!apiKey) {
       return { success: false, json: { message: "No API key found" } };
     }
-    const url = this.buildPortalUrl(profile.projects_endpoint, profile);
+    const url = this.buildPortalUrl("/projects", profile);
     if (!url) {
       return { success: false, json: { message: "Portal endpoint is not configured." } };
     }
@@ -37,6 +35,7 @@ export class SastPortalClient {
         Authorization: 'Bearer ' + apiKey,
         Accept: 'application/json'
       },
+      credentials: 'omit',
       cache: 'no-cache'
     })
       .then(async (httpResponse) => {
@@ -50,6 +49,7 @@ export class SastPortalClient {
   }
 
   async saveScan({ scanResult, projectId = null } = {}) {
+    await initializePortalRuntimeConfig();
     const profile = this.getProfile() || {};
     const apiKey = profile?.api_key;
     if (!apiKey) {
@@ -59,7 +59,7 @@ export class SastPortalClient {
     if (!findingCount) {
       return { success: false, json: { message: "Scan result is empty" } };
     }
-    const url = this.buildPortalUrl(profile.scans_endpoint, profile);
+    const url = this.buildPortalUrl("/scans", profile);
     if (!url) {
       return { success: false, json: { message: "Portal endpoint is not configured." } };
     }
@@ -90,6 +90,7 @@ export class SastPortalClient {
         'Content-Type': compressed.contentType,
         'X-PTK-Compression': compressed.compression
       },
+      credentials: 'omit',
       cache: 'no-cache',
       body: compressed.body
     })
@@ -104,12 +105,13 @@ export class SastPortalClient {
   }
 
   async downloadScans({ projectId = null, engine = "sast" } = {}) {
+    await initializePortalRuntimeConfig();
     const profile = this.getProfile() || {};
     const apiKey = profile?.api_key;
     if (!apiKey) {
       return { success: false, json: { message: "No API key found" } };
     }
-    const baseUrl = this.buildPortalUrl(profile.scans_endpoint, profile);
+    const baseUrl = this.buildPortalUrl("/scans", profile);
     if (!baseUrl) {
       return { success: false, json: { message: "Portal endpoint is not configured." } };
     }
@@ -131,6 +133,7 @@ export class SastPortalClient {
         Authorization: 'Bearer ' + apiKey,
         Accept: 'application/json'
       },
+      credentials: 'omit',
       cache: 'no-cache'
     })
       .then(async (httpResponse) => {
@@ -144,6 +147,7 @@ export class SastPortalClient {
   }
 
   async downloadScanById({ scanId } = {}) {
+    await initializePortalRuntimeConfig();
     const profile = this.getProfile() || {};
     const apiKey = profile?.api_key;
     if (!apiKey) {
@@ -152,7 +156,7 @@ export class SastPortalClient {
     if (!scanId) {
       return { success: false, json: { message: "Scan identifier is required." } };
     }
-    const baseUrl = this.buildPortalUrl(profile.scans_endpoint, profile);
+    const baseUrl = this.buildPortalUrl("/scans", profile);
     if (!baseUrl) {
       return { success: false, json: { message: "Portal endpoint is not configured." } };
     }
@@ -163,6 +167,7 @@ export class SastPortalClient {
         Authorization: 'Bearer ' + apiKey,
         Accept: 'application/gzip, application/x-gzip'
       },
+      credentials: 'omit',
       cache: 'no-cache'
     })
       .then(async (httpResponse) => {
@@ -179,38 +184,6 @@ export class SastPortalClient {
       .catch(e => ({ success: false, json: { message: "Error while downloading scan: " + e.message } }));
   }
 
-  async deleteScanById({ scanId } = {}) {
-    const profile = this.getProfile() || {};
-    const apiKey = profile?.api_key;
-    if (!apiKey) {
-      return { success: false, json: { message: "No API key found" } };
-    }
-    if (!scanId) {
-      return { success: false, json: { message: "Scan identifier is required." } };
-    }
-    const baseUrl = this.buildPortalUrl(profile.storage_endpoint, profile);
-    if (!baseUrl) {
-      return { success: false, json: { message: "Storage endpoint is not configured." } };
-    }
-    const normalizedBase = baseUrl.replace(/\/+$/, "");
-    const deleteUrl = `${normalizedBase}/${encodeURIComponent(scanId)}`;
-    return fetch(deleteUrl, {
-      method: 'DELETE',
-      headers: {
-        Authorization: 'Bearer ' + apiKey,
-        Accept: 'application/json'
-      },
-      cache: 'no-cache'
-    })
-      .then(async (httpResponse) => {
-        const json = await httpResponse.json().catch(() => null);
-        if (!httpResponse.ok) {
-          return { success: false, json: json || { message: "Unable to delete scan" } };
-        }
-        return json || { success: true };
-      })
-      .catch(e => ({ success: false, json: { message: "Error while deleting scan: " + e.message } }));
-  }
 }
 
 export default SastPortalClient;

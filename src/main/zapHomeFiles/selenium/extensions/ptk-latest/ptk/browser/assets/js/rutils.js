@@ -1,6 +1,8 @@
 import { ptk_utils } from "../../../background/utils.js";
 import { ptk_decoder } from "../../../background/decoder.js";
 import { default as dompurify } from "../../../packages/dompurify/purify.es.mjs";
+import { buildSastItemFromFinding } from "./sastFindingItem.js";
+import { buildIastItemFromFinding } from "./iastFindingItem.js";
 const decoder = new ptk_decoder();
 const INLINE_FILE_SPLIT_RE = /\s+::\s+/;
 const INLINE_FILE_PREFIX_RE = /^inline/i;
@@ -589,17 +591,20 @@ function isDastReportableAttack(info) {
 function buildMiscMeta(info) {
     const finding = info?.finding || null
     const meta = info?.metadata || {}
+    const outputKind = String(info?.outputKind || finding?.outputKind || meta?.outputKind || "").toLowerCase()
     const findingKind = String(info?.findingKind || finding?.findingKind || meta?.findingKind || "").toLowerCase()
     let icon = ""
     let attackClass = "nonvuln"
     let order = 3
     let severityValue = ""
     const isSastSupportSignal = info?.type === 'sast' && (findingKind === 'hint' || findingKind === 'artifact')
-    const isVuln = (info?.type === 'sast' && !isSastSupportSignal)
+    const isRecon = outputKind === 'recon' || findingKind === 'recon'
+    const isDisplayFinding = (info?.type === 'sast' && !isSastSupportSignal)
         || info?.type === 'iast'
         || (!!info?.success && isDastReportableAttack(info))
+    const countsAsFinding = isDisplayFinding && !(info?.type === 'dast' && isRecon)
 
-    if (isVuln) {
+    if (isDisplayFinding) {
         let severity = info.severity || finding?.severity || meta?.severity || 'medium'
         severityValue = ("" + severity).toLowerCase()
         if (severityValue === 'informational') {
@@ -617,7 +622,7 @@ function buildMiscMeta(info) {
         let name = finding?.ruleName || info.name || meta?.name || info.identifiers?.summary || info.category
         const supportLabel = isSastSupportSignal
             ? `<span class="ui mini basic label">${ptk_utils.escapeHtml(findingKind)}</span> `
-            : ""
+            : (isRecon ? `<span class="ui mini basic label">recon</span> ` : "")
         icon = `<div>${supportLabel}<b>${ptk_utils.escapeHtml(name)}</b></div>`
     }
 
@@ -637,7 +642,9 @@ function buildMiscMeta(info) {
         order,
         attackClass,
         severity: severityValue,
-        isVuln,
+        isVuln: isDisplayFinding,
+        countsAsFinding,
+        isRecon,
         statusCode,
         is4xx,
         is5xx
@@ -1779,10 +1786,6 @@ export function bindAttackDetails_IAST(info = {}) {
     if (flowSummary) {
         headerRows.push(`<div><strong>Flow:</strong> ${sanitize(ptk_utils.escapeHtml(String(flowSummary)))}</div>`)
     }
-    const timestamp = info?.createdAt || info?.updatedAt || null
-    if (timestamp) {
-        headerRows.push(`<div><strong>Time:</strong> ${sanitize(ptk_utils.escapeHtml(String(timestamp)))}</div>`)
-    }
     const headerEl = document.getElementById('iast_context_header')
     if (headerEl) {
         if (headerRows.length) {
@@ -1795,6 +1798,60 @@ export function bindAttackDetails_IAST(info = {}) {
 
     setFindingMetadata(description || 'No description provided.', recommendation || 'No recommendation provided.', links || {}, {})
     showFindingModal()
+}
+
+export function bindAttackDetails_Generic(info = {}) {
+    resetFindingModal();
+    toggleSection("#finding_http_section", false);
+    toggleSection("#finding_source_sink_section", false);
+    toggleSection("#finding_trace_segment", false);
+
+    const engine = String(info?.engine || '').toUpperCase() || 'Finding';
+    const title = info?.ruleName || info?.name || info?.moduleName || `${engine} finding`;
+    const modalTitle = getMisc({
+        ...info,
+        success: info?.success ?? true,
+        type: info?.type || 'finding',
+        name: title,
+        metadata: { ...(info?.metadata || {}), name: title }
+    }).icon || `<div><b>${ptk_utils.escapeHtml(title)}</b></div>`;
+    setFindingModalTitle(dompurify.sanitize(modalTitle, MODAL_TITLE_SANITIZE_CONFIG));
+
+    const description = info?.description || info?.metadata?.description || 'No description provided.';
+    const recommendation = info?.recommendation || info?.metadata?.recommendation || 'No recommendation provided.';
+    const links = mergeLinkMap(
+        info?.links,
+        info?.metadata?.links,
+        info?.module_metadata?.links
+    );
+
+    const headerRows = [];
+    if (engine) headerRows.push(`<div><strong>Engine:</strong> ${sanitize(ptk_utils.escapeHtml(engine))}</div>`);
+    if (info?.severity) headerRows.push(`<div><strong>Severity:</strong> ${sanitize(ptk_utils.escapeHtml(String(info.severity)))}</div>`);
+    if (info?.location?.route || info?.location?.url || info?.location?.file) {
+        headerRows.push(`<div><strong>Location:</strong> ${sanitize(ptk_utils.escapeHtml(String(info.location?.route || info.location?.url || info.location?.file)))}</div>`);
+    }
+    const headerEl = document.getElementById('iast_context_header');
+    if (headerEl) {
+        if (headerRows.length) {
+            headerEl.innerHTML = headerRows.join('');
+            headerEl.style.display = 'block';
+        } else {
+            headerEl.style.display = 'none';
+        }
+    }
+
+    setFindingMetadata(description, recommendation, links || {}, {
+        owasp: Array.isArray(info?.owasp) ? info.owasp : [],
+        cwe: Array.isArray(info?.cwe) ? info.cwe : []
+    });
+    showFindingModal();
+}
+
+function normalizeSastFindingKind(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (raw === 'hint' || raw === 'artifact') return 'hint';
+    return 'finding';
 }
 
 export function resolveIASTLocation(info, evidence) {
@@ -2207,7 +2264,7 @@ export function bindAttackDetails_SAST(el, info) {
     setFindingModalTitle(dompurify.sanitize(modalTitle, MODAL_TITLE_SANITIZE_CONFIG));
 
     const sourceLinkSpan = document.getElementById('source_link');
-    const isInlineSource = String(info.source.sourceFile || '').startsWith('inline');
+    const isInlineSource = String(info?.source?.sourceFile || '').startsWith('inline');
 
     renderLocationInto(sourceLinkSpan, {
         isInline: isInlineSource,
@@ -2219,7 +2276,7 @@ export function bindAttackDetails_SAST(el, info) {
 
 
     const sinkLinkSpan = document.getElementById('sink_link');
-    const isInlineSink = String(info.sink.sinkFile || '').startsWith('inline');
+    const isInlineSink = String(info?.sink?.sinkFile || '').startsWith('inline');
     renderLocationInto(sinkLinkSpan, {
         isInline: isInlineSink,
         displayText: isInlineSink
@@ -2246,8 +2303,8 @@ export function bindAttackDetails_DAST(el, attack, original) {
         : original?.response?.headers || [];
     let baseRequestRaw = original?.request?.raw || "";
     let request = attack.request?.raw ? attack.request.raw : baseRequestRaw;
-    let description = finding?.description || attack.metadata?.description || '';
-    let recommendation = finding?.recommendation || attack.metadata?.recommendation || '';
+    let description = finding?.description || attack.description || attack.metadata?.description || attack.metadata?.docs?.description || '';
+    let recommendation = finding?.recommendation || attack.recommendation || attack.metadata?.recommendation || attack.metadata?.docs?.recommendation || '';
 
     let misc = getMisc(attack);
     let icon = misc.icon;
@@ -2266,7 +2323,7 @@ export function bindAttackDetails_DAST(el, attack, original) {
         ? [statusLine, normalizedHeaders].filter(Boolean).join('\n')
         : headersText
     $("#raw_response_headers").val(responseHeaderBlock);
-    const links = finding?.links || attack.metadata?.links || {};
+    const links = finding?.links || attack.links || attack.metadata?.links || attack.metadata?.docs?.links || {};
     setFindingMetadata(description, recommendation, links, {});
     $("#attack_target").val(original?.request?.url || attack.request?.url || '');
 
@@ -2287,6 +2344,34 @@ export function bindAttackDetails_DAST(el, attack, original) {
     }, 100);
 
     return false;
+}
+
+export function showEvidenceFindingDetails(details = {}) {
+    const finding = details?.findingDetail || details?.finding || null;
+    const engine = String(finding?.engine || details?.engine || '').toUpperCase();
+    if (engine === 'IAST' && finding) {
+        const nativeItem = (
+            Array.isArray(finding?.evidence)
+            && finding?.metadata
+            && String(finding?.type || '').toLowerCase() === 'iast'
+        ) ? finding : buildIastItemFromFinding(finding, 0);
+        return bindAttackDetails_IAST(nativeItem);
+    }
+    if (engine === 'SAST' && finding) {
+        const nativeItem = (
+            finding?.source
+            && finding?.sink
+            && finding?.metadata
+            && String(finding?.type || '').toLowerCase() === 'sast'
+        ) ? finding : buildSastItemFromFinding(finding, 0);
+        return bindAttackDetails_SAST(null, nativeItem);
+    }
+    if (engine === 'DAST' && (details?.attack || details?.original || finding)) {
+        const attack = details?.attack || { finding };
+        const original = details?.original || {};
+        return bindAttackDetails_DAST(null, attack, original);
+    }
+    return bindAttackDetails_Generic(finding || details || {});
 }
 
 

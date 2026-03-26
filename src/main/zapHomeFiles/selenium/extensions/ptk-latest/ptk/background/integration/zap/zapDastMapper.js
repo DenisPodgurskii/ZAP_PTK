@@ -34,6 +34,75 @@ function toStatusCode(value) {
     return 0
 }
 
+function toHttpStatusCode(value) {
+    const statusCode = toStatusCode(value)
+    return statusCode >= 100 && statusCode <= 599 ? statusCode : 200
+}
+
+function defaultReasonPhrase(statusCode) {
+    switch (statusCode) {
+    case 201:
+        return 'Created'
+    case 202:
+        return 'Accepted'
+    case 204:
+        return 'No Content'
+    case 301:
+        return 'Moved Permanently'
+    case 302:
+        return 'Found'
+    case 304:
+        return 'Not Modified'
+    case 400:
+        return 'Bad Request'
+    case 401:
+        return 'Unauthorized'
+    case 403:
+        return 'Forbidden'
+    case 404:
+        return 'Not Found'
+    case 409:
+        return 'Conflict'
+    case 422:
+        return 'Unprocessable Entity'
+    case 429:
+        return 'Too Many Requests'
+    case 500:
+        return 'Internal Server Error'
+    case 502:
+        return 'Bad Gateway'
+    case 503:
+        return 'Service Unavailable'
+    case 504:
+        return 'Gateway Timeout'
+    default:
+        return statusCode >= 400 ? 'Error' : 'OK'
+    }
+}
+
+function buildStatusLine(response = {}) {
+    const rawStatusLine = toNonEmptyString(response.statusLine)
+    if (rawStatusLine && /^HTTP\/\d(?:\.\d)?\s+\d{3}(?:\s+.*)?$/i.test(rawStatusLine)) {
+        return rawStatusLine
+    }
+
+    const protocolVersion = /^HTTP\/\d(?:\.\d)?/i.test(rawStatusLine || '')
+        ? rawStatusLine.trim().split(/\s+/, 1)[0].toUpperCase()
+        : 'HTTP/1.1'
+    const statusCode = toHttpStatusCode(response.statusCode)
+    const statusMessage = toNonEmptyString(response.statusMessage)
+        || toNonEmptyString(response.statusText)
+        || (() => {
+            if (!rawStatusLine || !/^HTTP\/\d(?:\.\d)?\s+/i.test(rawStatusLine)) return null
+            const remainder = rawStatusLine.trim().replace(/^HTTP\/\d(?:\.\d)?\s+/i, '')
+            if (!remainder || /^\d{3}(?:\s+.*)?$/.test(remainder)) return null
+            return remainder
+        })()
+        || defaultReasonPhrase(statusCode)
+
+    return `${protocolVersion} ${statusCode} ${statusMessage}`
+}
+
 function toTimestampMs(value) {
     const numeric = Number(value)
     if (Number.isFinite(numeric) && numeric >= 0) return Math.round(numeric)
@@ -43,8 +112,7 @@ function toTimestampMs(value) {
 }
 
 function buildRawResponse(response = {}) {
-    const statusCode = toStatusCode(response.statusCode)
-    const statusLine = toNonEmptyString(response.statusLine) || `HTTP/1.1 ${statusCode}`
+    const statusLine = buildStatusLine(response)
     const headersBlock = Array.isArray(response.headers)
         ? response.headers
             .map((h) => {

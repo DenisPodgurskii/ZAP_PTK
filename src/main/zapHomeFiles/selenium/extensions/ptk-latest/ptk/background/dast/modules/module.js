@@ -54,6 +54,9 @@ export class ptk_module {
         this.scanControls = null
         this._selectorSkipStats = Object.create(null)
         this._selectorSelectionDiagnostics = []
+        this._requestSurfaceCache = new WeakMap()
+        this._candidateEvaluationCache = new WeakMap()
+        this._attackOriginalRequirementsCache = new Map()
 
         jsonLogic.add_operation("regex", this.op_regex)
         jsonLogic.add_operation("proof", this.op_proof)
@@ -293,6 +296,141 @@ export class ptk_module {
 
     _hasXmlBody(schema) {
         return Boolean(this._getXmlBody(schema).text)
+    }
+
+    _buildRequestSurfaceAnalysis(schema) {
+        const queryParams = []
+        for (const p of (schema?.request?.queryParams || [])) {
+            if (!this.isAttackableName(p?.name)) continue
+            if (this._isAuthLikeHardBlocked('params', { name: p?.name, value: p?.value, location: 'query' })) {
+                this._noteSelectorSkip('params', 'auth_like_hard_deny', p?.name)
+                continue
+            }
+            queryParams.push({
+                location: 'query',
+                name: p.name,
+                value: p.value,
+                typeHint: this._inferScalarTypeHint(p.value)
+            })
+        }
+
+        const bodyParams = []
+        for (const p of (schema?.request?.body?.params || [])) {
+            if (!this.isAttackableName(p?.name)) continue
+            if (this._isAuthLikeHardBlocked('params', { name: p?.name, value: p?.value, location: 'form' })) {
+                this._noteSelectorSkip('params', 'auth_like_hard_deny', p?.name)
+                continue
+            }
+            bodyParams.push({
+                location: 'form',
+                name: p.name,
+                value: p.value,
+                typeHint: this._inferScalarTypeHint(p.value)
+            })
+        }
+
+        const headers = []
+        for (const h of (schema?.request?.headers || [])) {
+            const name = String(h?.name || '')
+            const lowerName = name.toLowerCase()
+            if (!name || !this.isAttackableName(name)) continue
+            if (lowerName === 'cookie') continue
+            if (this._isHardDeniedName('headers', name)) {
+                this._noteSelectorSkip('headers', 'hard_deny', name)
+                continue
+            }
+            if (this._isAuthLikeHardBlocked('headers', { name, value: h?.value, location: 'header' })) {
+                this._noteSelectorSkip('headers', 'auth_like_hard_deny', name)
+                continue
+            }
+            if (this._isSoftGloballyExcluded('headers', name)) {
+                this._noteSelectorSkip('headers', 'global_exclude', name)
+                continue
+            }
+            headers.push({
+                location: 'header',
+                name,
+                value: h?.value
+            })
+        }
+
+        const cookies = []
+        for (const c of this._getCookiesArray(schema)) {
+            if (!this.isAttackableName(c?.name)) continue
+            if (this._isHardDeniedName('cookies', c?.name)) {
+                this._noteSelectorSkip('cookies', 'hard_deny', c?.name)
+                continue
+            }
+            if (this._isAuthLikeHardBlocked('cookies', { name: c?.name, value: c?.value, location: 'cookie' })) {
+                this._noteSelectorSkip('cookies', 'auth_like_hard_deny', c?.name)
+                continue
+            }
+            if (this._isSoftGloballyExcluded('cookies', c?.name)) {
+                this._noteSelectorSkip('cookies', 'global_exclude', c?.name)
+                continue
+            }
+            cookies.push({
+                location: 'cookie',
+                name: c.name,
+                value: c.value
+            })
+        }
+
+        const { obj: jsonObj } = this._getJsonBody(schema)
+        const jsonLeaves = jsonObj
+            ? this._enumerateJsonLeaves(jsonObj)
+                .map((leaf) => ({
+                    location: 'json',
+                    name: String(leaf?.path || ''),
+                    value: leaf?.value,
+                    jsonPath: String(leaf?.path || ''),
+                    typeHint: this._inferScalarTypeHint(leaf?.value)
+                }))
+                .filter((leaf) => Boolean(leaf.name))
+            : []
+
+        const { text: xmlText } = this._getXmlBody(schema)
+        const xmlLeaves = xmlText
+            ? this._enumerateXmlLeaves(xmlText).map((leaf) => ({
+                location: 'xml',
+                path: leaf?.path,
+                name: leaf?.name,
+                value: leaf?.value
+            }))
+            : []
+
+        return {
+            queryParams,
+            bodyParams,
+            paramPool: queryParams.concat(bodyParams),
+            headers,
+            cookies,
+            jsonObj,
+            jsonLeaves,
+            xmlText,
+            xmlLeaves
+        }
+    }
+
+    _getRequestSurfaceAnalysis(schema) {
+        if (!schema || typeof schema !== 'object') {
+            return {
+                queryParams: [],
+                bodyParams: [],
+                paramPool: [],
+                headers: [],
+                cookies: [],
+                jsonObj: null,
+                jsonLeaves: [],
+                xmlText: null,
+                xmlLeaves: []
+            }
+        }
+        const cached = this._requestSurfaceCache.get(schema)
+        if (cached) return cached
+        const analysis = this._buildRequestSurfaceAnalysis(schema)
+        this._requestSurfaceCache.set(schema, analysis)
+        return analysis
     }
 
     // Sync json -> text (and ensure CT)
@@ -554,10 +692,10 @@ export class ptk_module {
     // Enumerate attack targets according to action filters (query, form-body, headers, json-body, cookies)
     _getParamTargets(schema, action, target = null) {
         const targets = []
-
-        const qp = schema?.request?.queryParams || []
-        const bp = schema?.request?.body?.params || []
-        const hh = schema?.request?.headers || []
+        const analysis = this._getRequestSurfaceAnalysis(schema)
+        const qp = analysis.queryParams
+        const bp = analysis.bodyParams
+        const hh = analysis.headers
         const hasExplicitTargetConfig = target && typeof target === 'object'
             ? Object.values(target).some(value => Array.isArray(value) && value.length > 0)
             : false
@@ -575,27 +713,9 @@ export class ptk_module {
         const actionHasWildcardHeader = headerSelectors.some(a => !a.name)
 
         if (targetParamSelectors?.length) {
-            const paramPool = []
-            for (const p of qp) {
-                if (!this.isAttackableName(p.name)) continue
-                if (this._isAuthLikeHardBlocked('params', { name: p.name, value: p.value, location: 'query' })) {
-                    this._noteSelectorSkip('params', 'auth_like_hard_deny', p.name)
-                    continue
-                }
-                paramPool.push({ location: 'query', name: p.name, value: p.value, typeHint: this._inferScalarTypeHint(p.value) })
-            }
-            for (const p of bp) {
-                if (!this.isAttackableName(p.name)) continue
-                if (this._isAuthLikeHardBlocked('params', { name: p.name, value: p.value, location: 'form' })) {
-                    this._noteSelectorSkip('params', 'auth_like_hard_deny', p.name)
-                    continue
-                }
-                paramPool.push({ location: 'form', name: p.name, value: p.value, typeHint: this._inferScalarTypeHint(p.value) })
-            }
-
             const seenTargets = new Set()
             for (const selector of targetParamSelectors) {
-                const matches = this._selectParamCandidates(paramPool, selector)
+                const matches = this._selectParamCandidates(analysis.paramPool, selector)
                 for (const match of matches) {
                     const key = `${String(match.location || '')}:${String(match.name || '').toLowerCase()}`
                     if (!match?.name || seenTargets.has(key)) continue
@@ -610,11 +730,6 @@ export class ptk_module {
         } else {
             // Query params
             for (const p of qp) {
-                if (!this.isAttackableName(p.name)) continue
-                if (this._isAuthLikeHardBlocked('params', { name: p.name, value: p.value, location: 'query' })) {
-                    this._noteSelectorSkip('params', 'auth_like_hard_deny', p.name)
-                    continue
-                }
                 const matchingAction = paramSelectors.find(a => this._matchesParamSelector(p.name, a, null, 'query', p.value))
                 if (matchingAction || actionHasWildcardQuery) {
                     targets.push({ location: 'query', name: p.name })
@@ -623,11 +738,6 @@ export class ptk_module {
 
             // Body params (form-encoded style)
             for (const p of bp) {
-                if (!this.isAttackableName(p.name)) continue
-                if (this._isAuthLikeHardBlocked('params', { name: p.name, value: p.value, location: 'form' })) {
-                    this._noteSelectorSkip('params', 'auth_like_hard_deny', p.name)
-                    continue
-                }
                 const matchingAction = paramSelectors.find(a => this._matchesParamSelector(p.name, a, null, 'form', p.value))
                 if (matchingAction || actionHasWildcardForm) {
                     targets.push({ location: 'form', name: p.name })
@@ -678,22 +788,9 @@ export class ptk_module {
             (action.headers || []).some(h => (h.name || '').toLowerCase() === 'cookie')
 
         if (hasCookieIntent) {
-            const cookies = this._getCookiesArray(schema)
+            const cookies = analysis.cookies
             if (!cookieSelectors.length) {
                 for (const c of cookies) {
-                    if (!this.isAttackableName(c.name)) continue
-                    if (this._isHardDeniedName('cookies', c.name)) {
-                        this._noteSelectorSkip('cookies', 'hard_deny', c.name)
-                        continue
-                    }
-                    if (this._isAuthLikeHardBlocked('cookies', { name: c.name, value: c.value, location: 'cookie' })) {
-                        this._noteSelectorSkip('cookies', 'auth_like_hard_deny', c.name)
-                        continue
-                    }
-                    if (this._isSoftGloballyExcluded('cookies', c.name)) {
-                        this._noteSelectorSkip('cookies', 'global_exclude', c.name)
-                        continue
-                    }
                     targets.push({ location: 'cookie', name: c.name })
                 }
             } else {
@@ -712,7 +809,7 @@ export class ptk_module {
         }
 
         // JSON body
-        const { obj: jsonObj } = this._getJsonBody(schema)
+        const { jsonObj, jsonLeaves } = analysis
         if (jsonObj && Array.isArray(jsonSelectors) && jsonSelectors.length) {
             const seenJsonTargets = new Set()
             const pushJsonTarget = (path, value, typeHint = null) => {
@@ -740,19 +837,9 @@ export class ptk_module {
             // For wildcard/regex selectors, apply the same candidate selection pipeline used for params.
             const dynamicJsonSelectors = jsonSelectors.filter(selector => !selector?.name)
             if (dynamicJsonSelectors.length) {
-                const leaves = this._enumerateJsonLeaves(jsonObj)
-                    .map(leaf => ({
-                        location: 'json',
-                        name: String(leaf?.path || ''),
-                        value: leaf?.value,
-                        jsonPath: String(leaf?.path || ''),
-                        typeHint: this._inferScalarTypeHint(leaf?.value)
-                    }))
-                    .filter(leaf => Boolean(leaf.name))
-
                 for (const selector of dynamicJsonSelectors) {
                     if (!this._matchesSelectorLocation(selector, 'json')) continue
-                    const matches = this._selectParamCandidates(leaves, selector)
+                    const matches = this._selectParamCandidates(jsonLeaves, selector)
                     for (const match of matches) {
                         pushJsonTarget(match?.name, match?.value, match?.typeHint)
                     }
@@ -761,12 +848,11 @@ export class ptk_module {
         }
 
         // XML body
-        const { text: xmlText } = this._getXmlBody(schema)
+        const { xmlText, xmlLeaves } = analysis
         if (xmlText && (xmlSelectors.length || 0) >= 0) {
-            const leaves = this._enumerateXmlLeaves(xmlText)
             const seenXmlTargets = new Set()
             for (const selector of (xmlSelectors || [])) {
-                const matches = this._selectXmlCandidates(leaves, selector)
+                const matches = this._selectXmlCandidates(xmlLeaves, selector)
                 for (const match of matches) {
                     const path = String(match?.path || '')
                     if (!path || seenXmlTargets.has(path)) continue
@@ -818,6 +904,8 @@ export class ptk_module {
 
     setScanControls(scanControls) {
         this.scanControls = (scanControls && typeof scanControls === 'object') ? scanControls : null
+        this._requestSurfaceCache = new WeakMap()
+        this._candidateEvaluationCache = new WeakMap()
     }
 
     _clearSelectorDiagnostics() {
@@ -1098,6 +1186,97 @@ export class ptk_module {
         const name = String(candidate?.name ?? '')
         const jsonPath = this._normalizeJsonPathForKey(candidate?.meta?.jsonPath || candidate?.jsonPath || '')
         return `${location}:${name}:${jsonPath}`
+    }
+
+    _candidateEvaluationEntry(candidate) {
+        if (!candidate || typeof candidate !== 'object') return null
+        let entry = this._candidateEvaluationCache.get(candidate)
+        if (!entry) {
+            entry = {
+                classification: null,
+                rankByKey: new Map()
+            }
+            this._candidateEvaluationCache.set(candidate, entry)
+        }
+        return entry
+    }
+
+    _rankCacheKey(action, family) {
+        return [
+            family || '',
+            String(action?.name || ''),
+            String(action?.nameRegex || ''),
+            String(action?.flags || ''),
+            action?.scoredFallback === true ? '1' : '0'
+        ].join('|')
+    }
+
+    _collectJsonLogicVars(node, out = []) {
+        if (Array.isArray(node)) {
+            for (const value of node) {
+                this._collectJsonLogicVars(value, out)
+            }
+            return out
+        }
+        if (!node || typeof node !== 'object') return out
+        for (const [key, value] of Object.entries(node)) {
+            if (key === 'var' && typeof value === 'string') {
+                out.push(value)
+            }
+            this._collectJsonLogicVars(value, out)
+        }
+        return out
+    }
+
+    _attackOriginalRequirementsCacheKey(attack) {
+        return String(attack?.id || attack?.name || '')
+    }
+
+    getAttackOriginalRequirements(attack) {
+        const cacheKey = this._attackOriginalRequirementsCacheKey(attack)
+        if (cacheKey && this._attackOriginalRequirementsCache.has(cacheKey)) {
+            return this._attackOriginalRequirementsCache.get(cacheKey)
+        }
+
+        const requirements = {
+            needsStatus: false,
+            needsHeaders: false,
+            needsBody: false,
+            needsOtherResponseData: false
+        }
+        const vars = this._collectJsonLogicVars([
+            attack?.condition || null,
+            attack?.validation?.rule || null,
+            attack?.validation?.proof || null
+        ])
+        for (const path of vars) {
+            if (typeof path !== 'string' || !path.startsWith('original.response.')) continue
+            if (path.startsWith('original.response.body')) {
+                requirements.needsBody = true
+                continue
+            }
+            if (path.startsWith('original.response.headers')) {
+                requirements.needsHeaders = true
+                continue
+            }
+            if (path.startsWith('original.response.statusCode') || path.startsWith('original.response.status')) {
+                requirements.needsStatus = true
+                continue
+            }
+            requirements.needsOtherResponseData = true
+        }
+
+        if (this._isDeserializationTechniqueModule()) {
+            requirements.needsStatus = true
+            requirements.needsHeaders = true
+            requirements.needsBody = true
+        }
+
+        const result = Object.freeze(requirements)
+        if (cacheKey) {
+            this._attackOriginalRequirementsCache.set(cacheKey, result)
+        }
+        return result
     }
 
     _selectorFamily(action) {
@@ -1844,7 +2023,7 @@ export class ptk_module {
         return 0
     }
 
-    _classifyParam(candidate, family = 'sqli') {
+    _classifyParamUncached(candidate, family = 'sqli') {
         const name = String(candidate?.name ?? '')
         const lname = name.toLowerCase()
         const value = String(candidate?.value ?? '')
@@ -1986,6 +2165,18 @@ export class ptk_module {
         }
     }
 
+    _classifyParam(candidate, family = 'sqli') {
+        const cacheEntry = this._candidateEvaluationEntry(candidate)
+        if (cacheEntry?.classification) {
+            return cacheEntry.classification
+        }
+        const classification = this._classifyParamUncached(candidate, family)
+        if (cacheEntry) {
+            cacheEntry.classification = classification
+        }
+        return classification
+    }
+
     _isAuthLikeHardBlocked(surface, candidate) {
         const location = this._normalizeCandidateLocation(candidate?.location || (surface === 'params' ? 'form' : surface))
         const classification = this._classifyParam({
@@ -2016,6 +2207,11 @@ export class ptk_module {
 
     _rankParamCandidate(candidate, action, opts = {}) {
         const family = opts.family || this._selectorFamily(action)
+        const cacheEntry = this._candidateEvaluationEntry(candidate)
+        const rankCacheKey = this._rankCacheKey(action, family)
+        if (cacheEntry?.rankByKey?.has(rankCacheKey)) {
+            return cacheEntry.rankByKey.get(rankCacheKey)
+        }
         const classification = this._classifyParam(candidate, family)
         const familyEntry = classification.attackabilityByFamily?.[family] || { score: 0, confidence: 0.5, reasons: [] }
         const familyScore = this._clampInt(familyEntry.score, -100, 200)
@@ -2046,7 +2242,7 @@ export class ptk_module {
             1000
         )
 
-        return {
+        const result = {
             rankScore,
             confidence: Number(familyEntry?.confidence || 0),
             seenCount: this._reconSeenCount(candidate),
@@ -2062,6 +2258,10 @@ export class ptk_module {
             typePenalty,
             namePrior
         }
+        if (cacheEntry) {
+            cacheEntry.rankByKey.set(rankCacheKey, result)
+        }
+        return result
     }
 
     _sortRankedCandidates(entries) {
@@ -2964,7 +3164,7 @@ export class ptk_module {
 
     // Build N per-target attacks (default) or 1 bulk attack; can be overridden via options.mode.
     buildAttacks(schema, attack, options = {}) {
-        const prepared = this.prepareAttack(attack)
+        const prepared = options?.prepared === true ? attack : this.prepareAttack(attack)
         if (this._isDeserializationCoverageAttack(prepared)) {
             return this._buildDeserializationAttacks(schema, prepared)
         }
