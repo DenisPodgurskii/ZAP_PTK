@@ -140,7 +140,7 @@ export function toSastFinding(finding, { scanId } = {}) {
     const summary = buildRootSummary({ finding, proof, source, sink })
 
     return {
-        id: toNonEmptyString(finding.id) || `${fingerprint}:${Date.now()}`,
+        id: toNonEmptyString(finding.id) || fingerprint,
         fingerprint,
         moduleId,
         ruleId,

@@ -289,7 +289,7 @@ export function toDastFinding(finding, { scanId, scanResult } = {}) {
         || stableHash(`${scanId || ''}|${moduleId}|${ruleId}|${locationUrl}|${locationParam || ''}|${statusCode}`)
 
     const mapped = {
-        id: toNonEmptyString(finding.id) || stableHash(`${moduleId}|${ruleId}|${locationUrl}|${Date.now()}`),
+        id: toNonEmptyString(finding.id) || fingerprint,
         fingerprint,
         moduleId,
         ruleId,
