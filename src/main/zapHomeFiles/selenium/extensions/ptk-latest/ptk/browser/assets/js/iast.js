@@ -1710,8 +1710,16 @@ jQuery(function () {
 
     $(document).on("click", ".stop_scan_runtime", function () {
         controller.stopBackgroundScan().then(function (result) {
-            changeView(result)
-            bindScanResult(result)
+            const normalizedResult = Object.assign({ isScanRunning: false }, result || {})
+            changeView(normalizedResult)
+            if (hasRenderableIastData(normalizedResult.scanResult)) {
+                bindScanResult(normalizedResult)
+            } else {
+                cleanScanResult()
+                $('.generate_report').hide()
+                $('.save_scan').hide()
+                ensureIastDefaultModulesLoaded({ force: true }).catch(() => { })
+            }
         })
         return false
     })
@@ -2071,16 +2079,21 @@ jQuery(function () {
         else if (e.selectionStart) { e.selectionStart = start; e.selectionEnd = end; }
     }
 
+    showUnknownForm()
+
     controller.init().then(function (result) {
+        const viewState = resolveIastViewState(result)
         updateIastRulepackUi(result)
         changeView(result)
-        if (hasRenderableIastData(result.scanResult)) {
+        if (viewState === 'idle_with_data' || (viewState === 'running' && hasRenderableIastData(result.scanResult))) {
             bindScanResult(result)
-        } else if (!result.isScanRunning) {
+        } else if (viewState === 'idle_empty') {
             showWelcomeForm()
             ensureIastDefaultModulesLoaded().catch(() => { })
         }
-    }).catch(() => { })
+    }).catch(() => {
+        showWelcomeForm()
+    })
 
 })
 
@@ -2094,11 +2107,52 @@ function setIastPageLoader(show) {
     $loader.toggle(!!show)
 }
 
+function resolveIastViewState(result) {
+    if (result?.viewState === 'running' || result?.viewState === 'idle_empty' || result?.viewState === 'idle_with_data') {
+        return result.viewState
+    }
+    if (result?.isScanRunning) {
+        return 'running'
+    }
+    if (hasRenderableIastData(result?.scanResult)) {
+        return 'idle_with_data'
+    }
+    return 'idle_empty'
+}
+
+function syncIastTopControls(viewState) {
+    const isRunning = viewState === 'running'
+    const hasData = viewState === 'idle_with_data'
+    const isIdleEmpty = viewState === 'idle_empty'
+    $('.generate_report').toggle(hasData)
+    if (PORTAL_ACTIONS_VISIBLE && hasData) {
+        $('.save_scan').show()
+    } else {
+        $('.save_scan').hide()
+    }
+    $('.reset').closest('.icon.button').toggle(hasData)
+    $('.import_export').toggle(isIdleEmpty || hasData)
+    $('.cloud_download_scans').hide()
+    $('#run_scan_bg_control').toggle(isIdleEmpty || hasData)
+    $('#stop_scan_bg_control').toggle(isRunning)
+    $('.scan_info').toggle(isRunning)
+}
+
+function showUnknownForm() {
+    $('#init_loader').addClass('active')
+    setIastPageLoader(true)
+    $('#main').hide()
+    $('#welcome_message').hide()
+    $('#scanning_url').text("")
+    syncIastTopControls('unknown')
+    resetIastProgressRender({ hide: true })
+}
+
 function showWelcomeForm() {
     setIastPageLoader(false)
     $('#main').hide()
     $('#welcome_message').show()
-    $('#run_scan_bg_control').show()
+    syncIastTopControls('idle_empty')
     resetIastProgressRender({ hide: true })
 }
 
@@ -2110,10 +2164,9 @@ function hideWelcomeForm() {
 function showRunningForm(result) {
     setIastPageLoader(false)
     $('#main').show()
-    $('#scanning_url').text(result.scanResult.host)
+    $('#scanning_url').text(result?.scanResult?.host || "")
     updateIastRulepackUi(result)
-    $('.scan_info').show()
-    $('#stop_scan_bg_control').show()
+    syncIastTopControls('running')
 }
 
 function hideRunningForm() {
@@ -2126,7 +2179,7 @@ function hideRunningForm() {
 function showScanForm(result) {
     setIastPageLoader(false)
     $('#main').show()
-    $('#run_scan_bg_control').show()
+    syncIastTopControls('idle_with_data')
 }
 
 function hideScanForm() {
@@ -2136,13 +2189,14 @@ function hideScanForm() {
 
 function changeView(result) {
     $('#init_loader').removeClass('active')
-    if (result.isScanRunning) {
+    const viewState = resolveIastViewState(result)
+    if (viewState === 'running') {
         hideWelcomeForm()
         hideScanForm()
         showRunningForm(result)
         scheduleIastProgressUpdate({ message: "Runtime scan running", scanResult: result.scanResult || {} })
     }
-    else if (hasRenderableIastData(result.scanResult)) {
+    else if (viewState === 'idle_with_data') {
         hideWelcomeForm()
         hideRunningForm(result)
         showScanForm()
@@ -2179,12 +2233,6 @@ function bindScanResult(result) {
     updateIastRulepackUi(result)
     if (!result.isScanRunning) {
         resetIastProgressRender({ hide: true })
-    }
-    $('.generate_report').show()
-    if (PORTAL_ACTIONS_VISIBLE) {
-        $('.save_scan').show()
-    } else {
-        $('.save_scan').hide()
     }
     $('#request_info').html("")
     $('#attacks_info').html("")

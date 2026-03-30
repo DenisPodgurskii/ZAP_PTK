@@ -42,6 +42,9 @@ async function getExportController(engine) {
 let $runCveInput = null
 let $runCveCheckboxWrapper = null
 let runCveState = false
+let $dashboardHtmlLinkDiscoveryInput = null
+let $dashboardHtmlLinkDiscoveryCheckboxWrapper = null
+let $dashboardHtmlLinkDiscoveryBudget = null
 let dashboardActionInProgress = false
 const DASHBOARD_DAST_MACRO_STATE = {
     requested: false,
@@ -108,6 +111,48 @@ function setDashboardDastRecordMacro(enabled, { updateUi = true } = {}) {
 
 function isDashboardDastRecordMacroEnabled() {
     return $('#dashboard_dast_record_macro').is(':checked')
+}
+
+function normalizeDashboardHtmlLinkDiscoveryBudget(value) {
+    const normalized = String(value || 'safe').trim().toLowerCase()
+    return ['strict', 'safe', 'wide'].includes(normalized) ? normalized : 'safe'
+}
+
+function setDashboardHtmlLinkDiscoveryBudget(value) {
+    const normalized = normalizeDashboardHtmlLinkDiscoveryBudget(value)
+    if ($dashboardHtmlLinkDiscoveryBudget && $dashboardHtmlLinkDiscoveryBudget.length) {
+        $dashboardHtmlLinkDiscoveryBudget.val(normalized)
+    }
+    return normalized
+}
+
+function isDashboardHtmlLinkDiscoveryEnabled() {
+    return $('#dashboard_dast_autodiscover_links').is(':checked')
+}
+
+function syncDashboardHtmlLinkDiscoveryBudgetState(enabled = null) {
+    const active = enabled === null ? isDashboardHtmlLinkDiscoveryEnabled() : !!enabled
+    if ($dashboardHtmlLinkDiscoveryBudget && $dashboardHtmlLinkDiscoveryBudget.length) {
+        $dashboardHtmlLinkDiscoveryBudget.prop('disabled', !active)
+        $dashboardHtmlLinkDiscoveryBudget.toggleClass('disabled', !active)
+        $dashboardHtmlLinkDiscoveryBudget.closest('.ui.dropdown').toggleClass('disabled', !active)
+    }
+}
+
+function setDashboardHtmlLinkDiscoveryEnabled(enabled, { updateUi = true } = {}) {
+    const next = !!enabled
+    if (updateUi) {
+        if ($dashboardHtmlLinkDiscoveryCheckboxWrapper && $dashboardHtmlLinkDiscoveryCheckboxWrapper.length && typeof $dashboardHtmlLinkDiscoveryCheckboxWrapper.checkbox === 'function') {
+            $dashboardHtmlLinkDiscoveryCheckboxWrapper.checkbox(next ? 'set checked' : 'set unchecked')
+        } else if ($dashboardHtmlLinkDiscoveryInput && $dashboardHtmlLinkDiscoveryInput.length) {
+            $dashboardHtmlLinkDiscoveryInput.prop('checked', next)
+        }
+    }
+    syncDashboardHtmlLinkDiscoveryBudgetState(next)
+}
+
+function getDashboardHtmlLinkDiscoveryBudget() {
+    return normalizeDashboardHtmlLinkDiscoveryBudget($dashboardHtmlLinkDiscoveryBudget?.val())
 }
 
 async function startDashboardDastMacroRecording(activeTab = null) {
@@ -669,6 +714,8 @@ function getDashboardCachedScans() {
         dastScanStrategy: 'SMART',
         dastScanPolicy: getDashboardPolicyDefaultValue('dast'),
         dastRecordMacro: false,
+        enableHtmlLinkDiscovery: false,
+        htmlLinkDiscoveryBudget: 'safe',
         scanControls: { profile: 'safe' }
     }
     const raw = controller.scans && typeof controller.scans === 'object' ? controller.scans : {}
@@ -747,6 +794,8 @@ async function populateManageScansDialog(result = {}, activeTab = null, options 
     )
     $('#dast-safety-profile').val(String(dashboardSafetyProfile).toLowerCase())
     setRunCveState(false)
+    setDashboardHtmlLinkDiscoveryBudget('safe')
+    setDashboardHtmlLinkDiscoveryEnabled(false)
 
     const cachedReady = controller._contentReadyByTabId?.[resolvedActiveTab.tabId]
     if (cachedReady === true) {
@@ -1045,6 +1094,9 @@ jQuery(function () {
 
     $runCveInput = $('#ptk_dast_run_cve')
     $runCveCheckboxWrapper = $runCveInput.closest('.ui.checkbox')
+    $dashboardHtmlLinkDiscoveryInput = $('#dashboard_dast_autodiscover_links')
+    $dashboardHtmlLinkDiscoveryCheckboxWrapper = $dashboardHtmlLinkDiscoveryInput.closest('.ui.checkbox')
+    $dashboardHtmlLinkDiscoveryBudget = $('#dashboard_dast_autodiscovery_budget')
 
     if ($runCveCheckboxWrapper.length && typeof $runCveCheckboxWrapper.checkbox === 'function') {
         $runCveCheckboxWrapper.checkbox({
@@ -1062,7 +1114,30 @@ jQuery(function () {
         })
     }
 
+    if ($dashboardHtmlLinkDiscoveryCheckboxWrapper.length && typeof $dashboardHtmlLinkDiscoveryCheckboxWrapper.checkbox === 'function') {
+        $dashboardHtmlLinkDiscoveryCheckboxWrapper.checkbox({
+            onChecked() {
+                setDashboardHtmlLinkDiscoveryEnabled(true, { updateUi: false })
+            },
+            onUnchecked() {
+                setDashboardHtmlLinkDiscoveryEnabled(false, { updateUi: false })
+            }
+        })
+    }
+    if ($dashboardHtmlLinkDiscoveryInput.length) {
+        $dashboardHtmlLinkDiscoveryInput.on('change', function () {
+            setDashboardHtmlLinkDiscoveryEnabled($(this).is(':checked'), { updateUi: false })
+        })
+    }
+    if ($dashboardHtmlLinkDiscoveryBudget && $dashboardHtmlLinkDiscoveryBudget.length) {
+        $dashboardHtmlLinkDiscoveryBudget.on('change', function () {
+            setDashboardHtmlLinkDiscoveryBudget($(this).val())
+        })
+    }
+
     setRunCveState(false)
+    setDashboardHtmlLinkDiscoveryBudget('safe')
+    setDashboardHtmlLinkDiscoveryEnabled(false)
 
     tokens.push = function (item) {
         if (!this.find(e => (e[0] == item[0] && e[1] == item[1] && e[2] == item[2]))) {
@@ -1251,14 +1326,12 @@ $(document).on("click", "#generate_report", function () {
             }
     }
 
-    setTimeout(function () {
-        resolveActiveTab().then((activeTab) => {
-            const initOpts = activeTab?.tabId ? { tabId: activeTab.tabId, url: activeTab.url } : {}
-            return controller.init(initOpts).then((result) => handleDashboardInit(result, activeTab))
-        }).catch(() => {
-            controller.init().then((result) => handleDashboardInit(result, null)).catch(() => {})
-        })
-    }, 150)
+    resolveActiveTab().then((activeTab) => {
+        const initOpts = activeTab?.tabId ? { tabId: activeTab.tabId, url: activeTab.url } : {}
+        return controller.init(initOpts).then((result) => handleDashboardInit(result, activeTab))
+    }).catch(() => {
+        controller.init().then((result) => handleDashboardInit(result, null)).catch(() => {})
+    })
 
     setupCardToggleHandlers()
 
@@ -1422,7 +1495,7 @@ async function bindCVEs(force = false) {
     if (Array.isArray(controller.tab?.cves)) {
         controller.tab.cves.forEach(item => {
             const evidence = item.evidence || {}
-            const evidenceText = `H:${evidence.headers || 0} / HTML:${evidence.html || 0} / JS:${evidence.js || 0}`
+            const evidenceText = `H:${evidence.headers || 0} / HTML:${evidence.html || 0} / JS:${evidence.js || 0} / URL:${evidence.url || 0}`
             const verifyText = item.verify?.moduleId ? `DAST module: ${item.verify.moduleId}` : ''
             dt.push([
                 item.id || item.title || '',
@@ -1953,6 +2026,8 @@ $(document).on("click", "#manage_scans", function () {
                         sastScanStrategy: sastScanStrategy || 0,
                         scanStrategy: $('#dast-scan-strategy').val() || 'SMART',
                         dastRecordMacro: isDashboardDastRecordMacroEnabled(),
+                        enableHtmlLinkDiscovery: isDashboardHtmlLinkDiscoveryEnabled(),
+                        htmlLinkDiscoveryBudget: getDashboardHtmlLinkDiscoveryBudget(),
                         dastScanPolicy: parseDashboardPortalOptionValue(dastPolicyValue)
                             ? 'PORTAL'
                             : (dastPolicyValue || getDashboardPolicyDefaultValue('dast')),

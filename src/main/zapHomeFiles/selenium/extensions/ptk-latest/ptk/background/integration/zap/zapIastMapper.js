@@ -41,22 +41,58 @@ function resolveCanonicalUrl(...values) {
     return null
 }
 
-function buildLocation(finding = {}) {
+function findRequestEntry(scanResult = {}, finding = {}) {
+    const requests = Array.isArray(scanResult?.requests) ? scanResult.requests : []
+    if (!requests.length) return null
+    const evidence = toObject(finding?.evidence?.iast) || {}
+    const requestId = toNonEmptyString(evidence.requestId) || toNonEmptyString(finding.requestId)
+    const requestKey = toNonEmptyString(evidence.requestKey) || toNonEmptyString(finding.requestKey)
+    const location = toObject(finding.location) || {}
+    const candidateUrl = resolveCanonicalUrl(
+        location.runtimeUrl,
+        location.url,
+        location.pageUrl,
+        evidence?.routing?.runtimeUrl,
+        evidence?.routing?.url
+    )
+
+    if (requestId) {
+        const byId = requests.find((entry) => toNonEmptyString(entry?.id) === requestId)
+        if (byId) return byId
+    }
+    if (requestKey) {
+        const byKey = requests.find((entry) => toNonEmptyString(entry?.key) === requestKey)
+        if (byKey) return byKey
+    }
+    if (candidateUrl) {
+        const byUrl = requests.find((entry) => {
+            const entryUrl = resolveCanonicalUrl(entry?.url, entry?.displayUrl)
+            return entryUrl === candidateUrl
+        })
+        if (byUrl) return byUrl
+    }
+    return null
+}
+
+function buildLocation(finding = {}, { scanResult = null } = {}) {
     const location = toObject(finding.location) || {}
     const routing = toObject(finding?.evidence?.iast?.routing) || {}
+    const requestEntry = findRequestEntry(scanResult, finding)
     const url = resolveCanonicalUrl(
         location.runtimeUrl,
         routing.runtimeUrl,
         location.url,
         routing.url,
-        location.pageUrl
+        location.pageUrl,
+        requestEntry?.url,
+        requestEntry?.displayUrl
     )
     if (!url) return null
 
     return {
         url,
         route: toNonEmptyString(location.route) || null,
-        method: toNonEmptyString(location.method) || null,
+        method: toNonEmptyString(location.method) || toNonEmptyString(requestEntry?.method) || null,
         param: toNonEmptyString(location.param) || null
     }
 }
@@ -144,11 +180,11 @@ function buildRootSummary({ finding = {}, proof, source, sink }) {
     return truncate(`${base} to sink ${sinkLabel}`, 1024)
 }
 
-export function toIastFinding(finding, { scanId } = {}) {
+export function toIastFinding(finding, { scanId, scanResult } = {}) {
     if (!finding || typeof finding !== 'object') return null
     const moduleId = toNonEmptyString(finding.moduleId)
     const ruleId = toNonEmptyString(finding.ruleId)
-    const location = buildLocation(finding)
+    const location = buildLocation(finding, { scanResult })
     if (!moduleId || !ruleId || !location) return null
 
     const source = buildSource(finding)

@@ -228,6 +228,41 @@ export class DastCandidateRunService {
         this.fetchImpl = fetchImpl
     }
 
+    _getCurrentScanScope() {
+        const scanResult = this.getScanResult?.() || {}
+        return {
+            scanId: String(scanResult?.scanId || "").trim() || null,
+            host: String(scanResult?.host || "").trim() || null
+        }
+    }
+
+    _getEvidencePackageScopeFilters(extra = {}) {
+        const current = this._getCurrentScanScope()
+        return {
+            ...extra,
+            scanId: extra?.scanId || current.scanId || null,
+            host: extra?.host || current.host || null
+        }
+    }
+
+    async loadPersistedState() {
+        await this.evidencePackageStore?.load?.()
+        const scanResult = this.getScanResult?.() || {}
+        const bugBounty = scanResult?.bugbounty && typeof scanResult.bugbounty === "object"
+            ? scanResult.bugbounty
+            : (scanResult?.bugBounty && typeof scanResult.bugBounty === "object" ? scanResult.bugBounty : null)
+        const persistedPackages = Array.isArray(bugBounty?.evidencePackages) ? bugBounty.evidencePackages : []
+        if (persistedPackages.length && this.evidencePackageStore?.importMany) {
+            await this.evidencePackageStore.importMany(persistedPackages, this._getCurrentScanScope())
+        }
+        await this._notifyBugBountyState()
+    }
+
+    async clearHostState(host = null) {
+        await this.evidencePackageStore?.clearHost?.(host)
+        await this._notifyBugBountyState()
+    }
+
     _routeFromRouteKey(routeKey) {
         const scanResult = this.getScanResult?.() || {}
         const parts = String(routeKey || "").split("|")
@@ -467,7 +502,9 @@ export class DastCandidateRunService {
         return this.objectSwapService.apply(requestSeed, candidate, objectSwap)
     }
 
-    _buildBugBountySnapshot() {
+    async _buildBugBountySnapshot() {
+        const currentScope = this._getEvidencePackageScopeFilters()
+        const hasEvidenceScope = !!(currentScope?.scanId || currentScope?.host)
         const authzDiffs = this.authzDiffRunStore.list()
             .filter((run) => run?.diff && typeof run.diff === "object")
             .map((run) => ({
@@ -482,18 +519,9 @@ export class DastCandidateRunService {
                 objectSwap: run?.objectSwap || null,
                 completedAt: run?.finishedAt || run?.updatedAt || null
             }))
-        const evidencePackages = this.evidencePackageStore.list().map((entry) => ({
-            id: entry.id,
-            candidateId: entry.candidateId || null,
-            title: entry.title || null,
-            summary: entry.summary || null,
-            routeKey: entry.routeKey || null,
-            sessions: entry.sessions || null,
-            objectSwap: entry.objectSwap || null,
-            diffCategory: entry?.diff?.result?.category || null,
-            workflowSummary: entry.workflowSummary || null,
-            createdAt: entry.createdAt || null
-        }))
+        const evidencePackages = hasEvidenceScope
+            ? await this.evidencePackageStore.list(currentScope)
+            : []
         const workflowRuns = evidencePackages
             .filter((entry) => entry?.workflowSummary && typeof entry.workflowSummary === "object")
             .map((entry) => ({
@@ -510,10 +538,10 @@ export class DastCandidateRunService {
         }
     }
 
-    _notifyBugBountyState() {
+    async _notifyBugBountyState() {
         if (!this.onBugBountyStateChanged) return
         try {
-            this.onBugBountyStateChanged(this._buildBugBountySnapshot())
+            this.onBugBountyStateChanged(await this._buildBugBountySnapshot())
         } catch (_) {
             // no-op
         }
@@ -581,7 +609,10 @@ export class DastCandidateRunService {
             workflowSummary,
             reproductionSteps
         })
+        const currentScope = this._getCurrentScanScope()
         const evidencePackage = {
+            scanId: currentScope.scanId,
+            host: currentScope.host,
             candidateId: resolvedCandidate.id || null,
             title: String(title || resolvedCandidate?.title || "Authz diff evidence").trim(),
             summary: String(notes || diff?.result?.summary || "").trim(),
@@ -605,13 +636,13 @@ export class DastCandidateRunService {
             tags: ["bugbounty", "authz_diff"]
         }
         const persistedEvidencePackage = persist
-            ? this.evidencePackageStore.save(evidencePackage)
+            ? await this.evidencePackageStore.save(evidencePackage)
             : evidencePackage
         const reportDraft = this.reportDraftBuilder.build({
             evidencePackage: persistedEvidencePackage
         })
         if (persist) {
-            this._notifyBugBountyState()
+            await this._notifyBugBountyState()
         }
         return {
             evidencePackage: persistedEvidencePackage,
@@ -1086,7 +1117,7 @@ export class DastCandidateRunService {
                 objectSwap: appliedObjectSwap,
                 diff
             })
-            this._notifyBugBountyState()
+            void this._notifyBugBountyState()
         }
 
         return { success: true, runId: id, run: next }
@@ -1159,7 +1190,9 @@ export class DastCandidateRunService {
         candidateId = null
     } = {}) {
         const id = String(candidateId || "").trim()
-        const evidencePackages = this.evidencePackageStore.list({ candidateId: id || null })
+        const evidencePackages = (await this.evidencePackageStore.list(this._getEvidencePackageScopeFilters({
+            candidateId: id || null
+        })))
             .map((entry) => ({
                 id: entry.id,
                 createdAt: entry.createdAt || null,
@@ -1186,7 +1219,7 @@ export class DastCandidateRunService {
     } = {}) {
         const id = String(evidencePackageId || "").trim()
         if (!id) return { success: false, error: "evidence_package_id_required" }
-        const evidencePackage = this.evidencePackageStore.get(id)
+        const evidencePackage = await this.evidencePackageStore.get(id)
         if (!evidencePackage) {
             return {
                 success: false,
@@ -1208,7 +1241,7 @@ export class DastCandidateRunService {
     } = {}) {
         const resolvedId = String(evidencePackageId || "").trim()
         if (!resolvedId) return { success: false, error: "evidence_package_id_required" }
-        const evidencePackage = this.evidencePackageStore.get(resolvedId)
+        const evidencePackage = await this.evidencePackageStore.get(resolvedId)
         if (!evidencePackage) {
             return {
                 success: false,

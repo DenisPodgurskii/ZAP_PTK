@@ -4617,7 +4617,7 @@ jQuery(function () {
         if (Array.isArray(tab.cves)) {
             tab.cves.forEach(item => {
                 const evidence = item.evidence || {}
-                const evidenceText = `H:${evidence.headers || 0} / HTML:${evidence.html || 0} / JS:${evidence.js || 0}`
+                const evidenceText = `H:${evidence.headers || 0} / HTML:${evidence.html || 0} / JS:${evidence.js || 0} / URL:${evidence.url || 0}`
                 const verifyText = item.verify?.moduleId ? `DAST module: ${item.verify.moduleId}` : ''
                 dt.push([
                     item.id || item.title || '',

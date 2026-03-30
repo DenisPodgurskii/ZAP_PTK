@@ -151,21 +151,25 @@ class PtkAlertHandlerTest {
     }
 
     @Test
-    void dastReconCachePrivacyFindingMapsToAlert() {
+    void dastHeadersReferrerPolicyFindingMapsToAlert() {
         assumeResourcesLoaded();
         PtkFindingBatch batch = loadBatch(DAST_EXAMPLE);
-        PtkFinding reconFinding =
+        PtkFinding headersFinding =
                 batch.getFindings().stream()
-                        .filter(f -> "recon_cache_privacy".equals(f.getModuleId()))
+                        .filter(
+                                f ->
+                                        "headers".equals(f.getModuleId())
+                                                && "header_referrer_policy_missing_or_weak"
+                                                        .equals(f.getRuleId()))
                         .findFirst()
                         .orElse(null);
-        assertNotNull(reconFinding);
+        assertNotNull(headersFinding);
 
-        Alert alert = PtkAlertBuilder.buildFromFinding(reconFinding, "DAST", mapper, resources);
+        Alert alert = PtkAlertBuilder.buildFromFinding(headersFinding, "DAST", mapper, resources);
         assertNotNull(alert);
-        assertEquals("Missing Referrer-Policy", alert.getName());
-        assertEquals(200018, alert.getPluginId());
-        assertTrue(alert.getDescription().contains("cache"));
+        assertEquals("Missing or weak Referrer-Policy", alert.getName());
+        assertEquals(200005, alert.getPluginId());
+        assertTrue(alert.getDescription().contains("HTTP response headers"));
     }
 
     @Test

@@ -3596,13 +3596,26 @@ export class ptk_module {
     validateAttack(executed, original) {
         const isDeserializationModule = this._isDeserializationTechniqueModule()
         const isDeserializationCoverageAttack = this._isDeserializationCoverageAttack(executed?.metadata || {})
+        const hasExplicitValidationRule = !!(
+            executed?.metadata?.validation?.rule
+            && executed.metadata.validation.rule !== false
+        )
+        const shouldPreferCustomValidation = (
+            this.type !== 'passive'
+            && isDeserializationModule
+            && !isDeserializationCoverageAttack
+            && executed?.metadata?.deserializationProbe !== true
+            && hasExplicitValidationRule
+        )
         if (
+            !shouldPreferCustomValidation &&
             isDeserializationModule &&
             (this.type === 'passive' || (!isDeserializationCoverageAttack && executed?.metadata?.deserializationProbe !== true))
         ) {
             return this._validatePassiveDeserialization(executed, original)
         }
         if (
+            !shouldPreferCustomValidation &&
             isDeserializationModule &&
             (executed?.metadata?.deserializationProbe === true || isDeserializationCoverageAttack)
         ) {

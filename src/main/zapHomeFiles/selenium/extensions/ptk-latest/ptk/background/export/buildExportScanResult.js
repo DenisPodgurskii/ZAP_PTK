@@ -178,6 +178,15 @@ function sanitizeObjectStrings(value, depth = 3) {
     return value
 }
 
+function sanitizeScanConfiguration(settings) {
+    const cloned = (settings && typeof settings === "object") ? cloneValue(settings) : {}
+    if (!cloned || typeof cloned !== "object") return {}
+    delete cloned.rulepack
+    delete cloned.cveRulepack
+    delete cloned.onResultMutation
+    return sanitizeObjectStrings(cloned, 6) || {}
+}
+
 function sanitizeBodyObject(body, limits, labelPrefix) {
     if (!body || typeof body !== "object") return
     if (typeof body.text === "string") {
@@ -1060,6 +1069,9 @@ export function sanitizeScanResult(scanResult, opts = {}) {
         delete scanResult.bugbounty
         delete scanResult.bugBounty
     }
+    const sanitizedSettings = sanitizeScanConfiguration(scanResult.settings)
+    scanResult.settings = sanitizedSettings
+    scanResult.scanConfiguration = cloneValue(sanitizedSettings)
     sanitizeCodeArtifacts(scanResult.codeArtifacts)
     return scanResult
 }

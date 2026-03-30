@@ -137,6 +137,7 @@ class ScanResultStore {
         scan.stats = { ...defaultStats(), ...(envelope.stats || {}) }
         scan.groups = Array.isArray(envelope.groups) ? envelope.groups : []
         scan.items = Array.isArray(envelope.items) ? envelope.items : []
+        scan.recon = Array.isArray(envelope.recon) ? deepClone(envelope.recon) : []
         if (envelope.analysis && typeof envelope.analysis === "object") {
             scan.analysis = deepClone(envelope.analysis)
         }
@@ -169,6 +170,24 @@ class ScanResultStore {
         if (!scanId) return
         this._scans.delete(scanId)
         this._analysisFinalizeWindows.delete(scanId)
+    }
+
+    deleteScansByMatcher(predicate) {
+        if (typeof predicate !== "function") return 0
+        let deleted = 0
+        Array.from(this._scans.entries()).forEach(([scanId, scan]) => {
+            let shouldDelete = false
+            try {
+                shouldDelete = !!predicate(scan, scanId)
+            } catch (_) {
+                shouldDelete = false
+            }
+            if (!shouldDelete) return
+            this._scans.delete(scanId)
+            this._analysisFinalizeWindows.delete(scanId)
+            deleted += 1
+        })
+        return deleted
     }
 
     setFinished(scanId, finishedAt = new Date().toISOString()) {

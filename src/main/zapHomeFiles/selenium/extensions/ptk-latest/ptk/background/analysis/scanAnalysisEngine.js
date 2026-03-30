@@ -21,8 +21,9 @@ import runRulePassiveFindingSeeds from "./rules/rulePassiveFindingSeeds.js"
 import runRuleTemplateRenderWorkflows from "./rules/ruleTemplateRenderWorkflows.js"
 import runRuleIastRuntimeSignals from "./rules/ruleIastRuntimeSignals.js"
 import runRuleSastCodeArtifacts from "./rules/ruleSastCodeArtifacts.js"
+import { buildApiExplorer } from "./apiExplorerBuilder.js"
 
-export const ANALYSIS_VERSION = "1.7.6"
+export const ANALYSIS_VERSION = "1.7.7"
 
 const CACHE_KEY_PROP = "__ptkAnalysisCacheKey"
 const ENGINE_ORDER = Object.freeze(["DAST", "IAST", "SAST", "SCA"])
@@ -160,6 +161,9 @@ function buildRelatedScansSignature(relatedScans = []) {
     const digest = relatedScans
         .map((scan) => {
             if (!scan || typeof scan !== "object") return ""
+            const sastArtifacts = scan?.codeArtifacts?.sast && typeof scan.codeArtifacts.sast === "object"
+                ? scan.codeArtifacts.sast
+                : {}
             return [
                 scan?.scanId || "",
                 normalizeEngineName(scan?.engine) || "",
@@ -168,7 +172,13 @@ function buildRelatedScansSignature(relatedScans = []) {
                 scan?.finishedAt || scan?.finished || scan?.startedAt || "",
                 Array.isArray(scan?.findings) ? scan.findings.length : 0,
                 Array.isArray(scan?.requests) ? scan.requests.length : 0,
-                Array.isArray(scan?.runtimeEvents) ? scan.runtimeEvents.length : 0
+                Array.isArray(scan?.runtimeEvents) ? scan.runtimeEvents.length : 0,
+                Array.isArray(sastArtifacts?.routes) ? sastArtifacts.routes.length : 0,
+                Array.isArray(sastArtifacts?.endpoints) ? sastArtifacts.endpoints.length : 0,
+                Array.isArray(sastArtifacts?.graphql) ? sastArtifacts.graphql.length : 0,
+                Array.isArray(sastArtifacts?.surfaces) ? sastArtifacts.surfaces.length : 0,
+                Array.isArray(sastArtifacts?.hiddenParams) ? sastArtifacts.hiddenParams.length : 0,
+                Array.isArray(sastArtifacts?.gadgets) ? sastArtifacts.gadgets.length : 0
             ].join("|")
         })
         .filter(Boolean)
@@ -2636,6 +2646,7 @@ function buildAnalysis(scanResult, { caps = DEFAULT_CAPS, extraEnginesPresent = 
     const opportunities = buildOpportunities(scanResult, diffAnnotated.candidates, discovery)
     const attackMap = buildAttackMap(scanResult, patterns, diffAnnotated.candidates, discovery)
     const objectInventory = buildObjectInventory(scanResult, patterns, diffAnnotated.candidates, discovery)
+    const explorer = buildApiExplorer(scanResult, { relatedScans })
     return {
         version: ANALYSIS_VERSION,
         scanId: scanResult?.scanId || null,
@@ -2646,7 +2657,8 @@ function buildAnalysis(scanResult, { caps = DEFAULT_CAPS, extraEnginesPresent = 
         discovery,
         attackMap,
         objectInventory,
-        opportunities
+        opportunities,
+        explorer
     }
 }
 

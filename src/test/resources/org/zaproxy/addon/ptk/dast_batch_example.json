@@ -42,14 +42,14 @@
         }
       },
       {
-        "id": "ce3cac9a-7f7b-4d5d-b77f-28d063a4594b::DAST::recon_cache_privacy::recon_missing_referrer_policy::req-2::atk-9",
-        "fingerprint": "ce3cac9a-7f7b-4d5d-b77f-28d063a4594b::DAST::recon_cache_privacy::recon_missing_referrer_policy::req-2::atk-9",
-        "moduleId": "recon_cache_privacy",
-        "ruleId": "recon_missing_referrer_policy",
-        "attackId": "recon_missing_referrer_policy",
+        "id": "ce3cac9a-7f7b-4d5d-b77f-28d063a4594b::DAST::headers::header_referrer_policy_missing_or_weak::req-2::atk-9",
+        "fingerprint": "ce3cac9a-7f7b-4d5d-b77f-28d063a4594b::DAST::headers::header_referrer_policy_missing_or_weak::req-2::atk-9",
+        "moduleId": "headers",
+        "ruleId": "header_referrer_policy_missing_or_weak",
+        "attackId": "header_referrer_policy_missing_or_weak",
         "severity": "low",
         "confidence": 78,
-        "summary": "Missing Referrer-Policy",
+        "summary": "Missing or weak Referrer-Policy",
         "location": {
           "url": "http://localhost:3001/",
           "route": "/",
@@ -59,7 +59,7 @@
         "proof": {
           "payload": null,
           "proof": null,
-          "summary": "Missing Referrer-Policy"
+          "summary": "Missing or weak Referrer-Policy"
         },
         "request": {
           "timestamp": 1773065208351,
@@ -106,14 +106,14 @@
         }
       },
       {
-        "id": "ce3cac9a-7f7b-4d5d-b77f-28d063a4594b::DAST::headers::header_x_frame_options_obsolete::req-1::atk-11",
-        "fingerprint": "ce3cac9a-7f7b-4d5d-b77f-28d063a4594b::DAST::headers::header_x_frame_options_obsolete::req-1::atk-11",
+        "id": "ce3cac9a-7f7b-4d5d-b77f-28d063a4594b::DAST::headers::header_permissions_policy_legacy_or_unknown::req-1::atk-11",
+        "fingerprint": "ce3cac9a-7f7b-4d5d-b77f-28d063a4594b::DAST::headers::header_permissions_policy_legacy_or_unknown::req-1::atk-11",
         "moduleId": "headers",
-        "ruleId": "header_x_frame_options_obsolete",
-        "attackId": "header_x_frame_options_obsolete",
+        "ruleId": "header_permissions_policy_legacy_or_unknown",
+        "attackId": "header_permissions_policy_legacy_or_unknown",
         "severity": "low",
         "confidence": 78,
-        "summary": "X-Frame-Options header is a legacy directive",
+        "summary": "Deprecated Feature-Policy or unknown/overly-permissive Permissions-Policy",
         "location": {
           "url": "http://localhost:3001/rest/admin/application-configuration",
           "route": "/rest/admin/application-configuration",
@@ -122,8 +122,8 @@
         },
         "proof": {
           "payload": null,
-          "proof": "x-frame-options",
-          "summary": "X-Frame-Options header is a legacy directive"
+          "proof": "feature-policy",
+          "summary": "Deprecated Feature-Policy or unknown/overly-permissive Permissions-Policy"
         },
         "request": {
           "timestamp": 1773065206293,

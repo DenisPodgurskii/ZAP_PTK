@@ -183,10 +183,135 @@ function normalizeRequestRecord(record, index) {
     }
 }
 
+function getRequestRecordSortMeta(record = {}) {
+    const request = record?.original?.request && typeof record.original.request === "object"
+        ? record.original.request
+        : {}
+    const discoverySource = String(request.discoverySource || "").trim().toLowerCase()
+    const discoveryRank = discoverySource === "html_link" ? 1 : 0
+    const id = String(record.id || "")
+    const seqMatch = /^req-(\d+)$/i.exec(id)
+    const requestSeq = seqMatch ? Number(seqMatch[1]) : null
+    const timestamp = Number(request.timestamp ?? request.timeStamp ?? 0)
+    const url = String(request.ui_url || request.url || "").toLowerCase()
+    return {
+        discoveryRank,
+        requestSeq: Number.isFinite(requestSeq) ? requestSeq : null,
+        timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+        url,
+        id
+    }
+}
+
+function compareRequestRecordsForDisplay(left, right) {
+    const leftMeta = getRequestRecordSortMeta(left)
+    const rightMeta = getRequestRecordSortMeta(right)
+    if (leftMeta.discoveryRank !== rightMeta.discoveryRank) {
+        return leftMeta.discoveryRank - rightMeta.discoveryRank
+    }
+    if (leftMeta.requestSeq !== null || rightMeta.requestSeq !== null) {
+        if (leftMeta.requestSeq === null) return 1
+        if (rightMeta.requestSeq === null) return -1
+        if (leftMeta.requestSeq !== rightMeta.requestSeq) {
+            return leftMeta.requestSeq - rightMeta.requestSeq
+        }
+    }
+    if (leftMeta.timestamp !== rightMeta.timestamp) {
+        return leftMeta.timestamp - rightMeta.timestamp
+    }
+    const urlDiff = leftMeta.url.localeCompare(rightMeta.url)
+    if (urlDiff !== 0) return urlDiff
+    return leftMeta.id.localeCompare(rightMeta.id)
+}
+
 function normalizeRequests(rawRequests = []) {
     return rawRequests
         .map((record, index) => normalizeRequestRecord(record, index))
         .filter(Boolean)
+        .sort(compareRequestRecordsForDisplay)
+}
+
+function buildDastRouteLabel(record = {}) {
+    const request = record?.original?.request && typeof record.original.request === "object"
+        ? record.original.request
+        : {}
+    const method = String(request.method || "GET").toUpperCase()
+    const rawUrl = String(request.url || request.ui_url || "").trim()
+    if (!rawUrl) return `${method} <unknown>`
+    try {
+        const parsed = new URL(rawUrl)
+        return `${method} ${parsed.pathname || "/"}`
+    } catch (_) {
+        return `${method} ${rawUrl}`
+    }
+}
+
+function deriveDastScanHealth(raw = {}, normalizedRequests = []) {
+    if (!Array.isArray(normalizedRequests) || !normalizedRequests.length) return null
+    let totalAttacks = 0
+    let failedAttacks = 0
+    let requestsWithFailures = 0
+    const routeFailures = new Map()
+
+    normalizedRequests.forEach((record) => {
+        const attacks = Array.isArray(record?.attacks) ? record.attacks : []
+        let requestFailed = 0
+        const routeLabel = buildDastRouteLabel(record)
+        attacks.forEach((attack) => {
+            totalAttacks += 1
+            const statusLine = String(attack?.response?.statusLine || "")
+            if (!/Failed to fetch/i.test(statusLine)) return
+            failedAttacks += 1
+            requestFailed += 1
+        })
+        if (requestFailed > 0) {
+            requestsWithFailures += 1
+            routeFailures.set(routeLabel, (routeFailures.get(routeLabel) || 0) + requestFailed)
+        }
+    })
+
+    if (totalAttacks <= 0 || failedAttacks <= 0) return null
+
+    const failedRate = failedAttacks / totalAttacks
+    if (failedAttacks < 5 || failedRate < 0.08) return null
+
+    const currentMaxRequestsPerSecond = Number(raw?.settings?.maxRequestsPerSecond || 0)
+    const currentConcurrency = Number(raw?.settings?.concurrency || 0)
+    let recommendedMaxRequestsPerSecond = null
+    if (Number.isFinite(currentMaxRequestsPerSecond) && currentMaxRequestsPerSecond > 0) {
+        if (currentMaxRequestsPerSecond > 3) recommendedMaxRequestsPerSecond = 3
+        else if (currentMaxRequestsPerSecond > 2) recommendedMaxRequestsPerSecond = 2
+        else if (failedRate >= 0.35 && currentMaxRequestsPerSecond > 1) recommendedMaxRequestsPerSecond = currentMaxRequestsPerSecond - 1
+    }
+    let recommendedConcurrency = null
+    if (Number.isFinite(currentConcurrency) && currentConcurrency > 1) {
+        recommendedConcurrency = 1
+    }
+
+    return {
+        level: failedRate >= 0.35 || failedAttacks >= 20 ? "high" : "medium",
+        totalAttacks,
+        failedAttacks,
+        failedRate,
+        requestCount: normalizedRequests.length,
+        requestsWithFailures,
+        current: {
+            maxRequestsPerSecond: Number.isFinite(currentMaxRequestsPerSecond) && currentMaxRequestsPerSecond > 0
+                ? currentMaxRequestsPerSecond
+                : null,
+            concurrency: Number.isFinite(currentConcurrency) && currentConcurrency > 0
+                ? currentConcurrency
+                : null
+        },
+        recommended: {
+            maxRequestsPerSecond: recommendedMaxRequestsPerSecond,
+            concurrency: recommendedConcurrency
+        },
+        topRoutes: Array.from(routeFailures.entries())
+            .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+            .slice(0, 3)
+            .map(([route, failed]) => ({ route, failed }))
+    }
 }
 
 function normalizeIastRequests(rawRequests = []) {
@@ -463,6 +588,139 @@ function normalizeOpportunity(entry) {
     }
 }
 
+function normalizeExplorerSummary(summary = {}) {
+    return {
+        routeCount: Number.isFinite(summary.routeCount) ? Number(summary.routeCount) : 0,
+        endpointCount: Number.isFinite(summary.endpointCount) ? Number(summary.endpointCount) : 0,
+        graphqlCount: Number.isFinite(summary.graphqlCount) ? Number(summary.graphqlCount) : 0,
+        hiddenParamCount: Number.isFinite(summary.hiddenParamCount) ? Number(summary.hiddenParamCount) : 0,
+        surfaceCount: Number.isFinite(summary.surfaceCount) ? Number(summary.surfaceCount) : 0,
+        enginesPresent: Array.isArray(summary.enginesPresent) ? summary.enginesPresent : []
+    }
+}
+
+function normalizeExplorerRoute(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        routeKey: entry.routeKey || null,
+        path: entry.path || null,
+        routeType: entry.routeType || null,
+        enginesPresent: Array.isArray(entry.enginesPresent) ? entry.enginesPresent : [],
+        sources: Array.isArray(entry.sources) ? entry.sources : [],
+        authHints: Array.isArray(entry.authHints) ? entry.authHints : [],
+        protocolHints: Array.isArray(entry.protocolHints) ? entry.protocolHints : [],
+        environmentHints: Array.isArray(entry.environmentHints) ? entry.environmentHints : [],
+        frameworks: Array.isArray(entry.frameworks) ? entry.frameworks : [],
+        sourceKinds: Array.isArray(entry.sourceKinds) ? entry.sourceKinds : [],
+        hintNames: Array.isArray(entry.hintNames) ? entry.hintNames : [],
+        pageUrls: Array.isArray(entry.pageUrls) ? entry.pageUrls : [],
+        adminLike: entry.adminLike === true,
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+    }
+}
+
+function normalizeExplorerEndpoint(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        routeKey: entry.routeKey || null,
+        method: entry.method || null,
+        path: entry.path || null,
+        url: entry.url || null,
+        enginesPresent: Array.isArray(entry.enginesPresent) ? entry.enginesPresent : [],
+        sources: Array.isArray(entry.sources) ? entry.sources : [],
+        transports: Array.isArray(entry.transports) ? entry.transports : [],
+        authHints: Array.isArray(entry.authHints) ? entry.authHints : [],
+        contentTypes: Array.isArray(entry.contentTypes) ? entry.contentTypes : [],
+        paramNames: Array.isArray(entry.paramNames) ? entry.paramNames : [],
+        bodyKeys: Array.isArray(entry.bodyKeys) ? entry.bodyKeys : [],
+        headerNames: Array.isArray(entry.headerNames) ? entry.headerNames : [],
+        discoveryTags: Array.isArray(entry.discoveryTags) ? entry.discoveryTags : [],
+        environmentHints: Array.isArray(entry.environmentHints) ? entry.environmentHints : [],
+        pageUrls: Array.isArray(entry.pageUrls) ? entry.pageUrls : [],
+        adminLike: entry.adminLike === true,
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+    }
+}
+
+function normalizeExplorerGraphql(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        routeKey: entry.routeKey || null,
+        method: entry.method || null,
+        path: entry.path || null,
+        url: entry.url || null,
+        enginesPresent: Array.isArray(entry.enginesPresent) ? entry.enginesPresent : [],
+        transports: Array.isArray(entry.transports) ? entry.transports : [],
+        authHints: Array.isArray(entry.authHints) ? entry.authHints : [],
+        operationTypes: Array.isArray(entry.operationTypes) ? entry.operationTypes : [],
+        operationNames: Array.isArray(entry.operationNames) ? entry.operationNames : [],
+        rootFields: Array.isArray(entry.rootFields) ? entry.rootFields : [],
+        variableNames: Array.isArray(entry.variableNames) ? entry.variableNames : [],
+        pageUrls: Array.isArray(entry.pageUrls) ? entry.pageUrls : [],
+        adminLike: entry.adminLike === true,
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+    }
+}
+
+function normalizeExplorerHiddenParam(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        routeKey: entry.routeKey || null,
+        method: entry.method || null,
+        path: entry.path || null,
+        paramName: entry.paramName || null,
+        container: entry.container || null,
+        hintTypes: Array.isArray(entry.hintTypes) ? entry.hintTypes : [],
+        actions: Array.isArray(entry.actions) ? entry.actions : [],
+        enginesPresent: Array.isArray(entry.enginesPresent) ? entry.enginesPresent : [],
+        pageUrls: Array.isArray(entry.pageUrls) ? entry.pageUrls : [],
+        adminLike: entry.adminLike === true,
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+    }
+}
+
+function normalizeExplorerSurface(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        routeKey: entry.routeKey || null,
+        path: entry.path || null,
+        surfaceType: entry.surfaceType || null,
+        label: entry.label || null,
+        hintNames: Array.isArray(entry.hintNames) ? entry.hintNames : [],
+        enginesPresent: Array.isArray(entry.enginesPresent) ? entry.enginesPresent : [],
+        pageUrls: Array.isArray(entry.pageUrls) ? entry.pageUrls : [],
+        adminLike: entry.adminLike === true,
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+    }
+}
+
+function normalizeExplorer(explorer) {
+    if (!explorer || typeof explorer !== "object") return null
+    return {
+        summary: normalizeExplorerSummary(explorer.summary || {}),
+        routes: Array.isArray(explorer.routes)
+            ? explorer.routes.map(normalizeExplorerRoute).filter(Boolean)
+            : [],
+        endpoints: Array.isArray(explorer.endpoints)
+            ? explorer.endpoints.map(normalizeExplorerEndpoint).filter(Boolean)
+            : [],
+        graphql: Array.isArray(explorer.graphql)
+            ? explorer.graphql.map(normalizeExplorerGraphql).filter(Boolean)
+            : [],
+        hiddenParams: Array.isArray(explorer.hiddenParams)
+            ? explorer.hiddenParams.map(normalizeExplorerHiddenParam).filter(Boolean)
+            : [],
+        surfaces: Array.isArray(explorer.surfaces)
+            ? explorer.surfaces.map(normalizeExplorerSurface).filter(Boolean)
+            : []
+    }
+}
+
 function normalizeAnalysis(analysis, topLevelVersion = null) {
     if (!analysis || typeof analysis !== "object") return null
     const meta = analysis.meta && typeof analysis.meta === "object"
@@ -517,6 +775,14 @@ function normalizeAnalysis(analysis, topLevelVersion = null) {
         opportunities: Array.isArray(analysis.opportunities)
             ? analysis.opportunities.map(normalizeOpportunity).filter(Boolean)
             : [],
+        explorer: normalizeExplorer(analysis.explorer) || {
+            summary: normalizeExplorerSummary({}),
+            routes: [],
+            endpoints: [],
+            graphql: [],
+            hiddenParams: [],
+            surfaces: []
+        },
         meta,
         diff
     }
@@ -600,6 +866,7 @@ function normalizeLegacyDast(result) {
         findings,
         groups: [],
         requests,
+        scanHealth: deriveDastScanHealth(result, requests),
         codeArtifacts: normalizeCodeArtifacts(result.codeArtifacts),
         analysis: normalizeAnalysis(result.analysis, result.analysisVersion),
         legacy: result
@@ -749,6 +1016,7 @@ export function normalizeScanResult(scanResult) {
             findings,
             groups: groups.map(normalizeGroup),
             requests: normalizedRequests,
+            scanHealth: engine === "DAST" ? deriveDastScanHealth(raw, normalizedRequests) : null,
             codeArtifacts: normalizeCodeArtifacts(raw.codeArtifacts),
             analysis: normalizedAnalysis,
             legacy: raw
@@ -767,6 +1035,7 @@ export function normalizeScanResult(scanResult) {
         findings: [],
         groups: [],
         requests: [],
+        scanHealth: engine === "DAST" ? deriveDastScanHealth(raw, normalizedRequests) : null,
         codeArtifacts: normalizeCodeArtifacts(raw.codeArtifacts),
         analysis: normalizedAnalysis,
         legacy: raw

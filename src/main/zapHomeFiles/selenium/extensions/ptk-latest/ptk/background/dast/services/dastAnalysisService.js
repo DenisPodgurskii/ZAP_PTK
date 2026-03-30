@@ -259,6 +259,20 @@ export class DastAnalysisService {
         return this.ensureRelatedScanAnalysis(hydrated)
     }
 
+    _prunePersistedRelatedScansForEngine({ engine = null, expectedHost = null, preserveScanId = null } = {}) {
+        const normalizedEngine = String(engine || "").trim().toUpperCase()
+        if (!normalizedEngine || normalizedEngine === "DAST") return 0
+        if (!this.scanResultStore?.deleteScansByMatcher) return 0
+        const keepScanId = String(preserveScanId || "").trim()
+        return this.scanResultStore.deleteScansByMatcher((scan) => {
+            if (!scan || typeof scan !== "object") return false
+            if (String(scan?.engine || "").trim().toUpperCase() !== normalizedEngine) return false
+            if (!this.isHostMatch(scan?.host, expectedHost)) return false
+            if (keepScanId && String(scan?.scanId || "").trim() === keepScanId) return false
+            return true
+        })
+    }
+
     getRelatedScansFromApp(scanResult = this.getCurrentScanResult?.() || null) {
         const currentScan = scanResult && typeof scanResult === "object" ? scanResult : null
         const expectedHost = currentScan?.host || null
@@ -291,6 +305,14 @@ export class DastAnalysisService {
             try {
                 const stored = await this.storage.getItem(source.storageKey)
                 const envelope = this._unwrapStoredScan(stored)
+                const persistedScanId = envelope && typeof envelope === "object"
+                    ? (envelope?.scanId || envelope?.id || null)
+                    : null
+                this._prunePersistedRelatedScansForEngine({
+                    engine: source.engine,
+                    expectedHost,
+                    preserveScanId: persistedScanId
+                })
                 if (!envelope || typeof envelope !== "object") continue
                 if (!this.isCompletedEngineScan(envelope, { isRunning: false, expectedHost })) continue
                 const scanId = envelope?.scanId || envelope?.id || null
@@ -406,6 +428,36 @@ export class DastAnalysisService {
         }
         this.storage?.setItem?.(this.suppressionsStorageKey, this.suppressions)
         return []
+    }
+
+    clearDiffBaseIfOwnedByScan({ host = null, scanId = null } = {}) {
+        const hostKey = this.normalizeAnalysisHostKey(host)
+        const ownedScanId = String(scanId || "").trim()
+        if (!hostKey || !ownedScanId) {
+            return {
+                host: hostKey,
+                diffBaseCleared: false
+            }
+        }
+        const entry = this.diffBases?.[hostKey]
+        if (!entry || typeof entry !== "object") {
+            return {
+                host: hostKey,
+                diffBaseCleared: false
+            }
+        }
+        if (String(entry?.scanId || "").trim() !== ownedScanId) {
+            return {
+                host: hostKey,
+                diffBaseCleared: false
+            }
+        }
+        delete this.diffBases[hostKey]
+        this.storage?.setItem?.(this.diffBaseStorageKey, this.diffBases)
+        return {
+            host: hostKey,
+            diffBaseCleared: true
+        }
     }
 
     clearHostState(host) {

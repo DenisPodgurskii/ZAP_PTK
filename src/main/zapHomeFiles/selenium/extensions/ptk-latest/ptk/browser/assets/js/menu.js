@@ -89,6 +89,10 @@ jQuery(function () {
                     style="margin-top: -18px;"></i></a>
             <a href="https://owasp.org/www-project-penetration-testing-kit/" target="_blank"><img
                     src="assets/images/owasp.png" title="PTK on OWASP" style="width: 24px; padding:1px"></a>
+            <a href="https://www.zaproxy.org/blog/2026-01-19-owasp-ptk-add-on/" target="_blank"><img
+                    src="assets/images/zap.svg" title="OWASP PTK Integration with ZAP" style="width: 24px; padding:1px"></a>
+            <a href="https://athenaos.org/en/resources/browser-pentesting/#_top" target="_blank"><img
+                    src="assets/images/athenaos.svg" title="Athena OS Integration" style="width: 24px; padding:1px"></a>
         </div>
   
 

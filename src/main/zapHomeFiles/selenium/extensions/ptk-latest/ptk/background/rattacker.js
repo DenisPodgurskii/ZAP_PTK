@@ -13,6 +13,7 @@ import { DastPortalClient } from "./dast/services/dastPortalClient.js"
 import { DastCandidateRunService } from "./dast/services/dastCandidateRunService.js"
 import { DastFindingPresentationService } from "./dast/services/dastFindingPresentationService.js"
 import { SessionProfileStore } from "./bugbounty/sessionProfileStore.js"
+import { EvidencePackageStore } from "./bugbounty/evidencePackageStore.js"
 import { scanResultStore } from "./scanResultStore.js"
 import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js"
 
@@ -52,6 +53,12 @@ const UI_ANALYSIS_LIMITS = Object.freeze({
     // Analysis candidates include nested evidence/why objects that need one extra level for UI.
     maxDepth: 5
 })
+const UI_FINDING_DETAILS_LIMITS = Object.freeze({
+    ...UI_ANALYSIS_LIMITS,
+    // Native SAST/IAST detail dialogs need nested location points like
+    // evidence.sast.source.sourceLoc.start.line to survive sanitization.
+    maxDepth: 7
+})
 const ANALYSIS_DIFF_BASE_STORAGE_KEY = "ptk_dast_analysis_diff_base_v1"
 const ANALYSIS_SUPPRESSIONS_STORAGE_KEY = "ptk_dast_analysis_suppressions_v1"
 const POPUP_TO_BACKGROUND_CHANNELS = new Set(["ptk_popup2background_dast", "ptk_popup2background_rattacker"])
@@ -59,6 +66,14 @@ const CONTENT_TO_BACKGROUND_CHANNELS = new Set(["ptk_content2dast", "ptk_content
 const CONTENT_WS_TO_BACKGROUND_CHANNELS = new Set(["ptk_contentws2dast", "ptk_contentws2rattacker"])
 const IMPORT_TRANSFER_TTL_MS = 10 * 60 * 1000
 const IMPORT_TRANSFER_MAX_ENTRIES = 2
+
+function cloneForTransport(value) {
+    try {
+        return JSON.parse(JSON.stringify(value))
+    } catch (_) {
+        return value || null
+    }
+}
 
 export class ptk_rattacker {
 
@@ -129,12 +144,16 @@ export class ptk_rattacker {
             storage: ptk_storage,
             browserApi: browser
         })
+        this.evidencePackageStore = new EvidencePackageStore({
+            storage: ptk_storage
+        })
         this.candidateRunService = new DastCandidateRunService({
             settings: this.settings,
             getScanResult: () => this.scanResult,
             getCandidate: (candidateId) => this._findAnalysisCandidate(candidateId),
             getRequestRecordById: (requestId) => this.findingPresentationService.findRequestRecordById(this.scanResult, requestId),
             sessionProfileStore: this.sessionProfileStore,
+            evidencePackageStore: this.evidencePackageStore,
             workflowOverlayService: undefined,
             startWorkflowReplay: (payload = {}) => browser.runtime.sendMessage({
                 channel: "ptk_popup2background_recorder",
@@ -155,6 +174,12 @@ export class ptk_rattacker {
         this.addMessageListeners()
         this.regularModulesCache = null
         this.cveModulesCache = null
+        this._initPromise = null
+        this._persistedScanHydrated = false
+        this._analysisStateLoaded = false
+        this._candidateRunStateScopeKey = null
+        this._uiSnapshotRevision = 0
+        this._uiSnapshotCache = null
     }
 
     _cleanupImportTransfers(now = Date.now()) {
@@ -223,16 +248,76 @@ export class ptk_rattacker {
         if (key) this.importTransfers.delete(key)
     }
 
+    _invalidateUiSnapshot() {
+        this._uiSnapshotRevision += 1
+        this._uiSnapshotCache = null
+    }
 
-    async init() {
-        await portalPolicyRuntimeStore.ensureLoaded()
-        await this._ensureDefaultModulesReady()
-        this.storage = await this.scanResultLifecycle.loadPersistedScan() || {}
-        await this.analysisService.loadState()
-        if (!this.engine.isRunning && Object.keys(this.storage).length > 0) {
-            this.scanResult = this.storage
-        } else {
-            this.scanResult = this._setAuthoritativeScanResult(this.engine.scanResult)
+    _getCandidateRunStateScopeKey(scanResult = this.scanResult) {
+        const scanId = String(scanResult?.scanId || '').trim()
+        const host = String(scanResult?.host || '').trim().toLowerCase()
+        if (!scanId && !host) return '__empty__'
+        return `${scanId || '__scanless__'}|${host || '__hostless__'}`
+    }
+
+    _setLoadedScanResult(scanResult) {
+        const previousScopeKey = this._getCandidateRunStateScopeKey(this.scanResult)
+        this.scanResult = scanResult || {}
+        const nextScopeKey = this._getCandidateRunStateScopeKey(this.scanResult)
+        if (previousScopeKey !== nextScopeKey) {
+            this._candidateRunStateScopeKey = null
+        }
+        this._invalidateUiSnapshot()
+        return this.scanResult
+    }
+
+    async _ensureCandidateRunStateLoaded({ force = false } = {}) {
+        const scopeKey = this._getCandidateRunStateScopeKey(this.scanResult)
+        if (!force && scopeKey === this._candidateRunStateScopeKey) {
+            return
+        }
+        await this.candidateRunService.loadPersistedState()
+        this._candidateRunStateScopeKey = scopeKey
+    }
+
+    async init({ force = false } = {}) {
+        if (this._initPromise && !force) {
+            return this._initPromise
+        }
+        const initPromise = (async () => {
+            await portalPolicyRuntimeStore.ensureLoaded()
+            if (force || !this._analysisStateLoaded) {
+                await this.analysisService.loadState()
+                this._analysisStateLoaded = true
+            }
+            if (this.engine.isRunning) {
+                if (this.scanResult !== this.engine.scanResult) {
+                    this._setAuthoritativeScanResult(this.engine.scanResult)
+                }
+            } else {
+                if (force || !this._persistedScanHydrated) {
+                    this.storage = await this.scanResultLifecycle.loadPersistedScan() || {}
+                    this._persistedScanHydrated = true
+                }
+                if (Object.keys(this.storage || {}).length > 0) {
+                    if (this.scanResult !== this.storage) {
+                        this._setLoadedScanResult(this.storage)
+                    }
+                } else if (!this.scanResult || Object.keys(this.scanResult).length === 0) {
+                    this._setLoadedScanResult(this.engine.scanResult || {})
+                }
+            }
+            await this._ensureCandidateRunStateLoaded({ force })
+        })()
+        if (!force) {
+            this._initPromise = initPromise
+        }
+        try {
+            return await initPromise
+        } finally {
+            if (!force) {
+                this._initPromise = null
+            }
         }
     }
 
@@ -280,9 +365,22 @@ export class ptk_rattacker {
     }
 
     _cloneScanResultForUi() {
-        return this.resultProjector.cloneScanResultForUi(this.scanResult || {}, {
-            engineIsRunning: this.engine?.isRunning === true
+        const engineIsRunning = this.engine?.isRunning === true
+        const cached = this._uiSnapshotCache
+        if (cached
+            && cached.revision === this._uiSnapshotRevision
+            && cached.engineIsRunning === engineIsRunning) {
+            return cached.snapshot
+        }
+        const snapshot = this.resultProjector.cloneScanResultForUi(this.scanResult || {}, {
+            engineIsRunning
         })
+        this._uiSnapshotCache = {
+            revision: this._uiSnapshotRevision,
+            engineIsRunning,
+            snapshot
+        }
+        return snapshot
     }
 
     _hasRenderableScanData(scanResult = this.scanResult) {
@@ -298,8 +396,14 @@ export class ptk_rattacker {
     }
 
     _setAuthoritativeScanResult(scanResult, { markFinished = false } = {}) {
+        const previousScopeKey = this._getCandidateRunStateScopeKey(this.scanResult)
         const synced = this.scanResultLifecycle.syncScanResult(scanResult, { markFinished })
         this.scanResult = synced || scanResult || this.engine?.scanResult || {}
+        const nextScopeKey = this._getCandidateRunStateScopeKey(this.scanResult)
+        if (previousScopeKey !== nextScopeKey) {
+            this._candidateRunStateScopeKey = null
+        }
+        this._invalidateUiSnapshot()
         return this.scanResult
     }
 
@@ -315,6 +419,7 @@ export class ptk_rattacker {
             this.scanResult.bugbounty = clone
             this.scanResult.bugBounty = clone
         }
+        this._invalidateUiSnapshot()
         this._schedulePersistScanResult()
         return this.scanResult?.bugbounty || null
     }
@@ -358,9 +463,16 @@ export class ptk_rattacker {
             this._persistTimer = null
         }
         this.scanResultLifecycle.deleteScan(previousScanId)
-        this.analysisService.clearHostState(previousHost)
+        this.analysisService.clearDiffBaseIfOwnedByScan({
+            host: previousHost,
+            scanId: previousScanId
+        })
         this.engine.reset()
-        this.scanResult = this.engine.scanResult
+        this.storage = {}
+        this._persistedScanHydrated = true
+        this._candidateRunStateScopeKey = null
+        this._setLoadedScanResult(this.engine.scanResult)
+        await this.candidateRunService.clearHostState(previousHost)
         void ptk_storage.setItem(this.storageKey, {})
     }
 
@@ -670,13 +782,17 @@ export class ptk_rattacker {
     }
 
     async msg_init(message) {
-        await portalPolicyRuntimeStore.ensureLoaded()
         await this.init()
-        await this._ensureSelectedPortalRulepackSnapshot()
         const scanResult = this._cloneScanResultForUi()
+        const hasRenderableData = this._hasRenderableScanData(scanResult)
+        const shouldWarmRulepackPreview = !this.engine.isRunning && !hasRenderableData
+        if (shouldWarmRulepackPreview) {
+            await this._ensureSelectedPortalRulepackSnapshot()
+        }
         return Promise.resolve({
             scanResult,
             isScanRunning: this.engine.isRunning,
+            viewState: this.engine.isRunning ? 'running' : (hasRenderableData ? 'idle_with_data' : 'idle_empty'),
             activeTab: worker.ptk_app.proxy.activeTab,
             settings: this.settings,
             policyState: getDastPolicyState(),
@@ -772,8 +888,14 @@ export class ptk_rattacker {
     }
 
     async msg_get_request_snapshot(message) {
+        let targetScan = this.scanResult
+        const requestedScanId = String(message?.scanId || '').trim()
+        if (requestedScanId && String(targetScan?.scanId || '') !== requestedScanId) {
+            await this.analysisService?.hydratePersistedRelatedScans?.(this.scanResult)
+            targetScan = scanResultStore.getScan(requestedScanId) || targetScan
+        }
         return Promise.resolve(
-            this.findingPresentationService.getRequestSnapshot(this.scanResult, {
+            this.findingPresentationService.getRequestSnapshot(targetScan, {
                 requestId: message?.requestId || null,
                 attackId: message?.attackId || null
             })
@@ -1006,7 +1128,7 @@ export class ptk_rattacker {
             const fullFinding = resolvedFinding || details?.finding || null
             response.finding = this._sanitizeUiValue(details?.finding || null, 0, UI_ANALYSIS_LIMITS)
             response.attack = this._sanitizeUiValue(details?.attack || null, 0, UI_SCAN_RESULT_LIMITS)
-            response.findingDetail = this._sanitizeUiValue(fullFinding, 0, UI_ANALYSIS_LIMITS)
+            response.findingDetail = this._sanitizeUiValue(fullFinding, 0, UI_FINDING_DETAILS_LIMITS)
             response.sourceScanId = scan?.scanId || null
             response.engine = response.findingDetail?.engine || response.finding?.engine || scan?.engine || null
 
@@ -1027,8 +1149,23 @@ export class ptk_rattacker {
                         attackId: effectiveAttackId
                     })
                     : { original: null, attack: null }
-                response.original = this._sanitizeUiValue(snapshot?.original || null, 0, UI_SCAN_RESULT_LIMITS)
-                if (!response.attack && snapshot?.attack) {
+                response.original = cloneForTransport(snapshot?.original || null)
+                if (snapshot?.attack && typeof snapshot.attack === "object") {
+                    const mergedAttack = Object.assign(
+                        {},
+                        response.attack && typeof response.attack === "object" ? response.attack : {}
+                    )
+                    if (Object.prototype.hasOwnProperty.call(snapshot.attack, "request")) {
+                        mergedAttack.request = cloneForTransport(snapshot.attack.request)
+                    }
+                    if (Object.prototype.hasOwnProperty.call(snapshot.attack, "response")) {
+                        mergedAttack.response = cloneForTransport(snapshot.attack.response)
+                    }
+                    if (!mergedAttack.id && snapshot.attack.id) {
+                        mergedAttack.id = snapshot.attack.id
+                    }
+                    response.attack = mergedAttack
+                } else if (!response.attack && snapshot?.attack) {
                     response.attack = this._sanitizeUiValue(snapshot.attack, 0, UI_SCAN_RESULT_LIMITS)
                 }
                 response.requestId = effectiveRequestId || response.requestId || null
@@ -1164,7 +1301,9 @@ export class ptk_rattacker {
 
     async msg_export_scan_result(message) {
         if (!this.scanResult || Object.keys(this.scanResult).length === 0) {
-            this.scanResult = await this.scanResultLifecycle.loadPersistedScan()
+            this.storage = await this.scanResultLifecycle.loadPersistedScan() || {}
+            this._persistedScanHydrated = true
+            this._setLoadedScanResult(this.storage)
         }
         if (!this.scanResult) return null
         try {
@@ -1204,7 +1343,10 @@ export class ptk_rattacker {
         if (!response?.success || !response?.scanResult) {
             return response
         }
-        this.scanResult = response.scanResult
+        this.storage = response.scanResult
+        this._persistedScanHydrated = true
+        this._setLoadedScanResult(response.scanResult)
+        await this._ensureCandidateRunStateLoaded({ force: true })
         if (this.scanResult && (this.scanResult.finishedAt || this.scanResult.finished)) {
             try {
                 if (!this.analysisService.hasCurrentAnalysis(this.scanResult)) {
@@ -1332,7 +1474,10 @@ export class ptk_rattacker {
             return Promise.reject(new Error("Wrong format or empty scan result"))
         }
         this.reset()
-        this.scanResult = normalized
+        this.storage = normalized
+        this._persistedScanHydrated = true
+        this._setLoadedScanResult(normalized)
+        await this._ensureCandidateRunStateLoaded({ force: true })
         if (this.scanResult && (this.scanResult.finishedAt || this.scanResult.finished)) {
             try {
                 if (!this.analysisService.hasCurrentAnalysis(this.scanResult)) {
@@ -1358,7 +1503,18 @@ export class ptk_rattacker {
     async msg_run_bg_scan(message) {
         try {
             const effectiveSettings = await this._resolveDastRunSettings(message?.settings || {})
-            this.runBackgroundScan(message.tabId, message.host, message.domains, effectiveSettings)
+            const started = this.runBackgroundScan(message.tabId, message.host, message.domains, effectiveSettings)
+            if (!started || !this.engine.isRunning) {
+                return Promise.resolve({
+                    success: false,
+                    error: started === false ? 'scan_already_running' : 'scan_start_failed',
+                    message: started === false ? 'DAST scan is already running.' : 'Failed to start DAST scan.',
+                    isScanRunning: this.engine.isRunning,
+                    scanResult: this._cloneScanResultForUi(),
+                    policyState: getDastPolicyState(),
+                    rulepackSelection: getDastRulepackSelection()
+                })
+            }
             const defaultModules = await this.getPolicyPreviewModules(effectiveSettings.rulepack || null)
             return Promise.resolve({
                 success: true,

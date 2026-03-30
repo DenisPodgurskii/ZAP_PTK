@@ -78,14 +78,6 @@
                 "value": "POST"
               },
               {
-                "name": "request.headers",
-                "value": []
-              },
-              {
-                "name": "request.cookies",
-                "value": []
-              },
-              {
                 "name": "request.body.mimeType",
                 "value": "multipart/form-data; boundary=----WebKitFormBoundary%%random%%"
               },
@@ -124,56 +116,92 @@
                 "name": "Content-Type",
                 "value": "multipart/form-data; boundary=----WebKitFormBoundary%%random%%",
                 "operation": "replace"
-              },
-              {
-                "name": "Cookie",
-                "value": "",
-                "operation": "replace"
               }
             ]
           },
           "validation": {
             "rule": {
-              "and": [
+              "or": [
                 {
-                  "==": [
+                  "and": [
                     {
-                      "var": "attack.response.statusCode"
+                      "==": [
+                        {
+                          "var": "attack.response.statusCode"
+                        },
+                        500
+                      ]
                     },
-                    500
+                    {
+                      "or": [
+                        {
+                          "regex": [
+                            {
+                              "var": "attack.response.headers"
+                            },
+                            "text/x-component",
+                            "i"
+                          ]
+                        },
+                        {
+                          "regex": [
+                            {
+                              "var": "attack.response.body"
+                            },
+                            "(digest|text/x-component|rsc|react\\s*server|server\\s*action)",
+                            "i"
+                          ]
+                        }
+                      ]
+                    }
                   ]
                 },
                 {
-                  "or": [
+                  "and": [
+                    {
+                      "in": [
+                        {
+                          "var": "attack.response.statusCode"
+                        },
+                        [
+                          302,
+                          303
+                        ]
+                      ]
+                    },
                     {
                       "regex": [
                         {
                           "var": "attack.response.headers"
                         },
-                        "text/x-component"
+                        "x-action-redirect",
+                        "i"
                       ]
                     },
                     {
-                      "regex": [
-                        {
-                          "var": "attack.response.body"
-                        },
-                        {
-                          "var": "attack.metadata.proof_regex"
-                        }
-                      ]
+                      "!": {
+                        "regex": [
+                          {
+                            "var": "original.response.headers"
+                          },
+                          "x-action-redirect",
+                          "i"
+                        ]
+                      }
                     }
                   ]
                 }
               ]
             },
             "proof": {
-              "proof": [
+              "cat": [
+                "React2Shell probe status=",
                 {
-                  "var": "attack.response.body"
+                  "var": "attack.response.statusCode"
                 },
+                " headers=",
                 {
-                  "var": "attack.metadata.proof_regex"
+                  "var": "attack.response.headers"
                 }
               ]
             }
@@ -251,14 +279,6 @@
                 "value": "POST"
               },
               {
-                "name": "request.headers",
-                "value": []
-              },
-              {
-                "name": "request.cookies",
-                "value": []
-              },
-              {
                 "name": "request.body.mimeType",
                 "value": "multipart/form-data; boundary=----PTKReact2ShellBoundary"
               },
@@ -297,56 +317,92 @@
                 "name": "Content-Type",
                 "value": "multipart/form-data; boundary=----PTKReact2ShellBoundary",
                 "operation": "replace"
-              },
-              {
-                "name": "Cookie",
-                "value": "",
-                "operation": "replace"
               }
             ]
           },
           "validation": {
             "rule": {
-              "and": [
+              "or": [
                 {
-                  "==": [
+                  "and": [
                     {
-                      "var": "attack.response.statusCode"
+                      "==": [
+                        {
+                          "var": "attack.response.statusCode"
+                        },
+                        500
+                      ]
                     },
-                    500
+                    {
+                      "or": [
+                        {
+                          "regex": [
+                            {
+                              "var": "attack.response.headers"
+                            },
+                            "text/x-component",
+                            "i"
+                          ]
+                        },
+                        {
+                          "regex": [
+                            {
+                              "var": "attack.response.body"
+                            },
+                            "(digest|text/x-component|rsc|react\\s*server|server\\s*action)",
+                            "i"
+                          ]
+                        }
+                      ]
+                    }
                   ]
                 },
                 {
-                  "or": [
+                  "and": [
+                    {
+                      "in": [
+                        {
+                          "var": "attack.response.statusCode"
+                        },
+                        [
+                          302,
+                          303
+                        ]
+                      ]
+                    },
                     {
                       "regex": [
                         {
                           "var": "attack.response.headers"
                         },
-                        "text/x-component"
+                        "x-action-redirect",
+                        "i"
                       ]
                     },
                     {
-                      "regex": [
-                        {
-                          "var": "attack.response.body"
-                        },
-                        {
-                          "var": "attack.metadata.proof_regex"
-                        }
-                      ]
+                      "!": {
+                        "regex": [
+                          {
+                            "var": "original.response.headers"
+                          },
+                          "x-action-redirect",
+                          "i"
+                        ]
+                      }
                     }
                   ]
                 }
               ]
             },
             "proof": {
-              "proof": [
+              "cat": [
+                "React2Shell probe status=",
                 {
-                  "var": "attack.response.body"
+                  "var": "attack.response.statusCode"
                 },
+                " headers=",
                 {
-                  "var": "attack.metadata.proof_regex"
+                  "var": "attack.response.headers"
                 }
               ]
             }

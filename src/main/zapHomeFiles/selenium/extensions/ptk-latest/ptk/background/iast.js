@@ -853,6 +853,7 @@ export class ptk_iast {
         const hasRenderableData = (Array.isArray(scanResult.findings) && scanResult.findings.length > 0)
             || (Array.isArray(scanResult.items) && scanResult.items.length > 0)
             || (Array.isArray(scanResult.vulns) && scanResult.vulns.length > 0)
+        response.viewState = response.isScanRunning ? 'running' : (hasRenderableData ? 'idle_with_data' : 'idle_empty')
         response.policyState = getIastPortalPolicyState()
         response.rulepackSelection = !response.isScanRunning && !hasRenderableData
             ? getIastPortalSelection()
@@ -876,7 +877,7 @@ export class ptk_iast {
 
 
     async msg_reset(message) {
-        this.reset()
+        await this.reset()
         return Promise.resolve({
             scanResult: this._getPublicScanResult(),
             activeTab: worker.ptk_app.proxy.activeTab,
@@ -1322,7 +1323,10 @@ export class ptk_iast {
 
     async msg_stop_bg_scan(message) {
         await this.stopBackgroundScan()
-        return Promise.resolve({ scanResult: this._getPublicScanResult() })
+        return Promise.resolve({
+            scanResult: this._getPublicScanResult(),
+            isScanRunning: this.isScanRunning
+        })
     }
 
     _getZapManualEngineOptions() {

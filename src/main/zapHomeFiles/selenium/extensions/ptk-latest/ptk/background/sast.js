@@ -673,9 +673,11 @@ export class ptk_sast {
   async msg_init(message) {
     await this.init();
     const scanResult = this._cloneScanResultForUi();
+    const hasRenderableData = hasRenderableSastScanData(scanResult);
     return Promise.resolve({
       scanResult,
       isScanRunning: this.isScanRunning,
+      viewState: this.isScanRunning ? "running" : (hasRenderableData ? "idle_with_data" : "idle_empty"),
       progress: this._buildSastProgressSnapshot(),
       activeTab: worker.ptk_app.proxy.activeTab,
       policyState: getSastPolicyState(),

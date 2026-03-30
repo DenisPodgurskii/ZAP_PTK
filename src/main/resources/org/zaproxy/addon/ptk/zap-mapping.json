@@ -68,7 +68,7 @@
             "header_hsts_weak": 7,
             "header_powered_by_present": 8,
             "header_server_banner_disclosure": 9,
-            "header_x_frame_options_obsolete": 10,
+            "header_x_content_type_options_missing_or_invalid": 10,
             "header_xss_protection_obsolete": 11,
             "header_expect_ct_obsolete": 12,
             "header_coop_without_coep_or_corp": 13,
@@ -79,7 +79,9 @@
             "header_clear_site_data_wildcard": 18,
             "header_cors_wildcard_with_credentials": 19,
             "header_set_cookie_flags_missing": 20,
-            "header_cache_control_sensitive_missing_no_store": 21
+            "header_cache_control_sensitive_missing_no_store": 21,
+            "header_hpkp_obsolete": 22,
+            "header_coop_value_weak": 23
           }
         },
         {
@@ -204,9 +206,7 @@
           "moduleId": "recon_cache_privacy",
           "baseAlertId": 200018,
           "rules": {
-            "recon_cache_public_with_set_cookie": 1,
-            "recon_missing_referrer_policy": 2,
-            "recon_referrer_policy_unsafe": 3
+            "recon_cache_public_with_set_cookie": 1
           }
         },
         {

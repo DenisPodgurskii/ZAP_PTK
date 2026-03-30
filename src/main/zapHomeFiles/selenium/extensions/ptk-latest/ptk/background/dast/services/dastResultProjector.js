@@ -82,6 +82,9 @@ export class DastResultProjector {
         if (request.ui_url) summary.ui_url = this.truncateString(String(request.ui_url), 4096)
         if (request.method) summary.method = String(request.method)
         if (request.target) summary.target = this.truncateString(String(request.target), 1024)
+        if (request.discoverySource) summary.discoverySource = this.truncateString(String(request.discoverySource), 128)
+        if (request.discoveryLabel) summary.discoveryLabel = this.truncateString(String(request.discoveryLabel), 256)
+        if (request.discoveryParentUrl) summary.discoveryParentUrl = this.truncateString(String(request.discoveryParentUrl), 4096)
         if (typeof request.raw === "string" && request.raw) {
             summary.raw = this.truncateString(request.raw, 8192)
         }
@@ -110,6 +113,9 @@ export class DastResultProjector {
         if (response.status !== undefined && response.status !== null) summary.status = response.status
         if (response.statusMessage) summary.statusMessage = this.truncateString(String(response.statusMessage), 256)
         if (response.statusText) summary.statusText = this.truncateString(String(response.statusText), 256)
+        if (response.errorName) summary.errorName = this.truncateString(String(response.errorName), 128)
+        if (response.errorMessage) summary.errorMessage = this.truncateString(String(response.errorMessage), 512)
+        if (response.errorCause) summary.errorCause = this.truncateString(String(response.errorCause), 512)
         if (typeof response.timeMs === "number") summary.timeMs = response.timeMs
         if (typeof response.length === "number") summary.length = response.length
         if (typeof response.raw === "string" && response.raw) {

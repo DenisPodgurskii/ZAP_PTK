@@ -49,7 +49,10 @@
           "allowStrategyBulk": true,
           "allowAuthLikeTargets": false,
           "allowHardDeniedTargets": {},
-          "ignoreGlobalExcludes": false
+          "ignoreGlobalExcludes": false,
+          "prefilters": {
+            "requiresQueryOrBodyParams": true
+          }
         },
         "constants": {
           "regex": "(\\]\\[(DB2|ODBC|OleDb|Oracle|SqlServer|MySQL)|mysqli?_fetch_|not a valid MySQL|not a legal PLSQL identifer|mysqli?_connect\\(\\)|(SELECT\\s+[^:>]+\\sFROM\\s+[^:>]+\\sWHERE\\s+)|(at\\s[[:alnum:]\\\\/\\._]+\\sline\\s\\d+)|ociparse\\(\\):|must be a syntactically valid variable|CFSQLTYPE|Unknown column ['`]|Microsoft OLE DB Provider for SQL|SQL QUERY FAILURE:|Syntax error.{1,50}in query|ORA-01722:|PostgreSQL query failed:|nested\\s+exception\\s+is\\s+com.microsoft.sqlserver.jdbc.SQLServerException|Could\\s+not\\s+find\\s+stored\\s+procedure|uncategorized\\s+SQLException\\s+for\\s+SQL|You\\s+have\\s+an\\s+error\\s+in\\s+your\\s+SQL\\s+syntax|Unclosed\\s+quotation\\s+mark|(quoted|terminated)[ ]+.{1,100}(quoted|terminated)|sql syntax error|Syntax\\s+error\\s+in\\s+string\\s+in\\s+query\\s+expression\\s+column|Syntax error.{1,50}column|java\\.sql\\.SQLSyntaxErrorException|dao\\.EmptyResultDataAccessException|System\\.Data\\.OleDb\\.OleDbException|insert\\s+into\\s+['`][^\\s]+|database\\s+error|dberror|SqlClient.SqlException).{0,70}|call[ ]+to[ ]+a[ ]+member[ ]+function[ ]+fetch_assoc\\(\\)[ ]+.{0,100}|All[ ]+queries[ ]+combined[ ]+using[ ]+a[ ]+UNION,[ ]+INTERSECT[ ]+or[ ]+EXCEPT.{0,70}|(SQLITE_|sqlite3\\.Operational)ERROR.{0,70}"
@@ -114,7 +117,7 @@
           },
           "condition": {},
           "target": {},
-          "requestGrouping": "inherit",
+          "requestGrouping": "bulk",
           "metadata": {
             "taxonomy": {},
             "docs": {},
@@ -179,7 +182,7 @@
           },
           "condition": {},
           "target": {},
-          "requestGrouping": "inherit",
+          "requestGrouping": "bulk",
           "metadata": {
             "taxonomy": {},
             "docs": {},
@@ -244,7 +247,7 @@
           },
           "condition": {},
           "target": {},
-          "requestGrouping": "inherit",
+          "requestGrouping": "bulk",
           "metadata": {
             "taxonomy": {},
             "docs": {},
@@ -309,7 +312,7 @@
           },
           "condition": {},
           "target": {},
-          "requestGrouping": "inherit",
+          "requestGrouping": "bulk",
           "metadata": {
             "taxonomy": {},
             "docs": {},
@@ -850,7 +853,7 @@
     },
     {
       "id": "jwt_injection",
-      "name": "JSON Web Token attacks",
+      "name": "JWT None Algorithm attacks",
       "type": "active",
       "async": false,
       "runtime": {
@@ -4459,7 +4462,10 @@
           "allowStrategyBulk": true,
           "allowAuthLikeTargets": false,
           "allowHardDeniedTargets": {},
-          "ignoreGlobalExcludes": false
+          "ignoreGlobalExcludes": false,
+          "prefilters": {
+            "requiresHeaders": true
+          }
         },
         "constants": {},
         "extensions": {}
@@ -5004,6 +5010,17 @@
                       ]
                     }
                   ]
+                },
+                {
+                  "!": {
+                    "regex": [
+                      {
+                        "var": "original.request.url"
+                      },
+                      "(?:^|\\/)(?:assets?|static|public|dist|build|i18n|locales|translations?|lang)(?:\\/|\\?|$)|\\/(?:manifest\\.json|asset-manifest\\.json|site\\.webmanifest)(?:\\?|$)",
+                      "i"
+                    ]
+                  }
                 }
               ]
             }
@@ -5274,7 +5291,7 @@
                         {
                           "var": "value"
                         },
-                        "\\/\\d|apache|nginx|iis|tomcat|gunicorn|caddy|lighttpd|express|kestrel",
+                        "\\/\\d|apache|nginx|iis|tomcat|gunicorn|caddy|lighttpd|express|kestrel|uvicorn|envoy|cloudflare|openresty|jetty",
                         "i"
                       ]
                     }
@@ -5307,7 +5324,7 @@
                     {
                       "var": "original.response.headers"
                     },
-                    "\\/\\d|apache|nginx|iis|tomcat|gunicorn|caddy|lighttpd|express|kestrel",
+                    "\\/\\d|apache|nginx|iis|tomcat|gunicorn|caddy|lighttpd|express|kestrel|uvicorn|envoy|cloudflare|openresty|jetty",
                     "i"
                   ]
                 },
@@ -5316,7 +5333,7 @@
                     {
                       "var": "original.response.headers"
                     },
-                    "\\/\\d|apache|nginx|iis|tomcat|gunicorn|caddy|lighttpd|express|kestrel",
+                    "\\/\\d|apache|nginx|iis|tomcat|gunicorn|caddy|lighttpd|express|kestrel|uvicorn|envoy|cloudflare|openresty|jetty",
                     "i"
                   ]
                 },
@@ -5335,8 +5352,8 @@
           }
         },
         {
-          "id": "header_x_frame_options_obsolete",
-          "name": "X-Frame-Options header is a legacy directive",
+          "id": "header_x_content_type_options_missing_or_invalid",
+          "name": "Missing or invalid X-Content-Type-Options",
           "runtime": {
             "hooks": [],
             "confirmation": {},
@@ -5345,28 +5362,54 @@
           "action": {},
           "validation": {
             "rule": {
-              "some": [
+              "or": [
                 {
-                  "var": "original.response.headers"
+                  "none": [
+                    {
+                      "var": "original.response.headers"
+                    },
+                    {
+                      "regex": [
+                        {
+                          "var": "name"
+                        },
+                        "^x-content-type-options$",
+                        "i"
+                      ]
+                    }
+                  ]
                 },
                 {
-                  "regex": [
+                  "some": [
                     {
-                      "var": "name"
+                      "var": "original.response.headers"
                     },
-                    "^x-frame-options$",
-                    "i"
+                    {
+                      "and": [
+                        {
+                          "regex": [
+                            {
+                              "var": "name"
+                            },
+                            "^x-content-type-options$",
+                            "i"
+                          ]
+                        },
+                        {
+                          "!": {
+                            "regex": [
+                              {
+                                "var": "value"
+                              },
+                              "^\\s*nosniff\\s*$",
+                              "i"
+                            ]
+                          }
+                        }
+                      ]
+                    }
                   ]
                 }
-              ]
-            },
-            "proof": {
-              "proof": [
-                {
-                  "var": "original.response.headers"
-                },
-                "x-frame-options",
-                "i"
               ]
             }
           },
@@ -5473,6 +5516,52 @@
           }
         },
         {
+          "id": "header_hpkp_obsolete",
+          "name": "Public-Key-Pins is deprecated",
+          "runtime": {
+            "hooks": [],
+            "confirmation": {},
+            "config": {}
+          },
+          "action": {},
+          "validation": {
+            "rule": {
+              "some": [
+                {
+                  "var": "original.response.headers"
+                },
+                {
+                  "regex": [
+                    {
+                      "var": "name"
+                    },
+                    "^(public-key-pins|public-key-pins-report-only)$",
+                    "i"
+                  ]
+                }
+              ]
+            },
+            "proof": {
+              "proof": [
+                {
+                  "var": "original.response.headers"
+                },
+                "public-key-pins",
+                "i"
+              ]
+            }
+          },
+          "condition": {},
+          "target": {},
+          "requestGrouping": "inherit",
+          "metadata": {
+            "taxonomy": {},
+            "docs": {},
+            "constants": {},
+            "extensions": {}
+          }
+        },
+        {
           "id": "header_coop_without_coep_or_corp",
           "name": "COOP set without COEP/CORP (incomplete cross-origin isolation)",
           "runtime": {
@@ -5529,6 +5618,58 @@
                         "^cross-origin-resource-policy$",
                         "i"
                       ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "condition": {},
+          "target": {},
+          "requestGrouping": "inherit",
+          "metadata": {
+            "taxonomy": {},
+            "docs": {},
+            "constants": {},
+            "extensions": {}
+          }
+        },
+        {
+          "id": "header_coop_value_weak",
+          "name": "COOP present but value is not 'same-origin'",
+          "runtime": {
+            "hooks": [],
+            "confirmation": {},
+            "config": {}
+          },
+          "action": {},
+          "validation": {
+            "rule": {
+              "some": [
+                {
+                  "var": "original.response.headers"
+                },
+                {
+                  "and": [
+                    {
+                      "regex": [
+                        {
+                          "var": "name"
+                        },
+                        "^cross-origin-opener-policy$",
+                        "i"
+                      ]
+                    },
+                    {
+                      "!": {
+                        "regex": [
+                          {
+                            "var": "value"
+                          },
+                          "^\\s*same-origin\\s*$",
+                          "i"
+                        ]
+                      }
                     }
                   ]
                 }
@@ -6271,6 +6412,17 @@
                       ]
                     }
                   ]
+                },
+                {
+                  "!": {
+                    "regex": [
+                      {
+                        "var": "original.request.url"
+                      },
+                      "(?:^|\\/)(?:assets?|static|public|dist|build|i18n|locales|translations?|lang)(?:\\/|\\?|$)|\\/(?:manifest\\.json|asset-manifest\\.json|site\\.webmanifest)(?:\\?|$)",
+                      "i"
+                    ]
+                  }
                 }
               ]
             }
@@ -6330,7 +6482,10 @@
           "allowStrategyBulk": true,
           "allowAuthLikeTargets": false,
           "allowHardDeniedTargets": {},
-          "ignoreGlobalExcludes": false
+          "ignoreGlobalExcludes": false,
+          "prefilters": {
+            "requiresHeaders": true
+          }
         },
         "constants": {},
         "extensions": {}
@@ -6714,7 +6869,10 @@
           "allowStrategyBulk": true,
           "allowAuthLikeTargets": false,
           "allowHardDeniedTargets": {},
-          "ignoreGlobalExcludes": false
+          "ignoreGlobalExcludes": false,
+          "prefilters": {
+            "requiresQueryOrBodyParams": true
+          }
         },
         "constants": {},
         "extensions": {
@@ -7324,16 +7482,13 @@
           "allowStrategyBulk": true,
           "allowAuthLikeTargets": false,
           "allowHardDeniedTargets": {},
-          "ignoreGlobalExcludes": false
+          "ignoreGlobalExcludes": false,
+          "prefilters": {
+            "requiresHeaders": true
+          }
         },
         "constants": {},
-        "extensions": {
-          "ptk": {
-            "outputKind": "finding",
-            "reconKind": "error_disclosure",
-            "uiSurface": "recon"
-          }
-        }
+        "extensions": {}
       },
       "attacks": [
         {
@@ -8868,13 +9023,7 @@
           "ignoreGlobalExcludes": false
         },
         "constants": {},
-        "extensions": {
-          "ptk": {
-            "outputKind": "finding",
-            "reconKind": "token_exposure",
-            "uiSurface": "recon"
-          }
-        }
+        "extensions": {}
       },
       "attacks": [
         {
@@ -9727,7 +9876,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "presentation": {
+                  "aggregate": "scan"
+                }
+              }
+            }
           }
         },
         {
@@ -9770,7 +9925,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "presentation": {
+                  "aggregate": "scan"
+                }
+              }
+            }
           }
         },
         {
@@ -9790,7 +9951,7 @@
                     {
                       "var": "original.response.body"
                     },
-                    "\\b(staging|stage|dev|development|test|sandbox|uat)\\b",
+                    "\\b(staging|stage|dev(?:elopment)?|sandbox|uat|testing)\\b",
                     "i"
                   ]
                 }
@@ -9798,14 +9959,14 @@
             },
             "proof": {
               "proof": [
-                {
-                  "var": "original.response.body"
-                },
-                "\\b(staging|stage|dev|development|test|sandbox|uat)\\b",
-                "i"
-              ]
-            }
-          },
+              {
+                "var": "original.response.body"
+              },
+              "\\b(staging|stage|dev(?:elopment)?|sandbox|uat|testing)\\b",
+              "i"
+            ]
+          }
+        },
           "condition": {},
           "target": {},
           "requestGrouping": "inherit",
@@ -9862,7 +10023,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "presentation": {
+                  "aggregate": "scan"
+                }
+              }
+            }
           }
         }
       ]
@@ -10004,7 +10171,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "presentation": {
+                  "aggregate": "scan"
+                }
+              }
+            }
           }
         },
         {
@@ -10099,7 +10272,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "presentation": {
+                  "aggregate": "scan"
+                }
+              }
+            }
           }
         },
         {
@@ -10194,7 +10373,13 @@
             "taxonomy": {},
             "docs": {},
             "constants": {},
-            "extensions": {}
+            "extensions": {
+              "ptk": {
+                "presentation": {
+                  "aggregate": "scan"
+                }
+              }
+            }
           }
         }
       ]
@@ -10354,76 +10539,17 @@
                       ]
                     }
                   ]
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "recon_missing_referrer_policy",
-          "name": "Missing Referrer-Policy",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {}
-          },
-          "action": {},
-          "validation": {
-            "rule": {
-              "and": [
-                {
-                  "some": [
-                    {
-                      "var": "original.response.headers"
-                    },
-                    {
-                      "and": [
-                        {
-                          "regex": [
-                            {
-                              "var": "name"
-                            },
-                            "^content-type$",
-                            "i"
-                          ]
-                        },
-                        {
-                          "regex": [
-                            {
-                              "var": "value"
-                            },
-                            "text/html",
-                            "i"
-                          ]
-                        }
-                      ]
-                    }
-                  ]
                 },
                 {
-                  "none": [
-                    {
-                      "var": "original.response.headers"
-                    },
-                    {
-                      "regex": [
-                        {
-                          "var": "name"
-                        },
-                        "^referrer\\-policy$",
-                        "i"
-                      ]
-                    }
-                  ]
+                  "!": {
+                    "regex": [
+                      {
+                        "var": "original.request.url"
+                      },
+                      "(?:^|\\/)(?:assets?|static|public|dist|build|i18n|locales|translations?|lang)(?:\\/|\\?|$)|\\/(?:manifest\\.json|asset-manifest\\.json|site\\.webmanifest)(?:\\?|$)",
+                      "i"
+                    ]
+                  }
                 }
               ]
             }
@@ -10442,101 +10568,6 @@
                 }
               }
             }
-          }
-        },
-        {
-          "id": "recon_referrer_policy_unsafe",
-          "name": "Unsafe Referrer-Policy",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {}
-          },
-          "action": {},
-          "validation": {
-            "rule": {
-              "and": [
-                {
-                  "some": [
-                    {
-                      "var": "original.response.headers"
-                    },
-                    {
-                      "and": [
-                        {
-                          "regex": [
-                            {
-                              "var": "name"
-                            },
-                            "^referrer-policy$",
-                            "i"
-                          ]
-                        },
-                        {
-                          "regex": [
-                            {
-                              "var": "value"
-                            },
-                            "unsafe-url|no-referrer-when-downgrade",
-                            "i"
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            },
-            "proof": {
-              "if": [
-                {
-                  "regex": [
-                    {
-                      "var": "original.response.headers"
-                    },
-                    "referrer-policy",
-                    "i"
-                  ]
-                },
-                {
-                  "proof": [
-                    {
-                      "var": "original.response.headers"
-                    },
-                    "referrer-policy",
-                    "i"
-                  ]
-                },
-                {
-                  "regex": [
-                    {
-                      "var": "original.response.headers"
-                    },
-                    "unsafe-url|no-referrer-when-downgrade",
-                    "i"
-                  ]
-                },
-                {
-                  "proof": [
-                    {
-                      "var": "original.response.headers"
-                    },
-                    "unsafe-url|no-referrer-when-downgrade",
-                    "i"
-                  ]
-                },
-                null
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
           }
         }
       ]

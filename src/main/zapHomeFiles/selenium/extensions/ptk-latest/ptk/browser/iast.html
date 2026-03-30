@@ -50,6 +50,36 @@
       font-size: 11px;
     }
 
+    #iast_result_tabs {
+      background: #d8dee6;
+      border-top: 1px solid #b8c1cb;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    }
+
+    #iast_result_tabs .item {
+      background: #eef2f6;
+      color: #1f2937;
+      font-weight: 700;
+      border-right: 1px solid #c1c9d2;
+      box-shadow: inset 0 -1px 0 #c7ced7;
+      opacity: 1;
+    }
+
+    #iast_result_tabs .item:last-child {
+      border-right: none;
+    }
+
+    #iast_result_tabs .item:hover {
+      background: #e4eaf1;
+      color: #111827;
+    }
+
+    #iast_result_tabs .item.active {
+      background: #c7d0d9;
+      color: #111827;
+      box-shadow: inset 0 -2px 0 #6b7280;
+    }
+
     #discovery_info .iast-discovery-panel {
       display: none;
     }
@@ -130,14 +160,14 @@
       </div>
       <!-- <div class="ui mini right floated icon button " ><i class="settings rattacker large icon"
                   title="Settings"></i></div> -->
-      <div class="ui mini right floated icon button"><i class="trash all alternate large icon reset" title="Reset"></i>
+      <div class="ui mini right floated icon button" style="display:none"><i class="trash all alternate large icon reset" title="Reset"></i>
       </div>
-      <div class="ui mini right floated icon button cloud_download_scans" style="display:none;"><i class="cloud download alternate large icon" title="Download from PTK Pro portal"></i>
+      <div class="ui mini right floated icon button cloud_download_scans" style="display:none"><i class="cloud download alternate large icon" title="Download from PTK Pro portal"></i>
       </div>
-      <div class="ui mini right floated icon button import_export"><i class="exchange alternate large icon" title="Import/Export"></i>
+      <div class="ui mini right floated icon button import_export" style="display:none"><i class="exchange alternate large icon" title="Import/Export"></i>
       </div>
 
-      <div class="ui secondary small right floated button run_scan_runtime" id="run_scan_bg_control">Scan in
+      <div class="ui secondary small right floated button run_scan_runtime" id="run_scan_bg_control" style="display:none">Scan in
         runtime</div>
       <div class="ui secondary small right floated button stop_scan_runtime" id="stop_scan_bg_control" style="display:none">Stop runtime scan</div>
     </div>
@@ -340,7 +370,7 @@
 
   <div id="run_scan_dlg" class="ui small modal coupled second" style="display: none;">
     <i class="close icon"></i>
-    <div class="ui primary button" id="load_pro_policies_button" style="display: none; align-items: center; gap: 8px;padding-top: 0;padding-bottom: 0; position: absolute;top:55px; right: 0px; z-index: 3;">
+  <div class="ui primary button" id="load_pro_policies_button" style="display:none; align-items: center; gap: 8px;padding-top: 0;padding-bottom: 0; position: absolute;top:55px; right: 0px; z-index: 3;">
       <span>Load Pro</span>
       <img src="assets/images/PTK_PRO_256.png" alt="PTK Pro" class="ui image" style="width: 100px; height: auto;">
     </div>
@@ -406,7 +436,7 @@
 
 
 
-  <div id="import_export_dlg" class="ui fullscreen modal coupled second" style="display: none;">
+  <div id="import_export_dlg" class="ui fullscreen modal coupled second" style="display: none;max-width: 800px;">
     <i class="close icon"></i>
     <div class="ui header">Import/Export</div>
     <div class="content">

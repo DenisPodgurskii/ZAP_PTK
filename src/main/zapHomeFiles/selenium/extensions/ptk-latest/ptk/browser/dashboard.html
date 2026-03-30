@@ -30,6 +30,49 @@
       position: relative;
     }
 
+    #run_scan_dlg.visible.active {
+      display: flex !important;
+      flex-direction: column;
+      max-height: calc(100vh - 12px);
+      margin-top: 6px !important;
+      margin-bottom: 6px !important;
+    }
+
+    #run_scan_dlg>.content {
+      flex: 0 0 auto;
+      line-height: 1;
+    }
+
+    #run_scan_dlg>.content:first-of-type {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+
+    #run_scan_dlg>.actions {
+      flex: 0 0 auto;
+    }
+
+    #run_scan_dlg .ptk-scan-action-slot {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      height: 100%;
+    }
+
+    #run_scan_dlg .ptk-scan-action-slot .ui.checkbox,
+    #run_scan_dlg .ptk-scan-action-slot .ui.button {
+      margin: 0 !important;
+    }
+
+    #run_scan_dlg .ptk-scan-action-slot .ui.mini.button {
+      padding: 0.6em 0.85em;
+      line-height: 1;
+      min-height: 30px;
+    }
+
     #index_scans_form .field {
       position: relative;
     }
@@ -93,6 +136,15 @@
     .ui.grid>.row {
       padding-top: 6px !important;
       padding-bottom: 6px !important;
+    }
+
+    .ptk-card-scroll .ui.table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #f9fafb;
+      background-clip: padding-box;
+      box-shadow: inset 0 -1px 0 rgba(34, 36, 38, 0.15);
     }
   </style>
 </head>
@@ -317,10 +369,10 @@
   </div>
 </div>
 
-<div id="run_scan_dlg" class="ui modal coupled first fullscreen" style="display: none;">
+<div id="run_scan_dlg" class="ui modal coupled first fullscreen" style="display: none; max-width: 800px;">
   <i class="close icon" style="top:1px;right: 1px;"></i>
 
-  <div class="ui primary button" id="load_pro_policies_button" style="display: none; align-items: center; gap: 8px;padding-top: 0;padding-bottom: 0; position: absolute;top:55px; right: 0px; z-index: 3;">
+  <div class="ui primary button" id="load_pro_policies_button" style="display:none; align-items: center; gap: 8px;padding-top: 0;padding-bottom: 0; position: absolute;top:55px; right: 0px; z-index: 3;">
     <span>Load Pro</span>
     <img src="assets/images/PTK_PRO_256.png" alt="PTK Pro" class="ui image" style="width: 100px; height: auto;">
   </div>
@@ -411,7 +463,7 @@
               </select>
             </div>
           </div>
-          <div class="four wide column dast_scan_control">
+          <div class="five wide column dast_scan_control">
             <div class="field">
               <div class="ptk-help-label-row">
                 <label>Scan policy:</label>
@@ -431,21 +483,68 @@
               </select>
             </div>
           </div>
-          <div class="one wide column dast_scan_control">
 
-          </div>
           <div class="two wide column ">
-            <div class="ui toggle checkbox dast_scan" style="position: absolute;bottom: 0;">
-              <input type="checkbox" name="dast_scan" checked="checked">
+            <div class="ptk-scan-action-slot">
+              <div class="ui toggle checkbox dast_scan">
+                <input type="checkbox" name="dast_scan" checked="checked">
+              </div>
+              <div class="ui mini button secondary dast_scan_stop" style="display:none;">Stop</div>
             </div>
-            <div class="ui mini button secondary dast_scan_stop" style="margin-top: 45px;">Stop</div>
           </div>
+        </div>
+        <div class="row">
+          <div class="one wide column dast_scan_control"></div>
+          <div class="four wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Auto-discover same-origin links:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Auto-discovery:</strong> <br />
+                PTK can follow links found in visited HTML pages and queue them for DAST. Leave this off to scan only the requests created by your own browsing.
+              </div>
+              <div class="ui checkbox">
+                <input type="checkbox" id="dashboard_dast_autodiscover_links">
+              </div>
+            </div>
+          </div>
+          <div class="four wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Autodiscovery budget:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Autodiscovery budget:</strong> <br />
+                Controls how many unique same-origin links PTK can add during this scan.
+                <ul>
+                  <li><b>Strict</b> - minimal expansion from the pages you visit</li>
+                  <li><b>Safe</b> (recommended) - balanced coverage without broad crawling</li>
+                  <li><b>Wide</b> - allows substantially broader discovery</li>
+                </ul>
+              </div>
+              <select id="dashboard_dast_autodiscovery_budget" class="ui dropdown" style="width: 100%;" disabled>
+                <option value="strict">Strict</option>
+                <option value="safe" selected>Safe</option>
+                <option value="wide">Wide</option>
+              </select>
+            </div>
+          </div>
+          <div class="four wide column dast_scan_control">
+            <div class="field">
+
+            </div>
+          </div>
+          <div class="one wide column dast_scan_control"></div>
+          <div class="two wide column "></div>
         </div>
         <div class="row" style="border-bottom: solid 1px #cecece;" id="dast_scan_row">
           <div class="one wide column dast_scan_control">
 
           </div>
-          <div class="four wide column dast_scan_control">
+          <div class="three wide column dast_scan_control">
             <div class="field">
               <div class="ptk-help-label-row">
                 <label>Attack RPS:</label>
@@ -499,13 +598,13 @@
             </div>
           </div>
 
-          <div class="five wide column dast_scan_control">
+          <div class="three wide column dast_scan_control">
             <div class="field">
               <div class="ptk-help-label-row">
                 <label>
-                  Run CVE checks (danger zone):
+                  Run CVE attacks:
                 </label>
-                <i class="cve_example question circle icon"></i>
+                <i class="cve_example question circle icon" ></i>
               </div>
               <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
                 <strong>CVE-specific attacks:</strong> <br />
@@ -584,10 +683,12 @@
 
           </div>
           <div class="two wide column">
-            <div class="ui toggle checkbox iast_scan">
-              <input type="checkbox" name="iast_scan" checked="checked">
+            <div class="ptk-scan-action-slot">
+              <div class="ui toggle checkbox iast_scan">
+                <input type="checkbox" name="iast_scan" checked="checked">
+              </div>
+              <div class="ui mini button secondary iast_scan_stop" style="display:none;">Stop</div>
             </div>
-            <div class="ui mini button secondary iast_scan_stop" style="margin: -2px;">Stop</div>
           </div>
         </div>
         <div class="row" style="border-bottom: solid 1px #cecece;" id="sast_scan_row">
@@ -640,29 +741,28 @@
 
           </div>
           <div class="two wide column">
-            <div class="ui toggle checkbox sast_scan">
-              <input type="checkbox" name="sast_scan" checked="checked">
+            <div class="ptk-scan-action-slot">
+              <div class="ui toggle checkbox sast_scan">
+                <input type="checkbox" name="sast_scan" checked="checked">
+              </div>
+              <div class="ui mini button secondary sast_scan_stop" style="display:none;">Stop</div>
             </div>
-            <div class="ui mini button secondary sast_scan_stop" style="margin: -2px;">Stop</div>
           </div>
         </div>
         <div class="row" id="sca_scan_row">
           <div class="one wide column sca_scan_control">
             <div class="ui small header">SCA</div>
           </div>
-          <div class="two wide column sca_scan_control">
+          <div class="thirteen wide column sca_scan_control">
 
           </div>
-          <div class="ten wide column sca_scan_control">
-          </div>
-          <div class="one wide column">
-
-          </div>
-          <div class="one wide column">
-            <div class="ui toggle checkbox sca_scan">
-              <input type="checkbox" name="sca_scan" checked="checked">
+          <div class="two wide column">
+            <div class="ptk-scan-action-slot">
+              <div class="ui toggle checkbox sca_scan">
+                <input type="checkbox" name="sca_scan" checked="checked">
+              </div>
+              <div class="ui mini button secondary sca_scan_stop" style="display:none;">Stop</div>
             </div>
-            <div class="ui mini button secondary sca_scan_stop" style="margin: -2px;">Stop</div>
           </div>
         </div>
       </div>
@@ -681,7 +781,7 @@
       <div id="dashboard_export_progress_text" class="ptk-export-progress-text">Preparing export...</div>
     </div>
   </div>
-  <div class="actions">
+  <div class="actions" style="padding-top: 2px;padding-bottom: 2px;">
     <div id="stop_all_scans" class="ui button secondary disabled">Stop all scans</div>
     <div id="export_all_scans" class="ui button secondary disabled">Export all scans</div>
     <div id="upload_all_scans" class="ui button secondary disabled" style="display:none;">Upload all scans</div>

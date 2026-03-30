@@ -28,6 +28,17 @@ const DEFAULT_SCAN_STRATEGY = 'SMART'
 const DEFAULT_DAST_REQUEST_TIMEOUT_MS = 15000
 const DEFAULT_DAST_ORIGINAL_REQUEST_TIMEOUT_MS = 10000
 const DEFAULT_SCAN_CONTROL_PROFILE = 'safe'
+const DEFAULT_HTML_LINK_DISCOVERY_BUDGET = "safe"
+const HTML_LINK_DISCOVERY_BUDGETS = Object.freeze({
+    strict: 64,
+    safe: 256,
+    wide: 1024
+})
+const TASK_FAMILY_FAIRNESS_LOAD_SHED_THRESHOLD = 128
+const HTML_DISCOVERY_SEED_BATCH_SIZE = 8
+const HTML_LINK_DISCOVERY_SOURCE = "html_link"
+const HTML_LINK_DISCOVERY_LABEL = "Auto-discovered"
+const STATIC_ASSET_LINK_REGEX = /\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|otf|pdf|zip|tar|gz|mp4|webm|mp3|wav|txt)(?:[?#].*)?$/i
 const SCAN_STRATEGY_CONFIGS = {
     FAST: {
         strategy: 'FAST',
@@ -316,6 +327,13 @@ export class dastEngine {
         this._activeUniqueFindingKeys = new Set()
         this._spaSeenSinks = new Set()
         this._fingerprintMeta = new Map()
+        this._htmlDiscoverySeededUrls = new Set()
+        this._pendingHtmlDiscoveryUrls = []
+        this._pendingHtmlDiscoverySet = new Set()
+        this._htmlDiscoveryBackpressure = {
+            throttled: false,
+            reason: null
+        }
         this._familyActiveCounts = new Map()
         this._familyFairnessState = {
             lastDequeuedFamily: null,
@@ -385,11 +403,201 @@ export class dastEngine {
         this._taskQueueGroupPriority = new Map()
         this._taskReadyGroups = []
         this._taskReadyGroupSet = new Set()
+        this._taskReadyGroupFamily = new Map()
+        this._taskReadyFamilyCounts = new Map()
         this._taskQueueLength = 0
     }
 
     _taskQueueCount() {
         return Number(this._taskQueueLength || 0)
+    }
+
+    _normalizeHtmlLinkDiscoveryBudget(value) {
+        const normalized = String(value || DEFAULT_HTML_LINK_DISCOVERY_BUDGET).trim().toLowerCase()
+        return Object.prototype.hasOwnProperty.call(HTML_LINK_DISCOVERY_BUDGETS, normalized)
+            ? normalized
+            : DEFAULT_HTML_LINK_DISCOVERY_BUDGET
+    }
+
+    _isHtmlLinkDiscoveryEnabled() {
+        return this.settings?.enableHtmlLinkDiscovery === true
+    }
+
+    _resolveHtmlLinkDiscoveryBudgetLimit() {
+        const budget = this._normalizeHtmlLinkDiscoveryBudget(this.settings?.htmlLinkDiscoveryBudget)
+        return Number(HTML_LINK_DISCOVERY_BUDGETS[budget] || HTML_LINK_DISCOVERY_BUDGETS[DEFAULT_HTML_LINK_DISCOVERY_BUDGET] || 0)
+    }
+
+    _remainingHtmlLinkDiscoveryBudget() {
+        if (!this._isHtmlLinkDiscoveryEnabled()) return 0
+        const limit = this._resolveHtmlLinkDiscoveryBudgetLimit()
+        const used = this._htmlDiscoverySeededUrls instanceof Set ? this._htmlDiscoverySeededUrls.size : 0
+        return Math.max(0, limit - used)
+    }
+
+    _pendingHtmlLinkDiscoveryCount() {
+        return Array.isArray(this._pendingHtmlDiscoveryUrls) ? this._pendingHtmlDiscoveryUrls.length : 0
+    }
+
+    _remainingHtmlLinkDiscoveryAdmissionBudget() {
+        if (!this._isHtmlLinkDiscoveryEnabled()) return 0
+        const limit = this._resolveHtmlLinkDiscoveryBudgetLimit()
+        const seeded = this._htmlDiscoverySeededUrls instanceof Set ? this._htmlDiscoverySeededUrls.size : 0
+        const pending = this._pendingHtmlLinkDiscoveryCount()
+        return Math.max(0, limit - seeded - pending)
+    }
+
+    _htmlDiscoveryPressureThresholds() {
+        const concurrency = Math.max(1, Number(this.concurrency || 1))
+        const planningConcurrency = Math.max(1, Number(this.planningConcurrency || concurrency || 1))
+        return {
+            readyGroupsPause: Math.max(72, concurrency * 24),
+            readyGroupsResume: Math.max(24, concurrency * 8),
+            taskQueuePause: Math.max(256, concurrency * 96),
+            taskQueueResume: Math.max(96, concurrency * 32),
+            activePlansPause: Math.max(48, planningConcurrency * 16),
+            activePlansResume: Math.max(16, planningConcurrency * 6),
+            requestQueuePause: Math.max(24, planningConcurrency * 8),
+            requestQueueResume: Math.max(8, planningConcurrency * 3)
+        }
+    }
+
+    _htmlDiscoveryPressureSnapshot() {
+        return {
+            readyGroups: Number(this._taskReadyGroups?.length || 0),
+            taskQueue: Number(this._taskQueueCount() || 0),
+            activePlans: Number(this._activePlans?.size || 0),
+            requestQueue: Number(this._requestQueue?.size ? this._requestQueue.size() : 0),
+            pendingDiscovered: this._pendingHtmlLinkDiscoveryCount()
+        }
+    }
+
+    _evaluateHtmlDiscoveryBackpressure() {
+        const thresholds = this._htmlDiscoveryPressureThresholds()
+        const snapshot = this._htmlDiscoveryPressureSnapshot()
+        const state = this._htmlDiscoveryBackpressure || { throttled: false, reason: null }
+        const pauseReasons = []
+        if (snapshot.readyGroups >= thresholds.readyGroupsPause) pauseReasons.push("ready_groups")
+        if (snapshot.taskQueue >= thresholds.taskQueuePause) pauseReasons.push("task_queue")
+        if (snapshot.activePlans >= thresholds.activePlansPause) pauseReasons.push("active_plans")
+        if (snapshot.requestQueue >= thresholds.requestQueuePause) pauseReasons.push("request_queue")
+        const shouldPause = pauseReasons.length > 0
+        const canResume = (
+            snapshot.readyGroups <= thresholds.readyGroupsResume
+            && snapshot.taskQueue <= thresholds.taskQueueResume
+            && snapshot.activePlans <= thresholds.activePlansResume
+            && snapshot.requestQueue <= thresholds.requestQueueResume
+        )
+        let throttled = !!state.throttled
+        let reason = state.reason || null
+        if (throttled) {
+            if (canResume) {
+                throttled = false
+                reason = null
+            }
+        } else if (shouldPause) {
+            throttled = true
+            reason = pauseReasons.join(",")
+        }
+        const changed = throttled !== !!state.throttled || reason !== (state.reason || null)
+        this._htmlDiscoveryBackpressure = { throttled, reason }
+        if (changed) {
+            this._appendRuntimeEvent({
+                type: "dast_html_discovery_backpressure",
+                phase: "html_discovery",
+                throttled,
+                reason: reason || null,
+                thresholds,
+                snapshot,
+                budget: this._normalizeHtmlLinkDiscoveryBudget(this.settings?.htmlLinkDiscoveryBudget),
+                remainingBudget: this._remainingHtmlLinkDiscoveryBudget(),
+                admissionBudget: this._remainingHtmlLinkDiscoveryAdmissionBudget()
+            })
+        }
+        return {
+            throttled,
+            reason,
+            thresholds,
+            snapshot
+        }
+    }
+
+    _queueHtmlDiscoveredUrl(url, parentUrl = null) {
+        if (!url) return false
+        if (!Array.isArray(this._pendingHtmlDiscoveryUrls)) this._pendingHtmlDiscoveryUrls = []
+        if (!(this._pendingHtmlDiscoverySet instanceof Set)) this._pendingHtmlDiscoverySet = new Set()
+        if (this._htmlDiscoverySeededUrls?.has(url) || this._pendingHtmlDiscoverySet.has(url)) return false
+        this._pendingHtmlDiscoveryUrls.push({
+            url,
+            parentUrl: parentUrl || null
+        })
+        this._pendingHtmlDiscoverySet.add(url)
+        return true
+    }
+
+    _resolveHtmlDiscoverySeedBatchSize() {
+        return Math.max(2, Math.min(HTML_DISCOVERY_SEED_BATCH_SIZE, Math.max(1, Number(this.planningConcurrency || this.concurrency || 1)) * 2))
+    }
+
+    _drainPendingHtmlDiscoveryQueue() {
+        if (!this.isRunning) return 0
+        if (!this._isHtmlLinkDiscoveryEnabled()) return 0
+        if (!Array.isArray(this._pendingHtmlDiscoveryUrls) || !this._pendingHtmlDiscoveryUrls.length) return 0
+        const pressure = this._evaluateHtmlDiscoveryBackpressure()
+        if (pressure.throttled) return 0
+
+        const maxSeed = Math.min(
+            this._remainingHtmlLinkDiscoveryBudget(),
+            this._resolveHtmlDiscoverySeedBatchSize(),
+            this._pendingHtmlDiscoveryUrls.length
+        )
+        if (maxSeed <= 0) return 0
+
+        let seeded = 0
+        const samples = []
+        while (this._pendingHtmlDiscoveryUrls.length && seeded < maxSeed && this.isRunning) {
+            const next = this._pendingHtmlDiscoveryUrls.shift()
+            if (!next?.url) continue
+            this._pendingHtmlDiscoverySet?.delete(next.url)
+            if (this._htmlDiscoverySeededUrls?.has(next.url)) continue
+            try {
+                const parsed = new URL(next.url)
+                const raw = `GET ${next.url} HTTP/1.1\r\nHost: ${parsed.host}\r\n\r\n`
+                this.enqueue({
+                    raw,
+                    url: next.url,
+                    method: 'GET',
+                    ui_url: next.url,
+                    responseType: 'main_frame',
+                    discoverySource: HTML_LINK_DISCOVERY_SOURCE,
+                    discoveryLabel: HTML_LINK_DISCOVERY_LABEL,
+                    discoveryParentUrl: next.parentUrl || null
+                }, {
+                    url: next.url,
+                    ui_url: next.url,
+                    method: 'GET',
+                    type: 'main_frame',
+                    statusCode: 200
+                })
+                this._htmlDiscoverySeededUrls.add(next.url)
+                seeded += 1
+                if (samples.length < 4) samples.push(next.url)
+            } catch (_) { }
+        }
+
+        if (seeded > 0) {
+            this._appendRuntimeEvent({
+                type: 'dast_html_links_seeded',
+                phase: 'html_discovery',
+                seededCount: seeded,
+                samples,
+                pendingDiscovered: this._pendingHtmlLinkDiscoveryCount(),
+                budget: this._normalizeHtmlLinkDiscoveryBudget(this.settings?.htmlLinkDiscoveryBudget),
+                remainingBudget: this._remainingHtmlLinkDiscoveryBudget()
+            })
+        }
+
+        return seeded
     }
 
     _createPerformanceTelemetry() {
@@ -412,6 +620,14 @@ export class dastEngine {
                 readyGroupsMax: 0,
                 waitMsTotal: 0,
                 waitMsMax: 0
+            },
+            scheduler: {
+                fairnessChecks: 0,
+                fairnessYields: 0,
+                alternativeFamilyHits: 0,
+                alternativeFamilyMisses: 0,
+                fairnessLoadShedBypass: 0,
+                readyFamiliesMax: 0
             },
             execution: {
                 tasksCompleted: 0,
@@ -455,6 +671,9 @@ export class dastEngine {
     }
 
     _taskFamilyKey(task = null) {
+        if (task && typeof task === "object" && task._familyKey) {
+            return task._familyKey
+        }
         const module = task?.module || null
         const moduleId = String(task?.moduleId || module?.id || task?.moduleName || "").toLowerCase()
         const taxonomy = this._moduleTaxonomy(module)
@@ -464,27 +683,33 @@ export class dastEngine {
             ? taxonomy.tags.map((value) => String(value || "").toLowerCase())
             : []
         const runtimeMode = this._moduleRuntimeMode(module)
-        if (runtimeMode === "spa" || moduleId.startsWith("spa_") || tags.includes("spa")) return "spa"
-        if (moduleId.includes("graphql") || vulnId.includes("graphql") || tags.includes("graphql")) return "graphql"
-        if (moduleId.includes("jwt") || vulnId.includes("jwt") || tags.includes("jwt")) return "jwt"
-        if (moduleId.includes("request_smuggling") || vulnId.includes("request_smuggling")) return "smuggling"
-        if (moduleId.includes("host_header") || vulnId.includes("host_header")) return "host"
-        if (moduleId.includes("cors") || vulnId.includes("cors") || tags.includes("cors")) return "cors"
-        if (moduleId.includes("ssrf") || vulnId.includes("ssrf") || category === "ssrf" || tags.includes("ssrf")) return "ssrf"
-        if (moduleId.includes("api_testing") || tags.includes("api")) return "api"
-        if (moduleId.includes("dom_based") || moduleId.includes("dom_") || vulnId.includes("dom_") || tags.includes("dom")) return "dom"
-        if (moduleId.includes("deserial") || vulnId.includes("deserial")) return "deserialization"
-        if (moduleId.includes("xss") || vulnId.includes("xss") || category === "xss" || tags.includes("xss")) return "xss"
-        if (moduleId.includes("sql") || moduleId.includes("sqli") || moduleId.includes("bsql") || vulnId.includes("sql") || vulnId.includes("injection")) return "sqli"
+        let family = moduleId || "unknown"
+        if (runtimeMode === "spa" || moduleId.startsWith("spa_") || tags.includes("spa")) family = "spa"
+        else if (moduleId.includes("graphql") || vulnId.includes("graphql") || tags.includes("graphql")) family = "graphql"
+        else if (moduleId.includes("jwt") || vulnId.includes("jwt") || tags.includes("jwt")) family = "jwt"
+        else if (moduleId.includes("request_smuggling") || vulnId.includes("request_smuggling")) family = "smuggling"
+        else if (moduleId.includes("host_header") || vulnId.includes("host_header")) family = "host"
+        else if (moduleId.includes("cors") || vulnId.includes("cors") || tags.includes("cors")) family = "cors"
+        else if (moduleId.includes("ssrf") || vulnId.includes("ssrf") || category === "ssrf" || tags.includes("ssrf")) family = "ssrf"
+        else if (moduleId.includes("api_testing") || tags.includes("api")) family = "api"
+        else if (moduleId.includes("dom_based") || moduleId.includes("dom_") || vulnId.includes("dom_") || tags.includes("dom")) family = "dom"
+        else if (moduleId.includes("deserial") || vulnId.includes("deserial")) family = "deserialization"
+        else if (moduleId.includes("xss") || vulnId.includes("xss") || category === "xss" || tags.includes("xss")) family = "xss"
+        else if (moduleId.includes("sql") || moduleId.includes("sqli") || moduleId.includes("bsql") || vulnId.includes("sql") || vulnId.includes("injection")) family = "sqli"
         if (typeof task?.module?._selectorFamily === "function") {
             try {
-                const family = String(task.module._selectorFamily(task?.attack?.action || null) || "").trim().toLowerCase()
-                if (family && family !== "unknown") return family
+                const selectorFamily = String(task.module._selectorFamily(task?.attack?.action || null) || "").trim().toLowerCase()
+                if (selectorFamily && selectorFamily !== "unknown") {
+                    family = selectorFamily
+                }
             } catch (_) {
                 // fall through
             }
         }
-        return moduleId || "unknown"
+        if (task && typeof task === "object") {
+            task._familyKey = family || "unknown"
+        }
+        return family || "unknown"
     }
 
     _boundedMapSet(map, key, value, limit = 256) {
@@ -519,38 +744,100 @@ export class dastEngine {
         return 48
     }
 
-    _hasRunnableAlternativeFamily(excludedFamily, currentGroupKey = null) {
+    _bumpReadyFamilyCount(family, delta = 0) {
+        const key = String(family || "unknown")
+        if (!key || !delta) return
+        if (!this._taskReadyFamilyCounts) this._taskReadyFamilyCounts = new Map()
+        const nextValue = Number(this._taskReadyFamilyCounts.get(key) || 0) + Number(delta || 0)
+        if (nextValue <= 0) {
+            this._taskReadyFamilyCounts.delete(key)
+        } else {
+            this._taskReadyFamilyCounts.set(key, nextValue)
+        }
+        const scheduler = this._performanceTelemetry?.scheduler
+        if (scheduler) {
+            scheduler.readyFamiliesMax = Math.max(scheduler.readyFamiliesMax || 0, this._taskReadyFamilyCounts.size)
+        }
+    }
+
+    _resolveReadyGroupFamily(groupKey) {
+        if (!groupKey) return null
+        const queue = this._taskQueueGroups?.get(groupKey)
+        if (!Array.isArray(queue) || !queue.length) return null
+        const task = queue[0]
+        if (!task) return null
+        return this._taskFamilyKey(task)
+    }
+
+    _trackReadyGroupFamily(groupKey) {
+        if (!groupKey) return
+        if (!this._taskReadyGroupFamily) this._taskReadyGroupFamily = new Map()
+        const nextFamily = this._resolveReadyGroupFamily(groupKey)
+        const previousFamily = this._taskReadyGroupFamily.get(groupKey) || null
+        if (previousFamily === nextFamily) return
+        if (previousFamily) {
+            this._bumpReadyFamilyCount(previousFamily, -1)
+            this._taskReadyGroupFamily.delete(groupKey)
+        }
+        if (!nextFamily) return
+        this._taskReadyGroupFamily.set(groupKey, nextFamily)
+        this._bumpReadyFamilyCount(nextFamily, 1)
+    }
+
+    _untrackReadyGroupFamily(groupKey) {
+        if (!groupKey || !this._taskReadyGroupFamily?.has(groupKey)) return
+        const family = this._taskReadyGroupFamily.get(groupKey)
+        this._taskReadyGroupFamily.delete(groupKey)
+        this._bumpReadyFamilyCount(family, -1)
+    }
+
+    _hasRunnableAlternativeFamily(excludedFamily) {
         const targetFamily = String(excludedFamily || "unknown")
-        const readyGroups = Array.isArray(this._taskReadyGroups) ? this._taskReadyGroups : []
-        for (const groupKey of readyGroups) {
-            if (!groupKey || groupKey === currentGroupKey) continue
-            const queue = this._taskQueueGroups.get(groupKey)
-            if (!Array.isArray(queue) || !queue.length) continue
-            const task = queue[0]
-            if (!task) continue
-            if (!task.moduleAsync && task.moduleId && this._moduleLocks.has(task.moduleId)) continue
-            const planLockKey = task._runtimePlanLockKey || this._resolvePlanLockKey(task)
-            if (planLockKey && this._planLocks.has(planLockKey)) continue
-            if (!this._activePlans.has(task.planId)) continue
-            const family = this._taskFamilyKey(task)
-            if (family !== targetFamily) return true
+        const counts = this._taskReadyFamilyCounts instanceof Map ? this._taskReadyFamilyCounts : null
+        if (!counts || !counts.size) return false
+        for (const [family, count] of counts.entries()) {
+            if (family !== targetFamily && Number(count || 0) > 0) return true
         }
         return false
     }
 
-    _shouldYieldForFamilyFairness(task, groupKey = null) {
+    _shouldYieldForFamilyFairness(task) {
         if (!task) return false
+        const scheduler = this._performanceTelemetry?.scheduler
+        if (scheduler) {
+            scheduler.fairnessChecks += 1
+        }
+        if ((this._taskReadyGroups?.length || 0) >= TASK_FAMILY_FAIRNESS_LOAD_SHED_THRESHOLD) {
+            if (scheduler) {
+                scheduler.fairnessLoadShedBypass += 1
+            }
+            return false
+        }
         const family = this._taskFamilyKey(task)
-        const hasAlternativeFamily = this._hasRunnableAlternativeFamily(family, groupKey)
-        if (!hasAlternativeFamily) return false
+        const hasAlternativeFamily = this._hasRunnableAlternativeFamily(family)
+        if (!hasAlternativeFamily) {
+            if (scheduler) {
+                scheduler.alternativeFamilyMisses += 1
+            }
+            return false
+        }
+        if (scheduler) {
+            scheduler.alternativeFamilyHits += 1
+        }
 
         const activeCount = Number(this._familyActiveCounts?.get(family) || 0)
         if (activeCount >= this._familyConcurrencyQuota(family)) {
+            if (scheduler) {
+                scheduler.fairnessYields += 1
+            }
             return true
         }
 
         const state = this._familyFairnessState || {}
         if (state.lastDequeuedFamily === family && Number(state.consecutiveDequeues || 0) >= this._familyBurstQuota(family)) {
+            if (scheduler) {
+                scheduler.fairnessYields += 1
+            }
             return true
         }
 
@@ -715,7 +1002,7 @@ export class dastEngine {
         if (moduleBucket) {
             moduleBucket.planned += 1
         }
-        const familyBucket = this._perfFamilyBucket(this._taskFamilyKey(task))
+        const familyBucket = this._perfFamilyBucket(task._familyKey || this._taskFamilyKey(task))
         if (familyBucket) {
             familyBucket.planned += 1
         }
@@ -749,7 +1036,7 @@ export class dastEngine {
             moduleBucket.executionMsTotal += Math.max(0, Number(durationMs || 0))
             moduleBucket.executionMsMax = Math.max(moduleBucket.executionMsMax || 0, Math.max(0, Number(durationMs || 0)))
         }
-        const familyBucket = this._perfFamilyBucket(this._taskFamilyKey(task))
+        const familyBucket = this._perfFamilyBucket(task?._familyKey || this._taskFamilyKey(task))
         if (familyBucket) {
             familyBucket.completed += 1
             familyBucket.executionMsTotal += Math.max(0, Number(durationMs || 0))
@@ -1218,10 +1505,9 @@ export class dastEngine {
             host: null,
             tabId: null,
             startedAt: new Date().toISOString(),
-            settings: {
-                scanStrategy: strategyName,
-                scanControls: this._scanControlsSummary()
-            }
+            settings: this._buildExportableScanSettings({
+                scanStrategy: strategyName
+            })
         })
         envelope.version = envelope.version || "1.0"
         delete envelope.items
@@ -1399,20 +1685,28 @@ export class dastEngine {
         const cachedOriginal = originalCacheKey ? this._resolvedOriginalCache?.get(originalCacheKey) : null
         if (cachedOriginal) {
             this._recordBaselineResolution("captured")
-            return cloneValue(cachedOriginal)
+            const nextOriginal = cloneValue(cachedOriginal)
+            this._applyRequestDiscoveryMetadata(nextOriginal, rawMeta)
+            return nextOriginal
         }
         const capturedOriginal = this._buildCapturedOriginalFromMeta(schema, rawMeta, modules)
         if (capturedOriginal) {
+            this._applyRequestDiscoveryMetadata(capturedOriginal, rawMeta)
             this._recordBaselineResolution("captured")
             if (originalCacheKey) {
-                this._boundedMapSet(this._resolvedOriginalCache, originalCacheKey, cloneValue(capturedOriginal), 256)
+                const cacheOriginal = cloneValue(capturedOriginal)
+                this._stripRequestDiscoveryMetadata(cacheOriginal)
+                this._boundedMapSet(this._resolvedOriginalCache, originalCacheKey, cacheOriginal, 256)
             }
             return capturedOriginal
         }
         this._recordBaselineResolution("replay")
         const original = await this.executeOriginal(schema)
+        this._applyRequestDiscoveryMetadata(original, rawMeta)
         if (originalCacheKey && original) {
-            this._boundedMapSet(this._resolvedOriginalCache, originalCacheKey, cloneValue(original), 256)
+            const cacheOriginal = cloneValue(original)
+            this._stripRequestDiscoveryMetadata(cacheOriginal)
+            this._boundedMapSet(this._resolvedOriginalCache, originalCacheKey, cacheOriginal, 256)
         }
         return original
     }
@@ -1496,8 +1790,10 @@ export class dastEngine {
         if (blacklist.includes(response.type) && !hasParams && !isStateChanging) {
             allowed = false
         } else {
-            if (!url.host.includes(this.host) &&
-                this.domains.findIndex(i => url.host.includes(i)) < 0) {
+            const allowedHost = String(this.host || '')
+            const allowedDomains = Array.isArray(this.domains) ? this.domains : []
+            if (!url.host.includes(allowedHost) &&
+                allowedDomains.findIndex(i => url.host.includes(i)) < 0) {
                 allowed = false
             }
         }
@@ -1528,6 +1824,7 @@ export class dastEngine {
                     }
                 }
             })
+            this._seedHtmlDiscoveredRequests(result.requestRecord?.original || result.original || null)
         }
 
         if (data) {
@@ -1622,6 +1919,34 @@ export class dastEngine {
         return entry
     }
 
+    _applyRequestDiscoveryMetadata(original, rawMeta = {}) {
+        if (!original || typeof original !== 'object') return original
+        const request = original.request && typeof original.request === 'object'
+            ? original.request
+            : null
+        if (!request) return original
+        const discoverySource = String(rawMeta?.discoverySource || '').trim().toLowerCase()
+        if (!discoverySource) return original
+        request.discoverySource = discoverySource
+        const discoveryLabel = String(rawMeta?.discoveryLabel || '').trim()
+        if (discoveryLabel) request.discoveryLabel = discoveryLabel
+        const discoveryParentUrl = String(rawMeta?.discoveryParentUrl || '').trim()
+        if (discoveryParentUrl) request.discoveryParentUrl = discoveryParentUrl
+        return original
+    }
+
+    _stripRequestDiscoveryMetadata(original) {
+        if (!original || typeof original !== 'object') return original
+        const request = original.request && typeof original.request === 'object'
+            ? original.request
+            : null
+        if (!request) return original
+        delete request.discoverySource
+        delete request.discoveryLabel
+        delete request.discoveryParentUrl
+        return original
+    }
+
     _compactRequestForStorage(entry, { includeRaw = true, includeHeaders = true, includeBody = true } = {}) {
         const request = this._extractRequestShape(entry)
         if (!request || typeof request !== 'object') return null
@@ -1633,6 +1958,9 @@ export class dastEngine {
         if (request.url) compact.url = request.url
         if (request.ui_url) compact.ui_url = request.ui_url
         if (request.method) compact.method = request.method
+        if (request.discoverySource) compact.discoverySource = request.discoverySource
+        if (request.discoveryLabel) compact.discoveryLabel = request.discoveryLabel
+        if (request.discoveryParentUrl) compact.discoveryParentUrl = request.discoveryParentUrl
         if (includeRaw && typeof request.raw === 'string' && request.raw.length) {
             compact.raw = request.raw
         }
@@ -1662,6 +1990,9 @@ export class dastEngine {
         if (response.statusMessage) compact.statusMessage = response.statusMessage
         if (response.statusText) compact.statusText = response.statusText
         if (response.statusLine) compact.statusLine = response.statusLine
+        if (response.errorName) compact.errorName = response.errorName
+        if (response.errorMessage) compact.errorMessage = response.errorMessage
+        if (response.errorCause) compact.errorCause = response.errorCause
         if (response.mimeType) compact.mimeType = response.mimeType
         if (includeHeaders) {
             const headers = this._normalizeHttpHeaders(response.headers)
@@ -1779,6 +2110,12 @@ export class dastEngine {
         if (!Object.prototype.hasOwnProperty.call(settings || {}, 'cveRulepack')) {
             nextSettings.cveRulepack = null
         }
+        if (!Object.prototype.hasOwnProperty.call(settings || {}, 'enableHtmlLinkDiscovery')) {
+            nextSettings.enableHtmlLinkDiscovery = false
+        }
+        if (!Object.prototype.hasOwnProperty.call(settings || {}, 'htmlLinkDiscoveryBudget')) {
+            nextSettings.htmlLinkDiscoveryBudget = DEFAULT_HTML_LINK_DISCOVERY_BUDGET
+        }
         this.settings = nextSettings
         this.requestTimeoutMs = this._resolveTimeoutMs(
             this.settings?.requestTimeoutMs,
@@ -1819,11 +2156,13 @@ export class dastEngine {
             ),
             { emitWarnings: true }
         )
-        this.scanResult.settings = Object.assign({}, this.scanResult.settings, {
+        this._syncScanSettings({
             scanStrategy: this.strategyConfig.strategy,
             scanControls: this._scanControlsSummary(),
             runCve: runCveEnabled,
             dastScanPolicy,
+            enableHtmlLinkDiscovery: this._isHtmlLinkDiscoveryEnabled(),
+            htmlLinkDiscoveryBudget: this._normalizeHtmlLinkDiscoveryBudget(this.settings?.htmlLinkDiscoveryBudget),
             requestTimeoutMs: this.requestTimeoutMs,
             originalRequestTimeoutMs: this.originalRequestTimeoutMs,
             planningConcurrency: this.planningConcurrency
@@ -1873,6 +2212,7 @@ export class dastEngine {
             } else {
                 await this.runParallel()
             }
+            this._drainPendingHtmlDiscoveryQueue()
         } finally {
             this.inProgress = false
             this._notifyIdleResolvers()
@@ -2714,6 +3054,7 @@ export class dastEngine {
         if (this._taskReadyGroupSet?.has(groupKey)) return
         this._insertReadyGroup(groupKey)
         this._taskReadyGroupSet.add(groupKey)
+        this._trackReadyGroupFamily(groupKey)
         const queue = this._performanceTelemetry?.queue
         if (queue) {
             queue.readyGroupsMax = Math.max(queue.readyGroupsMax || 0, this._taskReadyGroups.length)
@@ -2725,6 +3066,7 @@ export class dastEngine {
         const groupKey = this._resolvePlanLockKey(task) || task.planId || task.id
         task._taskGroupKey = groupKey
         task._runtimePlanLockKey = groupKey
+        task._familyKey = task._familyKey || this._taskFamilyKey(task)
         task.priority = this._taskPriority(task)
         const existing = this._taskQueueGroups.get(groupKey) || []
         existing.push(task)
@@ -2926,6 +3268,7 @@ export class dastEngine {
         for (let i = 0; i < attempts; i++) {
             const groupKey = this._taskReadyGroups.shift()
             this._taskReadyGroupSet.delete(groupKey)
+            this._untrackReadyGroupFamily(groupKey)
             const queue = this._taskQueueGroups.get(groupKey)
             if (!Array.isArray(queue) || !queue.length) {
                 this._taskQueueGroups.delete(groupKey)
@@ -2952,7 +3295,7 @@ export class dastEngine {
                 this._markTaskGroupReady(groupKey)
                 continue
             }
-            if (!ignoreFairness && this._shouldYieldForFamilyFairness(task, groupKey)) {
+            if (!ignoreFairness && this._shouldYieldForFamilyFairness(task)) {
                 this._markTaskGroupReady(groupKey)
                 continue
             }
@@ -3169,7 +3512,7 @@ export class dastEngine {
         this.scanStats = this._createStrategyStats(cfg.strategy)
         this._strategyFindingKeys = new Set()
         if (this.scanResult) {
-            this.scanResult.settings = Object.assign({}, this.scanResult.settings, { scanStrategy: cfg.strategy })
+            this._syncScanSettings({ scanStrategy: cfg.strategy })
             this._syncScanStats()
         }
     }
@@ -3335,6 +3678,44 @@ export class dastEngine {
         }
     }
 
+    _buildExportableScanSettings(overrides = {}) {
+        const source = (this.settings && typeof this.settings === 'object') ? this.settings : {}
+        const base = {}
+        for (const [key, value] of Object.entries(source)) {
+            if (key === 'rulepack' || key === 'cveRulepack' || key === 'onResultMutation') continue
+            if (typeof value === 'function' || typeof value === 'undefined') continue
+            if (value && typeof value === 'object') {
+                base[key] = cloneValue(value)
+            } else {
+                base[key] = value
+            }
+        }
+        const normalizedPolicy = source?.dastScanPolicy || source?.scanPolicy || 'ACTIVE'
+        return Object.assign({}, base, {
+            scanStrategy: this.strategyConfig?.strategy || source?.scanStrategy || source?.dastScanStrategy || DEFAULT_SCAN_STRATEGY,
+            dastScanStrategy: source?.dastScanStrategy || source?.scanStrategy || this.strategyConfig?.strategy || DEFAULT_SCAN_STRATEGY,
+            safetyProfile: source?.safetyProfile || this.scanControls?.profile || DEFAULT_SCAN_CONTROL_PROFILE,
+            scanControls: this._scanControlsSummary(),
+            runCve: !!source?.runCve,
+            dastScanPolicy: normalizedPolicy,
+            scanPolicy: source?.scanPolicy || normalizedPolicy,
+            policyId: source?.policyId || null,
+            policyName: source?.policyName || null,
+            maxRequestsPerSecond: Number(this.maxRequestsPerSecond || source?.maxRequestsPerSecond || 0) || null,
+            concurrency: Number(this.concurrency || source?.concurrency || 0) || null,
+            planningConcurrency: Number(this.planningConcurrency || source?.planningConcurrency || 0) || null,
+            requestTimeoutMs: Number(this.requestTimeoutMs || source?.requestTimeoutMs || 0) || null,
+            originalRequestTimeoutMs: Number(this.originalRequestTimeoutMs || source?.originalRequestTimeoutMs || 0) || null,
+            hasRulepackSnapshot: !!source?.rulepack,
+            hasCveRulepackSnapshot: !!source?.cveRulepack
+        }, overrides || {})
+    }
+
+    _syncScanSettings(overrides = {}) {
+        if (!this.scanResult || typeof this.scanResult !== 'object') return
+        this.scanResult.settings = this._buildExportableScanSettings(overrides)
+    }
+
     _syncScanControlsToModules() {
         if (!Array.isArray(this.modules)) return
         for (const module of this.modules) {
@@ -3349,9 +3730,7 @@ export class dastEngine {
         this.scanControls = normalized.controls
         this._syncScanControlsToModules()
         if (this.scanResult) {
-            this.scanResult.settings = Object.assign({}, this.scanResult.settings, {
-                scanControls: this._scanControlsSummary()
-            })
+            this._syncScanSettings({ scanControls: this._scanControlsSummary() })
         }
         if (emitWarnings && normalized.warnings.length) {
             for (const warning of normalized.warnings) {
@@ -4227,7 +4606,21 @@ export class dastEngine {
             if (typeof schema.opts.override_headers === 'undefined') {
                 schema.opts.override_headers = true
             }
-            schema.opts.force_dnr = true
+            if (typeof schema.opts.preserve_browser_headers === 'undefined') {
+                schema.opts.preserve_browser_headers = false
+            }
+            if (typeof schema.opts.keepalive === 'undefined') {
+                schema.opts.keepalive = false
+            }
+            if (typeof schema.opts.retry_on_transport_failure === 'undefined') {
+                schema.opts.retry_on_transport_failure = true
+            }
+            if (typeof schema.opts.transport_retry_count === 'undefined') {
+                schema.opts.transport_retry_count = 1
+            }
+            if (typeof schema.opts.transport_retry_delay_ms === 'undefined') {
+                schema.opts.transport_retry_delay_ms = 75
+            }
             schema.opts.log_fingerprint = true
             const requestTimeoutMs = this._resolveRequestTimeoutMs(
                 schema?.opts?.requestTimeoutMs,
@@ -4374,6 +4767,106 @@ export class dastEngine {
         this._recentHtmlGetUrls(baseUrl, 3).forEach(add)
 
         return urls.slice(0, 4)
+    }
+
+    _decodeHtmlDiscoveryValue(value) {
+        return String(value || '')
+            .replace(/&amp;/gi, '&')
+            .replace(/&quot;/gi, '"')
+            .replace(/&#0*39;/gi, "'")
+            .replace(/&#x0*27;/gi, "'")
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+    }
+
+    _isSeedableHtmlLinkUrl(candidate, baseUrl) {
+        const raw = String(candidate || '').trim()
+        if (!raw) return null
+        if (/^(javascript|mailto|tel|data|blob):/i.test(raw)) return null
+        if (raw === '#') return null
+        const resolved = this._resolveSameOriginUrl(this._decodeHtmlDiscoveryValue(raw), baseUrl)
+        if (!resolved) return null
+        try {
+            const parsed = new URL(resolved)
+            if (STATIC_ASSET_LINK_REGEX.test(`${parsed.pathname}${parsed.search}`)) {
+                return null
+            }
+            return parsed.toString()
+        } catch (_) {
+            return null
+        }
+    }
+
+    _extractHtmlDiscoveredUrls(entry, max = Number.POSITIVE_INFINITY) {
+        if (!this._isHtmlLikeResponse(entry) || max <= 0) return []
+        const request = this._extractRequestShape(entry)
+        const response = this._extractResponseShape(entry)
+        const baseUrl = request?.ui_url || request?.url || null
+        const body = typeof response?.body === 'string' ? response.body : ''
+        if (!baseUrl || !body) return []
+
+        const urls = []
+        const seen = new Set()
+        const add = (candidate) => {
+            const resolved = this._isSeedableHtmlLinkUrl(candidate, baseUrl)
+            if (!resolved || seen.has(resolved)) return
+            seen.add(resolved)
+            urls.push(resolved)
+        }
+
+        const attrRegex = /\b(?:href|src|action|data-href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'<>`]+))/ig
+        let match = null
+        while ((match = attrRegex.exec(body)) && urls.length < max) {
+            add(match[1] || match[2] || match[3] || '')
+        }
+
+        return urls
+    }
+
+    _seedHtmlDiscoveredRequests(entry) {
+        if (!this.isRunning) return 0
+        if (!this._isHtmlLinkDiscoveryEnabled()) return 0
+        const request = this._extractRequestShape(entry)
+        const baseUrl = request?.ui_url || request?.url || null
+        if (!baseUrl) return 0
+        const method = String(request?.method || 'GET').toUpperCase()
+        if (method !== 'GET') return 0
+        const admissionBudget = this._remainingHtmlLinkDiscoveryAdmissionBudget()
+        if (admissionBudget <= 0) {
+            this._drainPendingHtmlDiscoveryQueue()
+            return 0
+        }
+
+        const discoveredUrls = this._extractHtmlDiscoveredUrls(entry, admissionBudget)
+        if (!discoveredUrls.length) {
+            this._drainPendingHtmlDiscoveryQueue()
+            return 0
+        }
+
+        let queued = 0
+        const samples = []
+        discoveredUrls.forEach((url) => {
+            if (!this._queueHtmlDiscoveredUrl(url, baseUrl)) return
+            queued += 1
+            if (samples.length < 4) samples.push(url)
+        })
+
+        const seeded = this._drainPendingHtmlDiscoveryQueue()
+        if (queued > 0) {
+            this._appendRuntimeEvent({
+                type: 'dast_html_links_buffered',
+                phase: 'html_discovery',
+                url: baseUrl,
+                queuedCount: queued,
+                seededCount: seeded,
+                samples,
+                pendingDiscovered: this._pendingHtmlLinkDiscoveryCount(),
+                budget: this._normalizeHtmlLinkDiscoveryBudget(this.settings?.htmlLinkDiscoveryBudget),
+                remainingBudget: this._remainingHtmlLinkDiscoveryBudget()
+            })
+        }
+
+        return seeded
     }
 
     async _runTemplateRenderFollowup(task, executed, context = null) {

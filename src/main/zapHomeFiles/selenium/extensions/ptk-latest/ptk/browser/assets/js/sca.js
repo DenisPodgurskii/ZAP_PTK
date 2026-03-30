@@ -92,8 +92,15 @@ jQuery(function () {
 
     $(document).on("click", ".stop_scan_runtime", function () {
         controller.stopBackgroundScan().then(function (result) {
-            changeView(result)
-            bindScanResult(result)
+            const normalizedResult = Object.assign({ isScanRunning: false }, result || {})
+            changeView(normalizedResult)
+            if (Array.isArray(normalizedResult.scanResult?.findings) && normalizedResult.scanResult.findings.length > 0) {
+                bindScanResult(normalizedResult)
+            } else {
+                cleanScanResult()
+                $('.generate_report').hide()
+                $('.save_scan').hide()
+            }
         })
         return false
     })
@@ -336,6 +343,8 @@ jQuery(function () {
         else if (e.selectionStart) { e.selectionStart = start; e.selectionEnd = end; }
     }
 
+    showUnknownForm()
+
     controller.init().then(function (result) {
         changeView(result)
         if (Array.isArray(result.scanResult?.findings) && result.scanResult.findings.length > 0) {
@@ -343,6 +352,8 @@ jQuery(function () {
         } else {
             //bindModules(result)
         }
+    }).catch(() => {
+        showWelcomeForm()
     })
     // $('.ui.accordion').accordion({
     //     onOpen: function () {
@@ -728,11 +739,51 @@ function filterByRequestId(requestId) {
 
 }
 
+function hasRenderableScaData(scanResult) {
+    return Array.isArray(scanResult?.findings) && scanResult.findings.length > 0
+}
+
+function resolveScaViewState(result) {
+    if (result?.viewState === 'running' || result?.viewState === 'idle_empty' || result?.viewState === 'idle_with_data') {
+        return result.viewState
+    }
+    if (result?.isScanRunning) {
+        return 'running'
+    }
+    if (hasRenderableScaData(result?.scanResult)) {
+        return 'idle_with_data'
+    }
+    return 'idle_empty'
+}
+
+function syncScaTopControls(viewState) {
+    const isRunning = viewState === 'running'
+    const hasData = viewState === 'idle_with_data'
+    const isIdleEmpty = viewState === 'idle_empty'
+    $('.generate_report').toggle(hasData)
+    $('.save_scan').hide()
+    $('.reset').closest('.icon.button').toggle(hasData)
+    $('.import_export').toggle(isIdleEmpty || hasData)
+    $('.cloud_download_scans').hide()
+    $('#run_scan_bg_control').toggle(isIdleEmpty || hasData)
+    $('#stop_scan_bg_control').toggle(isRunning)
+    $('.scan_info').toggle(isRunning)
+}
+
+function showUnknownForm() {
+    $('#init_loader').addClass('active')
+    setScaPageLoader(true)
+    $('#main').hide()
+    $('#welcome_message').hide()
+    $('#scanning_url').text("")
+    syncScaTopControls('unknown')
+}
+
 function showWelcomeForm() {
     setScaPageLoader(false)
     $('#main').hide()
     $('#welcome_message').show()
-    $('#run_scan_bg_control').show()
+    syncScaTopControls('idle_empty')
 }
 
 function hideWelcomeForm() {
@@ -743,9 +794,8 @@ function hideWelcomeForm() {
 function showRunningForm(result) {
     setScaPageLoader(false)
     $('#main').show()
-    $('#scanning_url').text(result.scanResult.host)
-    $('.scan_info').show()
-    $('#stop_scan_bg_control').show()
+    $('#scanning_url').text(result?.scanResult?.host || "")
+    syncScaTopControls('running')
 }
 
 function hideRunningForm() {
@@ -757,7 +807,7 @@ function hideRunningForm() {
 function showScanForm(result) {
     setScaPageLoader(false)
     $('#main').show()
-    $('#run_scan_bg_control').show()
+    syncScaTopControls('idle_with_data')
 }
 
 function hideScanForm() {
@@ -773,12 +823,13 @@ function setScaPageLoader(show) {
 
 function changeView(result) {
     $('#init_loader').removeClass('active')
-    if (result.isScanRunning) {
+    const viewState = resolveScaViewState(result)
+    if (viewState === 'running') {
         hideWelcomeForm()
         hideScanForm()
         showRunningForm(result)
     }
-    else if (Array.isArray(result.scanResult?.findings) && result.scanResult.findings.length > 0) {
+    else if (viewState === 'idle_with_data') {
         hideWelcomeForm()
         hideRunningForm(result)
         showScanForm()
@@ -816,8 +867,6 @@ function bindScanResult(result) {
         }
     }
     $("#progress_message").hide()
-    $('.generate_report').show()
-    $('.save_scan').show()
     hideWelcomeForm()
     renderScaComponentList()
     renderScaFindings()

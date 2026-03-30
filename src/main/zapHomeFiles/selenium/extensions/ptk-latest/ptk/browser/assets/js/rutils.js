@@ -300,6 +300,11 @@ $("#attack_details_dialog_wrapper").prepend(
                 </div>
 
                 <div id="iast_context_header" class="ui mini message" style="display:none; margin-bottom: 6px;"></div>
+                <div id="finding_loading_section" class="ui placeholder segment" style="min-height: 65%; margin-bottom: 4px; display: none;">
+                    <div class="ui active inverted dimmer" style="display:flex;">
+                        <div class="ui text loader">Loading finding details...</div>
+                    </div>
+                </div>
                 <div class="fields" id="finding_source_sink_section" style="min-height: 65%; margin-bottom: 4px; display: none;">
                     <div class="eight wide field" id="finding_source_column" style="padding-right: 1px; overflow:auto">
                         <div class="ui message message-code" style="height:100%;">
@@ -393,6 +398,7 @@ function clearElementText(id) {
 }
 
 function resetFindingModal() {
+    toggleSection("#finding_loading_section", false);
     toggleSection("#finding_http_section", false);
     toggleSection("#finding_source_sink_section", false);
     toggleSection("#finding_trace_segment", false);
@@ -410,15 +416,26 @@ function resetFindingModal() {
     if (sinkHeaderLabel) sinkHeaderLabel.textContent = 'Sink';
     $("#source_link").empty();
     $("#sink_link").empty();
+    $("#source_link").closest('.description').show();
+    $("#sink_link").closest('.description').show();
+    $("#source_start").closest('ul.list').show();
+    $("#sink_start").closest('ul.list').show();
     $("#source_extra_meta").empty().hide();
     $("#sink_extra_meta").empty().hide();
     $("#source_details_code").text("");
     $("#sink_details_code").text("");
+    $("#source_details").show();
+    $("#sink_details").show();
     $("#raw_request").val("");
     $("#raw_response").val("");
     $("#raw_response_headers").val("");
     $("#attack_target").val("");
     $("#taint_trace").empty();
+    const headerEl = document.getElementById('iast_context_header');
+    if (headerEl) {
+        headerEl.innerHTML = '';
+        headerEl.style.display = 'none';
+    }
     destroyRequestEditor();
     setFindingMetadata("", "", {}, {});
 }
@@ -475,6 +492,25 @@ function showFindingModal(tab = "finding-description") {
     if (findingModal.length) {
         findingModal.modal("show");
     }
+}
+
+export function showFindingDetailsLoading(message = "Loading finding details...") {
+    resetFindingModal();
+    const loadingEl = document.querySelector("#finding_loading_section .loader");
+    if (loadingEl) {
+        loadingEl.textContent = String(message || "Loading finding details...");
+    }
+    toggleSection("#finding_loading_section", true);
+    setFindingModalTitle('<i class="notched circle loading icon"></i> Loading details');
+    setFindingMetadata(`<p>${String(message || "Loading finding details...")}</p>`, "", {}, {});
+    showFindingModal("finding-description");
+}
+
+export function showFindingDetailsMessage(message = "Finding details are not available anymore.") {
+    resetFindingModal();
+    setFindingModalTitle("Finding details");
+    setFindingMetadata(`<p>${String(message || "Finding details are not available anymore.")}</p>`, "", {}, {});
+    showFindingModal("finding-description");
 }
 
 let requestEditor;
