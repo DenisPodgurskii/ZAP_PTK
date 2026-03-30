@@ -13,6 +13,9 @@
         "__next_f\\.push\\(",
         "react-server-dom-webpack"
       ],
+      "url": [
+        "/rce/react2shell\\;confidence:100"
+      ],
       "js": {
         "__next_f": "^true$\\;confidence:90"
       },

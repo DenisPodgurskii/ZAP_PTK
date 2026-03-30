@@ -1488,10 +1488,26 @@ jQuery(function () {
   });
 
   $(document).on("click", ".stop_scan_runtime", function () {
+    const $stopButton = $("#stop_scan_bg_control");
+    $stopButton.addClass("loading disabled");
+    $("#progress_message").show();
+    $("#progress_attack_name").text("Stopping runtime scan...");
     controller.stopBackgroundScan().then(function (result) {
-      changeView(result);
-      bindScanResult(result);
-    }).catch(e => e)
+      const normalizedResult = Object.assign({ isScanRunning: false }, result || {});
+      changeView(normalizedResult);
+      if (hasRenderableSastData(normalizedResult.scanResult)) {
+        bindScanResult(normalizedResult);
+      } else {
+        resetSastLiveState(normalizedResult);
+        $(".generate_report").hide();
+        $(".save_scan").hide();
+        ensureSastDefaultModulesLoaded({ force: true }).catch(() => {});
+      }
+    }).catch(function (err) {
+      showSastResultModal("Error", err?.message || "Runtime scan could not be stopped.");
+    }).finally(function () {
+      $stopButton.removeClass("loading disabled");
+    });
     return false;
   });
 
@@ -1848,11 +1864,14 @@ jQuery(function () {
     }
   };
 
+  showUnknownForm();
+
   controller.init().then(function (result) {
+    const viewState = resolveSastViewState(result);
     const initCount = Array.isArray(result?.scanResult?.findings) ? result.scanResult.findings.length : 0;
     applySastPortalPolicyState(result);
     changeView(result);
-    if (result.isScanRunning) {
+    if (viewState === "running") {
       showRunningForm(result);
       if (hasRenderableSastData(result.scanResult)) {
         bindScanResult(result);
@@ -1860,20 +1879,63 @@ jQuery(function () {
       if (result.progress) {
         scheduleSastProgressUpdate({ message: "Scan running", progress: result.progress });
       }
-    } else if (hasRenderableSastData(result.scanResult)) {
+    } else if (viewState === "idle_with_data") {
       bindScanResult(result);
     } else {
       showWelcomeForm();
       ensureSastDefaultModulesLoaded().catch(() => {});
     }
-  }).catch(() => { })
+  }).catch(() => {
+    showWelcomeForm();
+  })
 });
+
+function resolveSastViewState(result) {
+  if (result?.viewState === "running" || result?.viewState === "idle_empty" || result?.viewState === "idle_with_data") {
+    return result.viewState;
+  }
+  if (result?.isScanRunning) {
+    return "running";
+  }
+  if (hasRenderableSastData(result?.scanResult)) {
+    return "idle_with_data";
+  }
+  return "idle_empty";
+}
+
+function syncSastTopControls(viewState) {
+  const isRunning = viewState === "running";
+  const hasData = viewState === "idle_with_data";
+  const isIdleEmpty = viewState === "idle_empty";
+  $(".generate_report").toggle(hasData);
+  if (PORTAL_ACTIONS_VISIBLE && hasData) {
+    $(".save_scan").show();
+  } else {
+    $(".save_scan").hide();
+  }
+  $(".reset").closest(".icon.button").toggle(hasData);
+  $(".import_export").toggle(isIdleEmpty || hasData);
+  $(".cloud_download_scans").hide();
+  $("#run_scan_bg_control").toggle(isIdleEmpty || hasData);
+  $("#stop_scan_bg_control").toggle(isRunning);
+  $(".scan_info").toggle(isRunning);
+}
+
+function showUnknownForm() {
+  $("#init_loader").addClass("active");
+  setSastPageLoader(true);
+  $("#main").hide();
+  $("#welcome_message").hide();
+  $("#scanning_url").text("");
+  syncSastTopControls("unknown");
+  resetSastProgressRender({ hide: true });
+}
 
 function showWelcomeForm() {
   setSastPageLoader(false);
   $("#main").hide();
   $("#welcome_message").show();
-  $("#run_scan_bg_control").show();
+  syncSastTopControls("idle_empty");
 }
 
 function hideWelcomeForm() {
@@ -1884,9 +1946,8 @@ function hideWelcomeForm() {
 function showRunningForm(result) {
   setSastPageLoader(false);
   $("#main").show();
-  $("#scanning_url").text(result.scanResult.host);
-  $(".scan_info").show();
-  $("#stop_scan_bg_control").show();
+  $("#scanning_url").text(result?.scanResult?.host || "");
+  syncSastTopControls("running");
 }
 
 function hideRunningForm() {
@@ -1898,7 +1959,7 @@ function hideRunningForm() {
 function showScanForm(result) {
   setSastPageLoader(false);
   $("#main").show();
-  $("#run_scan_bg_control").show();
+  syncSastTopControls("idle_with_data");
 }
 
 function hideScanForm() {
@@ -1913,11 +1974,12 @@ function setSastPageLoader(show) {
 
 function changeView(result) {
   $("#init_loader").removeClass("active");
-  if (result.isScanRunning) {
+  const viewState = resolveSastViewState(result);
+  if (viewState === "running") {
     hideWelcomeForm();
     hideScanForm();
     showRunningForm(result);
-  } else if (hasRenderableSastData(result.scanResult)) {
+  } else if (viewState === "idle_with_data") {
     hideWelcomeForm();
     hideRunningForm(result);
     showScanForm();
@@ -2003,12 +2065,6 @@ function bindScanResult(result) {
   controller._sastIsScanning = scanning;
   if (!scanning) {
     resetSastProgressRender({ hide: true });
-  }
-  $(".generate_report").show();
-  if (PORTAL_ACTIONS_VISIBLE) {
-    $(".save_scan").show();
-  } else {
-    $(".save_scan").hide();
   }
   $("#request_info").html("");
   $("#attacks_info").html("");

@@ -413,9 +413,12 @@ export class ptk_sca {
 
     async msg_init(message) {
         await this.init()
+        const scanResult = this._cloneScanResultForUi({ ensureAnalysis: false })
+        const hasRenderableData = Array.isArray(scanResult?.findings) && scanResult.findings.length > 0
         return Promise.resolve({
-            scanResult: this._cloneScanResultForUi({ ensureAnalysis: false }),
+            scanResult,
             isScanRunning: this.isScanRunning,
+            viewState: this.isScanRunning ? 'running' : (hasRenderableData ? 'idle_with_data' : 'idle_empty'),
             activeTab: worker.ptk_app.proxy.activeTab
         })
     }
@@ -466,9 +469,12 @@ export class ptk_sca {
         return Promise.resolve({ isScanRunning: this.isScanRunning, scanResult: this._cloneScanResultForUi({ ensureAnalysis: false }) })
     }
 
-    msg_stop_bg_scan(message) {
-        this.stopBackgroundScan()
-        return Promise.resolve({ scanResult: this._cloneScanResultForUi({ ensureAnalysis: true }) })
+    async msg_stop_bg_scan(message) {
+        await this.stopBackgroundScan()
+        return Promise.resolve({
+            scanResult: this._cloneScanResultForUi({ ensureAnalysis: true }),
+            isScanRunning: this.isScanRunning
+        })
     }
 
     async msg_get_projects(message) {
@@ -766,7 +772,7 @@ export class ptk_sca {
             .catch(() => { })
     }
 
-    stopBackgroundScan() {
+    async stopBackgroundScan() {
         this.isScanRunning = false
         this.activeTabId = null
         if (this.scanResult) {
@@ -775,7 +781,7 @@ export class ptk_sca {
                 applyScanAnalysis(this.scanResult, { force: true })
             } catch (_) { }
         }
-        this._flushPersistScanResult()
+        await this._flushPersistScanResult()
         this.removeListeners()
     }
 

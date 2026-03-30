@@ -143,8 +143,8 @@ export class ptk_controller_dast {
         return this._send("release_export_scan", { exportId })
     }
 
-    async getRequestSnapshot(requestId, attackId = null) {
-        return this._send("get_request_snapshot", { requestId, attackId })
+    async getRequestSnapshot(requestId, attackId = null, scanId = null) {
+        return this._send("get_request_snapshot", { requestId, attackId, scanId })
     }
 
     async getFindingDetails({ findingId = null, requestId = null, attackId = null, moduleId = null } = {}) {

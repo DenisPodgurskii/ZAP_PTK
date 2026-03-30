@@ -65,11 +65,16 @@ const DAST_SEVERITY_ORDER = {
     info: 4
 }
 const DAST_BUCKET_ORDER = ['critical', 'high', 'medium', 'low', 'info', 'nonvuln']
-const DAST_RESULT_VIEWS = new Set(['findings', 'analysis'])
+const DAST_RESULT_VIEWS = new Set(['findings', 'analysis', 'explorer'])
 const ANALYSIS_CANDIDATE_PAGE_SIZE = 10
 let dastResultView = 'findings'
 const ANALYSIS_CANDIDATE_INDEX = new Map()
+const ANALYSIS_EXPLORER_ITEM_INDEX = new Map()
 const RELATED_FINDING_SUMMARY_INDEX = new Map()
+const ANALYSIS_EXPANDED_EVIDENCE = new Set()
+const ANALYSIS_EXPANDED_STEPS = new Set()
+const ANALYSIS_COLLAPSED_EXPLORER_SECTIONS = new Set()
+let EVIDENCE_FINDING_DETAILS_REQUEST_SEQ = 0
 const ANALYSIS_FILTER_STATE = {
     engine: 'all',
     type: 'all',
@@ -458,6 +463,9 @@ async function ensureDastDefaultModulesLoaded({ force = false } = {}) {
 
 function resetAnalysisUiState() {
     ANALYSIS_CANDIDATE_INDEX.clear()
+    ANALYSIS_EXPANDED_EVIDENCE.clear()
+    ANALYSIS_EXPANDED_STEPS.clear()
+    ANALYSIS_COLLAPSED_EXPLORER_SECTIONS.clear()
     ANALYSIS_FILTER_STATE.engine = 'all'
     ANALYSIS_FILTER_STATE.type = 'all'
     ANALYSIS_FILTER_STATE.confidence = 'all'
@@ -785,7 +793,50 @@ function formatAnalysisStatusMode(value) {
     return 'Unknown'
 }
 
-function buildAnalysisStatusHtml(analysis = {}) {
+function buildAnalysisHealthNoticeHtml(scanHealth = null) {
+    if (!scanHealth || typeof scanHealth !== 'object') return ''
+    const failedAttacks = Number(scanHealth?.failedAttacks || 0)
+    const totalAttacks = Number(scanHealth?.totalAttacks || 0)
+    if (failedAttacks <= 0 || totalAttacks <= 0) return ''
+    const failedRate = Number(scanHealth?.failedRate || 0)
+    if (failedRate < 0.08) return ''
+    const percent = Math.round(failedRate * 100)
+    const level = String(scanHealth?.level || 'medium').toLowerCase()
+    const currentRps = Number(scanHealth?.current?.maxRequestsPerSecond || 0)
+    const currentConcurrency = Number(scanHealth?.current?.concurrency || 0)
+    const recommendedRps = Number(scanHealth?.recommended?.maxRequestsPerSecond || 0)
+    const recommendedConcurrency = Number(scanHealth?.recommended?.concurrency || 0)
+    const settingsParts = []
+    if (currentRps > 0) settingsParts.push(`${currentRps} req/s`)
+    if (currentConcurrency > 0) settingsParts.push(`concurrency ${currentConcurrency}`)
+    const recommendationParts = []
+    if (recommendedRps > 0) recommendationParts.push(`${recommendedRps} req/s`)
+    if (recommendedConcurrency > 0) recommendationParts.push(`concurrency ${recommendedConcurrency}`)
+    const topRoutes = Array.isArray(scanHealth?.topRoutes) ? scanHealth.topRoutes : []
+    const routesText = topRoutes.length
+        ? topRoutes.map((entry) => `${String(entry?.route || '').trim()} (${Number(entry?.failed || 0)})`).join(', ')
+        : ''
+    const advisoryText = recommendationParts.length
+        ? `Try lowering to ${escapeHtml(recommendationParts.join(', '))} and rerun for a more stable scan.`
+        : 'Try lowering concurrency and requests/sec and rerun for a more stable scan.'
+    const currentSettingsText = settingsParts.length
+        ? `<div style="margin-top:4px;"><b>Current settings:</b> ${escapeHtml(settingsParts.join(', '))}</div>`
+        : ''
+    const affectedRoutesText = routesText
+        ? `<div style="margin-top:4px;"><b>Most affected routes:</b> ${escapeHtml(routesText)}</div>`
+        : ''
+    return `
+        <div class="ui ${level === 'high' ? 'warning' : 'warning'} tiny message" style="margin-top:10px;">
+            <div class="header">Replay stability warning</div>
+            <div>${failedAttacks} of ${totalAttacks} attack replays failed before an HTTP response (${percent}%).</div>
+            ${currentSettingsText}
+            ${affectedRoutesText}
+            <div style="margin-top:4px;">${advisoryText}</div>
+        </div>
+    `
+}
+
+function buildAnalysisStatusHtml(analysis = {}, scanHealth = null) {
     const coverage = analysis?.coverage && typeof analysis.coverage === 'object' ? analysis.coverage : {}
     const engines = Array.isArray(coverage.enginesPresent) ? coverage.enginesPresent : []
     const coverageConfidence = String(coverage?.confidence || '').trim().toLowerCase()
@@ -803,6 +854,7 @@ function buildAnalysisStatusHtml(analysis = {}) {
                     </button>
                 </div>
             </div>
+            ${buildAnalysisHealthNoticeHtml(scanHealth)}
         </div>
     `
 }
@@ -821,6 +873,118 @@ function buildEmptyAnalysisStateHtml() {
                     </button>
                 </div>
             </div>
+        </div>
+    `
+}
+
+function buildEmptyExplorerStateHtml() {
+    return `
+        <div class="ui info message">
+            <div class="header">No explorer data yet</div>
+            <p>Explorer appears when DAST, IAST, or SAST artifacts expose API routes, SPA routes, GraphQL traffic, hidden parameters, or client-side surfaces.</p>
+        </div>
+    `
+}
+
+function humanizeExplorerRouteType(value) {
+    const normalized = String(value || '').trim().toLowerCase()
+    if (normalized === 'spa') return 'SPA route'
+    if (normalized === 'page') return 'Page route'
+    if (normalized === 'runtime') return 'Runtime route'
+    return humanizeAnalysisToken(normalized || 'route')
+}
+
+function buildExplorerEngineBadges(engines = []) {
+    return (Array.isArray(engines) ? engines : [])
+        .map((engine) => buildEvidenceEngineBadge(engine))
+        .filter(Boolean)
+        .join('')
+}
+
+function formatExplorerList(values = [], { max = 6, fallback = '' } = {}) {
+    const items = Array.isArray(values)
+        ? values.map((value) => String(value || '').trim()).filter(Boolean)
+        : []
+    if (!items.length) return fallback
+    if (items.length <= max) return items.join(', ')
+    return `${items.slice(0, max).join(', ')} +${items.length - max} more`
+}
+
+function setExplorerItemIndex(kind, entry) {
+    const normalizedKind = String(kind || '').trim().toLowerCase()
+    const id = String(entry?.id || '').trim()
+    if (!normalizedKind || !id) return
+    ANALYSIS_EXPLORER_ITEM_INDEX.set(`${normalizedKind}:${id}`, { kind: normalizedKind, ...entry })
+}
+
+function getExplorerItem(kind, id) {
+    return ANALYSIS_EXPLORER_ITEM_INDEX.get(`${String(kind || '').trim().toLowerCase()}:${String(id || '').trim()}`) || null
+}
+
+function buildExplorerActionHtml(kind, entry) {
+    const id = String(entry?.id || '').trim()
+    if (!id) return ''
+    return `
+        <a href="#" class="open_explorer_rbuilder"
+            data-explorer-kind="${escapeAttr(kind)}"
+            data-explorer-id="${escapeAttr(id)}">Send to R-Builder</a>
+    `
+}
+
+function buildExplorerCardHtml(kind, entry, { title = '', meta = [], details = [] } = {}) {
+    setExplorerItemIndex(kind, entry)
+    const metaItems = (Array.isArray(meta) ? meta : []).filter(Boolean)
+    const detailItems = (Array.isArray(details) ? details : []).filter(Boolean)
+    const actionHtml = buildExplorerActionHtml(kind, entry)
+    return `
+        <div class="ui segment" style="margin:6px 0; padding:10px; position:relative;">
+            <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px;">
+                <div style="min-width:0; flex:1 1 auto;">
+                    <div style="font-weight:700; overflow-wrap:anywhere; word-break:break-word;">${escapeHtml(title || 'Explorer item')}</div>
+                    ${metaItems.length ? `<div style="margin-top:4px; color:#666; font-size:12px; overflow-wrap:anywhere; word-break:break-word;">${metaItems.map((item) => escapeHtml(item)).join(' · ')}</div>` : ''}
+                </div>
+                <div style="display:flex; flex:0 0 auto; align-items:flex-start; justify-content:flex-end; gap:4px;">
+                    ${buildExplorerEngineBadges(entry?.enginesPresent || [])}
+                </div>
+            </div>
+            ${detailItems.length ? `<div style="margin-top:6px; color:#555; font-size:13px; overflow-wrap:anywhere; word-break:break-word;">${detailItems.map((item) => `<div style="overflow-wrap:anywhere; word-break:break-word;">${escapeHtml(item)}</div>`).join('')}</div>` : ''}
+            ${actionHtml ? `<div style="margin-top:8px;">${actionHtml}</div>` : ''}
+        </div>
+    `
+}
+
+function buildExplorerSummaryHtml(explorer = {}) {
+    const summary = explorer?.summary && typeof explorer.summary === 'object' ? explorer.summary : {}
+    const metrics = [
+        `API endpoints: ${Number(summary.endpointCount || 0)}`,
+        `SPA routes: ${Number(summary.routeCount || 0)}`,
+        `GraphQL: ${Number(summary.graphqlCount || 0)}`,
+        `Hidden params: ${Number(summary.hiddenParamCount || 0)}`,
+        `Client surfaces: ${Number(summary.surfaceCount || 0)}`
+    ]
+    const engines = Array.isArray(summary.enginesPresent) && summary.enginesPresent.length
+        ? summary.enginesPresent.join(', ')
+        : 'DAST'
+    return `
+        <div class="ui message">
+            <div><b>Explorer:</b> ${escapeHtml(metrics.join(' | '))}</div>
+            <div style="margin-top:4px;"><b>Engines:</b> ${escapeHtml(engines)}</div>
+        </div>
+    `
+}
+
+function buildExplorerSectionHtml(sectionKey, title, items = []) {
+    const entries = Array.isArray(items) ? items.filter(Boolean) : []
+    if (!entries.length) return ''
+    const normalizedKey = String(sectionKey || '').trim().toLowerCase()
+    const collapsed = normalizedKey ? ANALYSIS_COLLAPSED_EXPLORER_SECTIONS.has(normalizedKey) : false
+    return `
+        <div class="ui message" style="margin-top:10px;">
+            <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px;">
+                <div class="header">${escapeHtml(title)}</div>
+                <a href="#" class="toggle_explorer_section" data-explorer-section="${escapeAttr(normalizedKey)}">${collapsed ? 'Expand' : 'Collapse'}</a>
+            </div>
+            <div style="margin-top:8px; display:${collapsed ? 'none' : 'block'};">${entries.join('')}</div>
         </div>
     `
 }
@@ -1227,9 +1391,10 @@ function buildManualStepsToggleHtml(candidate) {
     }
     const candidateId = String(candidate?.id || '')
     const drawerId = `analysis_steps_${toDomSafeId(candidateId || `${candidate?.title || 'candidate'}_${steps.length}`)}`
+    const expanded = candidateId ? ANALYSIS_EXPANDED_STEPS.has(candidateId) : false
     return `
-        <a href="#" class="toggle_candidate_manual_steps" data-steps-target="${escapeAttr(drawerId)}">Show next steps</a>
-        <div id="${escapeAttr(drawerId)}" style="display:none; margin-top:6px;">
+        <a href="#" class="toggle_candidate_manual_steps" data-candidate-id="${escapeAttr(candidateId)}" data-steps-target="${escapeAttr(drawerId)}">${expanded ? 'Hide next steps' : 'Show next steps'}</a>
+        <div id="${escapeAttr(drawerId)}" style="display:${expanded ? 'block' : 'none'}; margin-top:6px;">
             <b>Manual steps:</b> ${buildManualStepsHtml(candidate)}
         </div>
     `
@@ -2743,7 +2908,7 @@ function buildEvidenceEngineBadge(engine) {
     if (normalized === 'DAST') labelClass = 'ui mini red label'
     else if (normalized === 'IAST') labelClass = 'ui mini blue label'
     else if (normalized === 'SAST') labelClass = 'ui mini teal label'
-    return `<span class="${labelClass}" style="white-space:nowrap; margin-left:6px;">${escapeHtml(normalized)}</span>`
+    return `<span class="${labelClass}" style="display:inline-flex; align-items:center; justify-content:center; width:42px; min-width:42px; margin:0; white-space:nowrap; text-align:center;">${escapeHtml(normalized)}</span>`
 }
 
 function canOpenGenericEvidenceInRBuilder(ref, candidate) {
@@ -3013,6 +3178,67 @@ function buildFallbackCandidateRawRequest(candidate, rawScan = {}) {
     return `${method} ${requestTarget} HTTP/1.1\n${headers.join('\n')}\n\n${body}`
 }
 
+function buildExplorerRawRequest(entry = {}, kind = '', rawScan = {}) {
+    const routeParts = splitRouteKeyParts(entry?.routeKey, rawScan?.host || null)
+    const rawMethod = String(entry?.method || routeParts.method || (kind === 'graphql' ? 'POST' : 'GET')).toUpperCase()
+    const method = rawMethod === '*' ? (kind === 'graphql' ? 'POST' : 'GET') : rawMethod
+    let target = String(entry?.url || entry?.path || materializePathTemplate(routeParts.pathTemplate || '/')).trim()
+    if (!target) {
+        target = materializePathTemplate(routeParts.pathTemplate || '/')
+    }
+    const host = String(routeParts.host || rawScan?.host || 'localhost:80')
+    let requestTarget = buildAbsoluteRequestUrl(target, rawScan, host)
+    try {
+        const parsed = new URL(requestTarget)
+        if (kind === 'hiddenparam' && String(entry?.container || '').toLowerCase() === 'query' && entry?.paramName) {
+            parsed.searchParams.set(String(entry.paramName), 'test')
+            requestTarget = parsed.toString()
+        }
+    } catch (_) { }
+    const headers = [
+        `Host: ${host}`,
+        'User-Agent: PentestKit-Explorer',
+        'Accept: */*'
+    ]
+    const hintHeaders = Array.isArray(entry?.headerNames) ? entry.headerNames.map((value) => String(value || '').trim()).filter(Boolean) : []
+    if (kind === 'hiddenparam' && String(entry?.container || '').toLowerCase() === 'header' && entry?.paramName) {
+        hintHeaders.unshift(String(entry.paramName))
+    }
+    const uniqueHeaders = Array.from(new Set(hintHeaders.map((value) => String(value || '').trim()).filter(Boolean)))
+    uniqueHeaders.slice(0, 3).forEach((name) => {
+        if (/^host$/i.test(name)) return
+        headers.push(`${name}: test`)
+    })
+    let body = ''
+    const bodyKeys = Array.isArray(entry?.bodyKeys) ? entry.bodyKeys.map((value) => String(value || '').trim()).filter(Boolean) : []
+    if (kind === 'graphql') {
+        const variableNames = Array.isArray(entry?.variableNames) ? entry.variableNames : []
+        const variables = {}
+        variableNames.slice(0, 6).forEach((name) => {
+            if (!name) return
+            variables[String(name)] = 'test'
+        })
+        body = JSON.stringify({
+            operationName: Array.isArray(entry?.operationNames) ? String(entry.operationNames[0] || '') : '',
+            variables
+        })
+    } else if (kind === 'hiddenparam' && String(entry?.container || '').toLowerCase() === 'body' && entry?.paramName) {
+        body = JSON.stringify({ [String(entry.paramName)]: 'test' })
+    } else if (bodyKeys.length && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+        const payload = {}
+        bodyKeys.slice(0, 8).forEach((key) => {
+            payload[key] = 'test'
+        })
+        body = JSON.stringify(payload)
+    } else if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+        body = '{}'
+    }
+    if (body && !headers.some((line) => /^content-type\s*:/i.test(line))) {
+        headers.push('Content-Type: application/json')
+    }
+    return `${method} ${requestTarget} HTTP/1.1\n${headers.join('\n')}\n\n${body}`
+}
+
 function pathTemplateToRegex(pathTemplate) {
     const raw = String(pathTemplate || '/')
     const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -3122,6 +3348,20 @@ async function openCandidateInRBuilder(candidateId) {
         } else {
             rawRequest = buildFallbackCandidateRawRequest(candidate, latestDastRawScan || {})
         }
+    }
+    window.location.href = "rbuilder.html?rawRequest=" + decoder.base64_encode(encodeURIComponent(JSON.stringify(rawRequest)))
+}
+
+async function openExplorerItemInRBuilder(kind, itemId) {
+    const entry = getExplorerItem(kind, itemId)
+    if (!entry) {
+        showResultDialog('Explorer', 'Explorer item is not available anymore.')
+        return
+    }
+    const rawRequest = buildExplorerRawRequest(entry, kind, latestDastRawScan || {})
+    if (!rawRequest) {
+        showResultDialog('Explorer', 'Could not prepare request for R-Builder.')
+        return
     }
     window.location.href = "rbuilder.html?rawRequest=" + decoder.base64_encode(encodeURIComponent(JSON.stringify(rawRequest)))
 }
@@ -3312,6 +3552,8 @@ async function openEvidenceFindingDetails(findingId) {
         showResultDialog('Error', 'Finding is not available anymore.')
         return
     }
+    const requestSeq = ++EVIDENCE_FINDING_DETAILS_REQUEST_SEQ
+    rutils.showFindingDetailsLoading()
     try {
         const context = resolveDastFindingContext(key)
         const details = await controller.getFindingDetails({
@@ -3320,14 +3562,75 @@ async function openEvidenceFindingDetails(findingId) {
             attackId: context?.attackId || null,
             moduleId: context?.moduleId || null
         })
-        if (!details || (!details.finding && !details.findingDetail && !details.attack)) {
-            showResultDialog('Error', 'Finding details are not available anymore.')
+        if (requestSeq !== EVIDENCE_FINDING_DETAILS_REQUEST_SEQ) {
             return
+        }
+        if (!details || (!details.finding && !details.findingDetail && !details.attack)) {
+            rutils.showFindingDetailsMessage('Finding details are not available anymore.')
+            return
+        }
+        if (String(details?.engine || details?.findingDetail?.engine || details?.finding?.engine || '').toUpperCase() === 'DAST') {
+            const effectiveAttackId = details?.attack?.id
+                || details?.findingDetail?.evidence?.dast?.attackId
+                || details?.finding?.evidence?.dast?.attackId
+                || null
+            const effectiveRequestId = details?.requestId
+                || details?.findingDetail?.evidence?.dast?.requestId
+                || details?.finding?.evidence?.dast?.requestId
+                || null
+            const snapshotDetails = await loadFullDastDetailSnapshot({
+                requestId: effectiveRequestId,
+                attackId: effectiveAttackId,
+                scanId: details?.sourceScanId || null,
+                attack: details?.attack || null,
+                original: details?.original || null
+            })
+            details.attack = snapshotDetails.attack
+            details.original = snapshotDetails.original
         }
         rutils.showEvidenceFindingDetails(details)
     } catch (err) {
-        showResultDialog('Error', err?.message || 'Finding details could not be loaded.')
+        if (requestSeq !== EVIDENCE_FINDING_DETAILS_REQUEST_SEQ) {
+            return
+        }
+        rutils.showFindingDetailsMessage(err?.message || 'Finding details could not be loaded.')
     }
+}
+
+function mergeAttackWithSnapshot(attack, snapshotAttack) {
+    const merged = Object.assign({}, attack && typeof attack === 'object' ? attack : {})
+    if (snapshotAttack && typeof snapshotAttack === 'object') {
+        if (Object.prototype.hasOwnProperty.call(snapshotAttack, 'request')) {
+            merged.request = snapshotAttack.request
+        }
+        if (Object.prototype.hasOwnProperty.call(snapshotAttack, 'response')) {
+            merged.response = snapshotAttack.response
+        }
+        if (!merged.id && snapshotAttack.id) {
+            merged.id = snapshotAttack.id
+        }
+    }
+    return merged
+}
+
+async function loadFullDastDetailSnapshot({ requestId = null, attackId = null, scanId = null, attack = null, original = null } = {}) {
+    let nextAttack = attack && typeof attack === 'object' ? Object.assign({}, attack) : attack
+    let nextOriginal = original && typeof original === 'object' ? Object.assign({}, original) : original
+    if (!requestId) {
+        return { attack: nextAttack, original: nextOriginal }
+    }
+    try {
+        const snapshot = await controller.getRequestSnapshot(requestId, attackId || nextAttack?.id || null, scanId || null)
+        if (snapshot?.original) {
+            nextOriginal = snapshot.original
+        }
+        if (snapshot?.attack) {
+            nextAttack = mergeAttackWithSnapshot(nextAttack, snapshot.attack)
+        }
+    } catch (_) {
+        // fall back to projected payload when snapshot retrieval fails
+    }
+    return { attack: nextAttack, original: nextOriginal }
 }
 
 function renderAnalysisAndCoverage(vm, rawScan = {}) {
@@ -3387,6 +3690,7 @@ function renderAnalysisAndCoverage(vm, rawScan = {}) {
             const paramKey = escapeHtml(candidate?.paramKey || '-')
             const candidateId = String(candidate?.id || '')
             const drawerId = `analysis_evidence_${toDomSafeId(candidateId)}`
+            const evidenceExpanded = candidateId ? ANALYSIS_EXPANDED_EVIDENCE.has(candidateId) : false
             const runStatusHtml = buildCandidatePlaywrightRunHtml(candidate)
             const playwrightButtonHtml = PLAYWRIGHT_FEATURES_VISIBLE
                 ? `
@@ -3407,8 +3711,8 @@ function renderAnalysisAndCoverage(vm, rawScan = {}) {
                         <div style="margin-top:6px;"><b>Why:</b> ${buildCandidateWhyHtml(candidate)}</div>
                         <div style="margin-top:6px;">${buildManualStepsToggleHtml(candidate)}</div>
                         <div style="margin-top:8px;">
-                            <button type="button" class="ui tiny button toggle_candidate_evidence" data-evidence-target="${escapeAttr(drawerId)}">
-                                Show Evidence
+                            <button type="button" class="ui tiny button toggle_candidate_evidence" data-candidate-id="${escapeAttr(candidateId)}" data-evidence-target="${escapeAttr(drawerId)}">
+                                ${evidenceExpanded ? 'Hide Evidence' : 'Show Evidence'}
                             </button>
                             ${playwrightButtonHtml}
                             ${AUTHZ_DIFF_FEATURES_VISIBLE ? `
@@ -3421,7 +3725,7 @@ function renderAnalysisAndCoverage(vm, rawScan = {}) {
                             </button>
                         </div>
                         ${runStatusHtml}
-                        <div id="${escapeAttr(drawerId)}" class="ui tiny message" style="display:none; margin-top:8px; padding:8px;">
+                        <div id="${escapeAttr(drawerId)}" class="ui tiny message" style="display:${evidenceExpanded ? 'block' : 'none'}; margin-top:8px; padding:8px;">
                             ${buildEvidenceDrawerHtml(candidate)}
                         </div>
                     </div>
@@ -3446,7 +3750,7 @@ function renderAnalysisAndCoverage(vm, rawScan = {}) {
         : ''
 
     $analysis.html(`
-        ${buildAnalysisStatusHtml(analysis)}
+        ${buildAnalysisStatusHtml(analysis, vm?.scanHealth || null)}
         <div class="ui message">
             <div><b>Candidates:</b> ${topCandidates.length} of ${visibleCandidates.length} visible (${candidates.length} total${hiddenCandidateCount > 0 ? `, showing first ${topCandidates.length}` : ', showing all'})</div>
             ${analysis?.diff && typeof analysis.diff === 'object'
@@ -3458,6 +3762,105 @@ function renderAnalysisAndCoverage(vm, rawScan = {}) {
     `)
 }
 
+function renderExplorer(vm, rawScan = {}) {
+    const analysis = vm?.analysis || rawScan?.analysis || null
+    const $explorer = $('#explorer_info')
+    ANALYSIS_EXPLORER_ITEM_INDEX.clear()
+    if (!analysis || typeof analysis !== 'object') {
+        $explorer.html(buildEmptyExplorerStateHtml())
+        return
+    }
+    const explorer = analysis?.explorer && typeof analysis.explorer === 'object' ? analysis.explorer : null
+    if (!explorer) {
+        $explorer.html(buildEmptyExplorerStateHtml())
+        return
+    }
+
+    const routes = (Array.isArray(explorer.routes) ? explorer.routes : []).map((entry) => {
+        const meta = [humanizeExplorerRouteType(entry?.routeType || 'route')]
+        if (Array.isArray(entry?.frameworks) && entry.frameworks.length) {
+            meta.push(`Frameworks: ${formatExplorerList(entry.frameworks)}`)
+        }
+        const details = []
+        if (Array.isArray(entry?.authHints) && entry.authHints.length) details.push(`Auth hints: ${formatExplorerList(entry.authHints)}`)
+        if (Array.isArray(entry?.hintNames) && entry.hintNames.length) details.push(`Client hints: ${formatExplorerList(entry.hintNames)}`)
+        if (Array.isArray(entry?.sourceKinds) && entry.sourceKinds.length) details.push(`Runtime sources: ${formatExplorerList(entry.sourceKinds)}`)
+        if (Array.isArray(entry?.pageUrls) && entry.pageUrls.length) details.push(`Observed URLs: ${formatExplorerList(entry.pageUrls, { max: 3 })}`)
+        return buildExplorerCardHtml('route', entry, {
+            title: entry?.path || entry?.routeKey || '/',
+            meta,
+            details
+        })
+    })
+
+    const endpoints = (Array.isArray(explorer.endpoints) ? explorer.endpoints : []).map((entry) => {
+        const method = String(entry?.method || 'GET').toUpperCase()
+        const meta = [
+            `${method} ${entry?.path || '/'}`,
+            ...(Array.isArray(entry?.transports) && entry.transports.length ? [`Transport: ${formatExplorerList(entry.transports, { max: 3 })}`] : [])
+        ]
+        const details = []
+        if (Array.isArray(entry?.paramNames) && entry.paramNames.length) details.push(`Query params: ${formatExplorerList(entry.paramNames)}`)
+        if (Array.isArray(entry?.bodyKeys) && entry.bodyKeys.length) details.push(`Body keys: ${formatExplorerList(entry.bodyKeys)}`)
+        if (Array.isArray(entry?.headerNames) && entry.headerNames.length) details.push(`Header names: ${formatExplorerList(entry.headerNames)}`)
+        if (Array.isArray(entry?.authHints) && entry.authHints.length) details.push(`Auth hints: ${formatExplorerList(entry.authHints)}`)
+        if (Array.isArray(entry?.contentTypes) && entry.contentTypes.length) details.push(`Content types: ${formatExplorerList(entry.contentTypes)}`)
+        if (Array.isArray(entry?.discoveryTags) && entry.discoveryTags.length) details.push(`Discovery tags: ${formatExplorerList(entry.discoveryTags)}`)
+        return buildExplorerCardHtml('endpoint', entry, {
+            title: `${method} ${entry?.path || '/'}`,
+            meta,
+            details
+        })
+    })
+
+    const graphql = (Array.isArray(explorer.graphql) ? explorer.graphql : []).map((entry) => {
+        const details = []
+        if (Array.isArray(entry?.operationTypes) && entry.operationTypes.length) details.push(`Operation types: ${formatExplorerList(entry.operationTypes)}`)
+        if (Array.isArray(entry?.operationNames) && entry.operationNames.length) details.push(`Operation names: ${formatExplorerList(entry.operationNames)}`)
+        if (Array.isArray(entry?.rootFields) && entry.rootFields.length) details.push(`Root fields: ${formatExplorerList(entry.rootFields)}`)
+        if (Array.isArray(entry?.variableNames) && entry.variableNames.length) details.push(`Variables: ${formatExplorerList(entry.variableNames)}`)
+        if (Array.isArray(entry?.authHints) && entry.authHints.length) details.push(`Auth hints: ${formatExplorerList(entry.authHints)}`)
+        return buildExplorerCardHtml('graphql', entry, {
+            title: `${String(entry?.method || 'POST').toUpperCase()} ${entry?.path || '/graphql'}`,
+            meta: entry?.url ? [entry.url] : [],
+            details
+        })
+    })
+
+    const hiddenParams = (Array.isArray(explorer.hiddenParams) ? explorer.hiddenParams : []).map((entry) => {
+        const details = []
+        if (Array.isArray(entry?.hintTypes) && entry.hintTypes.length) details.push(`Hints: ${formatExplorerList(entry.hintTypes)}`)
+        if (Array.isArray(entry?.actions) && entry.actions.length) details.push(`Actions: ${formatExplorerList(entry.actions)}`)
+        return buildExplorerCardHtml('hiddenparam', entry, {
+            title: `${entry?.paramName || '<param>'} · ${String(entry?.container || 'query').toUpperCase()} · ${String(entry?.method || 'GET').toUpperCase()} ${entry?.path || '/'}`,
+            meta: entry?.adminLike ? ['Admin-like'] : [],
+            details
+        })
+    })
+
+    const surfaces = (Array.isArray(explorer.surfaces) ? explorer.surfaces : []).map((entry) => {
+        const details = []
+        if (Array.isArray(entry?.hintNames) && entry.hintNames.length) details.push(`Signals: ${formatExplorerList(entry.hintNames)}`)
+        return buildExplorerCardHtml('surface', entry, {
+            title: `${humanizeAnalysisToken(entry?.surfaceType || 'surface')} · ${entry?.label || entry?.path || '/'}`,
+            meta: [entry?.path || '/'].filter(Boolean),
+            details
+        })
+    })
+
+    const sectionHtml = [
+        buildExplorerSectionHtml('api_endpoints', 'API Endpoints', endpoints),
+        buildExplorerSectionHtml('spa_routes', 'SPA Routes', routes),
+        buildExplorerSectionHtml('graphql', 'GraphQL', graphql),
+        buildExplorerSectionHtml('hidden_parameters', 'Hidden Parameters', hiddenParams),
+        buildExplorerSectionHtml('client_surfaces', 'Client Surfaces', surfaces)
+    ].filter(Boolean)
+
+    $explorer.html(sectionHtml.length
+        ? `${buildExplorerSummaryHtml(explorer)}${sectionHtml.join('')}`
+        : buildEmptyExplorerStateHtml())
+}
+
 function ensureAnalysisPanelsRendered({ force = false } = {}) {
     if (!scanAnalysisUiEnabled) return
     if (!force && !analysisPanelsDirty) return
@@ -3465,6 +3868,7 @@ function ensureAnalysisPanelsRendered({ force = false } = {}) {
     if (!raw) return
     const vm = controller.scanViewModel || normalizeScanResult(raw)
     renderAnalysisAndCoverage(vm, raw)
+    renderExplorer(vm, raw)
     analysisPanelsDirty = false
 }
 
@@ -3480,11 +3884,15 @@ function setDastResultView(view) {
         .css('pointer-events', 'auto')
     $('#attacks_info').toggle(nextView === 'findings')
     $('#analysis_info').toggle(nextView === 'analysis')
-    if (nextView === 'analysis') {
+    $('#explorer_info').toggle(nextView === 'explorer')
+    if (nextView === 'analysis' || nextView === 'explorer') {
         ensureAnalysisPanelsRendered()
     }
     if (nextView === 'analysis' && !$('#analysis_info').children().length) {
         $('#analysis_info').html(buildEmptyAnalysisStateHtml())
+    }
+    if (nextView === 'explorer' && !$('#explorer_info').children().length) {
+        $('#explorer_info').html(buildEmptyExplorerStateHtml())
     }
     if (nextView === 'findings') {
         renderStatsFromCounters()
@@ -4005,6 +4413,9 @@ jQuery(function () {
 
     const $runCveInput = $('#ptk_dast_run_cve')
     const $runCveCheckboxWrapper = $runCveInput.closest('.ui.checkbox')
+    const $htmlLinkDiscoveryInput = $('#ptk_dast_autodiscover_links')
+    const $htmlLinkDiscoveryCheckboxWrapper = $htmlLinkDiscoveryInput.closest('.ui.checkbox')
+    const $htmlLinkDiscoveryBudget = $('#ptk_dast_autodiscovery_budget')
     let runCveState = false
 
     function setRunCveState(enabled, { updateUi = true } = {}) {
@@ -4024,6 +4435,48 @@ jQuery(function () {
         return !!runCveState
     }
 
+    function normalizeHtmlLinkDiscoveryBudget(value) {
+        const normalized = String(value || 'safe').trim().toLowerCase()
+        return ["strict", "safe", "wide"].includes(normalized) ? normalized : 'safe'
+    }
+
+    function setHtmlLinkDiscoveryBudget(value) {
+        const normalized = normalizeHtmlLinkDiscoveryBudget(value)
+        if ($htmlLinkDiscoveryBudget.length) {
+            $htmlLinkDiscoveryBudget.val(normalized)
+        }
+        return normalized
+    }
+
+    function isHtmlLinkDiscoveryEnabled() {
+        return $htmlLinkDiscoveryInput.is(':checked')
+    }
+
+    function syncHtmlLinkDiscoveryBudgetState(enabled = null) {
+        const active = enabled === null ? isHtmlLinkDiscoveryEnabled() : !!enabled
+        if ($htmlLinkDiscoveryBudget.length) {
+            $htmlLinkDiscoveryBudget.prop('disabled', !active)
+            $htmlLinkDiscoveryBudget.toggleClass('disabled', !active)
+            $htmlLinkDiscoveryBudget.closest('.ui.dropdown').toggleClass('disabled', !active)
+        }
+    }
+
+    function setHtmlLinkDiscoveryEnabled(enabled, { updateUi = true } = {}) {
+        const next = !!enabled
+        if (updateUi) {
+            if ($htmlLinkDiscoveryCheckboxWrapper.length && typeof $htmlLinkDiscoveryCheckboxWrapper.checkbox === 'function') {
+                $htmlLinkDiscoveryCheckboxWrapper.checkbox(next ? 'set checked' : 'set unchecked')
+            } else if ($htmlLinkDiscoveryInput.length) {
+                $htmlLinkDiscoveryInput.prop('checked', next)
+            }
+        }
+        syncHtmlLinkDiscoveryBudgetState(next)
+    }
+
+    function getHtmlLinkDiscoveryBudget() {
+        return normalizeHtmlLinkDiscoveryBudget($htmlLinkDiscoveryBudget.val())
+    }
+
     if ($runCveCheckboxWrapper.length && typeof $runCveCheckboxWrapper.checkbox === 'function') {
         $runCveCheckboxWrapper.checkbox({
             onChecked() {
@@ -4039,7 +4492,30 @@ jQuery(function () {
         })
     }
 
+    if ($htmlLinkDiscoveryCheckboxWrapper.length && typeof $htmlLinkDiscoveryCheckboxWrapper.checkbox === 'function') {
+        $htmlLinkDiscoveryCheckboxWrapper.checkbox({
+            onChecked() {
+                setHtmlLinkDiscoveryEnabled(true, { updateUi: false })
+            },
+            onUnchecked() {
+                setHtmlLinkDiscoveryEnabled(false, { updateUi: false })
+            }
+        })
+    }
+    if ($htmlLinkDiscoveryInput.length) {
+        $htmlLinkDiscoveryInput.on('change', function () {
+            setHtmlLinkDiscoveryEnabled($(this).is(':checked'), { updateUi: false })
+        })
+    }
+    if ($htmlLinkDiscoveryBudget.length) {
+        $htmlLinkDiscoveryBudget.on('change', function () {
+            setHtmlLinkDiscoveryBudget($(this).val())
+        })
+    }
+
     setRunCveState(false)
+    setHtmlLinkDiscoveryBudget('safe')
+    setHtmlLinkDiscoveryEnabled(false)
     setDastResultView('findings')
 
     // initialize all modals
@@ -4508,6 +4984,8 @@ jQuery(function () {
             )
             $('#dast-safety-profile').val(String(rattackerSafetyProfile).toLowerCase())
             setRunCveState(false)
+            setHtmlLinkDiscoveryBudget('safe')
+            setHtmlLinkDiscoveryEnabled(false)
             window._ptkDastReloadWarningClosed = false
             rutils.pingContentScript(result.activeTab.tabId, { timeoutMs: 700 }).then((ready) => {
                 if (window._ptkDastReloadWarningClosed) return
@@ -4538,7 +5016,9 @@ jQuery(function () {
                             scanControls: {
                                 profile: safetyProfile
                             },
-                            runCve: isRunCveEnabled()
+                            runCve: isRunCveEnabled(),
+                            enableHtmlLinkDiscovery: isHtmlLinkDiscoveryEnabled(),
+                            htmlLinkDiscoveryBudget: getHtmlLinkDiscoveryBudget()
                         }
                         if (selectedPortalPolicyId) {
                             settings.policyId = selectedPortalPolicyId
@@ -4627,6 +5107,13 @@ jQuery(function () {
             changeView(normalizedResult)
             if (hasRenderableScanData(normalizedResult.scanResult)) {
                 bindScanResult(normalizedResult)
+            } else {
+                cleanScanResult()
+                $('.generate_report').hide()
+                $('.save_scan').hide()
+                $('#dast_result_tabs').hide()
+                setDastResultView('findings')
+                ensureDastDefaultModulesLoaded({ force: true }).catch(() => { })
             }
             stopMacroRecording.catch(() => null)
         }).catch(function (err) {
@@ -4865,6 +5352,7 @@ jQuery(function () {
         $("#request_info").html("")
         $("#attacks_info").html("")
         $("#analysis_info").html("")
+        $("#explorer_info").html("")
         resetAnalysisSuppressionState()
         resetAnalysisUiState()
         $('.generate_report').hide()
@@ -4926,6 +5414,25 @@ jQuery(function () {
             }
         }
         await openEvidenceGenericInRBuilder(ref, candidateId)
+        return false
+    })
+
+    $(document).on("click", ".open_explorer_rbuilder", async function () {
+        const kind = $(this).attr('data-explorer-kind') || ''
+        const itemId = $(this).attr('data-explorer-id') || ''
+        await openExplorerItemInRBuilder(kind, itemId)
+        return false
+    })
+
+    $(document).on("click", ".toggle_explorer_section", function () {
+        const sectionKey = String($(this).attr('data-explorer-section') || '').trim().toLowerCase()
+        if (!sectionKey) return false
+        if (ANALYSIS_COLLAPSED_EXPLORER_SECTIONS.has(sectionKey)) {
+            ANALYSIS_COLLAPSED_EXPLORER_SECTIONS.delete(sectionKey)
+        } else {
+            ANALYSIS_COLLAPSED_EXPLORER_SECTIONS.add(sectionKey)
+        }
+        rerenderAnalysisPanels()
         return false
     })
 
@@ -5215,10 +5722,15 @@ jQuery(function () {
 
     $(document).on("click", ".toggle_candidate_evidence", function () {
         const targetId = String($(this).attr("data-evidence-target") || "")
+        const candidateId = String($(this).attr("data-candidate-id") || "").trim()
         if (!targetId) return false
         const $drawer = $(`#${targetId}`)
         if (!$drawer.length) return false
         const isVisible = $drawer.is(":visible")
+        if (candidateId) {
+            if (isVisible) ANALYSIS_EXPANDED_EVIDENCE.delete(candidateId)
+            else ANALYSIS_EXPANDED_EVIDENCE.add(candidateId)
+        }
         $drawer.toggle(!isVisible)
         $(this).text(isVisible ? "Show Evidence" : "Hide Evidence")
         return false
@@ -5226,10 +5738,15 @@ jQuery(function () {
 
     $(document).on("click", ".toggle_candidate_manual_steps", function () {
         const targetId = String($(this).attr("data-steps-target") || "")
+        const candidateId = String($(this).attr("data-candidate-id") || "").trim()
         if (!targetId) return false
         const $drawer = $(`#${targetId}`)
         if (!$drawer.length) return false
         const isVisible = $drawer.is(":visible")
+        if (candidateId) {
+            if (isVisible) ANALYSIS_EXPANDED_STEPS.delete(candidateId)
+            else ANALYSIS_EXPANDED_STEPS.add(candidateId)
+        }
         $drawer.toggle(!isVisible)
         $(this).text(isVisible ? "Show next steps" : "Hide next steps")
         return false
@@ -5405,19 +5922,6 @@ jQuery(function () {
 
     //$('#filter_all').addClass('active')
 
-
-    function hasRawPayload(original) {
-        return !!(original?.request?.raw || original?.response?.body)
-    }
-
-    function hasAttackDetailsPayload(attack) {
-        if (!attack || typeof attack !== 'object') return false
-        if (attack?.request?.raw) return true
-        if (typeof attack?.response?.body === 'string' && attack.response.body.length) return true
-        if (Array.isArray(attack?.response?.headers) && attack.response.headers.length) return true
-        return false
-    }
-
     $(document).on("click", ".attack_details", async function () {
         $('.metadata .item').tab()
         const groupedReconKey = String($(this).attr("data-grouped-recon-key") || "").trim()
@@ -5426,7 +5930,13 @@ jQuery(function () {
             const resolvedAttack = await resolveGroupedReconDetailsAttack(entry)
             const groupedDetails = buildGroupedReconDetailsPayload(entry, resolvedAttack)
             if (!groupedDetails) return false
-            rutils.bindAttackDetails_DAST($(this), groupedDetails.attack, groupedDetails.original)
+            const hydratedDetails = await loadFullDastDetailSnapshot({
+                requestId: entry?.requestId || null,
+                attackId: groupedDetails.attack?.id || null,
+                attack: groupedDetails.attack,
+                original: groupedDetails.original
+            })
+            rutils.bindAttackDetails_DAST($(this), hydratedDetails.attack, hydratedDetails.original)
             $('.metadata .item').tab('change tab', 'first');
             return false
         }
@@ -5437,22 +5947,21 @@ jQuery(function () {
         let attack = findAttackModel(requestModel, attackId)
         if (!attack) return
         let original = requestModel.original || controller?.scanResult?.scanResult?.items?.[requestId]?.original
-        if (!hasRawPayload(original) || !hasAttackDetailsPayload(attack)) {
-            try {
-                const snapshot = await controller.getRequestSnapshot(requestId, attackId)
-                if (snapshot?.original) {
-                    requestModel.original = snapshot.original
-                    original = snapshot.original
-                }
-                if (snapshot?.attack && Array.isArray(requestModel.attacks)) {
-                    const idx = requestModel.attacks.findIndex(item => String(item?.id) === String(attackId))
-                    if (idx >= 0) {
-                        requestModel.attacks[idx] = Object.assign({}, requestModel.attacks[idx], snapshot.attack)
-                        attack = requestModel.attacks[idx]
-                    }
-                }
-            } catch (_) {
-                // fall back to existing data
+        const snapshotDetails = await loadFullDastDetailSnapshot({
+            requestId,
+            attackId,
+            attack,
+            original
+        })
+        if (snapshotDetails.original) {
+            requestModel.original = snapshotDetails.original
+            original = snapshotDetails.original
+        }
+        if (snapshotDetails.attack && Array.isArray(requestModel.attacks)) {
+            const idx = requestModel.attacks.findIndex(item => String(item?.id) === String(attackId))
+            if (idx >= 0) {
+                requestModel.attacks[idx] = snapshotDetails.attack
+                attack = requestModel.attacks[idx]
             }
         }
         let lookup = controller._dastFindingLookup || buildFindingLookup(controller?.scanViewModel?.findings || [])
@@ -5486,7 +5995,10 @@ jQuery(function () {
         else if (e.selectionStart) { e.selectionStart = start; e.selectionEnd = end; }
     }
 
+    showUnknownForm()
+
     controller.init().then(function (result) {
+        const viewState = resolveDastViewState(result)
         applyDastPortalPolicyState(result)
         updateDastProgressContext(result)
         changeView(result)
@@ -5496,12 +6008,20 @@ jQuery(function () {
             startIdleChecker()
         }
         updateLiveModeNotice()
-        if (hasRenderableScanData(result.scanResult)) {
+        if (viewState === 'running') {
+            if (hasRenderableScanData(result.scanResult)) {
+                bindScanResult(result)
+            } else {
+                cleanScanResult()
+            }
+        } else if (viewState === 'idle_with_data') {
             bindScanResult(result)
         } else {
             showWelcomeForm()
             ensureDastDefaultModulesLoaded().catch(() => { })
         }
+    }).catch(() => {
+        showWelcomeForm()
     })
     $('.ui.accordion').accordion({
         onOpen: function () {
@@ -5532,11 +6052,51 @@ function setDastPageLoader(show) {
     $loader.toggle(!!show)
 }
 
+function resolveDastViewState(result) {
+    if (result?.viewState === 'running' || result?.viewState === 'idle_empty' || result?.viewState === 'idle_with_data') {
+        return result.viewState
+    }
+    if (result?.isScanRunning) {
+        return 'running'
+    }
+    if (hasRenderableScanData(result?.scanResult)) {
+        return 'idle_with_data'
+    }
+    return 'idle_empty'
+}
+
+function syncDastTopControls(viewState) {
+    const isRunning = viewState === 'running'
+    const hasData = viewState === 'idle_with_data'
+    const isIdleEmpty = viewState === 'idle_empty'
+    $('.generate_report').toggle(hasData)
+    if (PORTAL_ACTIONS_VISIBLE && hasData) {
+        $('.save_scan').show()
+    } else {
+        $('.save_scan').hide()
+    }
+    $('.reset').closest('.icon.button').toggle(hasData)
+    $('.import_export').toggle(isIdleEmpty || hasData)
+    $('.cloud_download_scans').hide()
+    $('#run_scan_bg_control').toggle(isIdleEmpty || hasData)
+    $('#stop_scan_bg_control').toggle(isRunning)
+    $('.scan_info').toggle(isRunning)
+}
+
+function showUnknownForm() {
+    $('#init_loader').addClass('active')
+    setDastPageLoader(true)
+    $('#main').hide()
+    $('#welcome_message').hide()
+    $('#scanning_url').text("")
+    syncDastTopControls('unknown')
+}
+
 function showWelcomeForm() {
     setDastPageLoader(false)
     $('#main').hide()
     $('#welcome_message').show()
-    $('#run_scan_bg_control').show()
+    syncDastTopControls('idle_empty')
 }
 
 function hideWelcomeForm() {
@@ -5547,9 +6107,8 @@ function hideWelcomeForm() {
 function showRunningForm(result) {
     setDastPageLoader(false)
     $('#main').show()
-    $('#scanning_url').text(result.scanResult.host)
-    $('.scan_info').show()
-    $('#stop_scan_bg_control').show()
+    $('#scanning_url').text(result?.scanResult?.host || "")
+    syncDastTopControls('running')
 }
 
 function hideRunningForm() {
@@ -5561,7 +6120,7 @@ function hideRunningForm() {
 function showScanForm(result) {
     setDastPageLoader(false)
     $('#main').show()
-    $('#run_scan_bg_control').show()
+    syncDastTopControls('idle_with_data')
 }
 
 function hideScanForm() {
@@ -5577,12 +6136,13 @@ function changeView(result) {
         showWelcomeForm()
         return
     }
-    if (result.isScanRunning) {
+    const viewState = resolveDastViewState(result)
+    if (viewState === 'running') {
         hideWelcomeForm()
         hideScanForm()
         showRunningForm(result)
     }
-    else if (hasRenderableScanData(result.scanResult)) {
+    else if (viewState === 'idle_with_data') {
         hideWelcomeForm()
         hideRunningForm(result)
         showScanForm()
@@ -5597,8 +6157,10 @@ function changeView(result) {
 function cleanScanResult() {
     $("#attacks_info").html("")
     $("#analysis_info").html("")
+    $("#explorer_info").html("")
     analysisPanelsDirty = true
     RELATED_FINDING_SUMMARY_INDEX.clear()
+    ANALYSIS_EXPLORER_ITEM_INDEX.clear()
     DAST_RENDER.groupedReconObservations.clear()
     resetAnalysisSuppressionState()
     resetAnalysisUiState()
@@ -5860,7 +6422,6 @@ function bindScanResult(result) {
     }
     seedRenderedFromViewModel(vm)
     $("#progress_message").hide()
-    $('.generate_report').show()
     scanAnalysisUiEnabled = shouldShowScanAnalysisUI(raw)
     refreshAnalysisSuppressions(raw?.host || vm?.host || null)
     if (scanAnalysisUiEnabled) {
@@ -5869,17 +6430,13 @@ function bindScanResult(result) {
         $('#dast_result_tabs').hide()
         dastResultView = 'findings'
     }
-    if (PORTAL_ACTIONS_VISIBLE) {
-        $('.save_scan').show()
-    } else {
-        $('.save_scan').hide()
-    }
     $('#request_info').html("")
     $('#attacks_info').html("")
     $('#analysis_info').html("")
+    $('#explorer_info').html("")
     analysisPanelsDirty = true
     hideWelcomeForm()
-    if (scanAnalysisUiEnabled && dastResultView === 'analysis') {
+    if (scanAnalysisUiEnabled && (dastResultView === 'analysis' || dastResultView === 'explorer')) {
         ensureAnalysisPanelsRendered({ force: true })
     }
 
@@ -5931,6 +6488,7 @@ function bindScanResult(result) {
         bucketMarkup[bucket].push(html)
     })
     $("#request_info").html(requestMarkup.join(''))
+    sortRequestCardsInPanel()
     $("#attacks_info").html([
         `<div class="dast_bucket${bucketMarkup.critical.length ? ' has-items' : ''}" data-bucket="critical">${bucketMarkup.critical.join('')}</div>`,
         `<div class="dast_bucket${bucketMarkup.high.length ? ' has-items' : ''}" data-bucket="high">${bucketMarkup.high.join('')}</div>`,
@@ -6025,10 +6583,23 @@ function bindModules(result) {
 }
 
 function bindRequest(info, requestId) {
+    const request = info?.request && typeof info.request === 'object' ? info.request : {}
+    const requestUrl = escapeHtml(request.ui_url || request.url || '')
+    const discoveryLabel = String(request.discoveryLabel || 'Auto-discovered').trim()
+    const discoveryTooltip = request.discoveryParentUrl
+        ? `Found on ${request.discoveryParentUrl}`
+        : discoveryLabel
+    const discoveryRank = String(request.discoverySource || '').toLowerCase() === 'html_link' ? 1 : 0
+    const requestSeqMatch = /^req-(\d+)$/i.exec(String(requestId || ''))
+    const requestSeq = requestSeqMatch ? Number(requestSeqMatch[1]) : ''
+    const requestTimestamp = Number(request.timestamp ?? request.timeStamp ?? 0)
+    const discoveryBadge = String(request.discoverySource || '').toLowerCase() === 'html_link'
+        ? `<span class="ui mini basic teal label ptk-request-discovery-badge" title="${escapeAttr(discoveryTooltip)}">${escapeHtml(discoveryLabel)}</span>`
+        : ''
     let item = `
-                <div>
+                <div class="ptk-request-card" data-discovery-rank="${discoveryRank}" data-request-seq="${escapeAttr(String(requestSeq))}" data-request-ts="${escapeAttr(String(Number.isFinite(requestTimestamp) ? requestTimestamp : 0))}" data-request-url="${escapeAttr(String(request.ui_url || request.url || '').toLowerCase())}" data-request-id="${escapeAttr(String(requestId || ''))}">
                 <div class="title short_message_text" data-request-id="${requestId}" style="overflow-y: hidden;height: 34px;background-color: #eeeeee;margin:1px 0 0 0;cursor:pointer; position: relative">
-                    <i class="dropdown icon"></i>${info.request.ui_url || info.request.url}<i class="filter icon" style="float:right; position: absolute; top: 3px; right: -3px;" title="Filter by request"></i>
+                    <i class="dropdown icon"></i>${requestUrl}${discoveryBadge}<i class="filter icon" style="float:right; position: absolute; top: 3px; right: -3px;" title="Filter by request"></i>
                     
                 </div>
                
@@ -6038,6 +6609,46 @@ function bindRequest(info, requestId) {
                 </div>
                 `
     return item
+}
+
+function compareRequestCardsForDisplay(left, right) {
+    const leftDiscovery = Number(left?.dataset?.discoveryRank || 0)
+    const rightDiscovery = Number(right?.dataset?.discoveryRank || 0)
+    if (leftDiscovery !== rightDiscovery) return leftDiscovery - rightDiscovery
+
+    const leftSeqRaw = String(left?.dataset?.requestSeq || '').trim()
+    const rightSeqRaw = String(right?.dataset?.requestSeq || '').trim()
+    const leftSeq = leftSeqRaw.length ? Number(leftSeqRaw) : null
+    const rightSeq = rightSeqRaw.length ? Number(rightSeqRaw) : null
+    if (leftSeq !== null || rightSeq !== null) {
+        if (!Number.isFinite(leftSeq)) return 1
+        if (!Number.isFinite(rightSeq)) return -1
+        if (leftSeq !== rightSeq) return leftSeq - rightSeq
+    }
+
+    const leftTs = Number(left?.dataset?.requestTs || 0)
+    const rightTs = Number(right?.dataset?.requestTs || 0)
+    if (leftTs !== rightTs) return leftTs - rightTs
+
+    const leftUrl = String(left?.dataset?.requestUrl || '')
+    const rightUrl = String(right?.dataset?.requestUrl || '')
+    const urlDiff = leftUrl.localeCompare(rightUrl)
+    if (urlDiff !== 0) return urlDiff
+
+    const leftId = String(left?.dataset?.requestId || '')
+    const rightId = String(right?.dataset?.requestId || '')
+    return leftId.localeCompare(rightId)
+}
+
+function sortRequestCardsInPanel() {
+    const container = document.getElementById('request_info')
+    if (!container) return
+    const cards = Array.from(container.children).filter((card) => card?.classList?.contains('ptk-request-card'))
+    if (cards.length < 2) return
+    cards.sort(compareRequestCardsForDisplay)
+    cards.forEach((card) => {
+        container.appendChild(card)
+    })
 }
 
 function scoreRawRequestRichness(rawValue) {
@@ -6439,6 +7050,7 @@ function flushDastQueue() {
 
     if (requestMarkup.length) {
         $("#request_info").append(requestMarkup.join(''))
+        sortRequestCardsInPanel()
     }
     if (attackMarkup.length) {
         ensureAttackBuckets()

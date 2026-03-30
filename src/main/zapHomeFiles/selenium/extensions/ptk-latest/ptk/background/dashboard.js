@@ -304,7 +304,8 @@ export class ptk_dashboard {
             html: message.info.html,
             js: message.info.js,
             dom: message.info.dom,
-            cookies: cookies
+            cookies: cookies,
+            url: this.activeTab?.url || this.tab?.url || ''
         })
         detections = Wappalyzer.resolve(detections)
 
@@ -443,7 +444,8 @@ export class ptk_dashboard {
             html: message.info.html,
             js: message.info.js,
             dom: message.info.dom,
-            cookies: cookies
+            cookies: cookies,
+            url: this.activeTab?.url || this.tab?.url || ''
         })
 
         const wafHtmlMatches = message.info?.htmlMatches?.waf?.matched || []
@@ -470,7 +472,8 @@ export class ptk_dashboard {
             const cveEvidence = {
                 js: new Map(),
                 html: new Map(),
-                headers: new Map()
+                headers: new Map(),
+                url: new Map()
             }
 
             const incrementEvidence = (bucket, techName) => {
@@ -530,20 +533,33 @@ export class ptk_dashboard {
                 incrementEvidence(cveEvidence.headers, detection?.technology?.name)
             })
 
+            const cveUrlInput = this.activeTab?.url || this.tab?.url || ''
+            const cveUrlDetections = cveUrlInput
+                ? (Wappalyzer.analyze({ url: cveUrlInput }) || [])
+                : []
+            cveUrlDetections.forEach((detection) => {
+                incrementEvidence(cveEvidence.url, detection?.technology?.name)
+            })
+
             let cveDetections = []
-            cveDetections = cveDetections.concat(jsDetections).concat(cveHtmlDetections).concat(cveHeaderDetections)
+            cveDetections = cveDetections
+                .concat(jsDetections)
+                .concat(cveHtmlDetections)
+                .concat(cveHeaderDetections)
+                .concat(cveUrlDetections)
 
             const resolvedCves = Wappalyzer.resolve(cveDetections) || []
             const cveDefinitions = this.cveTechnologies || {}
 
-            this.tab.cves = (Array.isArray(resolvedCves) ? resolvedCves : []).map((item) => {
+            const passiveCves = (Array.isArray(resolvedCves) ? resolvedCves : []).map((item) => {
                 const id = item.name
                 const raw = cveDefinitions[id] || {}
                 const meta = raw.ptk || {}
                 const evidence = {
                     js: cveEvidence.js.get(id) || 0,
                     html: cveEvidence.html.get(id) || 0,
-                    headers: cveEvidence.headers.get(id) || 0
+                    headers: cveEvidence.headers.get(id) || 0,
+                    url: cveEvidence.url.get(id) || 0
                 }
 
                 return {
@@ -557,6 +573,7 @@ export class ptk_dashboard {
                     verify: meta.verify || null
                 }
             })
+            this.tab.cves = passiveCves
         } else {
             this.tab.cves = []
         }
@@ -921,7 +938,8 @@ export class ptk_dashboard {
                     domains: message.domains,
                     settings: dastSettings
                 })
-                if (response?.success === false) {
+                const dastStarted = !!(response && response.success !== false && (response.isScanRunning === true || engines.dast?.engine?.isRunning))
+                if (!dastStarted) {
                     return Promise.resolve({
                         success: false,
                         error: response?.error || 'scan_start_failed',

@@ -549,11 +549,11 @@ export class ptk_ruleManager {
         }
     }
 
-    static removeSessionRule(id) {
+    static async removeSessionRule(id) {
         if (!worker.isFirefox) {
             try {
                 //console.log('remove rule ' + id)
-                chrome.declarativeNetRequest.updateSessionRules({
+                await chrome.declarativeNetRequest.updateSessionRules({
                     removeRuleIds: [id]
                 })
             } catch (e) {

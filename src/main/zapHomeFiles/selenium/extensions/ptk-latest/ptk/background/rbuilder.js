@@ -667,6 +667,7 @@ export class ptk_request {
 
         const headerList = schema.request.headers || []
         const overrideHeaders = schema.opts.override_headers != false
+        const preserveBrowserHeaders = schema?.opts?.preserve_browser_headers === true
         let effectiveCredentials = schema?.opts?.credentials || 'include'
         const hasCookieHeader = headerList.some(
             (h) => (h.name || '').toLowerCase() === 'cookie'
@@ -694,10 +695,15 @@ export class ptk_request {
         }
         const needsDnr =
             hasCookieHeader ||
-            hasOriginHeader ||
-            hasRefererHeader ||
-            hasUserAgentHeader ||
-            hostMismatch
+            hostMismatch ||
+            (
+                preserveBrowserHeaders &&
+                (
+                    hasOriginHeader ||
+                    hasRefererHeader ||
+                    hasUserAgentHeader
+                )
+            )
         const useDnr =
             (schema?.opts?.use_dnr !== false) &&
             overrideHeaders &&
@@ -715,9 +721,25 @@ export class ptk_request {
             'if-match',
             'if-unmodified-since'
         ])
+        const browserManagedHeaderNames = new Set([
+            'accept-encoding',
+            'connection',
+            'content-length',
+            'host',
+            'origin',
+            'referer',
+            'upgrade-insecure-requests',
+            'user-agent'
+        ])
         let effectiveHeaders = headerList.filter(
             (h) => !cacheValidatorNames.has((h?.name || '').toLowerCase())
         )
+        if (!preserveBrowserHeaders) {
+            effectiveHeaders = effectiveHeaders.filter((h) => {
+                const name = String(h?.name || '').toLowerCase()
+                return !browserManagedHeaderNames.has(name) && !name.startsWith('sec-fetch-') && !name.startsWith('sec-ch-ua')
+            })
+        }
 
         // Ensure Cookie header is explicit when cookies are present.
         const hasCookiesArray = Array.isArray(schema?.request?.cookies) && schema.request.cookies.length > 0
@@ -752,10 +774,14 @@ export class ptk_request {
         }
         schema.request.headers = effectiveHeaders
 
-        // Store headers for WebRequest to apply (Firefox)
-        if (this.useListeners && ptkReqId) {
+        const syncStoredHeadersForAttempt = () => {
+            if (!this.useListeners || !ptkReqId) return
             const webRequestHeaders = effectiveHeaders.map(h => ({ name: h.name, value: h.value }))
-            ptk_request._storedHeaderMap.set(ptkReqId, { headers: webRequestHeaders, ts: Date.now(), source: ptkSource || null })
+            ptk_request._storedHeaderMap.set(ptkReqId, {
+                headers: webRequestHeaders,
+                ts: Date.now(),
+                source: ptkSource || null
+            })
         }
 
         const timeoutMs = Number(schema?.opts?.requestTimeoutMs)
@@ -780,7 +806,7 @@ export class ptk_request {
             credentials: effectiveCredentials,
             redirect: schema.opts.follow_redirect ? "follow" : "manual",
             cache: 'no-cache',
-            keepalive: true,
+            keepalive: schema?.opts?.keepalive === true,
             headers: h,
         }
         if (controller) {
@@ -817,6 +843,28 @@ export class ptk_request {
         }
         const startTime = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
         let self = this
+        const retryOnTransportFailure = schema?.opts?.retry_on_transport_failure === true
+        const parsedRetryCount = Number(schema?.opts?.transport_retry_count)
+        const maxTransportRetries = Number.isFinite(parsedRetryCount)
+            ? Math.max(0, parsedRetryCount)
+            : (retryOnTransportFailure ? 1 : 0)
+        const parsedRetryDelay = Number(schema?.opts?.transport_retry_delay_ms)
+        const transportRetryDelayMs = Number.isFinite(parsedRetryDelay)
+            ? Math.max(0, parsedRetryDelay)
+            : 75
+        const sleep = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
+        const isRetriableTransportFailure = (error) => {
+            if (!error) return false
+            if (controller?.signal?.aborted) return false
+            const name = String(error?.name || '')
+            const message = String(error?.message || '')
+            if (name === 'AbortError') return false
+            return (
+                name === 'TypeError'
+                || /failed to fetch/i.test(message)
+                || /networkerror/i.test(message)
+            )
+        }
 
 
         const runRequest = async () => {
@@ -825,56 +873,93 @@ export class ptk_request {
                 ruleId = parseInt((Math.floor(Math.random() * 6) + 1) + Math.floor((Date.now() * Math.random() * 1000)).toString().substr(-8, 8))
                 await ptk_ruleManager.addSessionRule(schema, ruleId)
             }
-            return fetch(schema.request.url, params).then(async function (response) {
-            let rh = []
-            for (var pair of response.headers.entries()) {
-                rh.push({ name: pair[0], value: pair[1] })
-            }
-            let trackingRequest = null
-            if (self.trackingRequest && rbSchema?.opts?.ptk_req_id) {
-                trackingRequest = self.trackingRequest.get(`ptk:${rbSchema.opts.ptk_req_id}`) || null
-            }
+            try {
+                let attempt = 0
+                while (true) {
+                    try {
+                        attempt += 1
+                        syncStoredHeadersForAttempt()
+                        const response = await fetch(schema.request.url, params)
+                        let rh = []
+                        for (var pair of response.headers.entries()) {
+                            rh.push({ name: pair[0], value: pair[1] })
+                        }
+                        let trackingRequest = null
+                        if (self.trackingRequest && rbSchema?.opts?.ptk_req_id) {
+                            trackingRequest = self.trackingRequest.get(`ptk:${rbSchema.opts.ptk_req_id}`) || null
+                        }
 
-            rbSchema.response.body = await response.text()
-            rbSchema.response.length = typeof rbSchema.response.body === 'string' ? rbSchema.response.body.length : null
-            if (trackingRequest) {
-                rbSchema.response.headers = trackingRequest.response.responseHeaders
-                rbSchema.response.statusLine = trackingRequest.response.statusLine
-                rbSchema.response.statusCode = trackingRequest.response.statusCode
-            } else {
-                rbSchema.response.headers = rh
-                rbSchema.response.statusCode = response.status
-                const protocolVersion = (rbSchema.request.protocolVersion || 'HTTP/1.1').trim()
-                const statusText = typeof response.statusText === 'string' ? response.statusText.trim() : ''
-                rbSchema.response.statusLine = statusText
-                    ? `${protocolVersion} ${response.status} ${statusText}`
-                    : `${protocolVersion} ${response.status}`
+                        rbSchema.response.body = await response.text()
+                        rbSchema.response.length = typeof rbSchema.response.body === 'string' ? rbSchema.response.body.length : null
+                        if (trackingRequest) {
+                            rbSchema.response.headers = trackingRequest.response.responseHeaders
+                            rbSchema.response.statusLine = trackingRequest.response.statusLine
+                            rbSchema.response.statusCode = trackingRequest.response.statusCode
+                        } else {
+                            rbSchema.response.headers = rh
+                            rbSchema.response.statusCode = response.status
+                            const protocolVersion = (rbSchema.request.protocolVersion || 'HTTP/1.1').trim()
+                            const statusText = typeof response.statusText === 'string' ? response.statusText.trim() : ''
+                            rbSchema.response.statusLine = statusText
+                                ? `${protocolVersion} ${response.status} ${statusText}`
+                                : `${protocolVersion} ${response.status}`
+                        }
+                        const endTime = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+                        rbSchema.response.timeMs = Math.round(endTime - startTime)
+                        rbSchema.response.transportAttempts = attempt
+                        rbSchema.response.transportRetried = attempt > 1
+                        rbSchema.response.transportRetryCount = Math.max(0, attempt - 1)
+                        return rbSchema
+                    } catch (e) {
+                        const shouldRetry = attempt <= maxTransportRetries && isRetriableTransportFailure(e)
+                        if (shouldRetry) {
+                            await sleep(transportRetryDelayMs * attempt)
+                            continue
+                        }
+                        console.warn('ptk_request.sendRequest failed', {
+                            url: schema?.request?.url,
+                            method: schema?.request?.method,
+                            hasBody: preparedBody !== null,
+                            bodyLength: preparedBody ? preparedBody.length : 0,
+                            name: e?.name,
+                            message: e?.message,
+                            cause: e?.cause?.message || e?.cause || null,
+                            attempt
+                        }, e)
+                        rbSchema.response = rbSchema.response || {}
+                        rbSchema.response.statusLine = e?.message || 'Request failed'
+                        rbSchema.response.transportAttempts = attempt
+                        rbSchema.response.transportRetried = attempt > 1
+                        rbSchema.response.transportRetryCount = Math.max(0, attempt - 1)
+                        if (e?.name) rbSchema.response.errorName = String(e.name)
+                        if (e?.message) rbSchema.response.errorMessage = String(e.message)
+                        if (e?.cause) {
+                            rbSchema.response.errorCause = typeof e.cause === 'string'
+                                ? e.cause
+                                : (e.cause?.message || String(e.cause))
+                        }
+                        return rbSchema
+                    }
+                }
+            } catch (e) {
+                rbSchema.response = rbSchema.response || {}
+                rbSchema.response.statusLine = e?.message || 'Request failed'
+                if (e?.name) rbSchema.response.errorName = String(e.name)
+                if (e?.message) rbSchema.response.errorMessage = String(e.message)
+                if (e?.cause) {
+                    rbSchema.response.errorCause = typeof e.cause === 'string'
+                        ? e.cause
+                        : (e.cause?.message || String(e.cause))
+                }
+                return rbSchema
+            } finally {
+                clearTimeout(timeoutId)
+                self.trackingRequest = null
+                if (this.useListeners) self.removeListeners()
+                if (ruleId) {
+                    await ptk_ruleManager.removeSessionRule(ruleId)
+                }
             }
-            const endTime = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
-            rbSchema.response.timeMs = Math.round(endTime - startTime)
-            return rbSchema
-        }).catch(e => {
-            console.warn('ptk_request.sendRequest failed', {
-                url: schema?.request?.url,
-                method: schema?.request?.method,
-                hasBody: preparedBody !== null,
-                bodyLength: preparedBody ? preparedBody.length : 0,
-                name: e?.name,
-                message: e?.message,
-                cause: e?.cause?.message || e?.cause || null
-            }, e)
-            rbSchema.response = rbSchema.response || {}
-            rbSchema.response.statusLine = e.message
-            return rbSchema
-        }).finally(() => {
-            clearTimeout(timeoutId)
-            self.trackingRequest = null
-            if (this.useListeners) self.removeListeners()
-            if (ruleId) {
-                ptk_ruleManager.removeSessionRule(ruleId)
-            }
-
-        })
         }
 
         if (useDnr) {

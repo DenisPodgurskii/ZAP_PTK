@@ -35,6 +35,39 @@ function stableStringify(value) {
     return JSON.stringify(String(value))
 }
 
+function toSourceFindingKey(finding) {
+    if (!finding || typeof finding !== 'object') return ''
+    const evidence = finding?.evidence?.dast && typeof finding.evidence.dast === 'object'
+        ? finding.evidence.dast
+        : {}
+    const location = finding?.location && typeof finding.location === 'object'
+        ? finding.location
+        : {}
+    const fingerprint = typeof finding?.fingerprint === 'string' ? finding.fingerprint.trim() : ''
+    if (fingerprint) return fingerprint
+    const id = typeof finding?.id === 'string' ? finding.id.trim() : ''
+    if (id) return id
+    return [
+        String(finding.engine || ''),
+        String(finding.outputKind || ''),
+        String(evidence.attackId || ''),
+        String(evidence.requestId || ''),
+        String(finding.ruleId || ''),
+        String(finding.moduleId || ''),
+        String(location.url || ''),
+        String(location.method || ''),
+        String(location.param || '')
+    ].join('|')
+}
+
+function isReportableDastAttack(attack) {
+    if (!attack || typeof attack !== 'object') return false
+    if (!attack.success) return false
+    if (attack?.validation?.rule === false) return false
+    if (attack?.metadata?.validation?.rule === false) return false
+    return true
+}
+
 export default class ZapPublisher {
     constructor(app, zapBridge, resultsRegistry) {
         this.app = app
@@ -146,11 +179,15 @@ export default class ZapPublisher {
             const key = `${engine}:${scanId}`
             this._touchKey(key)
             if (engine === 'DAST') {
+                const dastSource = this._collectDastSourceFindings(scanResult)
                 await this._publishDastFindings({
                     key,
                     scanId,
                     scanResult,
-                    findings
+                    findings: dastSource.findings,
+                    rawCount: dastSource.rawCount,
+                    reconCount: dastSource.reconCount,
+                    synthesizedCount: dastSource.synthesizedCount
                 })
                 return
             }
@@ -161,6 +198,7 @@ export default class ZapPublisher {
                     engine,
                     scanId,
                     findings,
+                    scanResult,
                     mapper: toIastFinding,
                     sender: (payload) => this.zapBridge.sendIastFindingsBatch(payload)
                 })
@@ -173,6 +211,7 @@ export default class ZapPublisher {
                     engine,
                     scanId,
                     findings,
+                    scanResult,
                     mapper: toSastFinding,
                     sender: (payload) => this.zapBridge.sendSastFindingsBatch(payload)
                 })
@@ -220,10 +259,93 @@ export default class ZapPublisher {
         }
     }
 
-    async _publishDastFindings({ key, scanId, scanResult, findings: sourceFindings }) {
+    _collectDastSourceFindings(scanResult) {
+        const rawFindings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
+        const reconFindings = Array.isArray(scanResult?.recon) ? scanResult.recon : []
+        const synthesizedFindings = rawFindings.length === 0
+            ? this._synthesizeDastFindingsFromRequests(scanResult)
+            : []
+        const merged = []
+        const seen = new Set()
+        for (const finding of [...(rawFindings.length ? rawFindings : synthesizedFindings), ...reconFindings]) {
+            if (!finding || typeof finding !== 'object') continue
+            const key = toSourceFindingKey(finding)
+            if (key && seen.has(key)) continue
+            if (key) seen.add(key)
+            merged.push(finding)
+        }
+        return {
+            findings: merged,
+            rawCount: rawFindings.length,
+            reconCount: reconFindings.length,
+            synthesizedCount: synthesizedFindings.length
+        }
+    }
+
+    _synthesizeDastFindingsFromRequests(scanResult) {
+        const requests = Array.isArray(scanResult?.requests) ? scanResult.requests : []
+        const findings = []
+        let fallbackSeq = 0
+
+        for (const record of requests) {
+            if (!record || typeof record !== 'object') continue
+            const requestId = record.id || `req-${fallbackSeq + 1}`
+            const originalRequest = record?.original?.request || {}
+            const attacks = Array.isArray(record.attacks) ? record.attacks : []
+
+            for (const attack of attacks) {
+                if (!isReportableDastAttack(attack)) continue
+                fallbackSeq += 1
+                const meta = attack?.metadata && typeof attack.metadata === 'object' ? attack.metadata : {}
+                const attackId = attack.id || `atk-${fallbackSeq}`
+                const req = attack.request || originalRequest || {}
+                const attacked = meta.attacked
+                const paramName = attack.param
+                    || meta.param
+                    || (typeof attacked === 'string' ? attacked : attacked?.name)
+                    || null
+                findings.push({
+                    id: `zap-ui-dast-${scanResult?.scanId || 'scan'}-${requestId}-${attackId}`,
+                    engine: 'DAST',
+                    scanId: scanResult?.scanId || null,
+                    moduleId: attack.moduleId || meta.moduleId || null,
+                    moduleName: attack.moduleName || meta.moduleName || meta.module || null,
+                    ruleId: attack.ruleId || meta.id || meta.attackId || attackId,
+                    ruleName: attack.ruleName || attack.name || meta.name || meta.id || null,
+                    vulnId: attack.vulnId || meta.vulnId || meta.category || null,
+                    category: attack.category || meta.category || null,
+                    severity: attack.severity || meta.severity || 'medium',
+                    confidence: attack.confidence ?? meta.confidence ?? null,
+                    outputKind: attack.outputKind || meta.outputKind || null,
+                    reconKind: attack.reconKind || meta.reconKind || null,
+                    presentationAggregate: attack.presentationAggregate || meta.presentationAggregate || null,
+                    uiSurface: attack.uiSurface || meta.uiSurface || null,
+                    location: {
+                        url: req.url || req.href || originalRequest?.url || null,
+                        method: req.method || originalRequest?.method || null,
+                        param: paramName
+                    },
+                    evidence: {
+                        dast: {
+                            attackId,
+                            requestId,
+                            param: attack.param || meta.param || null,
+                            payload: attack.payload || meta.payload || null,
+                            proof: attack.proof || null
+                        }
+                    }
+                })
+            }
+        }
+
+        return findings
+    }
+
+    async _publishDastFindings({ key, scanId, scanResult, findings: sourceFindings, rawCount = 0, reconCount = 0, synthesizedCount = 0 }) {
         const findings = []
         let skippedFilter = 0
         let skippedMapper = 0
+        let alreadyPublished = 0
 
         for (const finding of sourceFindings) {
             if (!isZapExportableFinding('DAST', finding)) {
@@ -242,6 +364,7 @@ export default class ZapPublisher {
             const findingKey = this._getMappedFindingKey(mapped)
             const signature = stableStringify(mapped)
             if (!this._shouldPublishFindingVersion(key, findingKey, signature)) {
+                alreadyPublished += 1
                 continue
             }
             findings.push({ mapped, findingKey, signature })
@@ -253,8 +376,12 @@ export default class ZapPublisher {
             engine: 'DAST',
             scanId,
             total: Array.isArray(sourceFindings) ? sourceFindings.length : 0,
+            rawFindings: rawCount,
+            reconFindings: reconCount,
+            synthesizedFindings: synthesizedCount,
             exportable: (Array.isArray(sourceFindings) ? sourceFindings.length : 0) - skippedFilter,
-            mapped: findings.length,
+            toSend: findings.length,
+            alreadyPublished,
             skippedFilter,
             skippedMapper
         })
@@ -278,10 +405,11 @@ export default class ZapPublisher {
         }
     }
 
-    async _publishEngineFindingsBatch({ key, engine, scanId, findings: sourceFindings, mapper, sender }) {
+    async _publishEngineFindingsBatch({ key, engine, scanId, findings: sourceFindings, scanResult, mapper, sender }) {
         const findings = []
         let skippedFilter = 0
         let skippedMapper = 0
+        let alreadyPublished = 0
 
         for (const finding of sourceFindings) {
             if (!isZapExportableFinding(engine, finding)) {
@@ -289,7 +417,7 @@ export default class ZapPublisher {
                 continue
             }
 
-            const mapped = mapper(finding, { scanId })
+            const mapped = mapper(finding, { scanId, scanResult })
             if (!mapped) {
                 skippedMapper += 1
                 continue
@@ -297,6 +425,7 @@ export default class ZapPublisher {
             const findingKey = this._getMappedFindingKey(mapped)
             const signature = stableStringify(mapped)
             if (!this._shouldPublishFindingVersion(key, findingKey, signature)) {
+                alreadyPublished += 1
                 continue
             }
             findings.push({ mapped, findingKey, signature })
@@ -309,7 +438,8 @@ export default class ZapPublisher {
             scanId,
             total: Array.isArray(sourceFindings) ? sourceFindings.length : 0,
             exportable: (Array.isArray(sourceFindings) ? sourceFindings.length : 0) - skippedFilter,
-            mapped: findings.length,
+            toSend: findings.length,
+            alreadyPublished,
             skippedFilter,
             skippedMapper
         })
