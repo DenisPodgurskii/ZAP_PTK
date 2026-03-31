@@ -8,5 +8,6 @@
 	<indexitem text="ptk" target="addon.ptk" />
 	<indexitem text="OWASP PTK" target="addon.ptk" />
 	<indexitem text="Penetration Testing Kit" target="addon.ptk" />
+	<indexitem text="PTK Options" target="ptk.options" />
 </index>
 

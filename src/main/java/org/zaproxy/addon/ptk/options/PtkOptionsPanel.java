@@ -200,11 +200,16 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         enableAutomatedScanningCheckBox.setSelected(param.isAutomatedScanningEnabled());
         tree.setModel(buildTreeModel());
         expandEnginesAndModulesOnly(tree);
-        uncheckAll(tree);
-        for (String pathString : param.getCheckedPathStrings()) {
-            TreePath path = indexStringToTreePath(tree, pathString);
-            if (path != null) {
-                tree.check(path, true);
+        Set<String> savedPaths = param.getCheckedPathStrings();
+        if (savedPaths.isEmpty()) {
+            checkAll(tree);
+        } else {
+            uncheckAll(tree);
+            for (String pathString : savedPaths) {
+                TreePath path = indexStringToTreePath(tree, pathString);
+                if (path != null) {
+                    tree.check(path, true);
+                }
             }
         }
     }

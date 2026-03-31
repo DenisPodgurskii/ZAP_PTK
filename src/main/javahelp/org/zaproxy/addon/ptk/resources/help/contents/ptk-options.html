@@ -1,0 +1,30 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<TITLE>
+OWASP PTK Options
+</TITLE>
+</HEAD>
+<BODY>
+<H1>OWASP PTK Options</H1>
+
+<H2>Enable Automated Scanning</H2>
+When checked, PTK will automatically run its configured scan rules during browser sessions.
+When unchecked, PTK will still be active in the browser but no automated scanning will take place.
+
+<H2>Scan Rules</H2>
+The scan rules tree lists all available PTK rules grouped by engine (DAST, IAST, SAST) and module.
+Any rule that is enabled here will be available to PTK when it runs in the browser.
+Rules that are disabled will be ignored by PTK entirely.
+<p>
+All rules are enabled by default. Uncheck any rules you do not want PTK to use.
+
+<H2>ZAP Alerts</H2>
+PTK will raise ZAP alerts for any issues it finds. The full list of alerts raised by PTK is available at
+<a href="https://www.zaproxy.org/alerttags/tool_ptk/">https://www.zaproxy.org/alerttags/tool_ptk/</a>.
+
+<p>
+See also: <a href="ptk.html">OWASP PTK</a>
+
+</BODY>
+</HTML>
