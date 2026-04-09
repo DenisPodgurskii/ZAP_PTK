@@ -1,6 +1,7 @@
 package org.zaproxy.addon.ptk;
 
 import com.google.gson.Gson;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,6 +16,7 @@ import org.parosproxy.paros.extension.ExtensionHook;
 import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMessage;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
+import org.zaproxy.addon.client.ClientCallBackUtils;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.options.PtkOptionsPanel;
@@ -32,6 +34,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private ClientCallBackImplementor callBackImplementor;
     private PtkOptionsPanel optionsPanel;
     private PtkParam ptkParam;
+
+    private Map<String, Integer> scanProgress = new HashMap<>();
 
     public ExtensionPtk() {
         super("ExtensionPtk");
@@ -132,14 +136,22 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         msg.getRequestHeader().getURI(),
                         msg.getRequestBody());
             } else if (uri.contains(PTK_PROGRESS_PATH)) {
-                // POST with {"progress": 10} maybe?
-                // Where progress is a %, and when it reaches 100 then the window will be closed
-                // when using automation.
-                LOGGER.debug(
-                        "PTK got progress: {} {} {}",
-                        msg.getRequestHeader().getMethod(),
-                        msg.getRequestHeader().getURI(),
-                        msg.getRequestBody());
+                String requestBody = msg.getRequestBody().toString();
+                try {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> progressData = GSON.fromJson(requestBody, Map.class);
+                    String zapid = (String) progressData.get("zapid");
+                    Number progress = (Number) progressData.get("progress");
+                    if (zapid != null && progress != null) {
+                        scanProgress.put(zapid, progress.intValue());
+                        LOGGER.debug(
+                                "PTK progress: zapid={} progress={}", zapid, progress.intValue());
+                    } else {
+                        LOGGER.warn("PTK progress missing zapid or progress: {}", requestBody);
+                    }
+                } catch (Exception e) {
+                    LOGGER.warn("PTK failed to parse progress body: {}", requestBody, e);
+                }
                 msg.getResponseBody().setBody("{\"result\": \"OK\"}");
             } else {
                 LOGGER.warn(
@@ -152,6 +164,44 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             msg.getResponseHeader().setHeader(HttpHeader.CONTENT_TYPE, "application/json");
             msg.getResponseHeader().setContentLength(msg.getResponseBody().length());
             return "";
+        }
+
+        @Override
+        public void browserClosing(ClientCallBackUtils ccbutils) {
+            LOGGER.debug("PTK browserExiting {}", ccbutils.getUuid());
+            if (ccbutils.getUuid() == null) {
+                return;
+            }
+            String zapid = ccbutils.getUuid().toString();
+            if (!scanProgress.containsKey(zapid)) {
+                LOGGER.warn("PTK browserExiting: no progress for UUID {}", ccbutils.getUuid());
+                return;
+            }
+            long start = System.currentTimeMillis();
+            int count = 0;
+            while (scanProgress.getOrDefault(zapid, 100) < 100) {
+                count++;
+                if (count >= 20) {
+                    LOGGER.warn(
+                            "PTK browserExiting: UUID {} forced exit after {} ms, progress was {}",
+                            ccbutils.getUuid(),
+                            (System.currentTimeMillis() - start),
+                            scanProgress.get(zapid));
+                    scanProgress.remove(zapid);
+                    return;
+                }
+                try {
+                    Thread.sleep(5000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            scanProgress.remove(zapid);
+            LOGGER.debug(
+                    "PTK browserExiting: UUID {} exited cleanly waited for {} ms",
+                    ccbutils.getUuid(),
+                    (System.currentTimeMillis() - start));
         }
     }
 }
