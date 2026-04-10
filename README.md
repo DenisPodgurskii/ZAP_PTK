@@ -18,3 +18,12 @@ This ZAP add-on provides integration with [OWASP Penetration Testing Kit (PTK)](
 This ZAP add-on enables seamless integration between ZAP and OWASP PTK, allowing security testers to leverage both tools together for comprehensive application security testing.
 
 For more information about OWASP PTK, visit [https://pentestkit.co.uk/](https://pentestkit.co.uk/)
+
+## Development Notes
+
+To deploy to `../zaprozy` : `./gradlew copyZapAddOn`
+
+To deploy to `../zaproxy` and use a local add-on : `./gradlew copyZapAddOn --include-build=../zap-extensions`
+
+To apply code formatting: `./gradlew spotlessApply`
+

@@ -46,7 +46,7 @@ zapAddOn {
 }
 
 dependencies {
-    compileOnly("org.zaproxy.addon:client:0.21.0-SNAPSHOT")
+    compileOnly("org.zaproxy.addon:client:0.22.0-SNAPSHOT")
     compileOnly("org.zaproxy.addon:selenium:15.43.0")
     compileOnly("org.projectlombok:lombok:1.18.34")
     annotationProcessor("org.projectlombok:lombok:1.18.34")

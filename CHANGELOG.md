@@ -3,6 +3,10 @@ All notable changes to this add-on will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## 0.4.0
+### Added
+- Keep browsers open while scanning in automation mode
+
 ## 0.3.0
 ### Added
 - Added mapping to and from ZAP alert ids and PTK module names
