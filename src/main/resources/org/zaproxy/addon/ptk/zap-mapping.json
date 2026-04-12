@@ -30,7 +30,20 @@
             "xss_2": 2,
             "xss_3": 3,
             "xss_4": 4,
-            "xss_5": 5
+            "xss_5": 5,
+            "xss_attr_1": 6,
+            "xss_event_handler_polyglot": 7,
+            "xss_jsstring_1": 8,
+            "xss_template_literal_breakout": 9,
+            "xss_js_expression_replace": 10,
+            "xss_js_single_quote_breakout": 11,
+            "xss_js_slash_regex_breakout": 12,
+            "xss_js_comment_breakout": 13,
+            "xss_attr_double_quote_event_injection": 14,
+            "xss_attr_single_quote_event_injection": 15,
+            "xss_attr_unquoted_event_injection": 16,
+            "xss_attribute_name_event_injection": 17,
+            "xss_tagname_svg_onload": 18
           }
         },
         {
@@ -222,6 +235,30 @@
             "recon_dotenv_files": 7,
             "recon_git_exposure": 8,
             "recon_phpinfo": 9
+          }
+        },
+        {
+          "moduleId": "dom_xss_url_params",
+          "baseAlertId": 200020,
+          "rules": {
+            "dom_xss_url_params_html_img_onerror": 1,
+            "dom_xss_url_params_attr_breakout": 2,
+            "dom_xss_url_params_js_double_quote_breakout": 3,
+            "dom_xss_url_params_js_single_quote_breakout": 4,
+            "dom_xss_url_params_js_template_literal_breakout": 5,
+            "dom_xss_url_params_js_expression": 6,
+            "dom_xss_url_params_js_regex_breakout": 7,
+            "dom_xss_url_params_js_comment_breakout": 8,
+            "dom_xss_url_params_event_handler_value": 9,
+            "dom_xss_url_params_attribute_name_event": 10,
+            "dom_xss_url_params_href_javascript_url": 11,
+            "dom_xss_url_params_style_text_breakout": 12,
+            "dom_xss_url_params_js_script_tag_breakout": 13,
+            "dom_xss_url_params_attr_double_quote_event": 14,
+            "dom_xss_url_params_attr_double_quote_onerror": 15,
+            "dom_xss_url_params_attr_single_quote_event": 16,
+            "dom_xss_url_params_attr_unquoted_event": 17,
+            "dom_xss_url_params_tagname_svg_event": 18
           }
         }
       ]
