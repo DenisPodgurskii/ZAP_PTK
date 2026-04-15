@@ -74,6 +74,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 .getExtensionLoader()
                 .getExtension(ExtensionClientIntegration.class)
                 .unregisterClientCallBack(callBackImplementor);
+        if (optionsPanel != null) {
+            optionsPanel.unload();
+        }
     }
 
     @Override
