@@ -19,6 +19,69 @@ Rules that are disabled will be ignored by PTK entirely.
 <p>
 All rules are enabled by default. Uncheck any rules you do not want PTK to use.
 
+<H2>Command-Line Configuration</H2>
+PTK scan-rule state can be set directly from the ZAP command line using the <code>-config</code> flag,
+without opening the Options dialog. This is useful for headless or automated runs where you want to
+enable or disable specific engines, modules, or rules.
+<p>
+This is a temporary solution - we plan to add support for configuring the PTK rules in a similar way to other 
+ZAP rules in due course.
+
+<H3>Key format</H3>
+Configuration keys follow the hierarchy of the scan-rules tree:
+<ul>
+  <li><code>ptk.scanrules.<i>ENGINE</i>.enabled</code> — enable or disable an entire engine</li>
+  <li><code>ptk.scanrules.<i>ENGINE</i>.<i>moduleId</i>.enabled</code> — enable or disable a module within an engine</li>
+  <li><code>ptk.scanrules.<i>ENGINE</i>.<i>moduleId</i>.<i>ruleId</i>.enabled</code> — enable or disable a single rule</li>
+  <li><code>ptk.automatedScanning.enabled</code> — enable or disable automated scanning</li>
+</ul>
+Engine names are <code>SAST</code>, <code>IAST</code>, and <code>DAST</code>.
+Module and rule IDs can be found by hovering over a node in the Options dialog tree — the tooltip shows the internal ID used in configuration keys.
+
+<H3>Inheritance</H3>
+Settings are inherited from parent to child: a rule-level key overrides its module key, which overrides
+the engine key, which overrides the default of <code>true</code> (enabled).
+This means you can disable an entire engine with a single key and then selectively re-enable
+individual rules or modules.
+
+<H3>Examples</H3>
+Disable all IAST and DAST rules, leaving only SAST active:
+<pre>
+zap.sh -config ptk.scanrules.IAST.enabled=false \
+        -config ptk.scanrules.DAST.enabled=false
+</pre>
+
+Disable a specific SAST module:
+<pre>
+zap.sh -config ptk.scanrules.SAST.dom-xss.enabled=false
+</pre>
+
+Disable a single rule within a module:
+<pre>
+zap.sh -config ptk.scanrules.SAST.dom-xss.no-inner-outer-html.enabled=false
+</pre>
+
+Disable all SAST rules except one:
+<pre>
+zap.sh -config ptk.scanrules.SAST.enabled=false \
+        -config ptk.scanrules.SAST.dom-xss.no-inner-outer-html.enabled=true
+</pre>
+
+Enable automated scanning:
+<pre>
+zap.sh -config ptk.automatedScanning.enabled=true
+</pre>
+
+For many options, use a properties file with <code>-configfile</code>:
+<pre>
+ptk.scanrules.IAST.enabled=false
+ptk.scanrules.DAST.enabled=false
+ptk.scanrules.SAST.dom-xss.no-inner-outer-html.enabled=false
+</pre>
+<pre>
+zap.sh -configfile my-ptk-config.properties
+</pre>
+
 <H2>ZAP Alerts</H2>
 PTK will raise ZAP alerts for any issues it finds. The full list of alerts raised by PTK is available at
 <a href="https://www.zaproxy.org/alerttags/tool_ptk/">https://www.zaproxy.org/alerttags/tool_ptk/</a>.
