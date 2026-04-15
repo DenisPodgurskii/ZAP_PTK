@@ -30,13 +30,13 @@ import org.zaproxy.zap.common.VersionedAbstractParam;
  * <p>The default (no key present) is {@code true} (enabled). Inheritance: rule key wins over module
  * key wins over engine key wins over the default. Only {@code false} entries need to be written;
  * the default covers the {@code true} case. A child {@code true} can override a parent {@code
- * false} (useful with {@code --config} on the command line).
+ * false} (useful with {@code -config} on the command line).
  *
  * <p>This format allows simple CLI configuration, e.g.:
  *
  * <pre>
- *   --config ptk.scanrules.IAST.enabled=false
- *   --config ptk.scanrules.DAST.enabled=false
+ *   -config ptk.scanrules.IAST.enabled=false
+ *   -config ptk.scanrules.DAST.enabled=false
  * </pre>
  *
  * <p><strong>Constraint:</strong> engine, module, and rule IDs must not contain dots, as dots are

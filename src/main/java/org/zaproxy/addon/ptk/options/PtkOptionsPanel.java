@@ -279,6 +279,10 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         return ((OptionsParam) obj).getParamSet(PtkParam.class);
     }
 
+    public void unload() {
+        ToolTipManager.sharedInstance().unregisterComponent(tree);
+    }
+
     @Override
     public String getHelpIndex() {
         return "ptk.options";
