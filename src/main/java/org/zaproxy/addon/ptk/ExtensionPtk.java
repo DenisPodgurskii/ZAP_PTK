@@ -5,7 +5,6 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.control.Control;
@@ -113,9 +112,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 response.put("mode", getParam().isAutomatedScanningEnabled() ? "auto" : "manual");
                 PtkResourcesLoader loader = new PtkResourcesLoader();
                 PtkResourcesLoader.LoadedPtkResources resources = loader.loadAll();
-                Set<String> checkedPaths = getParam().getCheckedPathStrings();
                 Map<String, PtkModulesDefinition> config =
-                        PtkConfigFilter.filterByCheckedPaths(resources, checkedPaths);
+                        PtkConfigFilter.filter(resources, getParam());
                 response.put("sast", config.get("sast") != null ? config.get("sast") : Map.of());
                 response.put("iast", config.get("iast") != null ? config.get("iast") : Map.of());
                 response.put("dast", config.get("dast") != null ? config.get("dast") : Map.of());

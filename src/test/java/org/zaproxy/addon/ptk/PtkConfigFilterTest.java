@@ -8,225 +8,234 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.zaproxy.addon.ptk.model.PtkAttack;
 import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.PtkRule;
+import org.zaproxy.addon.ptk.options.PtkParam;
+import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
 /** Unit tests for {@link PtkConfigFilter}. */
 class PtkConfigFilterTest {
 
+    private PtkParam param;
+
+    @BeforeEach
+    void setUp() {
+        param = new PtkParam();
+        param.load(new ZapXmlConfiguration());
+    }
+
+    // --- default (no flags) ---
+
     @Test
-    void filterByCheckedPaths_nullCheckedPaths_returnsAllDefinitionsUnchanged() {
-        PtkModulesDefinition sast =
-                definition("sast", "SAST", module("m1", rule("r1"), rule("r2")));
-        PtkModulesDefinition dast = definition("dast", "DAST", moduleWithAttack("a1", "a2"));
+    void filter_noFlags_returnsAllDefinitions() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1"), rule("r2")));
+        PtkModulesDefinition dast = definition("DAST", moduleWithAttacks("a1", "a2"));
         PtkResourcesLoader.LoadedPtkResources resources =
                 new PtkResourcesLoader.LoadedPtkResources(sast, null, dast, null);
 
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, null);
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
 
         assertEquals(2, result.size());
-        assertTrue(result.containsKey("sast"));
-        assertTrue(result.containsKey("dast"));
-        assertEquals(sast, result.get("sast"));
-        assertEquals(dast, result.get("dast"));
+        assertEquals("SAST", result.get("sast").getEngine());
+        assertEquals(1, result.get("sast").getModules().size());
+        assertEquals("DAST", result.get("dast").getEngine());
+        assertEquals(1, result.get("dast").getModules().size());
     }
 
     @Test
-    void filterByCheckedPaths_emptyCheckedPaths_returnsAllDefinitionsUnchanged() {
-        PtkModulesDefinition sast = definition("sast", "SAST", module("m1", rule("r1")));
+    void filter_nullParam_returnsAllDefinitions() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1")));
         PtkResourcesLoader.LoadedPtkResources resources =
                 new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
 
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of());
-
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertEquals(sast, result.get("sast"));
-    }
-
-    @Test
-    void filterByCheckedPaths_explicitRulePaths_includesOnlyThoseRules() {
-        PtkModule mod1 = module("m1", rule("r1"));
-        PtkModule mod2 = module("m2", rule("r2"));
-        PtkModulesDefinition sast = definition("sast", "SAST", mod1, mod2);
-        PtkResourcesLoader.LoadedPtkResources resources =
-                new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
-        // Only rule paths are used; engine/module paths do not include all children
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("0/0/0", "0/1/0"));
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, null);
 
         assertEquals(1, result.size());
-        PtkModulesDefinition filtered = result.get("sast");
-        assertNotNull(filtered);
-        assertEquals(2, filtered.getModules().size());
-        assertEquals("m1", filtered.getModules().get(0).getId());
-        assertEquals("m2", filtered.getModules().get(1).getId());
-        assertEquals(1, filtered.getModules().get(0).getRules().size());
-        assertEquals(1, filtered.getModules().get(1).getRules().size());
+        assertEquals("SAST", result.get("sast").getEngine());
+    }
+
+    // --- engine-level disabled ---
+
+    @Test
+    void filter_engineDisabled_excludesAllRulesInEngine() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1")));
+        PtkModulesDefinition iast = definition("IAST", module("m1", rule("r1")));
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(sast, iast, null, null);
+        param.setEngineEnabled("SAST", false);
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        assertEquals(1, result.size());
+        assertNull(result.get("sast"));
+        assertNotNull(result.get("iast"));
     }
 
     @Test
-    void filterByCheckedPaths_onlyOneRulePath_includesOnlyThatModuleAndRule() {
-        PtkModule mod1 = module("m1", rule("r1"));
-        PtkModule mod2 = module("m2", rule("r2"));
-        PtkModulesDefinition sast = definition("sast", "SAST", mod1, mod2);
+    void filter_allEnginesDisabled_returnsEmptyMap() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1")));
+        PtkModulesDefinition iast = definition("IAST", module("m1", rule("r1")));
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(sast, iast, null, null);
+        param.setEngineEnabled("SAST", false);
+        param.setEngineEnabled("IAST", false);
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        assertTrue(result.isEmpty());
+    }
+
+    // --- module-level disabled ---
+
+    @Test
+    void filter_moduleDisabled_excludesAllRulesInModule() {
+        PtkModule m1 = module("m1", rule("r1"));
+        PtkModule m2 = module("m2", rule("r2"));
+        PtkModulesDefinition sast = definition("SAST", m1, m2);
         PtkResourcesLoader.LoadedPtkResources resources =
                 new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
+        param.setModuleEnabled("SAST", "m1", false);
 
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("0/1/0"));
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
 
         assertEquals(1, result.size());
         PtkModulesDefinition filtered = result.get("sast");
         assertNotNull(filtered);
         assertEquals(1, filtered.getModules().size());
         assertEquals("m2", filtered.getModules().get(0).getId());
-        assertEquals(1, filtered.getModules().get(0).getRules().size());
     }
 
     @Test
-    void filterByCheckedPaths_onlyOneRulePathChecked_includesOnlyThatRule() {
-        PtkModule mod = module("m1", rule("r1"), rule("r2"), rule("r3"));
-        PtkModulesDefinition sast = definition("sast", "SAST", mod);
+    void filter_allModulesInEngineDisabled_engineOmittedFromResult() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1")));
         PtkResourcesLoader.LoadedPtkResources resources =
                 new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
+        param.setModuleEnabled("SAST", "m1", false);
 
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("0/0/1"));
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
 
-        assertEquals(1, result.size());
-        PtkModulesDefinition filtered = result.get("sast");
-        assertNotNull(filtered);
-        assertEquals(1, filtered.getModules().size());
-        assertEquals(1, filtered.getModules().get(0).getRules().size());
-        assertEquals("r2", filtered.getModules().get(0).getRules().get(0).getId());
-    }
-
-    @Test
-    void filterByCheckedPaths_attackPathChecked_includesOnlyThatAttack() {
-        PtkModule mod = moduleWithAttack("a1", "a2", "a3");
-        PtkModulesDefinition dast = definition("dast", "DAST", mod);
-        PtkResourcesLoader.LoadedPtkResources resources =
-                new PtkResourcesLoader.LoadedPtkResources(null, null, dast, null);
-
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("0/0/1"));
-
-        assertEquals(1, result.size());
-        PtkModulesDefinition filtered = result.get("dast");
-        assertNotNull(filtered);
-        assertEquals(1, filtered.getModules().size());
-        assertEquals(1, filtered.getModules().get(0).getAttacks().size());
-        assertEquals("a2", filtered.getModules().get(0).getAttacks().get(0).getId());
-    }
-
-    @Test
-    void filterByCheckedPaths_noMatchingPaths_returnsEmptyMap() {
-        PtkModulesDefinition sast = definition("sast", "SAST", module("m1", rule("r1")));
-        PtkResourcesLoader.LoadedPtkResources resources =
-                new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
-
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("9/9/9", "1/0/0"));
-
-        assertNotNull(result);
         assertTrue(result.isEmpty());
     }
 
+    // --- rule-level disabled ---
+
     @Test
-    void filterByCheckedPaths_treeOrder_whenSastNull_path0RefersToIast() {
-        PtkModulesDefinition iast = definition("iast", "IAST", module("m1", rule("r1")));
+    void filter_ruleDisabled_excludesOnlyThatRule() {
+        PtkModule mod = module("m1", rule("r1"), rule("r2"), rule("r3"));
+        PtkModulesDefinition sast = definition("SAST", mod);
         PtkResourcesLoader.LoadedPtkResources resources =
-                new PtkResourcesLoader.LoadedPtkResources(null, iast, null, null);
+                new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
+        param.setRuleEnabled("SAST", "m1", "r2", false);
 
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("0/0/0"));
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
 
-        assertEquals(1, result.size());
-        assertTrue(result.containsKey("iast"));
-        assertEquals(iast.getEngine(), result.get("iast").getEngine());
-        assertEquals(1, result.get("iast").getModules().size());
+        PtkModulesDefinition filtered = result.get("sast");
+        assertNotNull(filtered);
+        assertEquals(1, filtered.getModules().size());
+        List<PtkRule> rules = filtered.getModules().get(0).getRules();
+        assertEquals(2, rules.size());
+        assertEquals("r1", rules.get(0).getId());
+        assertEquals("r3", rules.get(1).getId());
     }
 
     @Test
-    void filterByCheckedPaths_nullDefinition_omittedFromResult() {
-        PtkModulesDefinition sast = definition("sast", "SAST", module("m1", rule("r1")));
+    void filter_attackDisabled_excludesOnlyThatAttack() {
+        PtkModule mod = moduleWithAttacks("a1", "a2", "a3");
+        PtkModulesDefinition dast = definition("DAST", mod);
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(null, null, dast, null);
+        param.setRuleEnabled("DAST", "dast-mod", "a2", false);
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        PtkModulesDefinition filtered = result.get("dast");
+        assertNotNull(filtered);
+        List<PtkAttack> attacks = filtered.getModules().get(0).getAttacks();
+        assertEquals(2, attacks.size());
+        assertEquals("a1", attacks.get(0).getId());
+        assertEquals("a3", attacks.get(1).getId());
+    }
+
+    // --- child overrides parent ---
+
+    @Test
+    void filter_ruleTrueOverridesEngineFalse_ruleIsIncluded() {
+        PtkModule m1 = module("m1", rule("r1"), rule("r2"));
+        PtkModulesDefinition sast = definition("SAST", m1);
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
+        param.setEngineEnabled("SAST", false);
+        param.setRuleEnabled("SAST", "m1", "r1", true); // override
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        PtkModulesDefinition filtered = result.get("sast");
+        assertNotNull(filtered);
+        assertEquals(1, filtered.getModules().get(0).getRules().size());
+        assertEquals("r1", filtered.getModules().get(0).getRules().get(0).getId());
+    }
+
+    // --- null definition omitted ---
+
+    @Test
+    void filter_nullDefinition_omittedFromResult() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1")));
         PtkResourcesLoader.LoadedPtkResources resources =
                 new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
 
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("0/0/0"));
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
 
         assertEquals(1, result.size());
         assertNull(result.get("iast"));
         assertNull(result.get("dast"));
     }
 
-    @Test
-    void filterByCheckedPaths_moduleWithRulesAndAttacks_filtersByLeafPaths() {
-        PtkModule mod = module("m1", rule("r1"), rule("r2"));
-        mod.setAttacks(List.of(attack("a1"), attack("a2")));
-        PtkModulesDefinition def = definition("mixed", "DAST", mod);
-        PtkResourcesLoader.LoadedPtkResources resources =
-                new PtkResourcesLoader.LoadedPtkResources(null, null, def, null);
-        // Child indices: 0=r1, 1=r2, 2=a1, 3=a2. Only leaf paths include content.
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(
-                        resources, Set.of("0/0/0", "0/0/1", "0/0/2", "0/0/3"));
-
-        assertEquals(1, result.size());
-        PtkModule filteredMod = result.get("dast").getModules().get(0);
-        assertEquals(2, filteredMod.getRules().size());
-        assertEquals(2, filteredMod.getAttacks().size());
-    }
+    // --- multiple engines independent ---
 
     @Test
-    void filterByCheckedPaths_multipleEngines_respectsTreeIndices() {
-        PtkModulesDefinition sast = definition("sast", "SAST", module("s1", rule("r1")));
-        PtkModulesDefinition iast = definition("iast", "IAST", module("i1", rule("r1")));
-        PtkModulesDefinition dast = definition("dast", "DAST", moduleWithAttack("a1"));
+    void filter_multipleEngines_eachIndependentlyConfigured() {
+        PtkModulesDefinition sast = definition("SAST", module("s1", rule("r1")));
+        PtkModulesDefinition iast = definition("IAST", module("i1", rule("r1")));
+        PtkModulesDefinition dast = definition("DAST", moduleWithAttacks("a1"));
         PtkResourcesLoader.LoadedPtkResources resources =
                 new PtkResourcesLoader.LoadedPtkResources(sast, iast, dast, null);
-        // Only enable the one IAST rule (engine index 1, module 0, rule 0)
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("1/0/0"));
+        param.setEngineEnabled("SAST", false);
+        param.setEngineEnabled("DAST", false);
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
 
         assertEquals(1, result.size());
-        assertTrue(result.containsKey("iast"));
+        assertNotNull(result.get("iast"));
         assertEquals("IAST", result.get("iast").getEngine());
-        assertEquals(1, result.get("iast").getModules().size());
     }
 
     @Test
-    void filterByCheckedPaths_oneDastRuleWithParentPaths_returnsOnlyThatRule() {
-        PtkModule mod = moduleWithAttack("a1", "a2", "a3");
-        PtkModulesDefinition dast = definition("dast", "DAST", mod);
+    void filter_moduleWithRulesAndAttacks_eachFilteredIndependently() {
+        PtkModule mod = module("m1", rule("r1"), rule("r2"));
+        mod.setAttacks(List.of(attack("a1"), attack("a2")));
+        PtkModulesDefinition dast = definition("DAST", mod);
         PtkResourcesLoader.LoadedPtkResources resources =
                 new PtkResourcesLoader.LoadedPtkResources(null, null, dast, null);
-        // Simulate tree storing parent paths when one rule is checked (e.g. "0", "0/0", "0/0/1")
-        Map<String, PtkModulesDefinition> result =
-                PtkConfigFilter.filterByCheckedPaths(resources, Set.of("0", "0/0", "0/0/1"));
+        param.setRuleEnabled("DAST", "m1", "r1", false);
+        param.setRuleEnabled("DAST", "m1", "a2", false);
 
-        assertEquals(1, result.size());
-        PtkModulesDefinition filtered = result.get("dast");
-        assertNotNull(filtered);
-        assertEquals(1, filtered.getModules().size());
-        assertEquals(1, filtered.getModules().get(0).getAttacks().size());
-        assertEquals("a2", filtered.getModules().get(0).getAttacks().get(0).getId());
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        PtkModule filtered = result.get("dast").getModules().get(0);
+        assertEquals(1, filtered.getRules().size());
+        assertEquals("r2", filtered.getRules().get(0).getId());
+        assertEquals(1, filtered.getAttacks().size());
+        assertEquals("a1", filtered.getAttacks().get(0).getId());
     }
 
     // --- helpers ---
 
-    private static PtkModulesDefinition definition(
-            String engine, String engineName, PtkModule... modules) {
+    private static PtkModulesDefinition definition(String engineName, PtkModule... modules) {
         PtkModulesDefinition def = new PtkModulesDefinition();
-        def.setSchema("ptk-" + engine.toLowerCase() + "-rulepack/v1");
         def.setEngine(engineName);
         def.setVersion(1);
         def.setModules(List.of(modules));
@@ -241,7 +250,7 @@ class PtkConfigFilterTest {
         return mod;
     }
 
-    private static PtkModule moduleWithAttack(String... attackIds) {
+    private static PtkModule moduleWithAttacks(String... attackIds) {
         PtkModule mod = new PtkModule();
         mod.setId("dast-mod");
         mod.setName("dast-mod");
