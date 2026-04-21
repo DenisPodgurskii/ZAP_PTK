@@ -69,6 +69,11 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     }
 
     @Override
+    public boolean canUnload() {
+        return true;
+    }
+
+    @Override
     public void unload() {
         Control.getSingleton()
                 .getExtensionLoader()
