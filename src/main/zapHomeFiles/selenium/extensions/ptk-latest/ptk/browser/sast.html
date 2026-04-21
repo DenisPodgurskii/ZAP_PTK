@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta content="IE=edge,chrome=1" http-equiv="X-UA-Compatible" />
+  <meta content="width=device-width, initial-scale=1, maximum-scale=2, user-scalable=no" name="viewport" />
+  <meta content="Penetration Testing Kit - cross-browser extension for penetration testing" name="description" />
+  <meta content="Penetration Testing Kit, request builder, traffic recording, macro recording" name="keywords" />
+  <meta content="PPType" name="author" />
+  <meta content="#ffffff" name="theme-color" />
+  <title>OWASP Penetration Testing Kit - SAST (Static Application Security Testing)</title>
+
+  <script src="../packages/browser-polyfill/browser-polyfill.min.js"></script>
+  <script src="../packages/jquery/jquery.min.js"></script>
+  <script src="../packages/jquery/jquery.dataTables.min.js"></script>
+
+  <link rel="stylesheet" href="../packages/semantic-ui/semantic.min.css" type="text/css" />
+  <script src="../packages/semantic-ui/semantic.min.js"></script>
+
+  <link rel="stylesheet" href="../packages/codemirror/codemirror.css" type="text/css" />
+  <link rel="stylesheet" href="../packages/codemirror/addon/fold/foldgutter.css" type="text/css" />
+  <script src="../packages/codemirror/codemirror.js"></script>
+  <script src="../packages/codemirror/mode/http/http.js"></script>
+  <script src="../packages/codemirror/addon/fold/foldcode.js"></script>
+  <script src="../packages/codemirror/addon/fold/foldgutter.js"></script>
+  <script src="../packages/codemirror/addon/fold/brace-fold.js"></script>
+  <script src="../packages/codemirror/addon/fold/xml-fold.js"></script>
+  <script src="../packages/codemirror/addon/fold/indent-fold.js"></script>
+  <script src="../packages/codemirror/addon/fold/markdown-fold.js"></script>
+  <script src="../packages/codemirror/addon/fold/comment-fold.js"></script>
+
+  <link rel="stylesheet" href="assets/css/default.css" type="text/css" />
+  <script src="assets/js/menu.js"></script>
+
+  <script type="module" src="assets/js/sast.js"></script>
+
+  <style>
+    .CodeMirror-code {
+      padding-top: 35px;
+    }
+
+    #sast_result_tabs .item {
+      padding-left: 4px;
+      padding-right: 4px;
+      font-size: 11px;
+    }
+
+    #sast_result_tabs {
+      background: #d8dee6;
+      border-top: 1px solid #b8c1cb;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    }
+
+    #sast_result_tabs .item {
+      background: #eef2f6;
+      color: #1f2937;
+      font-weight: 700;
+      border-right: 1px solid #c1c9d2;
+      box-shadow: inset 0 -1px 0 #c7ced7;
+      opacity: 1;
+    }
+
+    #sast_result_tabs .item:last-child {
+      border-right: none;
+    }
+
+    #sast_result_tabs .item:hover {
+      background: #e4eaf1;
+      color: #111827;
+    }
+
+    #sast_result_tabs .item.active {
+      background: #c7d0d9;
+      color: #111827;
+      box-shadow: inset 0 -2px 0 #6b7280;
+    }
+
+    #sast_findings_filters {
+      min-height: 34px;
+      padding: 0;
+    }
+
+    #sast_findings_filters .rule-filter-wrap {
+      width: min(340px, calc(100% - 220px));
+      float: right;
+    }
+
+    #rule_filter_dropdown.ui.dropdown>.text,
+    #rule_filter_dropdown.ui.dropdown>.default.text {
+      display: block;
+      max-width: calc(100% - 18px);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #rule_filter_dropdown>.dropdown.icon {
+      top: -10px;
+    }
+
+    #discovery_info .sast-discovery-panel {
+      display: none;
+    }
+
+    #discovery_info .sast-discovery-item,
+    #discovery_info .sast-discovery-item>div,
+    #discovery_info .sast-discovery-item .description,
+    #discovery_info .sast-discovery-item .description div,
+    #discovery_info .sast-discovery-item b,
+    #discovery_info .sast-discovery-item i {
+      line-height: 1.4285;
+    }
+
+    #import_export_dlg {
+      position: relative;
+    }
+
+    #sast_scans_form .field {
+      position: relative;
+    }
+
+    #sast_scans_form .ptk-help-label-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 0.28571429rem;
+      max-width: 100%;
+    }
+
+    #sast_scans_form .ptk-help-label-row>label {
+      display: block;
+      margin: 0 !important;
+      padding-right: 0;
+    }
+
+    #sast_scans_form .ptk-help-label-row>.question.circle.icon {
+      position: static !important;
+      top: auto !important;
+      right: auto !important;
+      left: auto !important;
+      bottom: auto !important;
+      margin: 0 !important;
+      cursor: pointer;
+      flex: 0 0 auto;
+      opacity: 0.8;
+    }
+
+    #sast_scans_form .ui.popup.ptk-help-popup {
+      min-width: min(350px, calc(100vw - 48px)) !important;
+      max-width: calc(100vw - 48px) !important;
+      width: max-content;
+    }
+
+    #run_scan_dlg .ptk-run-scan-intro {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    #run_scan_dlg .ptk-run-scan-intro p {
+      margin: 0;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    #run_scan_dlg .ptk-run-scan-intro-actions {
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    #run_scan_dlg .ptk-run-scan-intro-actions>#load_pro_policies_button {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 0;
+      padding-bottom: 0;
+      margin: 0;
+    }
+
+    #sast_scans_form .ui.selection.dropdown.ptk-policy-dropdown>.default.text,
+    #sast_scans_form .ui.selection.dropdown.ptk-policy-dropdown>.text {
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #sast_scans_form .ui.selection.dropdown.ptk-policy-dropdown>.menu {
+      left: auto !important;
+      right: 0 !important;
+      width: max-content !important;
+      min-width: calc(100% + 2px) !important;
+      max-width: min(720px, calc(100vw - 48px)) !important;
+    }
+
+    #sast_scans_form .ui.selection.dropdown.ptk-policy-dropdown .menu>.item {
+      overflow: visible;
+      text-overflow: clip;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      line-height: 1.3;
+    }
+
+    .portal_scans_button {
+      display: none;
+    }
+
+    #portal_scans_modal .ptk-portal-toolbar {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    #portal_scans_modal .ptk-portal-project-field {
+      flex: 1 1 320px;
+      min-width: min(320px, 100%);
+      max-width: 420px;
+      margin: 0;
+    }
+
+    #portal_scans_modal .ptk-portal-toolbar-actions {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    #portal_scans_modal .ptk-portal-toolbar-actions .ui.button {
+      white-space: nowrap;
+    }
+  </style>
+
+</head>
+
+<body>
+  <div class="ui segment clearing info_tab">
+    <div style="padding-top: 5px; padding-right: 4px;">
+      <div class="ui small button generate_report" style="display: none;margin-left: -11px;">Generate
+        report</div>
+
+      <!-- <div class="ui small secondary button exchange" style="display: none; position: relative">
+                  Import/Export<i class="right floated exchange icon" style="padding-left: 8px;"></i>
+                  <div style="position:absolute; top:0px;right: 0px">
+                      <div class="ui  centered inline inverted loader"></div>
+                  </div>
+              </div> -->
+
+      <div class="ui mini message scan_info" style="display: none">
+        <div class="ui header">Scanning <span id="scanning_url"></span></div>
+      </div>
+      <!-- <div class="ui mini right floated icon button " ><i class="settings rattacker large icon"
+                  title="Settings"></i></div> -->
+      <div class="ui mini right floated icon button" style="display:none"><i class="trash all alternate large icon reset" title="Reset"></i>
+      </div>
+      <div class="ui mini right floated icon button portal_scans_button" title="PTK Pro" style="display:none">
+        <i class="cloud large icon"></i>
+      </div>
+      <div class="ui mini right floated icon button import_export" style="display:none"><i class="exchange alternate large icon" title="Import/Export"></i>
+      </div>
+
+      <div class="ui secondary small right floated button run_scan_runtime" id="run_scan_bg_control" style="display:none">Scan in
+        runtime</div>
+      <div class="ui secondary small right floated button stop_scan_runtime" id="stop_scan_bg_control" style="display:none">Stop runtime scan</div>
+    </div>
+  </div>
+  <div id="pagecontent">
+    <div id="sast_page_loader" class="ui active inverted dimmer" style="display:block; position: fixed; top: 46px; left: 0; width: 100%; height: 100%; z-index: 2;">
+      <div class="ui massive text loader">Loading</div>
+    </div>
+    <div id="main" style="display:none;height: 100%;height:100%;width: 100%;position: fixed; top: 46px;z-index: 1;">
+      <table class="ui tiny table" style="padding: 0px;margin: 0px;border: none;height: 100%;">
+        <tbody>
+          <tr>
+            <td style="min-width:50px; vertical-align: text-top; padding: 0px;">
+              <div class="eight wide field" style="padding-right: 1px;height: 91vh;">
+                <div class="field rattacker" style="scrollbar-width: none;height: 100% !important;min-height: 85vh; position: relative;">
+                  <div class="field" style="border:none;scrollbar-width: none;position: absolute;height: 100%;width: 100%;">
+                    <div class="ui items styled accordion" id="request_info" style="width: 100%; overflow: scroll;position:absolute; margin: 0px;scrollbar-width: none;">
+                    </div>
+                    <div style="position:absolute; top:0px;right: 0px">
+                      <div class="ui centered inline active inverted loader" id="init_loader">
+                      </div>
+                    </div>
+
+                    <div style="min-height: 96px; max-height: 132px; width: 50vw; position: fixed; bottom:0px; overflow-y:auto; overflow-x:hidden; display:none; scrollbar-width: none; margin-left: -2px;" id="progress_message">
+                      <div class="ui small message" style="min-height: 96px; margin: 0;">
+                        <div>
+                          <strong>Scan progress:</strong> <span id="progress_scan_metrics"> </span>
+                        </div>
+                        <p style="margin-top: 6px; min-height: 38px;">Status: <span id="progress_attack_name"> </span></p>
+                      </div>
+
+                    </div>
+
+                  </div>
+                </div>
+              </div>
+            </td>
+            <td style="width:50%;margin: 0px; padding: 0px 0px 0px 2px;border: none;vertical-align: top;">
+              <div class="eight wide field" style="padding-left: 1px;height: 91vh;">
+                <div class="field rattacker" style="scrollbar-width: none;height: 100% !important;min-height: 85vh;">
+                  <div class="ui tiny message" style="position: sticky;top: 0px;z-index: 1;min-height: 110px;padding:0;box-sizing:border-box;">
+                    <div id="sast_findings_filters">
+                      <div class="ui compact active button" id="sast_view_findings_button"><i class="icon" title="Findings" style="min-width: 70px;">Findings</i></div>
+                      <div class="ui compact button" id="sast_view_hints_button"><i class="icon" title="Hints" style="min-width: 70px;">Hints</i></div>
+                      <div class="field rule-filter-wrap">
+                        <div class="ui fluid tiny dropdown icon button" id="rule_filter_dropdown" style="width: 100%;">
+                          <div class="text">Filter by rule</div>
+                          <i class="dropdown icon"></i>
+                          <input type="hidden" value="__sast_all_rules__">
+                          <div class="menu">
+                            <div class="item active selected" data-value="__sast_all_rules__">All rules</div>
+                          </div>
+                        </div>
+                      </div>
+                      <br />
+                    </div>
+                    <div class="ui mini statistics ptk-summary-stats" style="margin-top:5px;margin-left:5px;display: inline-block;">
+                      <div class="statistic">
+                        <div class="label">Rules</div>
+                        <div class="value" id="sast_attacks_count">0</div>
+                      </div>
+                      <div class="statistic">
+                        <div class="label" id="sast_scope_count_label">Findings</div>
+                        <div class="value" id="sast_vulns_count">0</div>
+                      </div>
+                    </div>
+
+                    <div class="ui mini statistics ptk-severity-stats" style="margin-top:5px;display: inline-block; position: absolute;right: 20px;">
+                      <div class="statistic">
+                        <div class="label"><i class="fire ptk-sev-critical icon"></i>Critical</div>
+                        <div class="value" id="sast_critical_count">0</div>
+                      </div>
+                      <div class="statistic">
+                        <div class="label"><i class="exclamation triangle ptk-sev-high icon"></i>High</div>
+                        <div class="value" id="sast_high_count">0</div>
+                      </div>
+                      <div class="statistic">
+                        <div class="label"><i class="exclamation triangle ptk-sev-medium icon"></i>Medium</div>
+                        <div class="value" id="sast_medium_count">0</div>
+                      </div>
+                      <div class="statistic">
+                        <div class="label"><i class="exclamation triangle ptk-sev-low icon"></i>Low</div>
+                        <div class="value" id="sast_low_count">0</div>
+                      </div>
+                      <div class="statistic">
+                        <div class="label"><i class="info circle ptk-sev-info icon"></i>Info</div>
+                        <div class="value" id="sast_info_count">0</div>
+                      </div>
+                    </div>
+                    <div class="ui tiny six item menu result_tabs_top" id="sast_result_tabs" style="position:absolute; left:0; right:0; bottom:0; width:100%; margin:0;">
+                      <a class="item" data-view="routes">Routes</a>
+                      <a class="item" data-view="endpoints">Endpoints</a>
+                      <a class="item" data-view="graphql">GraphQL</a>
+                      <a class="item" data-view="surfaces">Surfaces</a>
+                      <a class="item" data-view="hiddenParams">Params</a>
+                      <a class="item" data-view="gadgets">Gadgets</a>
+                    </div>
+                  </div>
+                  <div class="ui items" id="attacks_info" style="width: 100%; overflow: scroll;position:absolute; margin: 0px;scrollbar-width: none;">
+                  </div>
+                  <div id="discovery_info" style="display:none;width: 100%; overflow: scroll;position:absolute; margin: 0px;scrollbar-width: none;">
+                  </div>
+
+                </div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <!--
+            <div class="eight wide field" style="padding-left: 1px;">
+                <div class="field rattacker" style="scrollbar-width: none;height: 100% !important;min-height: 85vh;">
+                    <div class="ui tiny message"
+                        style="position: sticky;top: 0px;z-index: 1; min-height: 80px;padding-top:15px">
+
+                        <div class="ui mini statistic left floated" style="margin-top: 5px;">
+                            <div class="label">
+                                Findings
+                            </div>
+                            <div class="value" id="sast_vulns_count">
+                                0
+                            </div>
+
+                        </div>
+                        <div class="ui mini statistic right floated" style="margin-top: 5px;">
+                            <div class="label"><i class="info circle ptk-sev-info icon"></i>
+                                Info
+                            </div>
+                            <div class="value" id="sast_info_count">
+                                0
+                            </div>
+                        </div>
+                        <div class="ui mini statistic right floated" style="margin-top: 5px;">
+                            <div class="label"><i class="exclamation triangle ptk-sev-low icon"></i>
+                                Low
+                            </div>
+                            <div class="value" id="sast_low_count">
+                                0
+                            </div>
+                        </div>
+                        <div class="ui mini statistic right floated" style="margin-top: 5px;">
+                            <div class="label"><i class="exclamation triangle ptk-sev-medium icon"></i>
+                                Medium
+                            </div>
+                            <div class="value" id="sast_medium_count">
+                                0
+                            </div>
+                        </div>
+                        <div class="ui mini statistic right floated" style="margin-top: 5px;">
+                            <div class="label"><i class="exclamation triangle ptk-sev-high icon"></i>
+                                High
+                            </div>
+                            <div class="value" id="sast_high_count">
+                                0
+                            </div>
+                        </div>
+                        <div class="ui mini statistic right floated" style="margin-top: 5px;">
+                            <div class="label"><i class="fire ptk-sev-critical icon"></i>
+                                Critical
+                            </div>
+                            <div class="value" id="sast_critical_count">
+                                0
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ui cards" id="attacks_info"
+                        style="width: 100%; overflow: scroll;position:absolute; margin: 0px;scrollbar-width: none;">
+                    </div>
+
+                </div>
+            </div>
+-->
+
+    </div>
+
+  </div>
+
+  <div id="welcome_message" class="ptk-welcome" style="display:none;">
+    <div class="ui message ptk-welcome-msg">
+      <div class="ptk-welcome-top">
+        <div class="content ptk-welcome-desc">
+          SAST, or Static Application Security Testing, is a white-box testing method that analyzes source code, bytecode, or binary code for vulnerabilities without executing the application. By scanning JS source files (including ES modules, frameworks like React/Vue, and embedded scripts in HTML), OWASP PTK will identify injection flaws, insecure data handling and DOM-based XSS before code ever reaches QA or production.
+        </div>
+        <div class="header">How to scan an application:</div>
+        <div class="content ptk-welcome-steps">
+          <ul>
+            <li>Click the "Scan in runtime" button and confirm it's starting</li>
+            <li>Start browsing the application you are scanning, e.g. click on different links, submit forms, etc.</li>
+            <li>Once completed open SAST scanner and stop the scan</li>
+            <li>Check the result</li>
+          </ul>
+        </div>
+      </div>
+      <div class="ptk-welcome-tablewrap" style="scrollbar-width: none;">
+        <table id="sast_rules_table" class="ui celled table small responsive nowrap unstackable" width="100%">
+          <thead>
+            <tr>
+              <th style="width: 50%;">Rule</th>
+              <th style="width: 35%;">Module</th>
+              <th style="width: 15%;">Severity</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Attack details and showHtml support -->
+  <div id="attack_details_dialog_wrapper"></div>
+
+  <div class="ui mini modal coupled error" id="result_dialog">
+    <div class="header" id="result_header"></div>
+    <div class="content">
+      <span id="result_message"></span>
+    </div>
+    <div class="actions">
+      <div class="ui button result_open_settings_btn" style="display:none;">Open Settings</div>
+      <div class="ui approve button">Close</div>
+    </div>
+  </div>
+
+  <div id="portal_scans_modal" class="ui fullscreen modal coupled second" style="display: none; height: 83%">
+    <i class="close icon"></i>
+    <div class="ui header">PTK Pro</div>
+    <div class="content" style="min-height: 400px; overflow: scroll;height: 90%;scrollbar-width: none;">
+      <div class="ui tiny negative message" id="sast_save_scan_modal_error" style="display: none;"></div>
+      <form class="ui form controls" id="portal_scan_actions_form" style="height: auto;">
+        <div class="ptk-portal-toolbar">
+          <div class="field ptk-portal-project-field">
+            <label>Portal project</label>
+            <select class="ui dropdown" id="sast_save_scan_project_select">
+              <option value="">Select a project</option>
+            </select>
+          </div>
+          <div class="ptk-portal-toolbar-actions">
+            <div class="ui button secondary disabled" id="portal_upload_scan_button">Upload</div>
+            <div class="ui button secondary" id="portal_download_scans_button">Download</div>
+          </div>
+        </div>
+      </form>
+      <div class="ui info message" id="portal_upload_unavailable" style="display: none;">
+        No completed scan available to upload yet. Run or download a scan first.
+      </div>
+      <form class="ui form controls" id="scan_list">
+        <table id="tbl_scans" class="ui celled table small responsive nowrap unstackable" width="100%" style="margin-bottom: 104px;">
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>Scan ID</th>
+              <th>Scan date</th>
+              <th>Download</th>
+            </tr>
+          </thead>
+        </table>
+      </form>
+    </div>
+  </div>
+
+  <div id="run_scan_dlg" class="ui small modal coupled second" style="display: none;">
+    <i class="close icon"></i>
+    <div class="content">
+      <div class="ui message ptk-run-scan-intro" style="margin: -20px -20px 0px -20px;">
+        <p>Are you sure you want to run SAST scan against <span id="scan_host" style="font-weight: 600;"></span>?</p>
+      </div>
+      <div class="ptk-run-scan-intro-actions" style="position: absolute;right: 0px; z-index: 3;">
+        <div class="ui button" id="load_pro_policies_button">
+          <span>Load</span>
+          <img src="assets/images/PTK_PRO_256.png" alt="PTK Pro" class="ui image" style="width: 100px; height: auto;">
+        </div>
+      </div>
+      <div id="ptk_scan_reload_warning" class="ui warning message ptk-reload-warning ptk-reload-warning-sast" style="top: 35px;z-index: 3;">
+        <i id="ptk_scan_reload_warning_close_sast" class="close icon"></i>
+        Reload this tab to enable runtime signals required for SAST.
+      </div>
+      <div class="ui form" id="sast_scans_form" style="margin-top: 32px;">
+        <div class="field">
+          <div class="ptk-help-label-row">
+            <label>Scan strategy:</label>
+            <i class="question circle icon"></i>
+          </div>
+          <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+            <strong>Scan strategy:</strong> <br />
+            <ul>
+              <li><b>Taint and pattern rules</b> (recommended) - run the full built-in SAST execution mode.</li>
+              <li><b>Taint rules only</b> - run only taint/dataflow rules, which is narrower and usually faster.</li>
+            </ul>
+          </div>
+          <select id="sast-scan-strategy" class="ui fluid dropdown" style="width: 100%;">
+            <option value="0" selected>Taint and pattern rules</option>
+            <option value="1">Taint rules only</option>
+          </select>
+        </div>
+        <div class="field">
+          <div class="ptk-help-label-row">
+            <label>Scan policy:</label>
+            <i class="question circle icon"></i>
+          </div>
+          <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+            <strong>Scan policy:</strong> <br />
+            <ul>
+              <li><b>Default (system)</b> - use the built-in SAST modules/rules.</li>
+              <li><b>PTK Pro policies</b> can appear here when available, offering advanced and customizable scanning options for Pro users.</li>
+            </ul>
+          </div>
+          <select id="sast-scan-policy" class="ui fluid dropdown ptk-policy-dropdown" style="width: 100%;">
+            <option value="default:0" selected>Default (system)</option>
+          </select>
+        </div>
+      </div>
+
+    </div>
+    <!-- 
+    <div class="ui fluid selection dropdown">
+      <input type="hidden" name="scanStrategy" id="sast-scan-strategy">
+      <i class="dropdown icon"></i>
+      <div class="default text">Scan strategy</div>
+      <div class="menu">
+        <div class="item" data-value="0">Taint and pattern rules</div>
+        <div class="item" data-value="1">Taint rules only</div>
+      </div>
+    </div>
+    <div class="ui form" style="margin-top: 12px;">
+      <div class="field">
+        <label>Pages to analyze (comma or newline separated)</label>
+        <textarea id="sast_pages" rows="3" placeholder="http://localhost:3001/#/search?q=test"></textarea>
+      </div>
+    </div> -->
+    <br />
+    <div class="actions">
+      <div class="ui cancel button">Cancel</div>
+      <div class="ui approve button secondary confirm_scan_run">Run scan</div>
+    </div>
+  </div>
+
+
+
+  <div id="import_export_dlg" class="ui fullscreen modal coupled second" style="display: none;max-width: 800px;">
+    <i class="close icon"></i>
+    <div class="ui header">Import/Export</div>
+    <div class="content">
+      <div class="ui  button secondary export_scan_btn">Export</div>
+      <div id="scan_export_progress" class="ptk-export-progress-dialog" style="display:none;">
+        <div class="ptk-export-progress-title">Export</div>
+        <div class="ui tiny progress ptk-export-progress-track">
+          <div id="scan_export_progress_bar" class="bar"></div>
+        </div>
+        <div id="scan_export_progress_text" class="ptk-export-progress-text">Preparing export...</div>
+      </div>
+    </div>
+    <div class="ui horizontal divider">
+      Or
+    </div>
+    <div class="content">
+
+      <form class="ui tiny form controls" id="scan_delete_form">
+        <textarea id="import_scan_json" style="width: 100%; min-height: 100px;"></textarea>
+      </form>
+      <div class="ui  button secondary import_scan_text_btn">Import from text</div>
+      <div class="ui right floated button secondary import_scan_file_btn">Import from file</div>
+      <input id="import_scan_file_input" type="file" hidden />
+      <div class="ui message error" id="scan_import_error_msg" style="display: none;"></div>
+    </div>
+  </div>
+
+
+</body>
+
+</html>

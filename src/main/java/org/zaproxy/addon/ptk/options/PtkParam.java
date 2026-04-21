@@ -182,6 +182,19 @@ public class PtkParam extends VersionedAbstractParam {
         getConfig().setProperty(AUTOMATED_SCANNING_ENABLED_KEY, this.automatedScanningEnabled);
     }
 
+    /**
+     * Builds a stable cache key for the effective PTK config returned by {@code /ptk/config}. The
+     * key changes whenever the automated-scanning mode or any enabled/disabled rule state changes.
+     */
+    public String buildConfigCacheKey(LoadedPtkResources resources) {
+        StringBuilder key = new StringBuilder(512);
+        key.append(automatedScanningEnabled ? "mode:auto" : "mode:manual");
+        appendDefinitionCacheKey(key, resources != null ? resources.getSastModules() : null);
+        appendDefinitionCacheKey(key, resources != null ? resources.getIastModules() : null);
+        appendDefinitionCacheKey(key, resources != null ? resources.getDastModules() : null);
+        return key.toString();
+    }
+
     // -------------------------------------------------------------------------
     // Config version key
     // -------------------------------------------------------------------------
@@ -370,5 +383,46 @@ public class PtkParam extends VersionedAbstractParam {
 
     private static String ruleKey(String engine, String moduleId, String ruleId) {
         return SCAN_RULES_KEY + "." + engine + "." + moduleId + "." + ruleId + ".enabled";
+    }
+
+    private void appendDefinitionCacheKey(StringBuilder key, PtkModulesDefinition def) {
+        if (def == null || def.getModules() == null) {
+            return;
+        }
+        String engine = def.getEngine();
+        if (engine == null) {
+            return;
+        }
+        key.append('|').append(engine);
+        for (PtkModule mod : def.getModules()) {
+            if (mod == null || mod.getId() == null) {
+                continue;
+            }
+            key.append('|').append(mod.getId()).append('=');
+            appendLeafCacheKey(key, engine, mod.getId(), mod.getRules());
+            appendLeafCacheKey(key, engine, mod.getId(), mod.getAttacks());
+        }
+    }
+
+    private void appendLeafCacheKey(
+            StringBuilder key, String engine, String moduleId, List<?> leafs) {
+        if (leafs == null) {
+            return;
+        }
+        for (Object leaf : leafs) {
+            String leafId = null;
+            if (leaf instanceof PtkRule) {
+                leafId = ((PtkRule) leaf).getId();
+            } else if (leaf instanceof PtkAttack) {
+                leafId = ((PtkAttack) leaf).getId();
+            }
+            if (leafId == null) {
+                continue;
+            }
+            key.append(leafId)
+                    .append(':')
+                    .append(isRuleEnabled(engine, moduleId, leafId) ? '1' : '0')
+                    .append(',');
+        }
     }
 }

@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "updatedAt": "2026-01-15",
+  "reasons": {
+    "token_heuristic": {
+      "label": "Token heuristic",
+      "short": "Token-like value detected",
+      "detail": "Matched a token pattern (length/charset/structure) during the operation.",
+      "severityHint": "info"
+    },
+    "jwt_heuristic": {
+      "label": "JWT heuristic",
+      "short": "JWT-like value detected",
+      "detail": "Value looks like a JWT (header.payload.signature).",
+      "severityHint": "info"
+    },
+    "pii_heuristic": {
+      "label": "PII heuristic",
+      "short": "PII-like value detected",
+      "detail": "Matched a PII pattern during the operation.",
+      "severityHint": "info"
+    },
+    "secret_regex": {
+      "label": "Secret pattern",
+      "short": "Secret-like value detected",
+      "detail": "Matched a secret regex during the operation.",
+      "severityHint": "info"
+    },
+    "sink_policy_match": {
+      "label": "Sink policy match",
+      "short": "Operation matches a sensitive sink policy",
+      "detail": "Operation type is flagged by sink policy.",
+      "severityHint": "medium"
+    },
+    "flow_match": {
+      "label": "Taint flow match",
+      "short": "Taint flow reached a sink",
+      "detail": "Untrusted input propagated to a sink.",
+      "severityHint": "high"
+    },
+    "cross_origin_send": {
+      "label": "Cross-origin send",
+      "short": "Sensitive data sent cross-origin",
+      "detail": "Destination origin differs from the page origin.",
+      "severityHint": "high"
+    },
+    "unexpected_header": {
+      "label": "Unexpected header",
+      "short": "Sensitive data placed in an unusual header",
+      "detail": "Header name does not match expected auth headers.",
+      "severityHint": "low"
+    },
+    "auth_header_same_origin": {
+      "label": "Auth header (same-origin)",
+      "short": "Token sent in expected auth header to same-origin",
+      "detail": "Typical auth header usage; recorded as an observation.",
+      "severityHint": "info"
+    },
+    "forbidden_header_attempt_cookie": {
+      "label": "Cookie header attempt",
+      "short": "Attempted to set forbidden Cookie header",
+      "detail": "Setting Cookie header manually is unusual in browsers.",
+      "severityHint": "low"
+    },
+    "storage_persist": {
+      "label": "Sensitive storage",
+      "short": "Sensitive data persisted in storage",
+      "detail": "Token-like value stored in local/session storage.",
+      "severityHint": "low"
+    },
+    "cookie_persist": {
+      "label": "Cookie persistence",
+      "short": "Sensitive data stored in cookie",
+      "detail": "Token-like value stored in document.cookie.",
+      "severityHint": "low"
+    },
+    "unknown": {
+      "label": "Other detection",
+      "short": "Sensitive data detected",
+      "detail": "Detection reason not categorized.",
+      "severityHint": "info"
+    },
+    "auth_header_same_origin_risky": {
+      "label": "Auth header risky (same-origin)",
+      "short": "Auth header used in suspicious same-origin context",
+      "detail": "Authorization-like headers were used on same-origin endpoints that look non-API or unusually frequent.",
+      "severityHint": "low"
+    },
+    "websocket_same_host": {
+      "label": "WebSocket same-host observation",
+      "short": "WebSocket payload sent to same host",
+      "detail": "WebSocket destination matched current host; recorded as observation context.",
+      "severityHint": "info"
+    },
+    "same_host_exfil_observation": {
+      "label": "Same-host exfil observation",
+      "short": "Potential exfil sink pointed to same host",
+      "detail": "Exfiltration sink used same-host destination; signal was downgraded to observation.",
+      "severityHint": "info"
+    }
+  },
+  "trust": {
+    "same_origin": {
+      "label": "Same-origin",
+      "detail": "Destination origin matches the page origin.",
+      "tone": "neutral"
+    },
+    "first_party": {
+      "label": "First-party",
+      "detail": "Destination matches an allowlisted first-party origin.",
+      "tone": "neutral"
+    },
+    "third_party": {
+      "label": "Third-party",
+      "detail": "Destination origin differs from the page origin.",
+      "tone": "warning"
+    },
+    "unknown": {
+      "label": "Unknown",
+      "detail": "Destination origin could not be determined.",
+      "tone": "neutral"
+    }
+  },
+  "primaryClass": {
+    "observation": {
+      "label": "Observation",
+      "detail": "Sensitive data was observed during an operation.",
+      "tone": "neutral"
+    },
+    "hybrid": {
+      "label": "Observed → Used",
+      "detail": "Observed sensitive data later used in an operation.",
+      "tone": "warning"
+    },
+    "taint_flow": {
+      "label": "Taint flow",
+      "detail": "Untrusted input reached a sink.",
+      "tone": "danger"
+    },
+    "policy_violation": {
+      "label": "Policy violation",
+      "detail": "Operation violated a hard policy regardless of direct taint flow evidence.",
+      "tone": "warning"
+    }
+  },
+  "dataKind": {
+    "token": {
+      "label": "Token"
+    },
+    "jwt": {
+      "label": "JWT"
+    },
+    "session_id": {
+      "label": "Session ID"
+    },
+    "api_key": {
+      "label": "API key"
+    },
+    "credential": {
+      "label": "Credential"
+    },
+    "pii": {
+      "label": "PII"
+    },
+    "unknown": {
+      "label": "Unknown"
+    }
+  }
+}
