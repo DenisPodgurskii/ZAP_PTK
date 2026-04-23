@@ -30,6 +30,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private static final Gson GSON = new Gson();
     private static final int BROWSER_CLOSE_MAX_ATTEMPTS = 20;
     private static final long BROWSER_CLOSE_WAIT_SLICE_MS = 1000;
+    private static final Set<String> DEFAULT_INFO_TIMING_PHASES =
+            Set.of("progress.terminal", "session.summary", "browser_close.end");
 
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
             List.of(ExtensionClientIntegration.class);
@@ -294,6 +296,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 Long handlerMs,
                 Long sinceFirstMs,
                 Boolean firstEvent) {
+            if (!LOGGER.isDebugEnabled()) {
+                return;
+            }
             StringBuilder summary = new StringBuilder();
             summary.append("PTK callback type=")
                     .append(type)
@@ -334,6 +339,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 Long elapsedMs,
                 Map<String, Object> extra) {
             if (phase == null || phase.isBlank()) {
+                return;
+            }
+            if (!LOGGER.isDebugEnabled() && !DEFAULT_INFO_TIMING_PHASES.contains(phase)) {
                 return;
             }
             StringBuilder summary = new StringBuilder();
@@ -529,7 +537,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
 
         @Override
         public void browserClosing(ClientCallBackUtils ccbutils) {
-            LOGGER.info("PTK browserClosing uuid={}", ccbutils.getUuid());
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.info("PTK browserClosing uuid={}", ccbutils.getUuid());
+            }
             if (ccbutils.getUuid() == null) {
                 return;
             }
@@ -590,12 +600,6 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             (System.currentTimeMillis() - start),
                             100,
                             status != null ? status : "");
-            LOGGER.info(
-                    "PTK browserClosing uuid={} forced=false waitedMs={} progress={} status={}",
-                    ccbutils.getUuid(),
-                    (System.currentTimeMillis() - start),
-                    100,
-                    status != null ? status : "");
             logTimingSummary(
                     zapid, browserid, "session.summary", elapsedSinceFirstMs, summaryExtra);
             logTimingSummary(
