@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta content="IE=edge,chrome=1" http-equiv="X-UA-Compatible" />
+  <meta content="width=device-width, initial-scale=1, maximum-scale=2, user-scalable=no" name="viewport" />
+  <meta content="Penetration Testing Kit - cross-browser extension for penetration testing" name="description" />
+  <meta content="Penetration Testing Kit, request builder, traffic recording, macro recording" name="keywords" />
+  <meta content="PPType" name="author" />
+  <meta content="#ffffff" name="theme-color" />
+  <title>OWASP Penetration Testing Kit - Dashboard</title>
+
+  <script src="../packages/browser-polyfill/browser-polyfill.min.js"></script>
+  <script src="../packages/jquery/jquery.min.js"></script>
+  <script src="../packages/jquery/jquery.dataTables.min.js"></script>
+
+  <link rel="stylesheet" href="../packages/semantic-ui/semantic.min.css" type="text/css" />
+  <script src="../packages/semantic-ui/semantic.min.js"></script>
+
+  <link rel="stylesheet" href="assets/css/default.css" type="text/css" />
+  <script src="assets/js/menu.js"></script>
+  <script type="module" src="assets/js/index.js"></script>
+  <style>
+    .ui.dimmer.modals.page.transition.visible.active {
+      z-index: 11111111 !important;
+    }
+
+    #run_scan_dlg {
+      position: relative;
+    }
+
+    #run_scan_dlg.visible.active {
+      display: flex !important;
+      flex-direction: column;
+      max-height: calc(100vh - 12px);
+      margin-top: 6px !important;
+      margin-bottom: 6px !important;
+    }
+
+    #run_scan_dlg>.content {
+      flex: 0 0 auto;
+      line-height: 1;
+    }
+
+    #run_scan_dlg>.content:first-of-type {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+
+    #run_scan_dlg>.actions {
+      flex: 0 0 auto;
+    }
+
+    #run_scan_dlg .ptk-run-scan-intro {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    #run_scan_dlg .ptk-run-scan-intro p {
+      margin: 0;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    #run_scan_dlg .ptk-run-scan-intro-actions {
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    #run_scan_dlg .ptk-run-scan-intro-actions>#load_pro_policies_button {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 0;
+      padding-bottom: 0;
+      margin: 0;
+    }
+
+    #run_scan_dlg .ptk-scan-action-slot {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      height: 100%;
+    }
+
+    #run_scan_dlg .ptk-scan-action-slot .ui.checkbox,
+    #run_scan_dlg .ptk-scan-action-slot .ui.button {
+      margin: 0 !important;
+    }
+
+    #run_scan_dlg .ptk-scan-action-slot .ui.mini.button {
+      padding: 0.6em 0.85em;
+      line-height: 1;
+      min-height: 30px;
+    }
+
+    #index_scans_form .field {
+      position: relative;
+    }
+
+    #index_scans_form .ptk-help-label-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 0.28571429rem;
+      max-width: 100%;
+    }
+
+    #index_scans_form .ptk-help-label-row>label {
+      display: block;
+      margin: 0 !important;
+      padding-right: 0;
+    }
+
+    #index_scans_form .ptk-help-label-row>.question.circle.icon {
+      position: static !important;
+      top: auto !important;
+      right: auto !important;
+      left: auto !important;
+      bottom: auto !important;
+      margin: 0 !important;
+      cursor: pointer;
+      flex: 0 0 auto;
+      opacity: 0.8;
+    }
+
+    #index_scans_form .ui.popup.ptk-help-popup {
+      min-width: min(350px, calc(100vw - 48px)) !important;
+      max-width: calc(100vw - 48px) !important;
+      width: max-content;
+    }
+
+    .ptk-pro-button-icon {
+      width: 18px;
+      height: 18px;
+      object-fit: contain;
+      vertical-align: text-bottom;
+      margin-right: 8px;
+    }
+
+    #index_scans_form .ptk-inline-policy-field {
+      display: block;
+      width: 100%;
+    }
+
+    #index_scans_form .ptk-inline-policy-field>label {
+      display: block;
+      margin: 0 0 0.28571429rem 0 !important;
+      white-space: normal;
+    }
+
+    #index_scans_form .ptk-inline-policy-field>.ui.dropdown,
+    #index_scans_form .ptk-inline-policy-field>select {
+      width: 100% !important;
+    }
+
+    #index_scans_form .ui.selection.dropdown.dashboard-pro-policy-select>.default.text,
+    #index_scans_form .ui.selection.dropdown.dashboard-pro-policy-select>.text {
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #index_scans_form .ui.selection.dropdown.dashboard-pro-policy-select>.menu {
+      left: auto !important;
+      right: 0 !important;
+      width: max-content !important;
+      min-width: calc(100% + 2px) !important;
+      max-width: min(720px, calc(100vw - 48px)) !important;
+    }
+
+    #index_scans_form .ui.selection.dropdown.dashboard-pro-policy-select .menu>.item {
+      overflow: visible;
+      text-overflow: clip;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      line-height: 1.3;
+    }
+
+    #result_dialog #result_message {
+      display: block;
+      white-space: pre-line;
+    }
+
+    .ui.grid>.row {
+      padding-top: 6px !important;
+      padding-bottom: 6px !important;
+    }
+
+    .ptk-card-scroll .ui.table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #f9fafb;
+      background-clip: padding-box;
+      box-shadow: inset 0 -1px 0 rgba(34, 36, 38, 0.15);
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="pagecontent">
+    <div class="ui segment clearing info_tab">
+      <div id="dashboard_message_text" class="ui left floated header short_message_text" style="width: calc(100vw - 330px);"></div>
+      <div class="ui right floated header buttons">
+        <button id="manage_scans" class="ui black button right floated">Manage scans</button>
+      </div>
+      <div class="ui right floated header buttons">
+        <button id="generate_report" class="ui black button right floated disabled">Generate report</button>
+      </div>
+    </div>
+    <div id="ptk_reload_banner" class="ui warning message ptk-reload-warning">
+      <i id="ptk_reload_banner_close" class="close icon"></i>
+      Reload this tab to enable runtime scans (IAST/SAST) and dashboard cards.
+    </div>
+    <div id="main" class="ui segment">
+
+      <div class="ui two cards">
+        <div class="ui fluid card ptk-dashboard-card">
+          <div class="content ">
+            <div class="ui small header"><i class="sticky note icon"></i>Technology stack / WAF / CDN</div>
+            <div id="technologies" class="ptk-card-scroll" style="height: 300px; overflow: scroll; margin-top: 5px;scrollbar-width: none;">
+              <div class="container">
+                <table id="tbl_technologies" class="ui celled table small responsive nowrap unstackable" width="100%" style="margin-bottom: 150px;">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Version</th>
+                      <th>Category</th>
+                    </tr>
+                  </thead>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="ptk-card-controls">
+            <button class="ptk-card-toggle" type="button" aria-label="Toggle fullscreen" title="Toggle fullscreen">
+              <i class="expand icon"></i>
+            </button>
+            <div class="ui active centered inline inverted loader technologies"></div>
+          </div>
+        </div>
+        <div class="ui fluid card ptk-dashboard-card">
+          <div class="content">
+            <div class="ui small header"><i class="th list icon"></i> OWASP Secure Headers </div>
+            <div id="owasp_passive" class="ptk-card-scroll" style="height: 300px; overflow: scroll; margin-top: 5px; scrollbar-width: none;">
+              <table id="tbl_owasp" class="ui celled table small responsive nowrap unstackable" width="100%" style="margin-bottom: 150px;">
+                <thead>
+                  <tr>
+                    <th>Header Name</th>
+                  </tr>
+                </thead>
+              </table>
+            </div>
+          </div>
+          <div class="ptk-card-controls">
+            <button class="ptk-card-toggle" type="button" aria-label="Toggle fullscreen" title="Toggle fullscreen">
+              <i class="expand icon"></i>
+            </button>
+            <div class="ui active centered inline inverted loader owasp"></div>
+          </div>
+        </div>
+
+        <div id="cve_wrapper" class="ui fluid card ptk-dashboard-card">
+          <div class="content">
+            <div class="ui small header"><i class="bug icon"></i>CVE lookup</div>
+            <div class="ui tiny grey text">Indicators detected (passive). Use DAST CVE modules to verify.</div>
+            <div id="cves" class="ptk-card-scroll" style="height: 300px; overflow: scroll; margin-top: 5px;scrollbar-width: none;">
+              <div class="container">
+                <table id="tbl_cves" class="ui celled table small responsive nowrap unstackable" width="100%" style="margin-bottom: 150px;">
+                  <thead>
+                    <tr>
+                      <th>CVE</th>
+                      <th>Severity</th>
+                      <th>Evidence</th>
+                      <th>Verify</th>
+                    </tr>
+                  </thead>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="ptk-card-controls">
+            <button class="ptk-card-toggle" type="button" aria-label="Toggle fullscreen" title="Toggle fullscreen">
+              <i class="expand icon"></i>
+            </button>
+            <div class="ui active centered inline inverted loader cves"></div>
+          </div>
+        </div>
+
+        <div class="ui fluid card ptk-dashboard-card">
+          <div class="content">
+
+            <div class="ui small header"><i class="key icon"></i> Storage / Authentication</div>
+            <div id="storage" class="ptk-card-scroll" style="height: 300px; overflow: scroll; margin-top: 5px; scrollbar-width: none;">
+              <table id="tbl_storage" class="ui celled table small responsive nowrap unstackable" width="100%" style="margin-bottom: 150px;">
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th></th>
+                  </tr>
+                </thead>
+              </table>
+            </div>
+            <div id="jwt_btn" style="position: absolute;top: 0px;right: 35px;margin-top:0px; display: none; ">
+              <h2 class="ui primary small button" style="height: 30px;">
+                <i class="icons">
+                  <i class="eye icon"></i>
+                </i>
+                JWT
+              </h2>
+            </div>
+          </div>
+          <div class="ptk-card-controls">
+            <button class="ptk-card-toggle" type="button" aria-label="Toggle fullscreen" title="Toggle fullscreen">
+              <i class="expand icon"></i>
+            </button>
+            <div class="ui active centered inline inverted loader storage"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <div id="footer_menu"></div>
+
+</body>
+
+<div id="storage_auth" class="ui fullscreen modal" style="display: none; height: 83%; z-index: 1111111;">
+  <i class="close icon"></i>
+  <div class="ui small header">Storage and authentication information:</div>
+  <div class="content" id="dialogStorageAuth" style="min-height: 400px; overflow: scroll;height:90%">
+    <form class="ui tiny form controls" id="request_form">
+      <div class="ui top attached pointing secondary menu" style="margin-left: -1px;">
+        <a class="active item" data-tab="cookie">Cookie</a>
+        <a class="item" data-tab="localStorage" style="display: none">Local storage</a>
+        <a class="item" data-tab="sessionStorage" style="display: none">Session storage</a>
+        <a class="item" data-tab="tokens" style="display: none">Tokens</a>
+        <a class="item" data-tab="headers" style="display: none">Headers</a>
+      </div>
+      <div class="ui bottom attached active tab segment" data-tab="cookie" style="height: 100%;overflow: scroll;" id='cookieform'>
+        <table id="tbl_cookie" class="ui celled table small responsive nowrap unstackable" width="100%" style="margin-bottom: 104px;">
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>Name</th>
+              <th>Value</th>
+              <th>HttpOnly</th>
+            </tr>
+          </thead>
+        </table>
+      </div>
+      <div class="ui bottom attached tab segment" data-tab="localStorage" style="height: 100%;overflow: scroll;">
+        <pre style="overflow:scroll"><code id="localStorageText"></code></pre>
+      </div>
+      <div class="ui bottom attached tab segment" data-tab="sessionStorage" style="height: 100%;overflow: scroll;">
+        <pre style="overflow:scroll"><code id="sessionStorageText"></code></pre>
+
+      </div>
+      <div class="ui bottom attached tab segment" data-tab="tokens" style="height: 100%;overflow: scroll;">
+        <table id="tbl_tokens" class="ui celled table small responsive nowrap unstackable" width="100%" style="margin-bottom: 104px;">
+          <thead>
+            <tr>
+              <th>In</th>
+              <th>Decoded</th>
+              <th>Token</th>
+            </tr>
+          </thead>
+        </table>
+      </div>
+      <div class="ui bottom attached tab segment" data-tab="headers" style="height: 100%;overflow: scroll;">
+        <table id="tbl_headers" class="ui celled table small responsive nowrap unstackable" width="100%" style="margin-bottom: 104px;">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+        </table>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<div class="ui mini modal coupled second error" id="result_dialog">
+  <i class="close icon"></i>
+  <div class="header" id="result_header"></div>
+  <div class="content">
+    <span id="result_message"></span>
+  </div>
+  <div class="actions">
+    <div class="ui button result_open_settings_btn" style="display:none;">Open Settings</div>
+    <div class="ui approve primary button">OK</div>
+  </div>
+</div>
+
+<div id="upload_scans_modal" class="ui small modal coupled second" style="display: none;">
+  <i class="close icon"></i>
+  <div class="ui header">Select project</div>
+  <div class="content">
+    <form class="ui small form">
+      <div class="field">
+        <label>Portal project</label>
+        <select class="ui dropdown" id="upload_scans_project_select">
+          <option value="">Select a project</option>
+        </select>
+      </div>
+      <div class="ui tiny negative message" id="upload_scans_modal_error" style="display: none;"></div>
+    </form>
+  </div>
+  <div class="actions">
+    <div class="ui button cancel">Cancel</div>
+    <div class="ui primary button approve">Upload scans</div>
+  </div>
+</div>
+
+<div id="run_scan_dlg" class="ui modal coupled first fullscreen" style="display: none; max-width: 800px;">
+  <i class="close icon" style="top:1px;right: 1px;"></i>
+  <div class="content">
+    <div class="ui message ptk-run-scan-intro" style="margin: -20px -20px 0px -20px;">
+      <p>Are you sure you want to run scan(s) against <span id="scan_host" style="font-weight: 600;"></span>?</p>
+    </div>
+    <div class="ptk-run-scan-intro-actions" style="position: absolute;right: 0px; z-index: 3;">
+      <div class="ui button" id="load_pro_policies_button">
+        <span>Load</span>
+        <img src="assets/images/PTK_PRO_256.png" alt="PTK Pro" class="ui image" style="width: 100px; height: auto;">
+      </div>
+    </div>
+    <div id="ptk_reload_warning" class="ui warning message ptk-reload-warning" style="z-index:3">
+      <i id="ptk_reload_warning_close" class="close icon"></i>
+      Reload this tab to enable runtime scans (IAST/SAST). DAST/SCA can still run.
+    </div>
+
+    <div id="ptk_pro_policy_validation" class="ui warning message" style="display:none; z-index:3"></div>
+
+
+    <form class="ui small form" id="index_scans_form" style="margin-top: 15px;">
+      <div class="ui  four column width grid">
+        <div class="row" id="dast_scan_row">
+          <div class="one wide column dast_scan_control">
+            <div class="ui small header">DAST</div>
+          </div>
+          <div class="thirteen wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Domains to scan (comma separated):</label>
+                <i class="domains_example question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Example:</strong> <br />
+                <i>domain.com, api.domain.com, subdomain.domain.com, www.domain.com</i>
+                <br />
+                <b>OR</b>
+                <br />
+                <i>*.domain.com - to scan all subdomains</i>
+              </div>
+              <textarea id="scan_domains" style="width: 70%; min-height: 25px;height: 35px;"></textarea>
+            </div>
+
+          </div>
+
+          <div class="two wide column ">
+          </div>
+        </div>
+        <div class="row">
+          <div class="one wide column dast_scan_control">
+
+          </div>
+          <div class="four wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Scan strategy:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Strategy:</strong> <br />
+                <ul>
+                  <li><b>Fast</b> – attack all params in one request, stop after first finding per module/URL
+                  </li>
+                  <li><b>Smart</b> (recommended) – one param per request, stop after first finding per module/param</li>
+                  <li><b>Comprehensive</b> – one param per request, report all findings</li>
+                </ul>
+              </div>
+              <select id="dast-scan-strategy" name="dastScanStrategy" class="ui dropdown" style="width: 100%;">
+                <option value="FAST">Fast</option>
+                <option value="SMART" selected>Smart</option>
+                <option value="COMPREHENSIVE">Comprehensive</option>
+              </select>
+            </div>
+          </div>
+          <div class="four wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Safety profile:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Safety profile:</strong> <br />
+                <ul>
+                  <li><b>Strict</b> - lowest footprint, narrow targeting, safest defaults</li>
+                  <li><b>Safe</b> (recommended) - balanced coverage and control</li>
+                  <li><b>Wide</b> - broadest coverage and higher scan pressure</li>
+                </ul>
+              </div>
+              <select id="dast-safety-profile" name="dastSafetyProfile" class="ui dropdown" style="width: 100%;">
+                <option value="strict">Strict</option>
+                <option value="safe" selected>Safe</option>
+                <option value="wide">Wide</option>
+              </select>
+            </div>
+          </div>
+          <div class="seven wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Scan policy:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Scan policy:</strong> <br />
+                <ul>
+                  <li><b>Recon (system)</b> - focuses on discovery (URLs, parameters, tech signals, passive checks) with a minimal footprint</li>
+                  <li><b>Active (system)</b> - runs exploit-style tests and can generate a lot more requests — use it only when you have permission and the target can handle it</li>
+                  <li><b>PTK Pro policies</b> can appear here when available, offering advanced and customizable scanning options for Pro users.</li>
+                </ul>
+              </div>
+              <select id="dast-scan-policy" name="dastScanPolicy" class="ui dropdown dashboard-pro-policy-select" data-engine="DAST" style="width: 100%;">
+                <option value="RECON">Recon (system)</option>
+                <option value="ACTIVE" selected>Active (system)</option>
+              </select>
+            </div>
+          </div>
+
+
+        </div>
+        <div class="row">
+          <div class="one wide column dast_scan_control"></div>
+          <div class="four wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Auto-discover same-origin links:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Auto-discovery:</strong> <br />
+                PTK can follow links found in visited HTML pages and queue them for DAST. Leave this off to scan only the requests created by your own browsing.
+              </div>
+              <div class="ui checkbox">
+                <input type="checkbox" id="dashboard_dast_autodiscover_links">
+              </div>
+            </div>
+          </div>
+          <div class="four wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Autodiscovery budget:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Autodiscovery budget:</strong> <br />
+                Controls how many unique same-origin links PTK can add during this scan.
+                <ul>
+                  <li><b>Strict</b> - minimal expansion from the pages you visit</li>
+                  <li><b>Safe</b> (recommended) - balanced coverage without broad crawling</li>
+                  <li><b>Wide</b> - allows substantially broader discovery</li>
+                </ul>
+              </div>
+              <select id="dashboard_dast_autodiscovery_budget" class="ui dropdown" style="width: 100%;" disabled>
+                <option value="strict">Strict</option>
+                <option value="safe" selected>Safe</option>
+                <option value="wide">Wide</option>
+              </select>
+            </div>
+          </div>
+          <div class="four wide column dast_scan_control">
+            <div class="field">
+
+            </div>
+          </div>
+          <div class="one wide column dast_scan_control"></div>
+          <div class="two wide column ">
+            <div class="ptk-scan-action-slot">
+              <div class="ui toggle checkbox dast_scan">
+                <input type="checkbox" name="dast_scan" checked="checked">
+              </div>
+              <div class="ui mini button secondary dast_scan_stop" style="display:none;">Stop</div>
+            </div>
+          </div>
+        </div>
+        <div class="row" style="border-bottom: solid 1px #cecece;" id="dast_scan_row">
+          <div class="one wide column dast_scan_control">
+
+          </div>
+          <div class="three wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Attack RPS:</label>
+                <i class="request_per_second_example question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Attack requests per second:</strong> <br />
+                <i>5-10 requests/second is a safe default for most websites, especially for
+                  active
+                  scanning
+                  (SQLi, XSS, etc.).</i>
+                <br />
+                <ul>
+                  <li>5 if you want to be extra gentle, minimize detection, or scan
+                    “production” apps
+                  </li>
+                  <li>10 if you know the site can take some load or it’s a dev/test
+                    environment</li>
+                  <li>2-3 for critical production, very slow or fragile sites, or to fly
+                    under the
+                    radar</li>
+                </ul>
+              </div>
+              <div class="ui toggle text" style="width: 50px;">
+                <input type="text" id="maxRequestsPerSecond" name="maxRequestsPerSecond">
+              </div>
+            </div>
+          </div>
+          <div class="three wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Concurrency:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Concurrency:</strong> <br />
+                <i>1-3 is a safe range. Never more than 5, unless you’re doing very short
+                  requests and
+                  you control the target</i>
+                <ul>
+                  <li>1 (sequential) if you want minimal footprint or are scanning “live”
+                    apps
+                  </li>
+                  <li>2 for reasonable speed without overloading a single tab/session</li>
+                  <li>3-4 for dev/test where performance matters more than stealth</li>
+                </ul>
+              </div>
+              <div class="ui toggle text" style="width: 50px;">
+                <input type="text" id="concurrency" name="concurrency">
+              </div>
+            </div>
+          </div>
+
+          <div class="three wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>
+                  Run CVE attacks:
+                </label>
+                <i class="cve_example question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>CVE-specific attacks:</strong> <br />
+                May trigger 5xx errors or crashes on vulnerable endpoints. Only use on systems you own.
+              </div>
+              <div class="ui checkbox">
+                <input type="checkbox" id="ptk_dast_run_cve">
+              </div>
+            </div>
+          </div>
+          <div class="three wide column dast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Record macro during scan:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Record macro during scan:</strong> <br />
+                Starts the macro recorder on the current tab without reloading it, so the same runtime scan flow is captured as a reusable macro.
+              </div>
+              <div class="ui checkbox">
+                <input type="checkbox" id="dashboard_dast_record_macro">
+              </div>
+            </div>
+          </div>
+        </div>
+
+
+
+        <div class="row" style="border-bottom: solid 1px #cecece;" id="iast_scan_row">
+          <div class="one wide column iast_scan_control">
+            <div class="ui small header">IAST</div>
+          </div>
+          <div class="six wide column iast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Scan strategy:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Scan strategy:</strong> <br />
+                <ul>
+                  <li><b>Smart</b> (recommended) keeps runtime analysis lighter, reduces startup noise, and limits expensive DOM/runtime processing.</li>
+                  <li><b>Comprehensive</b> runs deeper runtime tracking and broader DOM analysis, which can increase coverage, noise, and overhead.</li>
+                </ul>
+              </div>
+              <div>
+                <select id="iast-scan-strategy" class="ui fluid dropdown" style="width: 100%;">
+                  <option value="SMART">Smart (recommended)</option>
+                  <option value="COMPREHENSIVE">Comprehensive</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="six wide column iast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Scan policy:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Scan policy:</strong> <br />
+                <ul>
+                  <li><b>Default (system)</b> - built-in default IAST moddules/rules</li>
+                  <li><b>PTK Pro policies</b> can appear here when available, offering advanced and customizable scanning options for Pro users.</li>
+                </ul>
+              </div>
+              <div>
+                <select id="iast-scan-policy" class="ui fluid dropdown dashboard-pro-policy-select" data-engine="IAST" style="width: 100%;">
+                  <option value="default:0" selected>Default (system)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="one wide column">
+
+          </div>
+          <div class="two wide column">
+            <div class="ptk-scan-action-slot">
+              <div class="ui toggle checkbox iast_scan">
+                <input type="checkbox" name="iast_scan" checked="checked">
+              </div>
+              <div class="ui mini button secondary iast_scan_stop" style="display:none;">Stop</div>
+            </div>
+          </div>
+        </div>
+        <div class="row" style="border-bottom: solid 1px #cecece;" id="sast_scan_row">
+          <div class="one wide column sast_scan_control">
+            <div class="ui small header">SAST</div>
+          </div>
+
+          <div class="six wide column sast_scan_control">
+            <div class="field">
+              <div class="ptk-help-label-row">
+                <label>Scan strategy:</label>
+                <i class="question circle icon"></i>
+              </div>
+              <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                <strong>Scan strategy:</strong> <br />
+                <ul>
+                  <li><b>Taint and pattern rules</b> (recommended) - run the full built-in SAST execution mode.</li>
+                  <li><b>Taint rules only</b> - run only taint/dataflow rules, which is narrower and usually faster.</li>
+                </ul>
+              </div>
+              <select id="sast-scan-strategy" class="ui fluid dropdown" style="width: 100%;">
+                <option value="0" selected>Taint and pattern rules</option>
+                <option value="1">Taint rules only</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="six wide column sast_scan_control">
+            <div class="field">
+              <div class="ptk-inline-policy-field">
+                <div class="ptk-help-label-row">
+                  <label>Scan policy:</label>
+                  <i class="question circle icon"></i>
+                </div>
+                <div class="ui fluid popup ptk-help-popup bottom left transition hidden">
+                  <strong>Scan policy:</strong> <br />
+                  <ul>
+                    <li><b>Default (system)</b> - built-in SAST modules/rules.</li>
+                    <li><b>PTK Pro policies</b> can appear here when available, offering advanced and customizable scanning options for Pro users.</li>
+                  </ul>
+                </div>
+
+                <select id="sast-scan-policy" class="ui fluid dropdown dashboard-pro-policy-select" data-engine="SAST" style="width: 100%;">
+                  <option value="default:0" selected>Default (system)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="one wide column">
+
+          </div>
+          <div class="two wide column">
+            <div class="ptk-scan-action-slot">
+              <div class="ui toggle checkbox sast_scan">
+                <input type="checkbox" name="sast_scan" checked="checked">
+              </div>
+              <div class="ui mini button secondary sast_scan_stop" style="display:none;">Stop</div>
+            </div>
+          </div>
+        </div>
+        <div class="row" id="sca_scan_row">
+          <div class="one wide column sca_scan_control">
+            <div class="ui small header">SCA</div>
+          </div>
+          <div class="thirteen wide column sca_scan_control">
+
+          </div>
+          <div class="two wide column">
+            <div class="ptk-scan-action-slot">
+              <div class="ui toggle checkbox sca_scan">
+                <input type="checkbox" name="sca_scan" checked="checked">
+              </div>
+              <div class="ui mini button secondary sca_scan_stop" style="display:none;">Stop</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </form>
+
+
+
+
+  </div>
+  <div class="content" style="padding: 0;">
+    <div id="dashboard_export_progress" class="ptk-export-progress-dialog" style="display:none;">
+      <div class="ptk-export-progress-title">Export</div>
+      <div class="ui tiny progress ptk-export-progress-track">
+        <div id="dashboard_export_progress_bar" class="bar"></div>
+      </div>
+      <div id="dashboard_export_progress_text" class="ptk-export-progress-text">Preparing export...</div>
+    </div>
+  </div>
+  <div class="actions" style="padding-top: 2px;padding-bottom: 2px;">
+    <div id="stop_all_scans" class="ui button secondary disabled">Stop scans</div>
+    <div id="export_all_scans" class="ui button secondary disabled">Export scans</div>
+    <div id="upload_all_scans" class="ui button secondary disabled">Upload scans</div>
+    <div class="ui cancel button left floated">Cancel</div>
+    <div class="ui approve button secondary confirm_scan_run">Run scans</div>
+  </div>
+</div>
+
+</html>

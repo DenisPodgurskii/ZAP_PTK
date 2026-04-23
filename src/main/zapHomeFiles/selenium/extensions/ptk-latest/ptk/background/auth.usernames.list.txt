@@ -1,0 +1,16 @@
+# Common username-enumeration candidates for DAST differential auth probes.
+# Keep the higher-signal benchmark and real-world names near the top.
+administrator
+carlos
+wiener
+admin
+user
+guest
+demo
+test
+manager
+support
+root
+operator
+service
+api

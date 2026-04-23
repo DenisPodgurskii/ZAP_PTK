@@ -1,0 +1,68 @@
+html,
+body {
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+}
+
+.swagger-page-content {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: calc(100vh - 45px);
+  padding: 4px;
+}
+
+#swagger_form {
+  margin: 0;
+}
+
+#swagger_form .field {
+  margin-bottom: 0;
+}
+
+.swagger-file-actions .ui.buttons {
+  width: 100%;
+}
+
+#swagger_status {
+  margin: 0 !important;
+  min-height: 36px;
+}
+
+#swagger_status.is-info {
+  background: #f8fafc;
+  color: #334155;
+}
+
+#swagger_status.is-success {
+  background: #ecfdf5;
+  color: #166534;
+}
+
+#swagger_status.is-error {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+#swagger_status.is-loading {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+#swagger-ui {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+#swagger-ui .topbar {
+  display: none;
+}
+

@@ -1,0 +1,127 @@
+{
+    "author": "Denis Podgurskii",
+    "name": "OWASP Penetration Testing Kit",
+    "short_name": "OWASP PTK",
+    "description": "OWASP Penetration Testing Kit",
+    "version": "9.9.0",
+    "manifest_version": 3,
+    "incognito": "split",
+    "background": {
+        "service_worker": "app.js",
+        "type": "module"
+    },
+    "content_security_policy": {
+        "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http: https: ws: wss:;",
+        "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; default-src 'self'; script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http: https: ws: wss:;"
+    },
+    "sandbox": {
+        "pages": [
+            "ptk/browser/showhtml.html"
+        ]
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "ptk/packages/browser-polyfill/browser-polyfill.min.js"
+            ],
+            "all_frames": true,
+            "run_at": "document_start",
+            "match_about_blank": true
+        },
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "ptk/content.js"
+            ],
+            "all_frames": true,
+            "run_at": "document_start",
+            "match_about_blank": true
+        },
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "ptk/content/spa_hash_harness.js"
+            ],
+            "all_frames": true,
+            "run_at": "document_idle",
+            "match_about_blank": true
+        }
+    ],
+    "permissions": [
+        "activeTab",
+        "cookies",
+        "notifications",
+        "storage",
+        "unlimitedStorage",
+        "tabs",
+        "history",
+        "webNavigation",
+        "webRequest",
+        "background",
+        "offscreen",
+        "debugger",
+        "scripting",
+        "declarativeNetRequest",
+        "declarativeNetRequestWithHostAccess"
+    ],
+    "host_permissions": [
+        "<all_urls>",
+        "*://*/*"
+    ],
+    "icons": {
+        "128": "ptk/browser/assets/images/icon.png"
+    },
+    "action": {
+        "default_icon": {
+            "128": "ptk/browser/assets/images/icon.png"
+        },
+        "default_title": "OWASP Penetration Testing Kit",
+        "default_popup": "ptk/browser/index.html"
+    },
+    "options_ui": {
+        "page": "ptk/browser/settings.html",
+        "open_in_tab": false
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "ptk/*.js",
+                "ptk/content/*.js",
+                "ptk/background/*.json",
+                "ptk/*.map",
+                "ptk/*.png",
+                "ptk/*.json",
+                "ptk/browser/*.html",
+                "ptk/browser/assets/css/*.css",
+                "ptk/browser/assets/js/*.js",
+                "ptk/browser/assets/images/*",
+                "ptk/packages/*/*.js",
+                "ptk/packages/*/*.css",
+                "ptk/packages/*/*.map",
+                "ptk/packages/*/*.png",
+                "ptk/packages/*/*.svg",
+                "ptk/packages/*/*.woff",
+                "ptk/packages/*/*.woff2",
+                "ptk/packages/*/*.ttf",
+                "ptk/packages/*/*.eot",
+                "ptk/packages/*/*.html"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ],
+    "browser_specific_settings": {
+        "gecko": {
+            "id": "pentestkit@DenisPodgurskii",
+            "strict_min_version": "102.0"
+        }
+    }
+}
