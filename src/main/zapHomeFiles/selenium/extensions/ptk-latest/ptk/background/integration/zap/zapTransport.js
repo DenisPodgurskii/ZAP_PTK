@@ -20,8 +20,14 @@ const QUICKSTART_SCRIPT_FETCH_LIMIT = 8
 const QUICKSTART_SCRIPT_BODY_MAX = 250000
 const HISTORY_BOOTSTRAP_LOOKBACK_MS = 60 * 1000
 const HISTORY_BOOTSTRAP_MAX_RESULTS = 5
-const DAST_HISTORY_SEED_MAX_RESULTS = 10
-const DAST_HISTORY_SEED_SEARCH_MAX_RESULTS = DAST_HISTORY_SEED_MAX_RESULTS + HISTORY_BOOTSTRAP_MAX_RESULTS
+const STARTUP_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 2000, 5000]
+const POST_CALLBACK_CANDIDATE_MAX_RESULTS = 30
+const DAST_HISTORY_SEED_MAX_RESULTS = 30
+const DAST_HISTORY_SEED_SEARCH_MAX_RESULTS = Math.max(
+    120,
+    DAST_HISTORY_SEED_MAX_RESULTS * 4,
+    POST_CALLBACK_CANDIDATE_MAX_RESULTS * 4
+) + HISTORY_BOOTSTRAP_MAX_RESULTS
 let ZAP_DEBUG_LOG_ENABLED = false
 const ZAP_ALLOWED_DEBUG_PREFIXES = [
     '[PTK ZAP] ZAP detected!',
@@ -45,6 +51,27 @@ const ZAP_ALLOWED_DEBUG_PREFIXES = [
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function scoreZapHistorySeedUrl(url) {
+    let score = 0
+    try {
+        const parsed = new URL(url)
+        const pathAndQuery = `${parsed.pathname || ''}?${parsed.searchParams?.toString?.() || ''}`.toLowerCase()
+        if (parsed.search && parsed.search !== '?') score += 120
+        if (/(?:xss|script|javascript|js[_/-]|eval|attr|attribute|tagname|tag|html|textarea|href|svg|onerror|onload|search|query|(?:^|[?&])q=)/i.test(pathAndQuery)) {
+            score += 160
+        }
+        if (/(?:^|\/)\.(?:git|svn|hg)(?:\/|$)/i.test(parsed.pathname || '')) {
+            score -= 300
+        }
+        if (!parsed.search) {
+            score -= 40
+        }
+    } catch (_) {
+        score -= 20
+    }
+    return score
 }
 
 function debugLog(...args) {
@@ -266,6 +293,10 @@ function isZapBootstrapUrl(rawUrl) {
         || /(?:[?&])zapenable=true(?:[=&]|$)/i.test(rawUrl)
 }
 
+function isDirectZapCallbackUrl(rawUrl) {
+    return !!parseCallbackUrl(rawUrl)
+}
+
 class ZapTransport {
     constructor() {
         this._isFirefox = !!browser?.runtime?.getBrowserInfo
@@ -291,6 +322,7 @@ class ZapTransport {
         this._onHistoryVisited = null
         this._lastDetectionByTab = new Map()
         this._lastQuickstartProbeByTab = new Map()
+        this._startupBootstrapRunId = 0
     }
 
     _lifecycleLog(event, details = {}) {
@@ -320,6 +352,9 @@ class ZapTransport {
 
     _canProcessLiveSignals(url = '', source = 'unknown') {
         if (this.active) return true
+        if (isDirectZapCallbackUrl(url)) {
+            return true
+        }
         if (this._isFirefox) {
             return isZapBootstrapUrl(url)
         }
@@ -330,7 +365,7 @@ class ZapTransport {
     }
 
     _canProcessHistorySignals() {
-        return !this._isFirefox && this._isStartupGateOpen()
+        return this._isStartupGateOpen()
     }
 
     _shouldObserveUrl(source, url = '') {
@@ -375,11 +410,43 @@ class ZapTransport {
         if (this.active) {
             return
         }
-        void this._bootstrapFromHistory()
-        void this._bootstrapFromOpenTabs()
+        this._scheduleStartupBootstraps(source)
+    }
+
+    _scheduleStartupBootstraps(source = 'unknown') {
+        const runId = ++this._startupBootstrapRunId
+        this._lifecycleLog('zapTransport.bootstrap.schedule', {
+            source,
+            runId,
+            delaysMs: STARTUP_BOOTSTRAP_RETRY_DELAYS_MS
+        })
+
+        for (const delayMs of STARTUP_BOOTSTRAP_RETRY_DELAYS_MS) {
+            const run = async () => {
+                if (runId !== this._startupBootstrapRunId || this.active || !this._isStartupGateOpen()) {
+                    return
+                }
+                this._lifecycleLog('zapTransport.bootstrap.run', {
+                    source,
+                    runId,
+                    delayMs
+                })
+                await this._bootstrapFromHistory()
+                await this._bootstrapFromOpenTabs()
+            }
+
+            if (delayMs <= 0) {
+                void run()
+            } else {
+                setTimeout(() => {
+                    void run()
+                }, delayMs)
+            }
+        }
     }
 
     _closeStartupGate(reason = 'callback_detected') {
+        this._startupBootstrapRunId++
         const snapshot = clearZapStartupPending(globalThis, { reason })
         this._lifecycleLog('zapTransport.gateClosed', {
             reason,
@@ -405,7 +472,7 @@ class ZapTransport {
         const hasTabUpdated = !!browser?.tabs?.onUpdated
         const hasTabCreated = !!browser?.tabs?.onCreated
         const hasTabReplaced = !!browser?.tabs?.onReplaced
-        const hasHistoryVisited = !!browser?.history?.onVisited && !this._isFirefox
+        const hasHistoryVisited = !!browser?.history?.onVisited
         const hasHistorySearch = !!browser?.history?.search
 
         if (
@@ -471,8 +538,7 @@ class ZapTransport {
 
         this._listenerAttached = true
         if (this._isStartupGateOpen()) {
-            void this._bootstrapFromHistory()
-            void this._bootstrapFromOpenTabs()
+            this._scheduleStartupBootstraps('init')
         } else {
             this._lifecycleLog('zapTransport.init.gateClosed', {
                 active: this.active,
@@ -541,6 +607,32 @@ class ZapTransport {
 
     getLastDetectedPayload() {
         return this._lastDetectedPayload ? { ...this._lastDetectedPayload } : null
+    }
+
+    getStartupSnapshot() {
+        return getZapStartupSnapshot(globalThis)
+    }
+
+    isBootstrapUrl(url = '') {
+        return isZapBootstrapUrl(url)
+    }
+
+    processContentObservedZapUrl({ tabId = null, frameId = 0, url = '' } = {}) {
+        if (!isZapBootstrapUrl(url)) {
+            return false
+        }
+
+        this._logCaughtUrl('content.zapCallback', {
+            tabId,
+            frameId,
+            url
+        })
+
+        return this._processPotentialZapUrl({
+            tabId,
+            url,
+            source: 'content.zapCallback'
+        })
     }
 
     async _postJsonWithRetry(url, obj, errorCode) {
@@ -944,7 +1036,7 @@ class ZapTransport {
     }
 
     async _bootstrapFromHistory() {
-        if (this._isFirefox || !browser?.history?.search || !this._canProcessHistorySignals()) return
+        if (!browser?.history?.search || !this._canProcessHistorySignals()) return
 
         const startTime = Date.now() - HISTORY_BOOTSTRAP_LOOKBACK_MS
         const seen = new Set()
@@ -986,19 +1078,108 @@ class ZapTransport {
         await collect('quickstartlaunch')
     }
 
-    async collectPostCallbackSeedUrls({ pageUrl, baseUrl = null, maxResults = DAST_HISTORY_SEED_MAX_RESULTS } = {}) {
+    async collectPostCallbackSeedUrls({
+        pageUrl,
+        baseUrl = null,
+        maxResults = DAST_HISTORY_SEED_MAX_RESULTS,
+        includeMetadata = false
+    } = {}) {
         const normalizedPageUrl = safeParseUrl(pageUrl)
-        if (!normalizedPageUrl || !browser?.history?.search) return []
+        if (!normalizedPageUrl || !browser?.history?.search) {
+            return includeMetadata
+                ? { urls: [], totalAvailable: 0, droppedByCap: 0, searchResultCount: 0 }
+                : []
+        }
 
         let targetOrigin = null
         try {
             targetOrigin = new URL(normalizedPageUrl).origin
         } catch (_) {
-            return []
+            return includeMetadata
+                ? { urls: [], totalAvailable: 0, droppedByCap: 0, searchResultCount: 0 }
+                : []
         }
 
         const effectiveBaseUrl = toNonEmptyString(baseUrl || this.baseUrl || this._lastDetectedPayload?.baseUrl)
         const boundedMax = Math.max(0, Math.min(DAST_HISTORY_SEED_MAX_RESULTS, Number(maxResults) || 0))
+        if (!boundedMax) {
+            return includeMetadata
+                ? { urls: [], totalAvailable: 0, droppedByCap: 0, searchResultCount: 0 }
+                : []
+        }
+
+        const buildResult = (seedUrls = [], searchResultCount = 0) => {
+            const prioritizedUrls = seedUrls
+                .map((url, index) => ({ url, index, score: scoreZapHistorySeedUrl(url) }))
+                .sort((left, right) => {
+                    if (right.score !== left.score) return right.score - left.score
+                    return left.index - right.index
+                })
+                .map((entry) => entry.url)
+            const urls = prioritizedUrls.slice(0, boundedMax)
+            return includeMetadata
+                ? {
+                    urls,
+                    totalAvailable: prioritizedUrls.length,
+                    droppedByCap: Math.max(0, prioritizedUrls.length - urls.length),
+                    searchResultCount
+                }
+                : urls
+        }
+
+        try {
+            const items = await browser.history.search({
+                text: '',
+                startTime: Date.now() - HISTORY_BOOTSTRAP_LOOKBACK_MS,
+                maxResults: DAST_HISTORY_SEED_SEARCH_MAX_RESULTS
+            })
+            if (!Array.isArray(items) || !items.length) {
+                return buildResult([], 0)
+            }
+
+            const sortedItems = items
+                .slice()
+                .sort((left, right) => Number(right?.lastVisitTime || 0) - Number(left?.lastVisitTime || 0))
+
+            const callbackIndex = sortedItems.findIndex((item) => {
+                const itemUrl = typeof item?.url === 'string' ? item.url : ''
+                const parsed = parseCallbackUrl(itemUrl)
+                if (!parsed) return false
+                if (!effectiveBaseUrl) return true
+                return this._buildBaseUrl(itemUrl, parsed.secret) === effectiveBaseUrl
+            })
+            if (callbackIndex < 0) {
+                return buildResult([], sortedItems.length)
+            }
+
+            const seen = new Set([normalizedPageUrl])
+            const candidateUrls = []
+            for (const item of sortedItems.slice(0, callbackIndex)) {
+                const candidateUrl = safeParseUrl(item?.url)
+                if (!candidateUrl || CALLBACK_URL_REGEX.test(candidateUrl)) continue
+                try {
+                    const parsedCandidate = new URL(candidateUrl)
+                    if (parsedCandidate.origin !== targetOrigin) continue
+                } catch (_) {
+                    continue
+                }
+                if (seen.has(candidateUrl)) continue
+                seen.add(candidateUrl)
+                candidateUrls.push(candidateUrl)
+            }
+
+            return buildResult(candidateUrls, sortedItems.length)
+        } catch (err) {
+            console.warn('[PTK ZAP] Failed to collect post-callback history seed URLs:', err?.message || String(err))
+            return buildResult([], 0)
+        }
+    }
+
+    async collectPostCallbackCandidateUrls({ baseUrl = null, maxResults = POST_CALLBACK_CANDIDATE_MAX_RESULTS } = {}) {
+        if (!browser?.history?.search) return []
+
+        const effectiveBaseUrl = toNonEmptyString(baseUrl || this.baseUrl || this._lastDetectedPayload?.baseUrl)
+        const boundedMax = Math.max(0, Math.min(POST_CALLBACK_CANDIDATE_MAX_RESULTS, Number(maxResults) || 0))
         if (!boundedMax) return []
 
         try {
@@ -1022,31 +1203,36 @@ class ZapTransport {
             })
             if (callbackIndex < 0) return []
 
-            const seen = new Set([normalizedPageUrl])
-            const seedUrls = []
-            for (const item of sortedItems.slice(0, callbackIndex).slice(0, boundedMax)) {
+            const seen = new Set()
+            const candidates = []
+            for (const item of sortedItems.slice(0, callbackIndex)) {
                 const candidateUrl = safeParseUrl(item?.url)
-                if (!candidateUrl || CALLBACK_URL_REGEX.test(candidateUrl)) continue
+                if (!candidateUrl || CALLBACK_URL_REGEX.test(candidateUrl) || QUICKSTART_URL_REGEX.test(candidateUrl)) {
+                    continue
+                }
                 try {
                     const parsedCandidate = new URL(candidateUrl)
-                    if (parsedCandidate.origin !== targetOrigin) continue
+                    if (String(parsedCandidate.hostname || '').toLowerCase() === 'zap') {
+                        continue
+                    }
                 } catch (_) {
                     continue
                 }
                 if (seen.has(candidateUrl)) continue
                 seen.add(candidateUrl)
-                seedUrls.push(candidateUrl)
+                candidates.push(candidateUrl)
+                if (candidates.length >= boundedMax) break
             }
 
-            return seedUrls
+            return candidates
         } catch (err) {
-            console.warn('[PTK ZAP] Failed to collect post-callback history seed URLs:', err?.message || String(err))
+            console.warn('[PTK ZAP] Failed to collect post-callback history candidate URLs:', err?.message || String(err))
             return []
         }
     }
 
     async _bootstrapFromOpenTabs() {
-        if (this._isFirefox || !browser?.tabs?.query || !this._isStartupGateOpen() || this.active) return
+        if (!browser?.tabs?.query || !this._isStartupGateOpen() || this.active) return
 
         try {
             await this._scanOpenTabsForPotentialZapUrls('bootstrap.tabs.query')
@@ -1056,7 +1242,7 @@ class ZapTransport {
     }
 
     async _scanOpenTabsForPotentialZapUrls(source = 'bootstrap.tabs.query') {
-        if (this._isFirefox || !browser?.tabs?.query || !this._isStartupGateOpen() || this.active) return
+        if (!browser?.tabs?.query || !this._isStartupGateOpen() || this.active) return
 
         const tabs = await browser.tabs.query({})
         for (const tab of tabs) {
@@ -1148,7 +1334,8 @@ class ZapTransport {
                     changed: false,
                     zapid: detectedZapId || existingZapId || null,
                     progressUrl: this.progressUrl || this._lastDetectedPayload?.progressUrl || null,
-                    targetUrl: targetUrl || this._lastDetectedPayload?.targetUrl || null
+                    targetUrl: targetUrl || this._lastDetectedPayload?.targetUrl || null,
+                    detectedAt: this._lastDetectedPayload?.detectedAt || now
                 })
                 this.zapid = payload.zapid || null
                 this._lastDetectedPayload = payload
@@ -1218,6 +1405,7 @@ class ZapTransport {
             tabId,
             url,
             targetUrl,
+            detectedAt: now,
             changed,
             source
         }
@@ -1356,3 +1544,7 @@ const zapTransport = new ZapTransport()
 zapTransport.init()
 
 export default zapTransport
+export {
+    DAST_HISTORY_SEED_MAX_RESULTS,
+    POST_CALLBACK_CANDIDATE_MAX_RESULTS
+}

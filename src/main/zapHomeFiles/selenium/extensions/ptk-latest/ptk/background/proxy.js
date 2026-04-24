@@ -7,6 +7,30 @@ import { ptk_logger, ptk_utils } from "./utils.js"
 
 const worker = self
 
+function scoreZapAutomationSeedUrl(url, { method = "GET", stateChanging = false, hasBody = false } = {}) {
+    let score = 0
+    const upperMethod = String(method || "GET").toUpperCase()
+    if (stateChanging) score += 90
+    if (hasBody) score += 70
+    try {
+        const parsed = new URL(url)
+        const pathAndQuery = `${parsed.pathname || ""}?${parsed.searchParams?.toString?.() || ""}`.toLowerCase()
+        if (parsed.search && parsed.search !== "?") score += 120
+        if (/(?:xss|script|javascript|js[_/-]|eval|attr|attribute|tagname|tag|html|textarea|href|svg|onerror|onload|search|query|(?:^|[?&])q=)/i.test(pathAndQuery)) {
+            score += 160
+        }
+        if (/(?:^|\/)\.(?:git|svn|hg)(?:\/|$)/i.test(parsed.pathname || "")) {
+            score -= 300
+        }
+        if (!parsed.search && upperMethod === "GET") {
+            score -= 40
+        }
+    } catch (_) {
+        score -= 20
+    }
+    return score
+}
+
 export class ptk_proxy {
 
     constructor(settings) {
@@ -538,6 +562,10 @@ export class ptk_proxy {
     setTab(tabId, params, t) {
         if (!ptk_utils.isURL(params?.url) ) return
         if (!Number.isInteger(tabId) || tabId < 0) return
+        params.__ptkSeenAtMs = Number.isFinite(Number(params.timeStamp))
+            ? Number(params.timeStamp)
+            : Date.now()
+        params.__ptkEventType = t || null
 
         const scanTabId = (worker?.ptk_app?.dast || worker?.ptk_app?.rattacker)?.engine?.tabId
         const shouldTrackForScan = scanTabId != null && tabId === scanTabId
@@ -564,6 +592,105 @@ export class ptk_proxy {
     getTab(tabId) {
         if (tabId in this.tabs && this.tabs[tabId] instanceof ptk_tab) return this.tabs[tabId]
         return null
+    }
+
+    collectZapAutomationSeedRequests(tabId, options = {}) {
+        const tab = this.getTab(tabId)
+        if (!tab?.frames || typeof tab.frames.forEach !== 'function') return []
+
+        const sinceMs = Number.isFinite(Number(options?.sinceMs)) ? Number(options.sinceMs) : 0
+        const maxRequests = Number.isFinite(Number(options?.maxRequests))
+            ? Math.max(0, Number(options.maxRequests))
+            : 200
+        const targetOrigin = (() => {
+            try {
+                const raw = options?.targetUrl || options?.pageUrl || ''
+                return raw ? new URL(raw).origin : null
+            } catch (_) {
+                return null
+            }
+        })()
+
+        const isStateChanging = (method) => ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method || '').toUpperCase())
+        const sameOrigin = (url) => {
+            if (!targetOrigin) return true
+            try {
+                return new URL(url).origin === targetOrigin
+            } catch (_) {
+                return false
+            }
+        }
+
+        const entries = []
+        tab.frames.forEach((frameMap, frameId) => {
+            if (!frameMap || typeof frameMap.forEach !== 'function') return
+            frameMap.forEach((events, requestId) => {
+                if (!Array.isArray(events) || !events.length) return
+                let details = null
+                let rawBundle = null
+                try {
+                    details = this.getRequestDetails(tab, frameId, requestId)
+                    if (!details?.url || !sameOrigin(details.url)) return
+                    const seenAt = Math.max(
+                        ...events.map((event) => Number(event?.__ptkSeenAtMs || event?.timeStamp || 0)).filter(Number.isFinite),
+                        0
+                    )
+                    if (sinceMs > 0 && seenAt > 0 && seenAt < sinceMs) return
+                    rawBundle = this.getRawRequestWithMeta(tab, frameId, requestId, {
+                        expectedUrl: details.url,
+                        expectedMethod: details.method
+                    })
+                } catch (_) {
+                    return
+                }
+
+                const method = String(details?.method || '').toUpperCase()
+                const bodyText = (() => {
+                    if (typeof details?.requestBody?.raw === 'string') return details.requestBody.raw
+                    if (details?.requestBody?.formData) return JSON.stringify(details.requestBody.formData)
+                    return ''
+                })()
+                entries.push({
+                    tabId,
+                    frameId,
+                    requestId,
+                    url: details.url,
+                    ui_url: details.ui_url || details.url,
+                    method,
+                    type: details.type || 'xmlhttprequest',
+                    statusCode: details.statusCode || 200,
+                    requestHeaders: details.requestHeaders || [],
+                    requestBody: details.requestBody || null,
+                    raw: rawBundle?.raw || '',
+                    seenAt: Math.max(
+                        ...events.map((event) => Number(event?.__ptkSeenAtMs || event?.timeStamp || 0)).filter(Number.isFinite),
+                        0
+                    ),
+                    stateChanging: isStateChanging(method),
+                    hasBody: !!bodyText
+                })
+            })
+        })
+
+        const deduped = []
+        const seen = new Set()
+        entries
+            .sort((left, right) => {
+                const leftScore = scoreZapAutomationSeedUrl(left.url, left)
+                const rightScore = scoreZapAutomationSeedUrl(right.url, right)
+                if (leftScore !== rightScore) return rightScore - leftScore
+                if (left.stateChanging !== right.stateChanging) return left.stateChanging ? -1 : 1
+                if (left.hasBody !== right.hasBody) return left.hasBody ? -1 : 1
+                return Number(left.seenAt || 0) - Number(right.seenAt || 0)
+            })
+            .forEach((entry) => {
+                const key = `${entry.method}|${entry.url}|${String(entry.raw || '').slice(-512)}`
+                if (seen.has(key)) return
+                seen.add(key)
+                deduped.push(entry)
+            })
+
+        return maxRequests > 0 ? deduped.slice(0, maxRequests) : deduped
     }
 
     updateTab(tabId, params, t) {

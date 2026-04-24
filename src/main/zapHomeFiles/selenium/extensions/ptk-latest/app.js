@@ -37,18 +37,14 @@ logZapLifecycle('background.module.evaluated', {
 })
 
 browser.runtime.onStartup.addListener(() => {
-    const snapshot = worker.isFirefox
-        ? getZapStartupSnapshot(worker)
-        : armZapStartupPending(worker, { reason: 'runtime.onStartup' })
+    const snapshot = armZapStartupPending(worker, { reason: 'runtime.onStartup' })
 
     logZapLifecycle('runtime.onStartup', {
         isFirefox: worker.isFirefox,
         ...snapshot
     })
 
-    if (!worker.isFirefox) {
-        worker.ptk_app?.automation?.zap?.transport?.handleStartupGateOpened?.('runtime.onStartup')
-    }
+    worker.ptk_app?.automation?.zap?.transport?.handleStartupGateOpened?.('runtime.onStartup')
 })
 
 export class ptk_app {
@@ -136,11 +132,15 @@ export class ptk_app {
             this.proxy.maxTabsCount = this.settings.proxy.max_tabs
             this.proxy.maxRequestsPerTab = this.settings.proxy.max_requests_per_tab
         }
+        const startupAfterBootstrap = getZapStartupSnapshot(worker)
         logZapLifecycle('app.bootstrap.end', {
             isFirefox: worker.isFirefox,
-            startup: getZapStartupSnapshot(worker),
+            startup: startupAfterBootstrap,
             elapsedMs: Date.now() - bootstrapStartedAt
         })
+        if (startupAfterBootstrap.pending === true) {
+            this.automation?.zap?.transport?.handleStartupGateOpened?.('app.bootstrap.end')
+        }
         return this
     }
 
@@ -159,7 +159,29 @@ export class ptk_app {
     }
 
     onMessage(message, sender, sendResponse) {
-        if (message.channel != "ptk_popup2background_app") {
+        if (message?.channel === "ptk_content2background_zap" && message?.type === "zap_callback_url") {
+            return this.ready.then(() => {
+                const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
+                const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
+                const url = typeof message.url === 'string'
+                    ? message.url
+                    : (typeof sender?.url === 'string' ? sender.url : '')
+                const processed = this.automation?.zap?.transport?.processContentObservedZapUrl?.({
+                    tabId,
+                    frameId,
+                    url
+                })
+                return { ok: processed === true }
+            })
+        }
+
+        if (message?.channel === "ptk_content2background_runtime" && message?.type === "content_bootstrap_hello") {
+            return Promise.resolve(
+                this.automation?.handleContentBootstrapHello?.(message, sender)
+            ).then((response) => response || { mode: 'pending', script: 'none' })
+        }
+
+        if (message?.channel != "ptk_popup2background_app") {
             return undefined
         }
 
@@ -205,19 +227,14 @@ export class ptk_app {
 }
 
 browser.runtime.onInstalled.addListener(async (details) => {
-    let startupSnapshot = null
-    if (!worker.isFirefox) {
-        startupSnapshot = armZapStartupPending(worker, { reason: 'runtime.onInstalled' })
-    }
+    const startupSnapshot = armZapStartupPending(worker, { reason: 'runtime.onInstalled' })
     logZapLifecycle('runtime.onInstalled', {
         isFirefox: worker.isFirefox,
         reason: details?.reason || null,
         previousVersion: details?.previousVersion || null,
-        startup: startupSnapshot || getZapStartupSnapshot(worker)
+        startup: startupSnapshot
     })
-    if (!worker.isFirefox) {
-        worker.ptk_app?.automation?.zap?.transport?.handleStartupGateOpened?.('runtime.onInstalled')
-    }
+    worker.ptk_app?.automation?.zap?.transport?.handleStartupGateOpened?.('runtime.onInstalled')
     if (details.reason == 'update') {
         if (worker.ptk_app) {
             return worker.ptk_app.markUpdated()

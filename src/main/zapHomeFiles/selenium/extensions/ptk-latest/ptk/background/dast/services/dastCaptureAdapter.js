@@ -186,6 +186,13 @@ export class DastCaptureAdapter {
         return score
     }
 
+    _isPtkGeneratedRequest(rawRequest = "", url = "") {
+        const raw = String(rawRequest || "")
+        if (/^x-ptk-source\s*:/im.test(raw)) return true
+        const markerSource = `${raw}\n${String(url || "")}`
+        return /(?:ptk_xss_|PTK_SPA_DOM_XSS_|source%3A%27ptk-xss%27|source:'ptk-xss')/i.test(markerSource)
+    }
+
     _normalizeRawRequestLine(rawRequest, response = null) {
         const raw = String(rawRequest || "")
         if (!raw.trim()) return ""
@@ -305,6 +312,106 @@ export class DastCaptureAdapter {
         })
     }
 
+    async seedZapAutomationRequestsFromProxy(tabId, options = {}) {
+        if (!this.engine?.isRunning || !this.state.acceptIncomingRequests) {
+            return {
+                seeded: 0,
+                proxySeeded: 0,
+                historySeeded: 0,
+                historySeedInputCount: 0,
+                historySeedDuplicatesSkipped: 0
+            }
+        }
+
+        const proxy = this.worker?.ptk_app?.proxy
+        const maxRequests = Number.isFinite(Number(options?.maxRequests))
+            ? Math.max(0, Number(options.maxRequests))
+            : 200
+        const proxyEntries = typeof proxy?.collectZapAutomationSeedRequests === "function"
+            ? proxy.collectZapAutomationSeedRequests(tabId, {
+                targetUrl: options?.targetUrl || options?.pageUrl || null,
+                sinceMs: options?.sinceMs || 0,
+                maxRequests
+            })
+            : []
+
+        let proxySeeded = 0
+        for (const entry of Array.isArray(proxyEntries) ? proxyEntries : []) {
+            const rawRequest = String(entry?.raw || "")
+            const firstLine = rawRequest.split(/\r?\n/)[0] || ""
+            if (!/^[A-Z]+\s+https?:\/\//.test(firstLine)) continue
+            if (this._isPtkGeneratedRequest(rawRequest, entry?.url || "")) continue
+            const response = {
+                tabId,
+                frameId: Number.isInteger(entry?.frameId) ? entry.frameId : 0,
+                requestId: entry?.requestId || `zap-seed-${proxySeeded}`,
+                url: entry?.url,
+                ui_url: entry?.ui_url || entry?.url,
+                method: entry?.method || "GET",
+                type: entry?.type || "xmlhttprequest",
+                statusCode: entry?.statusCode || 200
+            }
+            this.engine?.enqueue?.({
+                raw: rawRequest,
+                url: entry?.url,
+                method: entry?.method || "GET",
+                ui_url: entry?.ui_url || entry?.url,
+                responseType: response.type,
+                capturedRequest: cloneCapturedRequest({
+                    url: entry?.url,
+                    ui_url: entry?.ui_url || entry?.url,
+                    method: entry?.method || "GET",
+                    requestHeaders: entry?.requestHeaders || [],
+                    requestBody: entry?.requestBody || null
+                })
+            }, response)
+            proxySeeded += 1
+        }
+
+        const historySeedUrls = Array.isArray(options?.historySeedUrls) ? options.historySeedUrls : []
+        let historySeeded = 0
+        let historySeedDuplicatesSkipped = 0
+        const seenHistory = new Set(proxyEntries.map((entry) => String(entry?.url || "")))
+        for (const url of historySeedUrls) {
+            if (typeof url !== "string" || !/^https?:\/\//i.test(url)) continue
+            if (this._isPtkGeneratedRequest("", url)) continue
+            if (seenHistory.has(url)) {
+                historySeedDuplicatesSkipped += 1
+                continue
+            }
+            try {
+                const parsed = new URL(url)
+                const raw = `GET ${url} HTTP/1.1\r\nHost: ${parsed.host}\r\n\r\n`
+                this.engine?.enqueue?.({
+                    raw,
+                    url,
+                    method: "GET",
+                    ui_url: url,
+                    responseType: "main_frame"
+                }, {
+                    tabId,
+                    frameId: 0,
+                    requestId: `zap-history-seed-${historySeeded}`,
+                    url,
+                    ui_url: url,
+                    method: "GET",
+                    type: "main_frame",
+                    statusCode: 200
+                })
+                historySeeded += 1
+                seenHistory.add(url)
+            } catch (_) { }
+        }
+
+        return {
+            seeded: proxySeeded + historySeeded,
+            proxySeeded,
+            historySeeded,
+            historySeedInputCount: historySeedUrls.length,
+            historySeedDuplicatesSkipped
+        }
+    }
+
     scheduleDeferredSeedAtEnd(seedGeneration) {
         this.sleep(0).then(async () => {
             const state = this.state
@@ -365,6 +472,9 @@ export class DastCaptureAdapter {
                         const method = String(response?.method || "GET").toUpperCase()
                         rawRequest = `${method} ${response.url} HTTP/1.1\r\nHost: ${parsed.host}\r\n\r\n`
                     } catch (_) { }
+                }
+                if (this._isPtkGeneratedRequest(rawRequest, response?.url || response?.ui_url || "")) {
+                    return false
                 }
                 const hasPerRequestHeaders = !!rawBundle?.meta?.hasPerRequestHeaders
                 const richness = this._rawRequestHeaderRichness(rawRequest)

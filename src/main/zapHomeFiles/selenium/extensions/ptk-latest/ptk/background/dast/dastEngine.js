@@ -345,6 +345,7 @@ export class dastEngine {
         this.tokenRefillInterval = 1000
         this.activeCount = 0
         this._requestQueue = new ptk_queue()
+        this._zapQueueOrder = 0
         this.scanResult = this.getEmptyScanResult()
         this._resetTaskQueues()
         this._activePlans = new Map()
@@ -1109,6 +1110,16 @@ export class dastEngine {
         ])
         if (topTierModules.has(moduleId)) priority += 800
 
+        const isXssTask = (
+            moduleId === 'xss'
+            || moduleId.includes('xss')
+            || vulnId.includes('xss')
+            || tags.includes('xss')
+        )
+        if (isXssTask) {
+            priority += this.settings?.zapManaged === true ? 5000 : 700
+        }
+
         const midTierModules = new Set([
             'host_header_poisoning',
             'cors_misconfig',
@@ -1126,6 +1137,11 @@ export class dastEngine {
 
         if (task?.moduleAsync === false) {
             priority += 25
+        }
+
+        const plannerPriority = Number(task?.plannerPriority)
+        if (Number.isFinite(plannerPriority) && plannerPriority !== 0) {
+            priority += Math.max(-1000, Math.min(1000, Math.trunc(plannerPriority)))
         }
 
         return priority
@@ -1849,6 +1865,85 @@ export class dastEngine {
         return payload
     }
 
+    _extractQueuedRequestUrl(payload = {}, response = null) {
+        const direct = payload?.url || payload?.ui_url || response?.url || response?.ui_url || ''
+        if (direct && /^https?:\/\//i.test(String(direct))) return String(direct)
+        const raw = String(payload?.raw || '')
+        const firstLine = raw.split(/\r?\n/)[0] || ''
+        const match = firstLine.match(/^[A-Z]+\s+(https?:\/\/\S+)\s+HTTP\/\d(?:\.\d)?$/i)
+        return match?.[1] || ''
+    }
+
+    _scoreZapManagedQueuedRequest(payload = {}, response = null) {
+        const method = String(payload?.method || response?.method || '').toUpperCase()
+        const raw = String(payload?.raw || '')
+        const hasBody = this._requestRawHasBody(raw) || !!payload?.capturedRequest?.requestBody
+        const responseType = String(payload?.responseType || response?.type || '').toLowerCase()
+        const statusCode = Number(response?.statusCode ?? payload?.capturedResponse?.statusCode ?? 0)
+        let score = 0
+
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) score += 160
+        if (hasBody) score += 110
+        if (responseType === 'main_frame' || responseType === 'sub_frame') score += 60
+        else if (responseType === 'xmlhttprequest' || responseType === 'fetch') score += 20
+        if (statusCode >= 400) score -= 80
+
+        const url = this._extractQueuedRequestUrl(payload, response)
+        if (!url) return score - 20
+
+        try {
+            const parsed = new URL(url)
+            const pathname = decodeURIComponent(parsed.pathname || '').toLowerCase()
+            const search = decodeURIComponent(parsed.search || '').toLowerCase()
+            const surface = `${pathname}?${search}`
+
+            if ((parsed.pathname || '').match(/(?:^|\/)\.(?:git|svn|hg)(?:\/|$)/i)) score -= 1000
+            if (parsed.search && parsed.search !== '?') score += 140
+            if (!parsed.search && method === 'GET') score -= 60
+            if (/(?:^|[?&])(?:q|query|search|s|term|keyword|text|message|comment|name|title|url|redirect)=/i.test(search)) score += 120
+            if (/(?:script|javascript|js[_/-]|eval|template|expression|comment)/i.test(surface)) score += 260
+            if (/(?:attr|attribute|event|tagname|svg|onerror|onload|onmouseover|href|srcdoc)/i.test(surface)) score += 240
+            if (/(?:textarea|html|body|head|content|render|preview)/i.test(surface)) score += 60
+            if (/(?:xss|dom)/i.test(surface)) score += 180
+        } catch (_) {
+            score -= 20
+        }
+
+        return score
+    }
+
+    _enqueueRequestPayload(payload, response = null) {
+        if (this.settings?.zapManaged !== true) {
+            this._requestQueue.enqueue(payload)
+            return
+        }
+
+        const priority = this._scoreZapManagedQueuedRequest(payload, response)
+        payload.__zapQueuePriority = priority
+        payload.__zapQueueOrder = ++this._zapQueueOrder
+
+        const buffer = this._requestQueue?._buffer
+        if (!Array.isArray(buffer)) {
+            this._requestQueue.enqueue(payload)
+            return
+        }
+
+        const head = this._requestQueue._head || 0
+        let insertAt = buffer.length
+        for (let i = head; i < buffer.length; i++) {
+            const candidate = buffer[i]
+            if (!candidate || typeof candidate !== 'object') continue
+            const candidatePriority = Number(candidate.__zapQueuePriority || 0)
+            if (priority > candidatePriority) {
+                insertAt = i
+                break
+            }
+        }
+
+        buffer.splice(insertAt, 0, payload)
+        this._requestQueue._size += 1
+    }
+
     _capturedOriginalSatisfiesRequirements(capturedResponse, modules = []) {
         if (!capturedResponse || typeof capturedResponse !== 'object') return false
         const hasStatus = Number.isFinite(Number(capturedResponse.statusCode))
@@ -2106,7 +2201,7 @@ export class dastEngine {
                 count: 1,
                 upgraded: 0
             })
-            this._requestQueue.enqueue(payload)
+            this._enqueueRequestPayload(payload, response)
             return
         }
         if (quality > (existing.quality + qualityDelta)) {
@@ -2118,7 +2213,7 @@ export class dastEngine {
                 return
             }
             this._fingerprintMeta.set(dedupeKey, existing)
-            this._requestQueue.enqueue(payload)
+            this._enqueueRequestPayload(payload, response)
             return
         }
         existing.count = (existing.count || 0) + 1
@@ -2817,6 +2912,26 @@ export class dastEngine {
             type: "attack_delta",
             requestId: plan.requestRecord?.id || null,
             attackId: entry?.id || null
+        })
+    }
+
+    _recordLiveAttackFinding(plan, attackResult, attackIndex = 0) {
+        if (!plan?.requestRecord || !attackResult?.success) return
+        const wasRecorded = Boolean(attackResult.__findingRecorded || attackResult.__reconRecorded)
+        if (this._isReconAttackResult(attackResult)) {
+            this._addReconObservation(plan.requestRecord, attackResult, attackIndex)
+        } else {
+            this._addUnifiedFinding(plan.requestRecord, attackResult, attackIndex)
+        }
+        const isRecorded = Boolean(attackResult.__findingRecorded || attackResult.__reconRecorded)
+        if (wasRecorded || !isRecorded) {
+            return
+        }
+        this._syncScanStats()
+        this._notifyResultMutation({
+            type: "attack_finding",
+            requestId: plan.requestRecord?.id || null,
+            attackId: attackResult.__requestRecordEntry?.id || attackResult.id || null
         })
     }
 
@@ -3838,7 +3953,15 @@ export class dastEngine {
         task._familyKey = task._familyKey || this._taskFamilyKey(task)
         task.priority = this._taskPriority(task)
         const existing = this._taskQueueGroups.get(groupKey) || []
-        existing.push(task)
+        let insertAt = existing.length
+        for (let index = 0; index < existing.length; index += 1) {
+            const currentPriority = Number(existing[index]?.priority || 0)
+            if (task.priority > currentPriority) {
+                insertAt = index
+                break
+            }
+        }
+        existing.splice(insertAt, 0, task)
         this._taskQueueGroups.set(groupKey, existing)
         const previousGroupPriority = Number(this._taskQueueGroupPriority?.get(groupKey) || Number.NEGATIVE_INFINITY)
         if (!this._taskQueueGroupPriority) this._taskQueueGroupPriority = new Map()
@@ -3986,8 +4109,10 @@ export class dastEngine {
                     requeued = true
                     this._enqueueTask(task)
                 } else if (res) {
+                    const attackIndex = plan.attacks.length
                     plan.attacks.push(res)
                     this._emitLiveAttackDelta(plan, res)
+                    this._recordLiveAttackFinding(plan, res, attackIndex)
                 }
             } catch (err) {
                 console.error('DAST worker error', {
