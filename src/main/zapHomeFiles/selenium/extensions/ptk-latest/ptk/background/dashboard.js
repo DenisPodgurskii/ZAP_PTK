@@ -249,23 +249,57 @@ export class ptk_dashboard {
         return scans
     }
 
-    async initCookies(urls) {
-        let merged = []
+    async initCookies(urls, context = {}) {
+        const uniqueUrls = Array.from(new Set((Array.isArray(urls) ? urls : [])
+            .filter((url) => typeof url === 'string' && ptk_utils.isURL(url))))
+        if (!uniqueUrls.length) {
+            return Promise.resolve(false)
+        }
+
         let promises = []
-        for (let i = 0; i < urls.length; i++) {
-            promises.push(browser.cookies.getAll({ 'url': urls[i] }))
+        for (let i = 0; i < uniqueUrls.length; i++) {
+            promises.push(browser.cookies.getAll({ 'url': uniqueUrls[i] }))
         }
         let self = this
         return Promise.all(promises).then(function (cookie) {
             let merged = [].concat.apply([], cookie)
             let cookies = merged.filter((v, i, a) => a.findIndex(v2 => (JSON.stringify(v) === JSON.stringify(v2))) === i).sort((a, b) => a.name.localeCompare(b.name));
+            if (!self.tab) {
+                self.tab = {}
+            }
             self.tab.cookies = cookies
             browser.runtime.sendMessage({
                 channel: "ptk_background2popup_dashboard",
                 type: "cookies_loaded",
-                data: Object.assign({}, { cookies: cookies })
+                data: Object.assign({}, {
+                    cookies: cookies,
+                    tabId: Number.isInteger(context?.tabId) ? context.tabId : null,
+                    url: context?.url || null
+                })
             }).catch(e => e)
         })
+    }
+
+    async initCookiesForTab(tabId, fallbackUrl = '') {
+        const urls = new Set()
+        const addUrl = (url) => {
+            if (typeof url === 'string' && ptk_utils.isURL(url)) {
+                urls.add(url)
+            }
+        }
+        addUrl(fallbackUrl)
+
+        const tab = tabId ? worker.ptk_app.proxy.getTab(tabId) : null
+        if (tab) {
+            try {
+                const tabInfo = await tab.analyze()
+                if (Array.isArray(tabInfo?.urls)) {
+                    tabInfo.urls.forEach(addUrl)
+                }
+            } catch (_) { }
+        }
+
+        return this.initCookies(Array.from(urls), { tabId, url: fallbackUrl })
     }
 
     async analyzeTab(message) {
@@ -1120,6 +1154,7 @@ export class ptk_dashboard {
             // Get per-tab cached analysis data for the CURRENT active tab
             const currentTabId = this.activeTab?.tabId
             const perTabCache = this._getTabAnalysisCache(currentTabId)
+            this.initCookiesForTab(currentTabId, this.activeTab?.url || '').catch(() => {})
 
             // Build tab object with per-tab cached analysis data
             let tabData = null

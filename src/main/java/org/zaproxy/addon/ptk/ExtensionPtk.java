@@ -42,8 +42,6 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private static final Gson GSON = new Gson();
     private static final int BROWSER_CLOSE_MAX_ATTEMPTS = 20;
     private static final long BROWSER_CLOSE_WAIT_SLICE_MS = 1000;
-    private static final Set<String> DEFAULT_INFO_TIMING_PHASES =
-            Set.of("progress.terminal", "session.summary", "browser_close.end");
 
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
             List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
@@ -179,7 +177,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         }
 
         extensions.add(new BrowserExtension(path, true, browser));
-        LOGGER.info(
+        LOGGER.debug(
                 "PTK {} extension registered with Selenium browser={} path={}",
                 label,
                 browser,
@@ -537,9 +535,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             if (phase == null || phase.isBlank()) {
                 return;
             }
-            boolean defaultInfoPhase = DEFAULT_INFO_TIMING_PHASES.contains(phase);
-            boolean debugEnabled = LOGGER.isDebugEnabled();
-            if (!debugEnabled && !defaultInfoPhase) {
+            if (!LOGGER.isDebugEnabled()) {
                 return;
             }
             StringBuilder summary = new StringBuilder();
@@ -563,11 +559,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             summary.append(" ").append(key).append("=").append(value);
                         });
             }
-            if (defaultInfoPhase) {
-                LOGGER.info(summary.toString());
-            } else {
-                LOGGER.debug(summary.toString());
-            }
+            LOGGER.debug(summary.toString());
         }
 
         @Override

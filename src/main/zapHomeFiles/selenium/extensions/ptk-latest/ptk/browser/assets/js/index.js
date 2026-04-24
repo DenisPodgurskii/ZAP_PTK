@@ -962,15 +962,47 @@ function clearDataTable(selector) {
     table.clear().draw(false)
 }
 
+function resetJwtTokens() {
+    tokens.length = 0
+    tokenAdded = false
+    $('#jwt_btn').hide()
+    clearDataTable('#tbl_tokens')
+}
+
+function upsertStorageSummaryRow(label, link) {
+    if (!$.fn.dataTable.isDataTable('#tbl_storage')) return
+    const table = $('#tbl_storage').DataTable()
+    const duplicateIndexes = []
+    let found = false
+
+    table.rows().every(function (rowIndex) {
+        const row = this.data()
+        if (!row || row[0] !== label) return
+        if (!found) {
+            this.data([label, link])
+            found = true
+            return
+        }
+        duplicateIndexes.push(rowIndex)
+    })
+
+    duplicateIndexes.reverse().forEach((rowIndex) => {
+        table.row(rowIndex).remove()
+    })
+
+    if (!found) {
+        table.row.add([label, link])
+    }
+    table.draw(false)
+}
+
 function resetDashboardCardsForTabChange() {
     controller.tab = {}
     controller.storage = null
     controller.cookies = {}
     controller._headersSig = null
     controller._lastHeadersRequestId = null
-    tokens = []
-    tokenAdded = false
-    $('#jwt_btn').hide()
+    resetJwtTokens()
     clearDataTable('#tbl_technologies')
     clearDataTable('#tbl_cves')
     clearDataTable('#tbl_owasp')
@@ -1452,7 +1484,7 @@ async function bindOWASP() {
 function bindCookies() {
     if (Object.keys(controller.cookies).length) {
         $("a[data-tab='cookie']").show()
-        $('#tbl_storage').DataTable().row.add(['Cookie', `<a href="#" class="storage_auth_link" data="cookie">View</a>`]).draw()
+        upsertStorageSummaryRow('Cookie', `<a href="#" class="storage_auth_link" data="cookie">View</a>`)
 
 
         let dt = new Array()
@@ -1583,13 +1615,16 @@ async function bindCVEs(force = false) {
 
 async function bindTokens(data) {
     if (tokens.length > 0) {
+        $('#jwt_btn').show()
+        upsertStorageSummaryRow('Tokens', `<a href="#" class="storage_auth_link" data="tokens">View</a>`)
         if (!tokenAdded) {
-            $('#tbl_storage').DataTable().row.add(['Tokens', `<a href="#" class="storage_auth_link" data="tokens">View</a>`]).draw()
             tokenAdded = true
         }
         $("a[data-tab='tokens']").show()
         bindTable('#tbl_tokens', { data: tokens })
         controller.save(JSON.parse(JSON.stringify(tokens)))
+    } else {
+        $('#jwt_btn').hide()
     }
 }
 
@@ -2339,6 +2374,9 @@ browser.runtime.onMessage.addListener(function (message, sender, sendResponse) {
             bindHeaders()
         }
         if (message.type == "cookies_loaded") {
+            if (Number.isInteger(message.data?.tabId) && Number.isInteger(controller.tabId) && message.data.tabId !== controller.tabId) {
+                return
+            }
             Object.assign(controller, message.data)
             bindCookies()
         }
