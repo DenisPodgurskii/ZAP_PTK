@@ -1,6 +1,12 @@
 package org.zaproxy.addon.ptk;
 
 import com.google.gson.Gson;
+import java.lang.reflect.Method;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -8,6 +14,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.control.Control;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.extension.Extension;
@@ -22,6 +29,11 @@ import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.options.PtkOptionsPanel;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.extension.alert.ExampleAlertProvider;
+import org.zaproxy.zap.extension.selenium.Browser;
+import org.zaproxy.zap.extension.selenium.BrowserExtension;
+import org.zaproxy.zap.extension.selenium.ExtensionSelenium;
+import org.zaproxy.zap.extension.selenium.SeleniumOptions;
+import org.zaproxy.zap.extension.selenium.SeleniumScriptUtils;
 
 public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvider {
 
@@ -30,11 +42,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private static final Gson GSON = new Gson();
     private static final int BROWSER_CLOSE_MAX_ATTEMPTS = 20;
     private static final long BROWSER_CLOSE_WAIT_SLICE_MS = 1000;
-    private static final Set<String> DEFAULT_INFO_TIMING_PHASES =
-            Set.of("progress.terminal", "session.summary", "browser_close.end");
 
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
-            List.of(ExtensionClientIntegration.class);
+            List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
 
     private ClientCallBackImplementor callBackImplementor;
     private PtkOptionsPanel optionsPanel;
@@ -50,6 +60,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private final Map<String, String> browserIdByZapId = new ConcurrentHashMap<>();
     private final Map<String, Integer> alertsRaisedByZapId = new ConcurrentHashMap<>();
     private final Map<String, Long> firstAlertSeenAtMs = new ConcurrentHashMap<>();
+    private final Map<String, String> lastProgressSummaryByZapId = new ConcurrentHashMap<>();
     private final Set<String> firstProgressLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> firstAlertLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> terminalProgressLogged = ConcurrentHashMap.newKeySet();
@@ -66,6 +77,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 .getExtensionLoader()
                 .getExtension(ExtensionClientIntegration.class)
                 .registerClientCallBack(callBackImplementor);
+        ensurePtkSeleniumExtensionsConfigured(
+                Control.getSingleton().getExtensionLoader().getExtension(ExtensionSelenium.class));
         extensionHook.addOptionsParamSet(getParam());
         if (hasView()) {
             extensionHook.getHookView().addOptionPanel(getOptionsPanel());
@@ -110,6 +123,96 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     @Override
     public List<Alert> getExampleAlerts() {
         return PtkExampleAlerts.getExampleAlerts(getLoadedResources());
+    }
+
+    private static void ensurePtkSeleniumExtensionsConfigured(ExtensionSelenium extensionSelenium) {
+        if (extensionSelenium == null) {
+            return;
+        }
+        Path chromiumPath = Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest");
+        Path xpiPath = Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest.xpi");
+
+        try {
+            SeleniumOptions options = getSeleniumOptions(extensionSelenium);
+            if (options == null) {
+                LOGGER.warn("PTK Selenium extension config skipped; Selenium options unavailable");
+                return;
+            }
+            List<BrowserExtension> extensions = new ArrayList<>(options.getBrowserExtensions());
+            boolean changed = false;
+            changed |= ensureBrowserExtension(extensions, chromiumPath, Browser.CHROME, "Chromium");
+            changed |= ensureBrowserExtension(extensions, xpiPath, Browser.FIREFOX, "Firefox");
+            if (changed) {
+                options.setBrowserExtensions(extensions);
+            }
+            logConfiguredPtkExtensions(extensions);
+        } catch (Exception e) {
+            LOGGER.warn("PTK Selenium extension config failed: {}", e.getMessage());
+        }
+    }
+
+    private static boolean ensureBrowserExtension(
+            List<BrowserExtension> extensions, Path path, Browser browser, String label) {
+        boolean exists =
+                browser == Browser.FIREFOX ? Files.isRegularFile(path) : Files.isDirectory(path);
+        if (!exists) {
+            LOGGER.warn("PTK {} extension config skipped; path not found path={}", label, path);
+            return false;
+        }
+        Path normalizedPath = path.toAbsolutePath().normalize();
+        boolean alreadyConfigured =
+                extensions.stream()
+                        .filter(extension -> extension != null && extension.getBrowser() == browser)
+                        .map(BrowserExtension::getPath)
+                        .filter(extensionPath -> extensionPath != null)
+                        .map(extensionPath -> extensionPath.toAbsolutePath().normalize())
+                        .anyMatch(normalizedPath::equals);
+        if (alreadyConfigured) {
+            LOGGER.debug(
+                    "PTK {} extension available to Selenium browser={} path={}",
+                    label,
+                    browser,
+                    normalizedPath);
+            return false;
+        }
+
+        extensions.add(new BrowserExtension(path, true, browser));
+        LOGGER.debug(
+                "PTK {} extension registered with Selenium browser={} path={}",
+                label,
+                browser,
+                normalizedPath);
+        return true;
+    }
+
+    private static void logConfiguredPtkExtensions(List<BrowserExtension> extensions) {
+        for (BrowserExtension extension : extensions) {
+            if (extension == null || extension.getPath() == null) {
+                continue;
+            }
+            Path path = extension.getPath().toAbsolutePath().normalize();
+            String name = path.getFileName() != null ? path.getFileName().toString() : "";
+            if (!"ptk-latest".equals(name) && !"ptk-latest.xpi".equals(name)) {
+                continue;
+            }
+            LOGGER.debug(
+                    "PTK Selenium extension configured browser={} enabled={} path={}",
+                    extension.getBrowser(),
+                    extension.isEnabled(),
+                    path);
+        }
+    }
+
+    private static SeleniumOptions getSeleniumOptions(ExtensionSelenium extensionSelenium) {
+        try {
+            Method getOptionsMethod = ExtensionSelenium.class.getDeclaredMethod("getOptions");
+            getOptionsMethod.setAccessible(true);
+            Object value = getOptionsMethod.invoke(extensionSelenium);
+            return value instanceof SeleniumOptions ? (SeleniumOptions) value : null;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            LOGGER.warn("PTK failed to access Selenium options: {}", e.getMessage());
+            return null;
+        }
     }
 
     private PtkResourcesLoader.LoadedPtkResources getLoadedResources() {
@@ -184,9 +287,48 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             return value instanceof String ? (String) value : null;
         }
 
+        private String extractZapIdFromUrl(String rawUrl) {
+            if (rawUrl == null || rawUrl.isBlank()) {
+                return null;
+            }
+            try {
+                int queryStart = rawUrl.indexOf('?');
+                if (queryStart < 0 || queryStart + 1 >= rawUrl.length()) {
+                    return null;
+                }
+                int fragmentStart = rawUrl.indexOf('#', queryStart + 1);
+                String query =
+                        fragmentStart >= 0
+                                ? rawUrl.substring(queryStart + 1, fragmentStart)
+                                : rawUrl.substring(queryStart + 1);
+                for (String part : query.split("&")) {
+                    int equalsIndex = part.indexOf('=');
+                    String key = equalsIndex >= 0 ? part.substring(0, equalsIndex) : part;
+                    if (!"zapid".equals(key)) {
+                        continue;
+                    }
+                    String value = equalsIndex >= 0 ? part.substring(equalsIndex + 1) : "";
+                    String decoded = URLDecoder.decode(value, StandardCharsets.UTF_8);
+                    return decoded.isBlank() ? null : decoded;
+                }
+            } catch (IllegalArgumentException e) {
+                LOGGER.debug("PTK failed to parse zapid from URL {}", rawUrl, e);
+            }
+            return null;
+        }
+
         private Integer getIntegerField(Map<String, Object> body, String key) {
             Object value = body.get(key);
             return value instanceof Number ? ((Number) value).intValue() : null;
+        }
+
+        private void appendDetailField(
+                StringBuilder summary, Map<String, Object> details, String key, String label) {
+            Object value = details.get(key);
+            if (!(value instanceof Number)) {
+                return;
+            }
+            summary.append(';').append(label).append('=').append(((Number) value).intValue());
         }
 
         private void rememberBrowserId(String zapid, String browserid) {
@@ -274,6 +416,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             browserIdByZapId.remove(zapid);
             alertsRaisedByZapId.remove(zapid);
             firstAlertSeenAtMs.remove(zapid);
+            lastProgressSummaryByZapId.remove(zapid);
             firstProgressLogged.remove(zapid);
             firstAlertLogged.remove(zapid);
             terminalProgressLogged.remove(zapid);
@@ -287,6 +430,52 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     || "error".equalsIgnoreCase(status)
                     || "cancelled".equalsIgnoreCase(status)
                     || "timeout".equalsIgnoreCase(status);
+        }
+
+        @SuppressWarnings("unchecked")
+        private String summarizeProgressPayload(Map<String, Object> progressData) {
+            StringBuilder summary = new StringBuilder();
+            Object enginesValue = progressData.get("engines");
+            if (!(enginesValue instanceof Map<?, ?> engines) || engines.isEmpty()) {
+                return "";
+            }
+            engines.forEach(
+                    (engineName, engineValue) -> {
+                        if (!(engineName instanceof String)
+                                || !(engineValue instanceof Map<?, ?>)) {
+                            return;
+                        }
+                        Map<String, Object> engine = (Map<String, Object>) engineValue;
+                        if (!summary.isEmpty()) {
+                            summary.append(',');
+                        }
+                        summary.append(engineName)
+                                .append(':')
+                                .append(getStringField(engine, "status"))
+                                .append(':');
+                        Object progress = engine.get("progress");
+                        if (progress instanceof Number) {
+                            summary.append(((Number) progress).intValue());
+                        } else {
+                            summary.append('0');
+                        }
+                        Object detailsValue = engine.get("details");
+                        if (detailsValue instanceof Map<?, ?> rawDetails) {
+                            Map<String, Object> details = (Map<String, Object>) rawDetails;
+                            summary.append('[');
+                            appendDetailField(summary, details, "planned", "p");
+                            appendDetailField(summary, details, "executed", "e");
+                            appendDetailField(summary, details, "remaining", "rem");
+                            appendDetailField(summary, details, "requestQueue", "rq");
+                            appendDetailField(summary, details, "taskQueue", "tq");
+                            appendDetailField(summary, details, "activeTasks", "at");
+                            appendDetailField(summary, details, "planning", "pl");
+                            appendDetailField(summary, details, "findingsCount", "f");
+                            appendDetailField(summary, details, "seededRequests", "seed");
+                            summary.append(']');
+                        }
+                    });
+            return summary.toString();
         }
 
         private void logCallbackSummary(
@@ -334,7 +523,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             if (firstEvent != null) {
                 summary.append(" first=").append(firstEvent);
             }
-            LOGGER.info(summary.toString());
+            LOGGER.debug(summary.toString());
         }
 
         private void logTimingSummary(
@@ -346,7 +535,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             if (phase == null || phase.isBlank()) {
                 return;
             }
-            if (!LOGGER.isDebugEnabled() && !DEFAULT_INFO_TIMING_PHASES.contains(phase)) {
+            if (!LOGGER.isDebugEnabled()) {
                 return;
             }
             StringBuilder summary = new StringBuilder();
@@ -370,7 +559,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             summary.append(" ").append(key).append("=").append(value);
                         });
             }
-            LOGGER.info(summary.toString());
+            LOGGER.debug(summary.toString());
         }
 
         @Override
@@ -484,6 +673,14 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         if (terminalProgress && zapid != null && !zapid.isBlank()) {
                             terminalProgressLogged.add(zapid);
                         }
+                        String progressSummary = summarizeProgressPayload(progressData);
+                        boolean progressChanged =
+                                zapid != null
+                                        && !zapid.isBlank()
+                                        && !progressSummary.isBlank()
+                                        && !progressSummary.equals(
+                                                lastProgressSummaryByZapId.put(
+                                                        zapid, progressSummary));
                         if (firstProgress || terminalProgress) {
                             logCallbackSummary(
                                     msg,
@@ -509,6 +706,16 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                                             progress.intValue(),
                                             "status",
                                             status != null ? status : ""));
+                        }
+                        if (!firstProgress && !terminalProgress && progressChanged) {
+                            Map<String, Object> extra = new LinkedHashMap<>();
+                            extra.put("progress", progress.intValue());
+                            if (status != null && !status.isBlank()) {
+                                extra.put("status", status);
+                            }
+                            extra.put("engines", progressSummary);
+                            logTimingSummary(
+                                    zapid, browserid, "progress.update", sinceFirstMs, extra);
                         }
                         if (terminalProgress) {
                             Map<String, Object> extra = new LinkedHashMap<>();
@@ -541,9 +748,44 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         }
 
         @Override
+        @SuppressWarnings("deprecation")
+        public void browserLaunched(SeleniumScriptUtils ssutils) {
+            if (ssutils == null || ssutils.getWebDriver() == null) {
+                return;
+            }
+            String currentUrl;
+            try {
+                currentUrl = ssutils.getWebDriver().getCurrentUrl();
+            } catch (Exception e) {
+                LOGGER.warn("PTK browserLaunched failed to read current URL: {}", e.getMessage());
+                return;
+            }
+            String zapid = extractZapIdFromUrl(currentUrl);
+            String browserid = ssutils.getBrowserId();
+            if (zapid == null || zapid.isBlank()) {
+                LOGGER.debug(
+                        "PTK browserLaunched without zapid browserid={} url={}",
+                        browserid,
+                        currentUrl);
+                return;
+            }
+
+            rememberBrowserId(zapid, browserid);
+            long start = System.currentTimeMillis();
+            logTimingSummary(zapid, browserid, "browser_launch.begin", null, Map.of());
+            long waitedMs = System.currentTimeMillis() - start;
+            boolean callbackSeen =
+                    callbackFirstSeenAtMs.containsKey(zapid) || scanProgress.containsKey(zapid);
+            Map<String, Object> extra = new LinkedHashMap<>();
+            extra.put("waitedMs", waitedMs);
+            extra.put("callbackSeen", callbackSeen);
+            logTimingSummary(zapid, browserid, "browser_launch.end", null, extra);
+        }
+
+        @Override
         public void browserClosing(ClientCallBackUtils ccbutils) {
             if (LOGGER.isDebugEnabled()) {
-                LOGGER.info("PTK browserClosing uuid={}", ccbutils.getUuid());
+                LOGGER.debug("PTK browserClosing uuid={}", ccbutils.getUuid());
             }
             if (ccbutils.getUuid() == null) {
                 return;

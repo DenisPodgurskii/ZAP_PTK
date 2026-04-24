@@ -37,13 +37,33 @@ export class SastSessionCoordinator {
     this.scanHeartbeatTimer = null;
     this.scanStartMs = null;
     this.scanningRequest = false;
+    this.firstCollectionStarted = false;
+    this.firstCollectionSettled = false;
+    this.firstCollectionError = null;
+    this.activeCollectionCount = 0;
+    this.lastCollectionState = "idle";
   }
 
   beginSession(tabId) {
     this.isScanRunning = true;
     this.activeTabId = tabId;
     this.scanningRequest = false;
+    this.firstCollectionStarted = false;
+    this.firstCollectionSettled = false;
+    this.firstCollectionError = null;
+    this.activeCollectionCount = 0;
+    this.lastCollectionState = "collection_pending";
     this.startHeartbeat();
+  }
+
+  getAutomationState() {
+    return {
+      firstCollectionStarted: this.firstCollectionStarted,
+      firstCollectionSettled: this.firstCollectionSettled,
+      firstCollectionError: this.firstCollectionError,
+      activeCollectionCount: this.activeCollectionCount,
+      collectionState: this.lastCollectionState || "idle"
+    };
   }
 
   handleRemoved(tabId) {
@@ -151,6 +171,11 @@ export class SastSessionCoordinator {
     if (!this.isScanRunning) return [];
     if (this.scanningRequest) return [];
     this.scanningRequest = true;
+    this.activeCollectionCount += 1;
+    if (!this.firstCollectionStarted) {
+      this.firstCollectionStarted = true;
+    }
+    this.lastCollectionState = "collection_pending";
     try {
       const delayMs = Number.isFinite(Number(opts?.delayMs))
         ? Math.max(0, Number(opts.delayMs))
@@ -171,6 +196,7 @@ export class SastSessionCoordinator {
         timeoutMs,
         retryDelayMs
       });
+      this.lastCollectionState = "payload_received";
       this.recordTiming("sast.payload.received", {
         scriptsCount: Array.isArray(payload?.scripts) ? payload.scripts.length : 0,
         htmlChars: typeof payload?.html === "string"
@@ -178,8 +204,20 @@ export class SastSessionCoordinator {
           : (Array.isArray(payload?.html) ? payload.html.length : 0)
       }, null, "sast.payload.received");
       if (!payload?.scripts) return [];
+      this.lastCollectionState = "scan_in_flight";
       return await this.scanCode(payload.scripts, payload.html, payload.file);
+    } catch (err) {
+      this.firstCollectionError = err?.message || String(err);
+      this.lastCollectionState = "collection_failed";
+      throw err;
     } finally {
+      this.activeCollectionCount = Math.max(0, this.activeCollectionCount - 1);
+      if (this.firstCollectionStarted && this.activeCollectionCount === 0) {
+        this.firstCollectionSettled = true;
+        if (this.lastCollectionState !== "collection_failed") {
+          this.lastCollectionState = "scan_complete";
+        }
+      }
       this.scanningRequest = false;
     }
   }

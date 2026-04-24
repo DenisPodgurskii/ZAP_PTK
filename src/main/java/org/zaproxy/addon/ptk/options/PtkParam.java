@@ -222,7 +222,7 @@ public class PtkParam extends VersionedAbstractParam {
 
         if (oldPaths == null || oldPaths.isEmpty()) {
             // Empty list means all rules were enabled — no flags needed (default is true).
-            LOGGER.info("PTK v1→v2: empty path list, all rules remain default-enabled");
+            LOGGER.debug("PTK v1→v2: empty path list, all rules remain default-enabled");
             return;
         }
 
@@ -272,7 +272,7 @@ public class PtkParam extends VersionedAbstractParam {
         }
 
         writeMinimizedFlags(defs, enabledLeafIds);
-        LOGGER.info(
+        LOGGER.debug(
                 "PTK v1→v2: {} positional paths → {} enabled leaf IDs → hierarchical flags",
                 oldPaths.size(),
                 enabledLeafIds.size());
@@ -280,7 +280,7 @@ public class PtkParam extends VersionedAbstractParam {
         // Persist immediately so the migrated config survives an unclean ZAP exit.
         try {
             getConfig().save();
-            LOGGER.info("PTK v1→v2: migrated config saved to disk");
+            LOGGER.debug("PTK v1→v2: migrated config saved to disk");
         } catch (ConfigurationException e) {
             LOGGER.warn("PTK v1→v2: could not save migrated config to disk", e);
         }

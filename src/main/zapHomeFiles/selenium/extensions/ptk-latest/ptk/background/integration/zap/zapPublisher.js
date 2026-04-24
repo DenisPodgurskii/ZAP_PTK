@@ -12,6 +12,7 @@ const MAX_KEYS = 50
 const KEY_IDLE_EVICT_MS = 10 * 60 * 1000
 const PUBLISHED_STATE_CAP_PER_KEY = 5000
 const ZAP_SESSION_SCAN_LOOKBACK_MS = 30 * 1000
+const TERMINAL_DRAIN_MIN_STABLE_PASSES = 2
 
 function chunkArray(items, size) {
     if (!Array.isArray(items) || !items.length) return []
@@ -96,6 +97,8 @@ export default class ZapPublisher {
 
         this.publishedState = new Map()
         this.lastSeen = new Map()
+        this._pollIdleWaiters = new Set()
+        this.flushRequested = false
     }
 
     start() {
@@ -114,6 +117,104 @@ export default class ZapPublisher {
 
     async flushOnce() {
         await this._pollOnce()
+    }
+
+    requestFlush() {
+        if (this.disabled) return
+        this.flushRequested = true
+        void this._pollOnce()
+    }
+
+    async flushPendingForTerminal({ maxPasses = 4 } = {}) {
+        if (this.disabled) {
+            return {
+                drained: true,
+                pendingFindings: 0,
+                pendingByEngine: {},
+                passes: 0,
+                stablePasses: 0
+            }
+        }
+
+        let lastState = {
+            drained: true,
+            pendingFindings: 0,
+            pendingByEngine: {},
+            passes: 0,
+            stablePasses: 0
+        }
+        let stablePasses = 0
+
+        for (let pass = 1; pass <= Math.max(1, Number(maxPasses) || 1); pass += 1) {
+            await this._waitForPollIdle()
+            await this._pollOnce()
+            await this._waitForPollIdle()
+
+            lastState = await this.getDrainState()
+            if (lastState.drained) {
+                stablePasses += 1
+                if (stablePasses >= TERMINAL_DRAIN_MIN_STABLE_PASSES) {
+                    return Object.assign({}, lastState, {
+                        passes: pass,
+                        stablePasses
+                    })
+                }
+            } else {
+                stablePasses = 0
+            }
+        }
+
+        return Object.assign({}, lastState, {
+            passes: Math.max(1, Number(maxPasses) || 1),
+            stablePasses
+        })
+    }
+
+    async getDrainState() {
+        if (!this._validateRegistryApi()) {
+            return {
+                drained: true,
+                pendingFindings: 0,
+                pendingByEngine: {}
+            }
+        }
+
+        const active = this.zapBridge.isActive()
+        if (!active) {
+            return {
+                drained: true,
+                pendingFindings: 0,
+                pendingByEngine: {}
+            }
+        }
+
+        const host = typeof this.zapBridge?.getActiveTargetHost === 'function'
+            ? this.zapBridge.getActiveTargetHost()
+            : null
+        const pendingByEngine = {}
+        let pendingFindings = 0
+
+        for (const engine of ENGINES) {
+            const scanIds = await this._resolveScanIdsForEngine(engine, host)
+            let enginePending = 0
+
+            for (const scanId of scanIds) {
+                const scanResult = await this.resultsRegistry.get(engine, scanId)
+                if (!scanResult) continue
+                enginePending += this._countPendingFindingsForScan(engine, scanId, scanResult)
+            }
+
+            if (enginePending > 0) {
+                pendingByEngine[engine] = enginePending
+                pendingFindings += enginePending
+            }
+        }
+
+        return {
+            drained: pendingFindings === 0 && !this.pollInFlight,
+            pendingFindings,
+            pendingByEngine
+        }
     }
 
     resetState() {
@@ -150,15 +251,28 @@ export default class ZapPublisher {
     }
 
     async _pollOnce() {
-        if (this.disabled || this.pollInFlight) return
+        if (this.disabled) return
+        if (this.pollInFlight) {
+            this.flushRequested = true
+            return
+        }
         this.pollInFlight = true
 
         try {
-            await this._runPoll()
+            let passes = 0
+            do {
+                this.flushRequested = false
+                passes += 1
+                await this._runPoll()
+            } while (this.flushRequested && !this.disabled && passes < 3)
         } catch (err) {
             console.warn('[PTK ZAP] Poll cycle failed:', err)
         } finally {
             this.pollInFlight = false
+            this._notifyPollIdle()
+            if (this.flushRequested && !this.disabled) {
+                void this._pollOnce()
+            }
         }
     }
 
@@ -354,33 +468,19 @@ export default class ZapPublisher {
     }
 
     async _publishDastFindings({ key, scanId, scanResult, findings: sourceFindings, rawCount = 0, reconCount = 0, synthesizedCount = 0 }) {
-        const findings = []
-        let skippedFilter = 0
-        let skippedMapper = 0
-        let alreadyPublished = 0
-
-        for (const finding of sourceFindings) {
-            if (!isZapExportableFinding('DAST', finding)) {
-                skippedFilter += 1
-                continue
-            }
-
-            const mapped = toDastFinding(finding, {
-                scanId,
-                scanResult
-            })
-            if (!mapped) {
-                skippedMapper += 1
-                continue
-            }
-            const findingKey = this._getMappedFindingKey(mapped)
-            const signature = stableStringify(mapped)
-            if (!this._shouldPublishFindingVersion(key, findingKey, signature)) {
-                alreadyPublished += 1
-                continue
-            }
-            findings.push({ mapped, findingKey, signature })
-        }
+        const {
+            entries: findings,
+            skippedFilter,
+            skippedMapper,
+            alreadyPublished
+        } = this._collectPendingMappedFindings({
+            key,
+            engine: 'DAST',
+            scanId,
+            sourceFindings,
+            scanResult,
+            mapper: toDastFinding
+        })
 
         if (!findings.length) return
 
@@ -418,30 +518,19 @@ export default class ZapPublisher {
     }
 
     async _publishEngineFindingsBatch({ key, engine, scanId, findings: sourceFindings, scanResult, mapper, sender }) {
-        const findings = []
-        let skippedFilter = 0
-        let skippedMapper = 0
-        let alreadyPublished = 0
-
-        for (const finding of sourceFindings) {
-            if (!isZapExportableFinding(engine, finding)) {
-                skippedFilter += 1
-                continue
-            }
-
-            const mapped = mapper(finding, { scanId, scanResult })
-            if (!mapped) {
-                skippedMapper += 1
-                continue
-            }
-            const findingKey = this._getMappedFindingKey(mapped)
-            const signature = stableStringify(mapped)
-            if (!this._shouldPublishFindingVersion(key, findingKey, signature)) {
-                alreadyPublished += 1
-                continue
-            }
-            findings.push({ mapped, findingKey, signature })
-        }
+        const {
+            entries: findings,
+            skippedFilter,
+            skippedMapper,
+            alreadyPublished
+        } = this._collectPendingMappedFindings({
+            key,
+            engine,
+            scanId,
+            sourceFindings,
+            scanResult,
+            mapper
+        })
 
         if (!findings.length) return
 
@@ -477,6 +566,91 @@ export default class ZapPublisher {
 
     _touchKey(key) {
         this.lastSeen.set(key, Date.now())
+    }
+
+    _notifyPollIdle() {
+        if (!this._pollIdleWaiters.size) return
+        const waiters = Array.from(this._pollIdleWaiters)
+        this._pollIdleWaiters.clear()
+        for (const resolve of waiters) {
+            try {
+                resolve()
+            } catch (_) {
+                // no-op
+            }
+        }
+    }
+
+    _waitForPollIdle() {
+        if (!this.pollInFlight) {
+            return Promise.resolve()
+        }
+        return new Promise((resolve) => {
+            this._pollIdleWaiters.add(resolve)
+        })
+    }
+
+    _collectPendingMappedFindings({ key, engine, scanId, sourceFindings, scanResult, mapper }) {
+        const entries = []
+        let skippedFilter = 0
+        let skippedMapper = 0
+        let alreadyPublished = 0
+
+        for (const finding of Array.isArray(sourceFindings) ? sourceFindings : []) {
+            if (!isZapExportableFinding(engine, finding)) {
+                skippedFilter += 1
+                continue
+            }
+
+            const mapped = mapper(finding, { scanId, scanResult })
+            if (!mapped) {
+                skippedMapper += 1
+                continue
+            }
+
+            const findingKey = this._getMappedFindingKey(mapped)
+            const signature = stableStringify(mapped)
+            if (!this._shouldPublishFindingVersion(key, findingKey, signature)) {
+                alreadyPublished += 1
+                continue
+            }
+
+            entries.push({ mapped, findingKey, signature })
+        }
+
+        return {
+            entries,
+            skippedFilter,
+            skippedMapper,
+            alreadyPublished
+        }
+    }
+
+    _countPendingFindingsForScan(engine, scanId, scanResult) {
+        const key = `${engine}:${scanId}`
+
+        if (engine === 'DAST') {
+            const dastSource = this._collectDastSourceFindings(scanResult)
+            return this._collectPendingMappedFindings({
+                key,
+                engine,
+                scanId,
+                sourceFindings: dastSource.findings,
+                scanResult,
+                mapper: toDastFinding
+            }).entries.length
+        }
+
+        const mapper = engine === 'IAST' ? toIastFinding : toSastFinding
+        const findings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
+        return this._collectPendingMappedFindings({
+            key,
+            engine,
+            scanId,
+            sourceFindings: findings,
+            scanResult,
+            mapper
+        }).entries.length
     }
 
     _getPublishedStateForKey(key) {

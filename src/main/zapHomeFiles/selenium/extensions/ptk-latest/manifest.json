@@ -41,17 +41,6 @@
             "all_frames": true,
             "run_at": "document_start",
             "match_about_blank": true
-        },
-        {
-            "matches": [
-                "<all_urls>"
-            ],
-            "js": [
-                "ptk/content/spa_hash_harness.js"
-            ],
-            "all_frames": true,
-            "run_at": "document_idle",
-            "match_about_blank": true
         }
     ],
     "permissions": [

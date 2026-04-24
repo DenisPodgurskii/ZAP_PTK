@@ -44,6 +44,16 @@ const ZAP_DEFERRED_ENGINE_START_BASE_DELAY_MS = 1500
 const ZAP_DEFERRED_ENGINE_START_SPREAD_MS = 500
 const ZAP_DEFERRED_ENGINE_START_BUCKETS = 4
 const ZAP_DEFERRED_ENGINE_PER_ENGINE_DELAY_MS = 1000
+const CONTENT_RUNTIME_MODE_PENDING = 'pending'
+const CONTENT_RUNTIME_MODE_MANUAL = 'manual'
+const CONTENT_RUNTIME_MODE_AUTOMATION = 'automation'
+const CONTENT_RUNTIME_SCRIPT_NONE = 'none'
+const CONTENT_RUNTIME_SCRIPT_MANUAL = 'manual'
+const CONTENT_RUNTIME_SCRIPT_AUTOMATION = 'automation'
+const CONTENT_RUNTIME_FILES = Object.freeze({
+    [CONTENT_RUNTIME_SCRIPT_MANUAL]: ['ptk/content_manual.js', 'ptk/content/spa_hash_harness.js'],
+    [CONTENT_RUNTIME_SCRIPT_AUTOMATION]: ['ptk/content_automation.js']
+})
 
 function sleep(ms) {
     if (!(Number.isFinite(Number(ms)) && Number(ms) > 0)) {
@@ -103,8 +113,16 @@ class EngineAdapter {
                 'enableSyntheticRedirectRequests',
                 'zapManaged',
                 'targetUrl',
+                'pageUrl',
+                'zapCallbackDetectedAt',
+                'zapHistorySeedUrls',
+                'zapHistorySeedCount',
+                'zapHistorySeedTotalAvailable',
+                'zapHistorySeedDroppedByCap',
+                'zapSeedMaxRequests',
                 'maxRequestsPerSecond',
-                'concurrency'
+                'concurrency',
+                'planningConcurrency'
             ]
             for (const key of passthroughSettings) {
                 if (Object.prototype.hasOwnProperty.call(options || {}, key)) {
@@ -324,6 +342,7 @@ export class ptk_automation {
         this.app = null
         this.engines = null
         this.zap = zapBridge                  // ZAP integration module
+        this._unsubscribeZapContentRuntimeRefresh = null
         this.addMessageListeners()
     }
 
@@ -332,6 +351,181 @@ export class ptk_automation {
         this.engines = new EngineAdapter(app, this)
         resultsRegistry.init(app)
         this.zap.attach(app, resultsRegistry)
+        if (!this._unsubscribeZapContentRuntimeRefresh && this.zap?.transport?.onZapDetected) {
+            this._unsubscribeZapContentRuntimeRefresh = this.zap.transport.onZapDetected((payload) => {
+                const tabId = Number.isInteger(payload?.tabId) ? payload.tabId : null
+                if (tabId == null) return
+                this._notifyContentRuntimeRefresh(tabId).catch(() => { })
+            })
+        }
+    }
+
+    _getSessionForTab(tabId) {
+        if (!Number.isInteger(tabId)) return null
+        const sessionId = this.activeSessionByTabId.get(tabId)
+        if (!sessionId) return null
+        return this.sessions.get(sessionId) || null
+    }
+
+    _isZapManagedActiveSessionForTab(tabId) {
+        const session = this._getSessionForTab(tabId)
+        if (!session || session.source !== 'zap') return false
+        return this._isActiveSessionStatus(session.status)
+    }
+
+    _getContentRuntimeProfile({ tabId = null, frameId = 0, url = '' } = {}) {
+        const safeUrl = typeof url === 'string' ? url : ''
+        const isTopFrame = frameId === 0
+        const transport = this.zap?.transport || null
+        const startup = transport?.getStartupSnapshot?.() || { pending: false }
+        const detectedPayload = transport?.getLastDetectedPayload?.() || null
+        const detectedTabId = Number.isInteger(detectedPayload?.tabId) ? detectedPayload.tabId : null
+        const isBootstrapUrl = transport?.isBootstrapUrl?.(safeUrl) === true
+        const hasZapSession = this._isZapManagedActiveSessionForTab(tabId)
+        const isDetectedAutomationTab = Number.isInteger(tabId) && Number.isInteger(detectedTabId) && tabId === detectedTabId
+        const isZapAutomationTab = hasZapSession || isDetectedAutomationTab
+        const isZapActive = transport?.isActive?.() === true
+
+        if (!isTopFrame) {
+            if (isZapAutomationTab || isBootstrapUrl) {
+                return {
+                    mode: isZapActive || isZapAutomationTab ? CONTENT_RUNTIME_MODE_AUTOMATION : CONTENT_RUNTIME_MODE_PENDING,
+                    script: CONTENT_RUNTIME_SCRIPT_NONE,
+                    reason: 'subframe_suppressed'
+                }
+            }
+            return {
+                mode: CONTENT_RUNTIME_MODE_MANUAL,
+                script: CONTENT_RUNTIME_SCRIPT_MANUAL,
+                reason: 'manual_subframe'
+            }
+        }
+
+        if (isZapActive && (isZapAutomationTab || isBootstrapUrl)) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_AUTOMATION,
+                script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
+                reason: 'zap_active'
+            }
+        }
+
+        if (!isZapActive && startup.pending && isBootstrapUrl) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_PENDING,
+                script: CONTENT_RUNTIME_SCRIPT_NONE,
+                reason: 'zap_bootstrap_pending'
+            }
+        }
+
+        if (isZapAutomationTab) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_AUTOMATION,
+                script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
+                reason: 'zap_tab_claimed'
+            }
+        }
+
+        return {
+            mode: CONTENT_RUNTIME_MODE_MANUAL,
+            script: CONTENT_RUNTIME_SCRIPT_MANUAL,
+            reason: 'manual_default'
+        }
+    }
+
+    async _executeContentRuntimeFiles({ tabId = null, frameId = 0, files = [] } = {}) {
+        if (!Number.isInteger(tabId) || tabId < 0) return false
+        const normalizedFiles = Array.isArray(files)
+            ? files.filter((value) => typeof value === 'string' && value.trim())
+            : []
+        if (!normalizedFiles.length) return false
+
+        const isFirefox = !!browser?.runtime?.getBrowserInfo
+        const manifestVersion = Number(browser?.runtime?.getManifest?.()?.manifest_version || 2)
+
+        if (!isFirefox && manifestVersion >= 3 && browser?.scripting?.executeScript) {
+            await browser.scripting.executeScript({
+                target: Number.isInteger(frameId)
+                    ? { tabId, frameIds: [frameId] }
+                    : { tabId, allFrames: false },
+                files: normalizedFiles
+            })
+            return true
+        }
+
+        if (browser?.tabs?.executeScript) {
+            for (const file of normalizedFiles) {
+                await browser.tabs.executeScript(tabId, {
+                    file,
+                    frameId: Number.isInteger(frameId) ? frameId : 0,
+                    runAt: 'document_idle',
+                    matchAboutBlank: true
+                })
+            }
+            return true
+        }
+
+        return false
+    }
+
+    async _notifyContentRuntimeRefresh(tabId, frameId = 0) {
+        if (!Number.isInteger(tabId) || tabId < 0 || !browser?.tabs?.sendMessage) return false
+        try {
+            await browser.tabs.sendMessage(tabId, {
+                channel: 'ptk_background2content_runtime',
+                type: 'refresh_profile'
+            }, Number.isInteger(frameId) ? { frameId } : undefined)
+            return true
+        } catch (_) {
+            return false
+        }
+    }
+
+    async handleContentBootstrapHello(message = {}, sender = {}) {
+        const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
+        const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
+        const url = typeof message?.url === 'string'
+            ? message.url
+            : (typeof sender?.url === 'string' ? sender.url : '')
+        const zapHintUrl = typeof message?.zapHintUrl === 'string' ? message.zapHintUrl : ''
+        const observedUrls = Array.from(new Set([url, zapHintUrl].filter((value) => typeof value === 'string' && value)))
+        for (const observedUrl of observedUrls) {
+            try {
+                this.zap?.transport?.processContentObservedZapUrl?.({
+                    tabId,
+                    frameId,
+                    url: observedUrl
+                })
+            } catch (error) {
+                console.warn('[PTK Automation] Failed to process bootstrap URL for ZAP detection', {
+                    tabId,
+                    frameId,
+                    url: observedUrl,
+                    error: error?.message || String(error)
+                })
+            }
+        }
+        const profile = this._getContentRuntimeProfile({ tabId, frameId, url })
+        const files = CONTENT_RUNTIME_FILES[profile.script] || []
+
+        if (files.length) {
+            try {
+                await this._executeContentRuntimeFiles({ tabId, frameId, files })
+            } catch (error) {
+                console.warn('[PTK Automation] Failed to inject content runtime', {
+                    tabId,
+                    frameId,
+                    script: profile.script,
+                    error: error?.message || String(error)
+                })
+                return {
+                    ...profile,
+                    script: CONTENT_RUNTIME_SCRIPT_NONE,
+                    error: error?.message || String(error)
+                }
+            }
+        }
+
+        return profile
     }
 
     _getZapTimingForSession(session = null) {
@@ -606,9 +800,18 @@ export class ptk_automation {
         this._recordZapTiming(session, 'session.created')
 
         try {
-            await this._startEngines(session)
-            const startupSummary = this._summarizeEngineStartup(session)
-            if (startupSummary.failedEngines.length > 0) {
+            const immediateEngines = this._selectImmediateZapStartupEngines(engines)
+            const deferredEngines = engines.filter(engineName => !immediateEngines.includes(engineName))
+            for (const engineName of deferredEngines) {
+                session.engineStates[engineName] = Object.assign({}, session.engineStates[engineName], {
+                    status: ENGINE_STATUS_DEFERRED_START,
+                    deferredAt: Date.now()
+                })
+            }
+
+            await this._startEngines(session, immediateEngines)
+            const startupSummary = this._summarizeEngineStartup(session, immediateEngines)
+            if (startupSummary.failedEngines.length > 0 && startupSummary.startedEngines.length === 0) {
                 const message = this._buildZapStartupFailureMessage(startupSummary.failedEngines)
                 session.status = 'error'
                 session.error = message
@@ -634,8 +837,19 @@ export class ptk_automation {
                 }
             }
             session.status = 'running'
+            if (deferredEngines.length) {
+                this._recordZapTiming(session, 'session.deferred_start.begin', {
+                    engines: deferredEngines.join(',')
+                })
+                this._startDeferredZapEngines(
+                    session,
+                    deferredEngines,
+                    this._computeDeferredZapEngineStartDelay(session)
+                )
+            }
             this._recordZapTiming(session, 'session.running', {
-                startedEngines: startupSummary.startedEngines.join(',')
+                startedEngines: startupSummary.startedEngines.join(','),
+                deferredEngines: deferredEngines.join(',')
             })
             debugAutomationLog('[PTK Automation] startZapConfiguredSession running', {
                 sessionId,
@@ -643,13 +857,15 @@ export class ptk_automation {
                 host,
                 targetUrl,
                 startedEngines: startupSummary.startedEngines,
+                deferredEngines,
                 requiredEngines: engines
             })
             return {
                 sessionId,
-                status: 'started',
+                status: deferredEngines.length ? 'starting' : 'started',
                 startedEngines: startupSummary.startedEngines,
                 failedEngines: startupSummary.failedEngines,
+                deferredEngines,
                 requiredEngines: engines
             }
         } catch (err) {
@@ -2041,10 +2257,13 @@ export class ptk_automation {
             }
             if (engineName === 'DAST' && session.source === 'zap') {
                 if (!(Number.isFinite(Number(mergedOptions.maxRequestsPerSecond)) && Number(mergedOptions.maxRequestsPerSecond) > 0)) {
-                    mergedOptions.maxRequestsPerSecond = 5
+                    mergedOptions.maxRequestsPerSecond = 12
                 }
                 if (!(Number.isFinite(Number(mergedOptions.concurrency)) && Number(mergedOptions.concurrency) > 0)) {
-                    mergedOptions.concurrency = 3
+                    mergedOptions.concurrency = 6
+                }
+                if (!(Number.isFinite(Number(mergedOptions.planningConcurrency)) && Number(mergedOptions.planningConcurrency) > 0)) {
+                    mergedOptions.planningConcurrency = 4
                 }
             }
             if (engineName === 'IAST' && session.source === 'zap') {
@@ -2305,6 +2524,7 @@ export class ptk_automation {
 
     _buildZapDastRuntime(engineState, engineProgress, session) {
         const coordinatorState = this._getDastAutomationCoordinatorState(session?.id)
+        const hasCoordinatorState = coordinatorState && typeof coordinatorState === 'object'
         const planned = toFiniteNumber(engineProgress?.progress?.total)
         const executed = toFiniteNumber(engineProgress?.progress?.done)
         const remaining = toFiniteNumber(engineProgress?.progress?.remaining ?? engineProgress?.remaining)
@@ -2313,6 +2533,9 @@ export class ptk_automation {
         const requestQueue = toFiniteNumber(engineProgress?.requestQueue, 0)
         const pendingPlans = toFiniteNumber(engineProgress?.pendingPlans, 0)
         const planning = toFiniteNumber(engineProgress?.planning, 0)
+        const pendingAutomationSeeds = hasCoordinatorState
+            ? toFiniteNumber(coordinatorState?.pendingAutomationSeeds, 0)
+            : 0
         const lastActivityAt = engineProgress?.lastActivityAt || null
         const hasObservedWork = [
             planned,
@@ -2323,10 +2546,9 @@ export class ptk_automation {
             requestQueue,
             pendingPlans,
             planning,
+            pendingAutomationSeeds,
             toFiniteNumber(engineProgress?.findingsCount, 0)
         ].some(value => Number.isFinite(value) && value > 0) || Boolean(toNonEmptyString(lastActivityAt))
-        const hasCoordinatorState = coordinatorState && typeof coordinatorState === 'object'
-
         return {
             status: engineState?.status || 'unknown',
             isRunning: engineProgress?.isRunning === true,
@@ -2340,6 +2562,14 @@ export class ptk_automation {
             requestQueue,
             pendingPlans,
             planning,
+            pendingAutomationSeeds,
+            seededRequests: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.seeded, 0),
+            proxySeededRequests: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.proxySeeded, 0),
+            historySeededRequests: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeeded, 0),
+            historySeedInputCount: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedInputCount, 0),
+            historySeedTotalAvailable: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedTotalAvailable, 0),
+            historySeedDroppedByCap: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedDroppedByCap, 0),
+            historySeedDuplicatesSkipped: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedDuplicatesSkipped, 0),
             lastActivityAt,
             interactionRequired: hasCoordinatorState
                 ? coordinatorState.requireUserInteractionBeforeCapture !== false
@@ -2349,7 +2579,9 @@ export class ptk_automation {
                 : false,
             hasObservedWork,
             findingsCount: toFiniteNumber(engineProgress?.findingsCount, 0),
-            error: toNonEmptyString(engineProgress?.error) || toNonEmptyString(engineState?.error) || null
+            error: toNonEmptyString(engineProgress?.error)
+                || toNonEmptyString(engineState?.error)
+                || null
         }
     }
 
@@ -2387,6 +2619,7 @@ export class ptk_automation {
 
     _buildZapSastRuntime(engineState, engineProgress, session) {
         const liveProgress = this._getLiveSastAutomationProgress() || {}
+        const automationState = this.app?.sast?.sessionCoordinator?.getAutomationState?.() || {}
         const scanResult = this.app?.sast?.scanResult || null
         const phase = liveProgress.phase || engineProgress?.phase || null
         const totalFiles = toFiniteNumber(liveProgress.totalFiles ?? engineProgress?.totalFiles, 0)
@@ -2424,6 +2657,11 @@ export class ptk_automation {
             lastStatus,
             findings,
             hints,
+            firstCollectionStarted: automationState.firstCollectionStarted === true,
+            firstCollectionSettled: automationState.firstCollectionSettled === true,
+            firstCollectionError: toNonEmptyString(automationState.firstCollectionError) || null,
+            activeCollectionCount: toFiniteNumber(automationState.activeCollectionCount, 0),
+            collectionState: toNonEmptyString(automationState.collectionState) || null,
             lastActivityAt,
             hasObservedWork,
             error: toNonEmptyString(engineProgress?.error) || toNonEmptyString(engineState?.error) || null

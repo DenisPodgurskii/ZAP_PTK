@@ -52,6 +52,89 @@ export class DastTaskPlanner {
         )
     }
 
+    _collectAttackProbeStrings(value, out = []) {
+        if (value == null) return out
+        if (typeof value === "string") {
+            out.push(value)
+            return out
+        }
+        if (Array.isArray(value)) {
+            value.forEach(item => this._collectAttackProbeStrings(item, out))
+            return out
+        }
+        if (typeof value === "object") {
+            for (const [key, nested] of Object.entries(value)) {
+                if (key === "value" || key === "marker" || key === "payload") {
+                    this._collectAttackProbeStrings(nested, out)
+                } else if (nested && typeof nested === "object") {
+                    this._collectAttackProbeStrings(nested, out)
+                }
+            }
+        }
+        return out
+    }
+
+    _requestSurfaceText(requestSchema = null, original = null) {
+        const fields = [
+            requestSchema?.request?.url,
+            requestSchema?.request?.path,
+            requestSchema?.request?.ui_url,
+            requestSchema?.request?.uiUrl,
+            original?.request?.url,
+            original?.request?.path,
+            original?.request?.ui_url,
+            original?.request?.uiUrl,
+            requestSchema?.metadata?.attacked?.location,
+            requestSchema?.metadata?.attacked?.name
+        ]
+        return fields
+            .filter(value => value != null)
+            .map(value => String(value).toLowerCase())
+            .join(" ")
+    }
+
+    _attackExecutionPriority(attack, requestSchema = null, original = null) {
+        const values = []
+        this._collectAttackProbeStrings(attack?.action, values)
+        this._collectAttackProbeStrings(attack?.runtime?.confirmation?.tracking?.marker, values)
+        const text = values.join(" ").toLowerCase()
+        if (!text) return 0
+
+        const invokesScript = /\b(?:alert|confirm|prompt|postmessage)\s*\(/i.test(text)
+        if (!invokesScript) return 0
+
+        let priority = 0
+        const hasEventHandler = /\bon[a-z][a-z0-9_-]*\s*=/i.test(text)
+        const injectsWholeTag = /<\s*[a-z][\w:-]*/i.test(text)
+        const hasScriptTag = /<\s*script\b/i.test(text)
+        const hasSvgExecution = /<\s*svg\b|(?:^|\s)svg\s+on[a-z][a-z0-9_-]*\s*=/i.test(text)
+        const hasJsStringBreakout = /["'`]\s*;\s*(?:alert|confirm|prompt)\s*\(/i.test(text)
+            || /\/\s*;\s*(?:alert|confirm|prompt)\s*\(/i.test(text)
+            || /\*\/\s*(?:alert|confirm|prompt)\s*\(/i.test(text)
+        const surface = this._requestSurfaceText(requestSchema, original)
+        const likelyAttributeContext = /(?:attr|attribute|tagname|href|srcdoc|src|style|css|link|event)/i.test(surface)
+        const likelyCodeContext = /(?:eval|assignment|quoted|string|comment|expression|template|javascript)/i.test(surface)
+        const likelyHtmlContext = /(?:html|body|content|render|preview|escape|encode|decode|text)/i.test(surface)
+
+        const breaksAttributeContext = hasEventHandler && !injectsWholeTag
+        if (breaksAttributeContext) priority += 720
+        if (hasScriptTag) priority += 620
+        if (hasJsStringBreakout) priority += 560
+        if (hasSvgExecution && !injectsWholeTag) priority += 520
+        if (hasEventHandler && injectsWholeTag) priority += 180
+        if (hasSvgExecution && injectsWholeTag) priority += 140
+        if (breaksAttributeContext && likelyAttributeContext) priority += 260
+        if (hasJsStringBreakout && likelyCodeContext) priority += 320
+        if (hasScriptTag && likelyHtmlContext && !likelyAttributeContext && !likelyCodeContext) priority += 320
+        if (hasEventHandler && !likelyAttributeContext && (likelyHtmlContext || likelyCodeContext)) priority -= 260
+
+        return priority
+    }
+
+    _attackRequestPriority(requestSchema, attack, original = null) {
+        return this._selectorPriority(requestSchema, attack) + this._attackExecutionPriority(attack, requestSchema, original)
+    }
+
     _conditionNeedsRequestMetadata(condition) {
         if (!condition || typeof condition !== "object") return false
         try {
@@ -159,6 +242,7 @@ export class DastTaskPlanner {
                                 attack
                             )
                             const fingerprint = this.fingerprintFromPayload(enriched) || planFingerprint
+                            const priority = this._attackRequestPriority(req, attack, original)
                             const task = this.createTask({
                                 module,
                                 attack,
@@ -166,12 +250,13 @@ export class DastTaskPlanner {
                                 type: "active",
                                 fingerprint
                             })
+                            task.plannerPriority = priority
                             bufferedModuleTasks.push({
                                 module,
                                 attack,
                                 requestSchema: req,
                                 task,
-                                priority: this._selectorPriority(req, attack),
+                                priority,
                                 orderHint: bufferedModuleTasks.length
                             })
                         }

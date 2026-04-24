@@ -174,11 +174,14 @@ export class ptk_rattacker {
         })
         this.importTransfers = new Map()
         if (this.engine?.setResultMutationListener) {
-            this.engine.setResultMutationListener(() => {
+            this.engine.setResultMutationListener((payload = null) => {
                 this._setAuthoritativeScanResult(this.engine.scanResult, {
                     markFinished: !!(this.engine?.scanResult?.finishedAt || this.engine?.scanResult?.finished)
                 })
                 this._schedulePersistScanResult()
+                if (payload?.type === "attack_finding") {
+                    worker?.ptk_app?.automation?.zap?.publisher?.requestFlush?.()
+                }
             })
         }
         this.addMessageListeners()

@@ -7,8 +7,22 @@ function createDefaultSessionState() {
         deferredSeedState: null,
         enableSyntheticRedirectRequests: false,
         automationSession: null,
-        zapManaged: false
+        zapManaged: false,
+        pendingAutomationSeeds: 0,
+        lastAutomationSeedResult: null
     }
+}
+
+function formatSeedLogField(name, value) {
+    if (value == null || value === '') return null
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return `${name}=${value}`
+    }
+    return `${name}=${JSON.stringify(String(value))}`
+}
+
+function shouldLogAutomationSeedSummary() {
+    return globalThis.__PTK_AUTOMATION_DEBUG__ === true
 }
 
 export class DastSessionCoordinator {
@@ -83,6 +97,8 @@ export class DastSessionCoordinator {
         this.state.userInteractionUnlocked = !this.state.requireUserInteractionBeforeCapture
         this.state.enableSyntheticRedirectRequests = runtimeSettings.enableSyntheticRedirectRequests === true
         this.state.zapManaged = runtimeSettings.zapManaged === true
+        this.state.pendingAutomationSeeds = 0
+        this.state.lastAutomationSeedResult = null
 
         if (resolvedSettings.ws) {
             this.registerScript?.()
@@ -101,6 +117,7 @@ export class DastSessionCoordinator {
         this.state.userInteractionUnlocked = false
         this.state.enableSyntheticRedirectRequests = false
         this.state.zapManaged = false
+        this.state.pendingAutomationSeeds = 0
 
         if (waitForIdleBeforeStop) {
             try {
@@ -150,6 +167,7 @@ export class DastSessionCoordinator {
             resolvedSettings.policyCode = policyCode
         }
         this.runBackgroundScan(tabId, host, domains || host, resolvedSettings)
+        this._seedZapAutomationRequests(tabId, resolvedSettings)
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks({
                 sessionId,
@@ -160,10 +178,76 @@ export class DastSessionCoordinator {
         return { success: true }
     }
 
+    _seedZapAutomationRequests(tabId, settings = {}) {
+        if (settings?.zapManaged !== true || typeof this.captureAdapter?.seedZapAutomationRequestsFromProxy !== "function") {
+            return null
+        }
+        this.state.pendingAutomationSeeds = Number(this.state.pendingAutomationSeeds || 0) + 1
+        const seedPromise = Promise.resolve()
+            .then(() => this.captureAdapter.seedZapAutomationRequestsFromProxy(tabId, {
+                targetUrl: settings?.targetUrl || null,
+                pageUrl: settings?.pageUrl || null,
+                sinceMs: settings?.zapCallbackDetectedAt || 0,
+                historySeedUrls: Array.isArray(settings?.zapHistorySeedUrls) ? settings.zapHistorySeedUrls : [],
+                maxRequests: settings?.zapSeedMaxRequests || 200
+            }))
+            .then((result) => {
+                const mergedResult = Object.assign({}, result || {}, {
+                    historySeedTotalAvailable: Number(settings?.zapHistorySeedTotalAvailable || 0),
+                    historySeedDroppedByCap: Number(settings?.zapHistorySeedDroppedByCap || 0)
+                })
+                this.state.lastAutomationSeedResult = mergedResult
+                const fields = [
+                    '[PTK_DAST_AUTOMATION_SEED]',
+                    formatSeedLogField('tabId', tabId),
+                    formatSeedLogField('targetUrl', settings?.targetUrl || settings?.pageUrl || null),
+                    formatSeedLogField('proxySeeded', mergedResult?.proxySeeded ?? 0),
+                    formatSeedLogField('historySeeded', mergedResult?.historySeeded ?? 0),
+                    formatSeedLogField('historySeedInputCount', mergedResult?.historySeedInputCount ?? 0),
+                    formatSeedLogField('historySeedTotalAvailable', mergedResult?.historySeedTotalAvailable ?? 0),
+                    formatSeedLogField('historySeedDroppedByCap', mergedResult?.historySeedDroppedByCap ?? 0),
+                    formatSeedLogField('historySeedDuplicatesSkipped', mergedResult?.historySeedDuplicatesSkipped ?? 0)
+                ]
+                if (shouldLogAutomationSeedSummary()) {
+                    console.log(fields.filter(Boolean).join(' '))
+                }
+                return mergedResult
+            })
+            .catch((error) => {
+                this.state.lastAutomationSeedResult = {
+                    proxySeeded: 0,
+                    historySeeded: 0,
+                    historySeedInputCount: Array.isArray(settings?.zapHistorySeedUrls) ? settings.zapHistorySeedUrls.length : 0,
+                    historySeedTotalAvailable: Number(settings?.zapHistorySeedTotalAvailable || 0),
+                    historySeedDroppedByCap: Number(settings?.zapHistorySeedDroppedByCap || 0),
+                    error: error?.message || String(error)
+                }
+                const fields = [
+                    '[PTK_DAST_AUTOMATION_SEED]',
+                    formatSeedLogField('tabId', tabId),
+                    formatSeedLogField('targetUrl', settings?.targetUrl || settings?.pageUrl || null),
+                    formatSeedLogField('proxySeeded', 0),
+                    formatSeedLogField('historySeeded', 0),
+                    formatSeedLogField('historySeedInputCount', this.state.lastAutomationSeedResult.historySeedInputCount),
+                    formatSeedLogField('historySeedTotalAvailable', this.state.lastAutomationSeedResult.historySeedTotalAvailable),
+                    formatSeedLogField('historySeedDroppedByCap', this.state.lastAutomationSeedResult.historySeedDroppedByCap),
+                    formatSeedLogField('error', this.state.lastAutomationSeedResult.error)
+                ]
+                console.warn(fields.filter(Boolean).join(' '))
+                return this.state.lastAutomationSeedResult
+            })
+            .finally(() => {
+                this.state.pendingAutomationSeeds = Math.max(0, Number(this.state.pendingAutomationSeeds || 0) - 1)
+            })
+        this.state.lastAutomationSeedPromise = seedPromise
+        return seedPromise
+    }
+
     async stopAutomationSession(sessionId, timeoutMs = 180000) {
         if (!this.state.automationSession || this.state.automationSession.id !== sessionId) {
             throw new Error("automation_session_mismatch")
         }
+        await this.state.lastAutomationSeedPromise?.catch?.(() => null)
         await this.engine?.waitForIdle?.(timeoutMs)
         this.state.acceptIncomingRequests = false
         await this.engine?.waitForIdle?.(timeoutMs)
