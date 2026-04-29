@@ -123,6 +123,10 @@ function buildDastFindingMergeKey(finding = {}) {
     const evidence = finding?.evidence?.dast && typeof finding.evidence.dast === "object"
         ? finding.evidence.dast
         : {}
+    const aggregateKey = typeof evidence?.aggregate?.key === "string" ? evidence.aggregate.key.trim() : ""
+    if (aggregateKey) {
+        return `aggregate|${aggregateKey}`
+    }
     const location = finding.location && typeof finding.location === "object" ? finding.location : {}
     const parts = [
         String(finding.engine || ""),
@@ -138,15 +142,87 @@ function buildDastFindingMergeKey(finding = {}) {
     return parts.join("|")
 }
 
+function getDastOccurrenceCount(finding = {}) {
+    const value = finding?.evidence?.dast?.occurrenceCount
+    const count = Number(value)
+    return Number.isFinite(count) && count > 0 ? count : 1
+}
+
+function getDastSampleLimit(finding = {}) {
+    const value = finding?.evidence?.dast?.sampleLimit
+    const limit = Number(value)
+    return Number.isFinite(limit) && limit > 0 ? Math.max(1, Math.floor(limit)) : 10
+}
+
+function buildDastSampleKey(sample = {}) {
+    const method = String(sample?.method || "").toUpperCase()
+    const url = String(sample?.url || "")
+    const runtimeUrl = String(sample?.runtimeUrl || "")
+    if (sample?.requestId) {
+        return [method, url, runtimeUrl, "request", String(sample.requestId)].join("|")
+    }
+    if (sample?.attackId) {
+        return [method, url, runtimeUrl, "attack", String(sample.attackId)].join("|")
+    }
+    return [
+        method,
+        url,
+        runtimeUrl,
+        String(sample?.param || ""),
+        String(sample?.proof || "")
+    ].join("|")
+}
+
+function mergeDastAggregateFinding(target, incoming) {
+    const targetEvidence = target?.evidence?.dast
+    const incomingEvidence = incoming?.evidence?.dast
+    if (!targetEvidence || typeof targetEvidence !== "object" || !incomingEvidence || typeof incomingEvidence !== "object") {
+        return target
+    }
+
+    const sampleLimit = Math.max(getDastSampleLimit(target), getDastSampleLimit(incoming))
+    targetEvidence.occurrenceCount = getDastOccurrenceCount(target) + getDastOccurrenceCount(incoming)
+    targetEvidence.sampleLimit = sampleLimit
+    targetEvidence.truncated = targetEvidence.truncated === true || incomingEvidence.truncated === true
+
+    const samples = Array.isArray(targetEvidence.samples) ? targetEvidence.samples : []
+    const seen = new Set(samples.map(buildDastSampleKey))
+    const incomingSamples = Array.isArray(incomingEvidence.samples) ? incomingEvidence.samples : []
+    incomingSamples.forEach((sample) => {
+        if (!sample || typeof sample !== "object") return
+        const key = buildDastSampleKey(sample)
+        if (seen.has(key)) return
+        seen.add(key)
+        if (samples.length < sampleLimit) {
+            samples.push(sample)
+        } else {
+            targetEvidence.truncated = true
+        }
+    })
+    targetEvidence.samples = samples
+
+    const targetConfidence = Number(target.confidence)
+    const incomingConfidence = Number(incoming?.confidence)
+    if (Number.isFinite(incomingConfidence) && (!Number.isFinite(targetConfidence) || incomingConfidence > targetConfidence)) {
+        target.confidence = incomingConfidence
+    }
+    return target
+}
+
 function mergeDastFindings(primaryFindings = [], extraFindings = []) {
     const merged = []
-    const seen = new Set()
+    const seen = new Map()
     ;[...(Array.isArray(primaryFindings) ? primaryFindings : []), ...(Array.isArray(extraFindings) ? extraFindings : [])]
         .forEach((finding) => {
             if (!finding || typeof finding !== "object") return
             const key = buildDastFindingMergeKey(finding) || String(finding.id || "")
-            if (key && seen.has(key)) return
-            if (key) seen.add(key)
+            if (key && seen.has(key)) {
+                if (key.startsWith("aggregate|")) {
+                    mergeDastAggregateFinding(seen.get(key), finding)
+                }
+                return
+            }
+            if (key) seen.set(key, finding)
             merged.push(finding)
         })
     return merged

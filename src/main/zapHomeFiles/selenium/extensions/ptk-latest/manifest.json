@@ -3,7 +3,7 @@
     "name": "OWASP Penetration Testing Kit",
     "short_name": "OWASP PTK",
     "description": "OWASP Penetration Testing Kit",
-    "version": "9.9.0",
+    "version": "9.9.1",
     "manifest_version": 3,
     "incognito": "split",
     "background": {

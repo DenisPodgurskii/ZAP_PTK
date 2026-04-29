@@ -29,7 +29,10 @@
           "xss"
         ],
         "severity": "high",
-        "vulnId": "dom_xss"
+        "vulnId": "dom_xss",
+        "presentation": {
+          "aggregate": "route-source-sink-callsite"
+        }
       },
       "rules": [
         {
@@ -429,7 +432,10 @@
           "execution"
         ],
         "severity": "high",
-        "vulnId": "code_injection"
+        "vulnId": "code_injection",
+        "presentation": {
+          "aggregate": "source-sink-callsite"
+        }
       },
       "rules": [
         {
@@ -578,7 +584,10 @@
           "spa"
         ],
         "severity": "medium",
-        "vulnId": "route_control"
+        "vulnId": "route_control",
+        "presentation": {
+          "aggregate": "source-sink"
+        }
       },
       "rules": [
         {
@@ -830,7 +839,10 @@
           "xss"
         ],
         "severity": "high",
-        "vulnId": "dom_xss"
+        "vulnId": "dom_xss",
+        "presentation": {
+          "aggregate": "route-source-sink-callsite"
+        }
       },
       "rules": [
         {

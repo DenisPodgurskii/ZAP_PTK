@@ -979,6 +979,7 @@ export class ptk_sast {
     try {
       const payload = buildExportScanResult(this.scanResult?.scanId, {
         target: message?.target || "download",
+        includeSecrets: message?.includeSecrets === true,
         scanResult: this.scanResult
       });
       if (!payload) return null;
