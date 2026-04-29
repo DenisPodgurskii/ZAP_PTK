@@ -4,6 +4,13 @@ import { resolveFindingTaxonomy } from "../../common/resolveFindingTaxonomy.js"
 
 const ENGINE_IAST = "IAST"
 const DEFAULT_CATEGORY = "runtime_issue"
+const IAST_FINDING_AGGREGATE_SAMPLE_LIMIT = 10
+const IAST_FINDING_AGGREGATION_MODES = new Set([
+    "route-source-sink",
+    "route-source-sink-callsite",
+    "source-sink",
+    "source-sink-callsite"
+])
 const SEVERITY_LEVELS = ["info", "low", "medium", "high", "critical"]
 const SEVERITY_RANK = {
     info: 0,
@@ -113,6 +120,135 @@ export function getFindingFingerprint(finding = {}) {
     })
 }
 
+export function normalizeIastFindingAggregationMode(value) {
+    const mode = String(value || "").trim().toLowerCase()
+    return IAST_FINDING_AGGREGATION_MODES.has(mode) ? mode : null
+}
+
+export function resolveIastFindingPresentationAggregate(...sources) {
+    for (const source of sources) {
+        const mode = normalizeIastFindingAggregationMode(
+            source?.presentation?.aggregate
+            || source?.metadata?.presentation?.aggregate
+        )
+        if (mode) return mode
+    }
+    return null
+}
+
+export function buildIastFindingAggregateKey({ finding = {}, ruleMeta = {}, moduleMeta = {}, scanId = null, host = null } = {}) {
+    const mode = resolveIastFindingPresentationAggregate(ruleMeta, moduleMeta)
+    if (!mode) return null
+    const evidence = getIastEvidencePayload(finding) || {}
+    const sourceKey = resolveIastAggregateSourceKey(finding, evidence)
+    const sinkKey = normalizeIastAggregatePart(evidence?.sinkId || finding?.sinkId || evidence?.sink || "")
+    if (!sourceKey || !sinkKey) return null
+    const parts = [
+        "IAST",
+        mode,
+        String(scanId || finding?.scanId || ""),
+        normalizeIastAggregateHost(host || finding?.location?.url || evidence?.routing?.runtimeUrl || evidence?.routing?.url || ""),
+        normalizeIastAggregatePart(finding?.moduleId || moduleMeta?.id || moduleMeta?.moduleId || ""),
+        normalizeIastAggregatePart(finding?.ruleId || ruleMeta?.id || ruleMeta?.ruleId || "")
+    ]
+
+    if (mode.startsWith("route-")) {
+        const route = normalizeIastAggregateRoute(
+            evidence?.routing?.urlPattern
+            || evidence?.routing?.runtimeUrl
+            || evidence?.routing?.url
+            || finding?.location?.runtimeUrl
+            || finding?.location?.url
+            || ""
+        )
+        if (!route) return null
+        parts.push(route)
+    }
+
+    parts.push(sourceKey, sinkKey)
+
+    if (mode.endsWith("-callsite")) {
+        const callsite = resolveIastAggregateCallsite(finding, evidence)
+        if (!callsite) return null
+        parts.push(callsite)
+    }
+
+    return parts.join("|")
+}
+
+export function buildIastFindingAggregateSample(finding = {}) {
+    const evidence = getIastEvidencePayload(finding) || {}
+    const route = normalizeIastAggregateRoute(
+        evidence?.routing?.urlPattern
+        || evidence?.routing?.runtimeUrl
+        || evidence?.routing?.url
+        || finding?.location?.runtimeUrl
+        || finding?.location?.url
+        || ""
+    )
+    return compactObject({
+        url: finding?.location?.runtimeUrl || evidence?.routing?.runtimeUrl || finding?.location?.url || null,
+        route,
+        sourceKey: resolveIastAggregateSourceKey(finding, evidence),
+        sourceKind: evidence?.sourceKind || evidence?.primarySource?.sourceKind || evidence?.sources?.[0]?.sourceKind || evidence?.sources?.[0]?.kind || null,
+        source: evidence?.source || evidence?.taintSource || finding?.source || null,
+        sinkId: evidence?.sinkId || finding?.sinkId || null,
+        callsite: resolveIastAggregateCallsite(finding, evidence),
+        matched: truncateSampleValue(evidence?.matched || finding?.matched || null, 160),
+        seenAt: new Date().toISOString()
+    })
+}
+
+export function applyIastFindingAggregateState(finding, { aggregateKey = null, mode = null, sample = null } = {}) {
+    if (!finding || !aggregateKey) return finding
+    const normalizedMode = normalizeIastFindingAggregationMode(mode)
+    if (!normalizedMode) return finding
+    finding.evidence = finding.evidence && typeof finding.evidence === "object" ? finding.evidence : {}
+    finding.evidence.iast = finding.evidence.iast && typeof finding.evidence.iast === "object" ? finding.evidence.iast : {}
+    const evidence = finding.evidence.iast
+    const aggregateFingerprint = CryptoES.SHA1(aggregateKey).toString(CryptoES.enc.Hex)
+    finding.fingerprint = aggregateFingerprint
+    finding.id = `${finding?.scanId || "scan"}::IAST::${aggregateFingerprint}`
+    finding.presentationAggregate = normalizedMode
+    evidence.aggregate = Object.assign({}, evidence.aggregate || {}, {
+        mode: normalizedMode,
+        key: aggregateKey
+    })
+    evidence.occurrenceCount = Math.max(1, Number(evidence.occurrenceCount || 0) || 0)
+    evidence.sampleLimit = IAST_FINDING_AGGREGATE_SAMPLE_LIMIT
+    evidence.truncated = evidence.truncated === true
+    evidence.samples = Array.isArray(evidence.samples) ? evidence.samples : []
+    appendIastAggregateSample(evidence, sample)
+    return finding
+}
+
+export function mergeIastFindingAggregateOccurrence(existingFinding, incomingFinding, { sample = null } = {}) {
+    if (!existingFinding || !incomingFinding) return existingFinding || incomingFinding
+    const existingEvidence = getIastEvidencePayload(existingFinding) || {}
+    const incomingEvidence = getIastEvidencePayload(incomingFinding) || {}
+    existingFinding.severity = pickHigherSeverity(existingFinding.severity, incomingFinding.severity)
+    if (
+        Number.isFinite(Number(incomingFinding.confidence))
+        && (
+            !Number.isFinite(Number(existingFinding.confidence))
+            || Number(incomingFinding.confidence) > Number(existingFinding.confidence)
+        )
+    ) {
+        existingFinding.confidence = Number(incomingFinding.confidence)
+    }
+    existingFinding.updatedAt = incomingFinding.updatedAt || new Date().toISOString()
+    existingFinding.lastSeenAt = new Date().toISOString()
+    existingFinding.evidence = existingFinding.evidence && typeof existingFinding.evidence === "object" ? existingFinding.evidence : {}
+    existingFinding.evidence.iast = existingEvidence
+    existingEvidence.occurrenceCount = Math.max(1, Number(existingEvidence.occurrenceCount || 0) || 0) + 1
+    existingEvidence.sampleLimit = IAST_FINDING_AGGREGATE_SAMPLE_LIMIT
+    existingEvidence.truncated = existingEvidence.truncated === true
+    existingEvidence.samples = Array.isArray(existingEvidence.samples) ? existingEvidence.samples : []
+    appendIastAggregateSample(existingEvidence, sample || buildIastFindingAggregateSample(incomingFinding))
+    mergeIastAggregateSourceSamples(existingEvidence, incomingEvidence)
+    return existingFinding
+}
+
 export function mergeFinding(existingFinding, newFinding) {
     if (!existingFinding) return newFinding
     if (!newFinding) return existingFinding
@@ -138,6 +274,185 @@ export function mergeFinding(existingFinding, newFinding) {
     existingFinding.evidence = mergeEvidence(existingFinding.evidence, newFinding.evidence)
 
     return existingFinding
+}
+
+function compactObject(value = {}) {
+    return Object.fromEntries(
+        Object.entries(value).filter(([, entry]) => entry !== null && entry !== undefined && entry !== "")
+    )
+}
+
+function truncateSampleValue(value, limit = 160) {
+    if (value === null || value === undefined) return null
+    const text = String(value)
+    return text.length > limit ? `${text.slice(0, limit)}...` : text
+}
+
+function normalizeIastAggregatePart(value = null) {
+    const text = String(value || "").trim().toLowerCase()
+    return text || null
+}
+
+function normalizeIastAggregateHost(value = null) {
+    const raw = String(value || "").trim()
+    if (!raw) return ""
+    try {
+        const hostOnly = /^[^/\s?#]+(?::\d+)?$/.test(raw)
+        const hasScheme = !hostOnly && /^[a-z][a-z0-9+.-]*:/i.test(raw)
+        const urlValue = hasScheme
+            ? raw
+            : (hostOnly ? `http://${raw}` : raw)
+        const parsed = new URL(urlValue, hasScheme || hostOnly ? undefined : "http://placeholder")
+        if (parsed.hostname === "placeholder" && !/placeholder/i.test(raw)) return ""
+        return parsed.host.toLowerCase()
+    } catch (_) {
+        return raw.toLowerCase()
+    }
+}
+
+function normalizeIastAggregateRoute(value = null) {
+    const raw = String(value || "").trim()
+    if (!raw) return null
+    const normalizePath = (pathValue) => {
+        const path = String(pathValue || "/").trim() || "/"
+        if (path === "/") return path
+        return path.replace(/\/+$/, "") || "/"
+    }
+    try {
+        const parsed = new URL(raw, raw.startsWith("http") ? undefined : "http://placeholder")
+        let route = `${parsed.origin.toLowerCase()}${normalizePath(parsed.pathname)}`
+        if (parsed.hash) {
+            const hashRoute = String(parsed.hash.slice(1) || "").split("?")[0]
+            if (hashRoute) route += `#${normalizePath(hashRoute)}`
+        }
+        return route
+    } catch (_) {
+        const [withoutQuery] = raw.split("?")
+        const [pathOnly, hashPart] = withoutQuery.split("#")
+        const hashRoute = hashPart ? hashPart.split("?")[0] : ""
+        return `${normalizePath(pathOnly)}${hashRoute ? `#${normalizePath(hashRoute)}` : ""}`
+    }
+}
+
+function resolveIastAggregateSourceKey(finding = {}, evidence = {}) {
+    const primary = getPrimaryIastSource(evidence)
+    const candidates = [
+        evidence?.sourceKey,
+        evidence?.primarySource?.key,
+        evidence?.primarySource?.source,
+        primary?.key,
+        primary?.source,
+        primary?.sourceId,
+        evidence?.sourceId,
+        finding?.sourceKey,
+        finding?.taintSource
+    ]
+    for (const candidate of candidates) {
+        const normalized = normalizeIastAggregatePart(candidate)
+        if (normalized) return normalized
+    }
+    return null
+}
+
+function getPrimaryIastSource(evidence = {}) {
+    const sources = Array.isArray(evidence?.sources) ? evidence.sources : []
+    for (const source of sources) {
+        if (!source || typeof source !== "object") continue
+        const sourceKind = source?.sourceKind || source?.kind || null
+        const sourceKey = source?.key || source?.source || source?.sourceId || null
+        if (sourceKind || sourceKey) return source
+    }
+    return null
+}
+
+function resolveIastAggregateCallsite(finding = {}, evidence = {}) {
+    const context = evidence?.context && typeof evidence.context === "object" ? evidence.context : {}
+    const contextScriptLocation = formatIastScriptLocation(context?.scriptUrl, context?.line, context?.column)
+    const findingScriptLocation = formatIastScriptLocation(finding?.location?.scriptUrl, finding?.location?.line, finding?.location?.column)
+    const candidates = [
+        context.domPath,
+        finding?.location?.domPath,
+        contextScriptLocation,
+        findingScriptLocation,
+        context.elementId ? `id:${context.elementId}` : null,
+        context.attribute ? `attr:${context.attribute}` : null,
+        evidence?.traceSummary,
+        firstTraceFrame(evidence?.trace),
+        context.method ? `method:${context.method}` : null
+    ]
+    for (const candidate of candidates) {
+        const normalized = normalizeIastAggregatePart(candidate)
+        if (normalized) return normalized
+    }
+    return null
+}
+
+function formatIastScriptLocation(scriptUrl = null, line = null, column = null) {
+    const script = String(scriptUrl || "").trim()
+    if (!script) return null
+    const lineNumber = Number(line)
+    const columnNumber = Number(column)
+    if (Number.isFinite(lineNumber) && lineNumber > 0) {
+        return `${script}:${Math.trunc(lineNumber)}:${Number.isFinite(columnNumber) && columnNumber >= 0 ? Math.trunc(columnNumber) : 0}`
+    }
+    return script
+}
+
+function firstTraceFrame(trace = null) {
+    if (Array.isArray(trace)) {
+        for (const frame of trace) {
+            if (!frame || typeof frame !== "object") continue
+            const location = formatIastScriptLocation(frame.url || frame.scriptUrl || frame.file, frame.line || frame.lineNumber, frame.column || frame.columnNumber)
+            if (location) return location
+            const label = String(frame.label || frame.name || frame.functionName || frame.kind || "").trim()
+            if (label) return label
+        }
+        return null
+    }
+    const text = String(trace || "")
+    if (!text) return null
+    return text.split("\n").map(line => line.trim()).find(line => line && !/^error:/i.test(line)) || null
+}
+
+function appendIastAggregateSample(evidence = {}, sample = null) {
+    if (!sample || typeof sample !== "object") return
+    evidence.samples = Array.isArray(evidence.samples) ? evidence.samples : []
+    const sampleKey = [
+        sample.route || "",
+        sample.url || "",
+        sample.sourceKey || "",
+        sample.sinkId || "",
+        sample.callsite || ""
+    ].join("|")
+    const existingKeys = new Set(evidence.samples.map((entry) => [
+        entry?.route || "",
+        entry?.url || "",
+        entry?.sourceKey || "",
+        entry?.sinkId || "",
+        entry?.callsite || ""
+    ].join("|")))
+    if (existingKeys.has(sampleKey)) return
+    if (evidence.samples.length < IAST_FINDING_AGGREGATE_SAMPLE_LIMIT) {
+        evidence.samples.push(sample)
+    } else {
+        evidence.truncated = true
+    }
+}
+
+function mergeIastAggregateSourceSamples(existingEvidence = {}, incomingEvidence = {}) {
+    if (!Array.isArray(incomingEvidence?.sources) || !incomingEvidence.sources.length) return
+    if (!Array.isArray(existingEvidence.sources)) {
+        existingEvidence.sources = incomingEvidence.sources.slice(0, IAST_FINDING_AGGREGATE_SAMPLE_LIMIT)
+        return
+    }
+    const seen = new Set(existingEvidence.sources.map(entry => String(entry?.key || entry?.source || entry?.sourceId || "")))
+    for (const source of incomingEvidence.sources) {
+        const key = String(source?.key || source?.source || source?.sourceId || "")
+        if (!key || seen.has(key)) continue
+        if (existingEvidence.sources.length >= IAST_FINDING_AGGREGATE_SAMPLE_LIMIT) break
+        existingEvidence.sources.push(source)
+        seen.add(key)
+    }
 }
 
 function mergeOwaspSets(base, incoming) {

@@ -12,6 +12,7 @@ import { DastExportService } from "./dast/services/dastExportService.js"
 import { DastPortalClient } from "./dast/services/dastPortalClient.js"
 import { DastCandidateRunService } from "./dast/services/dastCandidateRunService.js"
 import { DastFindingPresentationService } from "./dast/services/dastFindingPresentationService.js"
+import { collapseDastAggregatedFindings } from "./dast/services/dastFindingAggregation.js"
 import { SessionProfileStore } from "./bugbounty/sessionProfileStore.js"
 import { EvidencePackageStore } from "./bugbounty/evidencePackageStore.js"
 import { scanResultStore } from "./scanResultStore.js"
@@ -1327,7 +1328,8 @@ export class ptk_rattacker {
         try {
             return await this.exportService.createChunkedExport(this.scanResult, {
                 target: message?.target || "download",
-                fileName: message?.fileName || "PTK_DAST_scan.json"
+                fileName: message?.fileName || "PTK_DAST_scan.json",
+                includeSecrets: message?.includeSecrets === true
             })
         } catch (err) {
             console.error("[PTK DAST] Failed to export scan result", err)
@@ -1684,8 +1686,9 @@ export class ptk_rattacker {
             counts[sev] = (counts[sev] || 0) + 1
         }
         const sourceScan = scanResult && typeof scanResult === 'object' ? scanResult : this.scanResult
-        const findings = Array.isArray(sourceScan?.findings) ? sourceScan.findings : []
-        if (findings.length) {
+        const rawFindings = Array.isArray(sourceScan?.findings) ? sourceScan.findings : []
+        const findings = collapseDastAggregatedFindings(rawFindings)
+        if (rawFindings.length) {
             findings.forEach(finding => accumulate(finding?.severity))
         } else {
             const requests = Array.isArray(sourceScan?.requests) ? sourceScan.requests : []
@@ -1712,9 +1715,11 @@ export class ptk_rattacker {
         }
         const stats = sourceScan?.stats || {}
         const findingsFromCounts = counts.info + counts.low + counts.medium + counts.high + counts.critical
-        const findingsCount = stats?.findingsCount && stats.findingsCount > findingsFromCounts
+        const findingsCount = rawFindings.length
+            ? findingsFromCounts
+            : (stats?.findingsCount && stats.findingsCount > findingsFromCounts
             ? stats.findingsCount
-            : findingsFromCounts
+            : findingsFromCounts)
         return { counts, findingsCount }
     }
 

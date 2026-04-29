@@ -163,6 +163,49 @@ export class DastTaskPlanner {
         return true
     }
 
+    _baselineResponseText(original = null) {
+        const response = original?.response && typeof original.response === "object"
+            ? original.response
+            : null
+        if (!response) return ""
+        return [
+            response.body,
+            response.statusText,
+            response.statusMessage,
+            response.statusLine,
+            response.errorMessage
+        ]
+            .filter(value => value != null)
+            .map(value => String(value))
+            .join(" ")
+            .slice(0, 2000)
+    }
+
+    _activeAttackBaselineSkipReason(original = null) {
+        const method = String(original?.request?.method || "").toUpperCase()
+        if (!method || ["GET", "HEAD", "OPTIONS"].includes(method)) return null
+
+        const response = original?.response && typeof original.response === "object"
+            ? original.response
+            : null
+        if (!response) return null
+
+        const statusCode = Number(response.statusCode ?? response.status)
+        const text = this._baselineResponseText(original)
+
+        if (/\b(?:wrong\s+answer|invalid\s+captcha|captcha\s+(?:failed|invalid|wrong))\b/i.test(text)) {
+            return "baseline_captcha_failed"
+        }
+        if (/\b(?:constraint\s+failed|foreign\s+key\s+constraint|validation\s+(?:failed|error)|invalid\s+(?:input|request|value)|required)\b/i.test(text)) {
+            return "baseline_validation_failed"
+        }
+        if (!Number.isFinite(statusCode)) return null
+        if (statusCode === 401 || statusCode === 403) return "baseline_auth_failed"
+        if (statusCode >= 500) return "baseline_5xx"
+        if (statusCode >= 400) return "baseline_4xx"
+        return null
+    }
+
     async buildAttackPlan(raw) {
         const rawStr = typeof raw === "object" ? raw.raw : raw
         const rawMeta = typeof raw === "object" ? raw : {}
@@ -189,11 +232,27 @@ export class DastTaskPlanner {
             tasks: [],
             fingerprint: planFingerprint
         }
+        const baselineActiveSkipReason = this._activeAttackBaselineSkipReason(original)
+        let baselineActiveSkipEventRecorded = false
 
         for (const module of modules) {
             if (!Array.isArray(module?.attacks)) continue
             const modulePlanDecision = this.shouldPlanModule(module, schema, original)
             if (modulePlanDecision === false || modulePlanDecision?.allowed === false) {
+                continue
+            }
+            if (module.type === "active" && baselineActiveSkipReason) {
+                if (!baselineActiveSkipEventRecorded) {
+                    baselineActiveSkipEventRecorded = true
+                    this.appendRuntimeEvent({
+                        type: "dast_plan_skipped",
+                        phase: "plan_build",
+                        reason: baselineActiveSkipReason,
+                        url: original?.request?.url || null,
+                        method: original?.request?.method || null,
+                        statusCode: original?.response?.statusCode ?? original?.response?.status ?? null
+                    })
+                }
                 continue
             }
             const moduleAllowsStrategyBulk = this.shouldUseBulkAttack(module, { resolveOnly: true })

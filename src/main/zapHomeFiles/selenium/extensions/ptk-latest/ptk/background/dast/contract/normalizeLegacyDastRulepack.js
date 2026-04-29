@@ -18,6 +18,13 @@ const ENGINE_CAPABILITIES = new Set([
     "multipart_files",
     "multi_identity"
 ])
+const FINDING_AGGREGATION_MODES = new Set([
+    "scan",
+    "route",
+    "route-param",
+    "route-sink",
+    "route-param-sink"
+])
 const MODULE_CONSTANT_KEYS = ["regex", "regexLoginUrl", "regexLoggedIn"]
 const ATTACK_CONSTANT_KEYS = ["regex", "regex1", "resultRegex"]
 const TEMPLATE_FOLLOWUP_HOOK = "template_render_followup"
@@ -153,6 +160,13 @@ function normalizeAttackDocs(attackDef = {}) {
     if (recommendation) out.recommendation = recommendation
     if (Object.keys(links).length) out.links = links
     return out
+}
+
+function normalizePresentation(value = {}) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+    const aggregate = normalizeString(value?.aggregate).toLowerCase()
+    if (!aggregate || !FINDING_AGGREGATION_MODES.has(aggregate)) return {}
+    return { aggregate }
 }
 
 function normalizeModuleConstants(moduleDef = {}) {
@@ -362,12 +376,15 @@ function normalizeAttackMetadata(attackDef = {}) {
     if (attackDef?.metadata?.deserProfile && typeof attackDef.metadata.deserProfile === "object") {
         extensions.deserialization = clonePlainObject(attackDef.metadata.deserProfile, {})
     }
-    return {
+    const out = {
         taxonomy: normalizeAttackTaxonomy(attackDef),
         docs: normalizeAttackDocs(attackDef),
         constants: normalizeAttackConstants(attackDef),
         extensions
     }
+    const presentation = normalizePresentation(meta?.presentation)
+    if (Object.keys(presentation).length) out.presentation = presentation
+    return out
 }
 
 function buildSelectorConstantMap(moduleDef = {}, attackDef = {}) {
@@ -436,13 +453,16 @@ function normalizeAttack(attackDef = {}, moduleDef = {}) {
 
 function normalizeModuleMetadata(moduleDef = {}) {
     const meta = moduleDef?.metadata || {}
-    return {
+    const out = {
         taxonomy: normalizeModuleTaxonomy(moduleDef),
         docs: normalizeModuleDocs(moduleDef),
         execution: normalizeModuleExecution(moduleDef),
         constants: normalizeModuleConstants(moduleDef),
         extensions: clonePlainObject(meta?.extensions, {})
     }
+    const presentation = normalizePresentation(meta?.presentation)
+    if (Object.keys(presentation).length) out.presentation = presentation
+    return out
 }
 
 function normalizeModule(moduleDef = {}) {

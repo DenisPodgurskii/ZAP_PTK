@@ -111,7 +111,7 @@ export class DastScanResultLifecycleService {
         })
     }
 
-    buildExportPayload(scanResult, { target = "download" } = {}) {
+    buildExportPayload(scanResult, { target = "download", includeSecrets = false } = {}) {
         if (!scanResult || typeof scanResult !== "object") return null
         const source = this.exportScanSnapshot(scanResult, {
             sync: true,
@@ -121,6 +121,7 @@ export class DastScanResultLifecycleService {
         const scanId = source.scanId || scanResult.scanId || null
         return this.buildExport(scanId, {
             target,
+            includeSecrets: includeSecrets === true,
             scanResult: source
         })
     }

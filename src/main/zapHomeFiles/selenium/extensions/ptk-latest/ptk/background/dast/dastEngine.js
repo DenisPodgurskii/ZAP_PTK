@@ -59,6 +59,13 @@ const DAST_BROWSER_WORKFLOW_DEFAULT_PROTECTED_PATHS = Object.freeze([
     "/user"
 ])
 const DAST_FINDING_SCAN_AGGREGATE_SAMPLE_LIMIT = 10
+const DAST_FINDING_AGGREGATION_MODES = new Set([
+    "scan",
+    "route",
+    "route-param",
+    "route-sink",
+    "route-param-sink"
+])
 const STATIC_ASSET_LINK_REGEX = /\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|otf|pdf|zip|tar|gz|mp4|webm|mp3|wav|txt)(?:[?#].*)?$/i
 const SCAN_STRATEGY_CONFIGS = {
     FAST: {
@@ -361,7 +368,7 @@ export class dastEngine {
         this._passiveUniqueFindingKeys = new Set()
         this._activeUniqueFindingKeys = new Set()
         this._findingAggregateIndex = new Map()
-        this._spaSeenSinks = new Set()
+        this._spaConfirmedAggregateKeys = new Set()
         this._browserNavSeenSinks = new Set()
         this._browserNavHarnessRegistered = false
         this._browserWorkflowHarnessRegistered = false
@@ -2828,7 +2835,7 @@ export class dastEngine {
             vulnId: classification.vulnId || null,
             outputKind: reconMeta.outputKind || classification.outputKind || null,
             reconKind: reconMeta.reconKind || classification.reconKind || null,
-            presentationAggregate: reconMeta?.presentation?.aggregate || classification.presentationAggregate || null,
+            presentationAggregate: classification.presentationAggregate || null,
             uiSurface: reconMeta.uiSurface || classification.uiSurface || null
         }
         const persistedConfidenceDetails = attackResult?.success
@@ -3792,20 +3799,233 @@ export class dastEngine {
         }
     }
 
-    _buildFindingAggregateKey(classification = {}, location = {}) {
-        const mode = String(classification?.presentationAggregate || '').trim().toLowerCase()
-        if (mode !== 'scan') return null
+    _normalizeFindingAggregationMode(value) {
+        const mode = String(value || '').trim().toLowerCase()
+        return DAST_FINDING_AGGREGATION_MODES.has(mode) ? mode : null
+    }
+
+    _resolveFindingPresentationAggregate(...sources) {
+        for (const source of sources) {
+            const mode = this._normalizeFindingAggregationMode(source?.presentation?.aggregate)
+            if (mode) return mode
+        }
+        return null
+    }
+
+    _normalizeFindingAggregateRoute(urlValue = null) {
+        const raw = String(urlValue || '').trim()
+        if (!raw) return ''
+        const fallbackBase = this.host ? `http://${String(this.host).trim()}` : 'http://localhost'
+        const normalizePath = (value) => {
+            const text = String(value || '/').trim() || '/'
+            if (text === '/') return text
+            return text.replace(/\/+$/, '') || '/'
+        }
+        try {
+            const parsed = new URL(raw, raw.startsWith('http') ? undefined : fallbackBase)
+            const origin = String(parsed.origin || '').toLowerCase()
+            let route = `${origin}${normalizePath(parsed.pathname)}`
+            if (parsed.hash) {
+                const hashRoute = String(parsed.hash.slice(1) || '').split('?')[0]
+                if (hashRoute) {
+                    route += `#${normalizePath(hashRoute)}`
+                }
+            }
+            return route
+        } catch (_) {
+            const [withoutQuery] = raw.split('?')
+            const [pathOnly, hashPart] = withoutQuery.split('#')
+            const hashRoute = hashPart ? hashPart.split('?')[0] : ''
+            return `${normalizePath(pathOnly)}${hashRoute ? `#${normalizePath(hashRoute)}` : ''}`
+        }
+    }
+
+    _resolveFindingAggregateParam(location = {}, attackMeta = {}, attack = null) {
+        const explicit = location?.param
+            || attack?.param
+            || attackMeta?.attacked?.name
+            || (Array.isArray(attackMeta?.mutations) && attackMeta.mutations[0]?.name)
+            || null
+        if (explicit) return String(explicit).trim().toLowerCase()
+        const params = getSearchParamsFromUrlOrHash(location?.runtimeUrl || location?.url || '')
+        const names = Array.from(new Set(Array.from(params.keys()).map((name) => String(name || '').trim()).filter(Boolean)))
+        return names.length === 1 ? names[0].toLowerCase() : null
+    }
+
+    _normalizeFindingAggregateSink(value = null) {
+        if (value && typeof value === 'object') return null
+        const text = String(value || '').trim()
+        if (!text) return null
+        const normalizeHarnessSink = (sinkText) => {
+            const sinkParts = String(sinkText || '').split('|')
+            const type = String(sinkParts[0] || '').trim().toLowerCase()
+            const knownHarnessTypes = new Set([
+                'attribute_event_handler',
+                'attribute_srcdoc',
+                'attribute_style',
+                'attribute_url',
+                'attribute',
+                'script_text',
+                'text'
+            ])
+            if (sinkParts.length >= 5 && knownHarnessTypes.has(type)) {
+                // The final harness part is a hash of outerHTML, which can include
+                // the attack marker/payload. It is too volatile for presentation
+                // aggregation; route + param + structural sink is the stable identity.
+                return sinkParts.slice(0, 4).join('|')
+            }
+            return sinkText
+        }
+        const parts = text.split('|')
+        if (parts.length > 1) {
+            try {
+                new URL(parts[0])
+                const rest = parts.slice(1).join('|').trim()
+                if (rest) return normalizeHarnessSink(rest).toLowerCase()
+            } catch (_) {
+                // Keep non-URL composite sink keys intact.
+            }
+        }
+        return normalizeHarnessSink(text).toLowerCase()
+    }
+
+    _resolveFindingAggregateSink(attackMeta = {}, attack = null) {
+        const checks = Array.isArray(attackMeta?.checks)
+            ? attackMeta.checks.join(',')
+            : attackMeta?.checks
+        const candidates = [
+            attackMeta?.sinkKey,
+            attackMeta?.sink,
+            attackMeta?.context?.sink,
+            attackMeta?.context,
+            attack?.detector,
+            attackMeta?.detector,
+            attackMeta?.validation?.type,
+            checks
+        ]
+        for (const candidate of candidates) {
+            const sink = this._normalizeFindingAggregateSink(candidate)
+            if (sink) return sink
+        }
+        return null
+    }
+
+    _buildFindingAggregateKey(classification = {}, location = {}, details = {}) {
+        const mode = this._normalizeFindingAggregationMode(classification?.presentationAggregate)
+        if (!mode) return null
         const scopeHost = this._resolveFindingAggregateScopeHost(
             location?.runtimeUrl || location?.url || null
         )
-        return [
+        const baseParts = [
             'DAST',
-            'scan',
+            mode,
             String(this.scanResult?.scanId || ''),
             String(scopeHost || ''),
             String(classification?.moduleId || ''),
             String(classification?.ruleId || '')
-        ].join('|')
+        ]
+        if (mode === 'scan') {
+            return baseParts.join('|')
+        }
+
+        const route = this._normalizeFindingAggregateRoute(location?.runtimeUrl || location?.url || null)
+        if (!route) return null
+        baseParts.push(route)
+
+        const attackMeta = details?.attackMeta && typeof details.attackMeta === 'object'
+            ? details.attackMeta
+            : {}
+        const attack = details?.attack || null
+        if (mode === 'route-param' || mode === 'route-param-sink') {
+            const param = this._resolveFindingAggregateParam(location, attackMeta, attack)
+            if (!param) return null
+            baseParts.push(param)
+        }
+        if (mode === 'route-sink' || mode === 'route-param-sink') {
+            const sink = this._resolveFindingAggregateSink(attackMeta, attack)
+            if (!sink) return null
+            baseParts.push(sink)
+        }
+        return baseParts.join('|')
+    }
+
+    _buildSpaRuntimeAggregateContext(task, {
+        uiUrl = null,
+        param = null,
+        sinkKey = null,
+        resultMetadata = {}
+    } = {}) {
+        const targetUrl = uiUrl || task?.payload?.ui_url || task?.payload?.uiUrl || null
+        const targetParam = param ?? task?.payload?.param ?? null
+        const moduleMeta = this._moduleMetadataView(task?.module)
+        const baseMetadata = task?.payload?.metadata && typeof task.payload.metadata === 'object'
+            ? task.payload.metadata
+            : this._attackMetadataView(task?.module, task?.attack)
+        const metadata = Object.assign({}, baseMetadata, resultMetadata || {}, {
+            attacked: { location: 'hash', name: targetParam },
+            sinkKey: sinkKey || resultMetadata?.sinkKey || baseMetadata?.sinkKey || null
+        })
+        const attackForClassification = {
+            success: true,
+            metadata,
+            request: { url: targetUrl, ui_url: targetUrl, method: 'GET' },
+            __moduleId: task?.moduleId || task?.module?.id || moduleMeta.id || metadata.moduleId || null,
+            __moduleName: task?.moduleName || task?.module?.name || moduleMeta.name || metadata.moduleName || null,
+            __moduleMetadata: moduleMeta,
+            __moduleVulnId: task?.module?.vulnId || moduleMeta.vulnId || metadata.vulnId || null,
+            __attackKey: task?.attack?.id || task?.attackKey || metadata.id || null
+        }
+        const classification = this._buildAttackClassification(
+            attackForClassification,
+            task?.attack?.id || task?.attackKey || null
+        )
+        const location = {
+            url: targetUrl,
+            runtimeUrl: targetUrl,
+            method: 'GET',
+            param: targetParam
+        }
+        return {
+            aggregateKey: this._buildFindingAggregateKey(classification, location, {
+                attackMeta: metadata,
+                attack: attackForClassification
+            }),
+            classification,
+            location,
+            metadata
+        }
+    }
+
+    _isSpaAttackResult(attack = null, classification = {}) {
+        const request = attack?.request?.request && typeof attack.request.request === 'object'
+            ? attack.request.request
+            : (attack?.request && typeof attack.request === 'object' ? attack.request : {})
+        const metadata = attack?.metadata && typeof attack.metadata === 'object' ? attack.metadata : {}
+        if (request?.ui_url || request?.uiUrl) return true
+        if (metadata?.attacked?.location === 'hash' && Array.isArray(metadata?.checks)) return true
+        return String(classification?.moduleId || '').toLowerCase().startsWith('spa_')
+    }
+
+    _isSpaAggregateKeyConfirmed(aggregateKey = null) {
+        if (!aggregateKey) return false
+        if (!(this._spaConfirmedAggregateKeys instanceof Set)) {
+            this._spaConfirmedAggregateKeys = new Set()
+        }
+        if (this._spaConfirmedAggregateKeys.has(aggregateKey)) return true
+        const existing = this._lookupAggregatedFinding(aggregateKey)
+        if (existing?.id) {
+            this._spaConfirmedAggregateKeys.add(aggregateKey)
+            return true
+        }
+        return false
+    }
+
+    _markSpaAggregateKeyConfirmed(aggregateKey = null, attack = null, classification = {}) {
+        if (!aggregateKey || !this._isSpaAttackResult(attack, classification)) return
+        if (!(this._spaConfirmedAggregateKeys instanceof Set)) {
+            this._spaConfirmedAggregateKeys = new Set()
+        }
+        this._spaConfirmedAggregateKeys.add(aggregateKey)
     }
 
     _lookupAggregatedFinding(aggregateKey = null) {
@@ -3861,7 +4081,7 @@ export class dastEngine {
             ? dastEvidence.aggregate
             : {}
         dastEvidence.aggregate = Object.assign({}, aggregate, {
-            mode: 'scan',
+            mode: this._normalizeFindingAggregationMode(classification?.presentationAggregate) || 'scan',
             key: aggregateKey,
             scopeHost: this._resolveFindingAggregateScopeHost(
                 finding?.location?.runtimeUrl || finding?.location?.url || null
@@ -5696,13 +5916,24 @@ export class dastEngine {
             const pickDomXss = () => {
                 const dx = res?.dom_xss
                 if (!dx || !dx.vulnerable) return null
-                if (dx.sinkKey && this._spaSeenSinks?.has(dx.sinkKey)) {
-                    filteredReason = 'duplicate_sink'
-                    filteredDetails = { sinkKey: dx.sinkKey }
+                const aggregateState = this._buildSpaRuntimeAggregateContext(task, {
+                    uiUrl,
+                    param: payload.param,
+                    sinkKey: dx.sinkKey || null,
+                    resultMetadata: {
+                        checks: payload.checks,
+                        executed: !!dx.executed,
+                        reflected: !!dx.reflected,
+                        context: dx.context || null
+                    }
+                })
+                if (aggregateState.aggregateKey && this._isSpaAggregateKeyConfirmed(aggregateState.aggregateKey)) {
+                    filteredReason = 'duplicate_aggregate'
+                    filteredDetails = {
+                        aggregateKey: aggregateState.aggregateKey,
+                        sinkKey: dx.sinkKey || null
+                    }
                     return null
-                }
-                if (dx.sinkKey && this._spaSeenSinks) {
-                    this._spaSeenSinks.add(dx.sinkKey)
                 }
                 const metadata = Object.assign({}, payload.metadata, {
                     attacked: { location: 'hash', name: payload.param },
@@ -8160,7 +8391,10 @@ export class dastEngine {
         }
         const tags = Array.isArray(classification.tags) ? classification.tags : []
         const findingInstanceId = resolverKey || `${requestRecord?.id || 'req'}::${logAttackId || `attack-${index}`}`
-        const aggregateKey = this._buildFindingAggregateKey(classification, location)
+        const aggregateKey = this._buildFindingAggregateKey(classification, location, {
+            attackMeta,
+            attack
+        })
         const aggregateSample = aggregateKey
             ? this._buildFindingAggregateSample({
                 requestRecord,
@@ -8195,6 +8429,7 @@ export class dastEngine {
                     if (!this._activeUniqueFindingKeys) this._activeUniqueFindingKeys = new Set()
                     this._activeUniqueFindingKeys.add(uniqueFindingState.uniqueKey)
                 }
+                this._markSpaAggregateKeyConfirmed(aggregateKey, attack, classification)
                 return
             }
         }
@@ -8250,6 +8485,7 @@ export class dastEngine {
         if (aggregateKey && this._findingAggregateIndex instanceof Map) {
             this._findingAggregateIndex.set(aggregateKey, normalizedFinding)
         }
+        this._markSpaAggregateKeyConfirmed(aggregateKey, attack, classification)
         const groupKey = aggregateKey || [
             "DAST",
             normalizedFinding.vulnId,
@@ -8492,6 +8728,13 @@ export class dastEngine {
         const moduleMeta = attack?.__moduleMetadata || attack?.metadata || {}
         const attackMeta = attack?.metadata || {}
         const ptkMeta = this._resolveAttackPtkMeta(attack)
+        const presentationAggregate = this._resolveFindingPresentationAggregate(
+            ptkMeta,
+            attackMeta?.metadata,
+            attackMeta,
+            moduleMeta?.metadata,
+            moduleMeta
+        )
         const moduleId = attack?.__moduleId
             || attack?.moduleId
             || moduleMeta.id
@@ -8543,7 +8786,7 @@ export class dastEngine {
             links,
             outputKind: ptkMeta.outputKind || null,
             reconKind: ptkMeta.reconKind || null,
-            presentationAggregate: ptkMeta?.presentation?.aggregate || null,
+            presentationAggregate,
             uiSurface: ptkMeta.uiSurface || null,
             moduleMeta,
             ruleMeta: attackMeta
@@ -8662,7 +8905,7 @@ export class dastEngine {
             confidence,
             outputKind: "recon",
             reconKind: ptkMeta.reconKind || classification.reconKind || null,
-            presentationAggregate: ptkMeta?.presentation?.aggregate || classification.presentationAggregate || null,
+            presentationAggregate: classification.presentationAggregate || null,
             uiSurface: ptkMeta.uiSurface || classification.uiSurface || null,
             tags: classification.tags || [],
             description: classification.description || null,

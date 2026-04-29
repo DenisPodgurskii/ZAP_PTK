@@ -345,16 +345,36 @@ function normalizeIastEvidence(evidence = {}, finding = {}) {
         : (payload.raw && typeof payload.raw.context === "object" ? payload.raw.context : null)
     const sanitizedContext = sanitizeIastContext(context)
     const sanitizedTrace = sanitizeIastTrace(payload.trace || finding.trace || null)
+    const aggregate = payload.aggregate && typeof payload.aggregate === "object" && !Array.isArray(payload.aggregate)
+        ? payload.aggregate
+        : null
+    const samples = Array.isArray(payload.samples)
+        ? payload.samples.filter(entry => entry && typeof entry === "object")
+        : null
+    const occurrenceCount = Number.isFinite(Number(payload.occurrenceCount))
+        ? Number(payload.occurrenceCount)
+        : null
+    const sampleLimit = Number.isFinite(Number(payload.sampleLimit))
+        ? Number(payload.sampleLimit)
+        : null
+    const truncated = payload.truncated === true ? true : (payload.truncated === false ? false : null)
     const sanitized = compactEvidenceObject({
         requestId: payload.requestId || payload.requestKey || null,
         sinkId: payload.sinkId || payload.sink || finding.sinkId || null,
         sourceId: payload.sourceId || payload.taintSource || finding.taintSource || null,
+        sourceKey: payload.sourceKey || null,
+        sourceKind: payload.sourceKind || null,
+        sourceValuePreview: payload.sourceValuePreview || null,
         taintSource: payload.taintSource || finding.taintSource || null,
         source: payload.source || finding.source || null,
+        primarySource: payload.primarySource || null,
+        secondarySources: payload.secondarySources || null,
         sources: Array.isArray(payload.sources) ? payload.sources : undefined,
         sink: payload.sink || null,
+        sinkContext: payload.sinkContext || null,
         matched: truncateString(payload.matched || finding.matched || null, 160),
         trace: sanitizedTrace,
+        traceSummary: payload.traceSummary || null,
         context: sanitizedContext,
         sinkSummary: payload.sinkSummary || null,
         taintSummary: payload.taintSummary || null,
@@ -370,8 +390,13 @@ function normalizeIastEvidence(evidence = {}, finding = {}) {
         suppression: payload.suppression || null,
         networkTarget: payload.networkTarget || null,
         routing: payload.routing || null,
+        aggregate,
+        occurrenceCount,
+        sampleLimit,
+        truncated,
+        samples,
         message: truncateString(payload.message || finding.message || null, 400)
-    }, ["requestId", "sinkId", "sourceId", "taintSource", "source", "sources", "sink", "matched", "trace", "context", "sinkSummary", "taintSummary", "allowedSources", "schemaVersion", "primaryClass", "sourceRole", "origin", "observedAt", "operation", "detection", "trust", "suppression", "networkTarget", "routing", "message"])
+    }, ["requestId", "sinkId", "sourceId", "sourceKey", "sourceKind", "sourceValuePreview", "taintSource", "source", "primarySource", "secondarySources", "sources", "sink", "sinkContext", "matched", "trace", "traceSummary", "context", "sinkSummary", "taintSummary", "allowedSources", "schemaVersion", "primaryClass", "sourceRole", "origin", "observedAt", "operation", "detection", "trust", "suppression", "networkTarget", "routing", "aggregate", "occurrenceCount", "sampleLimit", "truncated", "samples", "message"])
     const extras = {}
     if (Array.isArray(finding.affectedUrls)) {
         const filtered = finding.affectedUrls.map(ensureString).filter(Boolean)

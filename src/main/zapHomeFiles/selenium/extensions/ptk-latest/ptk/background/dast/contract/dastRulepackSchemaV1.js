@@ -73,6 +73,17 @@ export const DAST_RULEPACK_SCHEMA_V1 = {
                 "repeatable"
             ]
         },
+        "findingAggregationMode": {
+            "type": "string",
+            "enum": [
+                "scan",
+                "route",
+                "route-param",
+                "route-sink",
+                "route-param-sink"
+            ],
+            "description": "Presentation-level finding aggregation. This controls only top-level finding grouping; evidence samples still retain individual occurrences."
+        },
         "requestGrouping": {
             "type": "string",
             "enum": [
@@ -739,6 +750,16 @@ export const DAST_RULEPACK_SCHEMA_V1 = {
                 }
             }
         },
+        "presentation": {
+            "type": "object",
+            "additionalProperties": false,
+            "default": {},
+            "properties": {
+                "aggregate": {
+                    "$ref": "#/$defs/findingAggregationMode"
+                }
+            }
+        },
         "validation": {
             "type": "object",
             "additionalProperties": false,
@@ -788,6 +809,9 @@ export const DAST_RULEPACK_SCHEMA_V1 = {
                 "extensions": {
                     "type": "object",
                     "default": {}
+                },
+                "presentation": {
+                    "$ref": "#/$defs/presentation"
                 }
             }
         },
@@ -814,6 +838,9 @@ export const DAST_RULEPACK_SCHEMA_V1 = {
                 "extensions": {
                     "type": "object",
                     "default": {}
+                },
+                "presentation": {
+                    "$ref": "#/$defs/presentation"
                 }
             }
         },

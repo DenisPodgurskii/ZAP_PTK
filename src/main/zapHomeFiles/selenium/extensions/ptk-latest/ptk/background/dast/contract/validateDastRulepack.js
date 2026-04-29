@@ -22,6 +22,14 @@ const SELECTOR_MODES = new Set([
     "score"
 ])
 
+const FINDING_AGGREGATION_MODES = new Set([
+    "scan",
+    "route",
+    "route-param",
+    "route-sink",
+    "route-param-sink"
+])
+
 function contextFor(moduleId = null, attackId = null) {
     return {
         moduleId: moduleId || null,
@@ -232,6 +240,16 @@ function validateMetadata(metadata, path, errors, ctx, { requireExecution = fals
     }
     if (!isPlainObject(metadata.extensions)) {
         pushRequiredError(errors, path, "extensions", ctx)
+    }
+    if ("presentation" in metadata) {
+        if (!isPlainObject(metadata.presentation)) {
+            pushTypeError(errors, `${path}/presentation`, "object", ctx)
+        } else if ("aggregate" in metadata.presentation) {
+            const aggregate = String(metadata.presentation.aggregate || "").trim().toLowerCase()
+            if (!FINDING_AGGREGATION_MODES.has(aggregate)) {
+                pushValueError(errors, `${path}/presentation/aggregate`, `unsupported finding aggregation mode: ${metadata.presentation.aggregate}`, ctx)
+            }
+        }
     }
     if (!requireExecution || !isPlainObject(metadata.execution)) return
 

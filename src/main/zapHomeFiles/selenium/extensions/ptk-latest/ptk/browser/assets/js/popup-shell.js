@@ -26,9 +26,10 @@ const RELEASE_NOTE_HTML = `
     <button id="ptk_release_note_close" class="ptk-shell-release-note-close" type="button" aria-label="Close release notes">x</button>
     <h3>Release notes - ${version}</h3>
     <ul>
-      <li><strong>DAST autodiscovery controls:</strong> Added opt-in same-origin link autodiscovery.</li>
-      <li><strong>Better DAST review flow:</strong> Added Explorer tab and improved Analysis view.</li>
-      <li><strong>Performance and UX:</strong> The extension opens faster, and multiple scan and explorer UI issues were fixed to make day-to-day use smoother.</li>
+      <li><strong>Automation reliability:</strong> Improved PTK/ZAP browser automation startup, runtime selection, and scan session coordination.</li>
+      <li><strong>More XSS attacks:</strong> Expanded reflected XSS coverage across script, SVG/onload, JavaScript, and attribute contexts.</li>
+      <li><strong>Cleaner results:</strong> Reduced duplicate SPA/DOM XSS and IAST findings while preserving useful occurrence samples.</li>
+      <li><strong>Performance and exports:</strong> Improved automated scan workflows, telemetry, export normalization, and redaction handling.</li>
     </ul>
     <p>More details on <a href="https://pentestkit.co.uk/release_notes.html" target="_blank" rel="noopener">https://pentestkit.co.uk/release_notes.html</a></p>
   </div>

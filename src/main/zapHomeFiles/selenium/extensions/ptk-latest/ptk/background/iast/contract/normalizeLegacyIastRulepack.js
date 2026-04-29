@@ -8,6 +8,12 @@ const DEFAULT_CATEGORY = "runtime_issue"
 const DEFAULT_RECOMMENDATION = "Review and remediate the identified runtime issue."
 const VALID_HOOK_KINDS = new Set(["propertySetter", "methodCall", "constructor", "attribute", "event"])
 const VALID_SANITIZER_ACTIONS = new Set(["suppress", "lower_confidence"])
+const VALID_FINDING_AGGREGATION_MODES = new Set([
+    "route-source-sink",
+    "route-source-sink-callsite",
+    "source-sink",
+    "source-sink-callsite"
+])
 
 function cloneValue(value) {
     if (typeof globalThis.structuredClone === "function") {
@@ -62,6 +68,13 @@ function normalizeLinks(value) {
     return Object.keys(links).length ? links : undefined
 }
 
+function normalizePresentation(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+    const aggregate = normalizeString(value.aggregate).toLowerCase()
+    if (!VALID_FINDING_AGGREGATION_MODES.has(aggregate)) return undefined
+    return { aggregate }
+}
+
 function normalizePolicy(policy) {
     if (!policy || typeof policy !== "object" || Array.isArray(policy)) return undefined
     const normalized = {}
@@ -99,6 +112,8 @@ function normalizeModuleMetadata(moduleDef = {}) {
     }
     const links = normalizeLinks(meta.links)
     if (links) metadata.links = links
+    const presentation = normalizePresentation(meta.presentation)
+    if (presentation) metadata.presentation = presentation
     return metadata
 }
 
@@ -212,6 +227,8 @@ function normalizeRuleMetadata(ruleDef = {}) {
     if (tags.length) normalized.tags = tags
     const links = normalizeLinks(meta.links)
     if (links) normalized.links = links
+    const presentation = normalizePresentation(meta.presentation)
+    if (presentation) normalized.presentation = presentation
     return Object.keys(normalized).length ? normalized : undefined
 }
 

@@ -4,6 +4,7 @@
 import { zapBridge } from './integration/zap/index.js'
 import buildExportScanResult from './export/buildExportScanResult.js'
 import { resultsRegistry } from './resultsRegistry.js'
+import { collapseDastAggregatedFindings } from './dast/services/dastFindingAggregation.js'
 
 
 /**
@@ -296,7 +297,8 @@ class EngineAdapter {
 
     // Compute stats from actual findings array
     _extractStats(scanResult) {
-        const findings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
+        const rawFindings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
+        const findings = collapseDastAggregatedFindings(rawFindings)
         const stats = this._createEmptyStats()
 
         for (const finding of findings) {
@@ -313,14 +315,27 @@ class EngineAdapter {
 
     // Extract findings with limit
     _extractFindings(scanResult, limit = 100, engine = 'unknown') {
-        const findings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
+        const rawFindings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
+        const findings = collapseDastAggregatedFindings(rawFindings)
         return findings.slice(0, limit).map(f => ({
             id: f.id || f.findingId,
-            title: f.title || f.name,
+            title: f.title || f.name || f.ruleName || f.moduleName || f.ruleId || f.moduleId,
             severity: f.severity || f.effectiveSeverity || 'info',
-            category: f.category || f.ruleId,
+            category: f.category || f.vulnId || f.ruleId || f.moduleId,
             url: f.url || f.location?.url,
-            engine: f.engine || scanResult?.engine || engine
+            engine: f.engine || scanResult?.engine || engine,
+            moduleId: f.moduleId || null,
+            moduleName: f.moduleName || null,
+            ruleId: f.ruleId || null,
+            ruleName: f.ruleName || null,
+            vulnId: f.vulnId || null,
+            confidence: Number.isFinite(Number(f.confidence)) ? Number(f.confidence) : null,
+            presentationAggregate: f.presentationAggregate || null,
+            occurrenceCount: Number.isFinite(Number(f.evidence?.dast?.occurrenceCount))
+                ? Number(f.evidence.dast.occurrenceCount)
+                : null,
+            aggregate: f.evidence?.dast?.aggregate || null,
+            samples: Array.isArray(f.evidence?.dast?.samples) ? f.evidence.dast.samples : null
         }))
     }
 
@@ -432,6 +447,10 @@ export class ptk_automation {
         }
     }
 
+    _isFirefoxRuntime() {
+        return !!browser?.runtime?.getBrowserInfo
+    }
+
     async _executeContentRuntimeFiles({ tabId = null, frameId = 0, files = [] } = {}) {
         if (!Number.isInteger(tabId) || tabId < 0) return false
         const normalizedFiles = Array.isArray(files)
@@ -439,7 +458,7 @@ export class ptk_automation {
             : []
         if (!normalizedFiles.length) return false
 
-        const isFirefox = !!browser?.runtime?.getBrowserInfo
+        const isFirefox = this._isFirefoxRuntime()
         const manifestVersion = Number(browser?.runtime?.getManifest?.()?.manifest_version || 2)
 
         if (!isFirefox && manifestVersion >= 3 && browser?.scripting?.executeScript) {
@@ -454,12 +473,12 @@ export class ptk_automation {
 
         if (browser?.tabs?.executeScript) {
             for (const file of normalizedFiles) {
-                await browser.tabs.executeScript(tabId, {
+                const details = {
                     file,
                     frameId: Number.isInteger(frameId) ? frameId : 0,
-                    runAt: 'document_idle',
-                    matchAboutBlank: true
-                })
+                    runAt: 'document_idle'
+                }
+                await browser.tabs.executeScript(tabId, details)
             }
             return true
         }
@@ -506,8 +525,9 @@ export class ptk_automation {
         }
         const profile = this._getContentRuntimeProfile({ tabId, frameId, url })
         const files = CONTENT_RUNTIME_FILES[profile.script] || []
+        const useStaticFirefoxManualRuntime = profile.script === CONTENT_RUNTIME_SCRIPT_MANUAL && this._isFirefoxRuntime()
 
-        if (files.length) {
+        if (files.length && !useStaticFirefoxManualRuntime) {
             try {
                 await this._executeContentRuntimeFiles({ tabId, frameId, files })
             } catch (error) {
@@ -1497,6 +1517,7 @@ export class ptk_automation {
         const {
             includeBodies = true,
             includeEvidence = true,
+            includeSecrets = false,
             maxExportBytes = 25 * 1024 * 1024
         } = options
 
@@ -1505,7 +1526,7 @@ export class ptk_automation {
             throw new Error(`scan_result_not_found:${engine}`)
         }
 
-        let exported = buildExportScanResult(scanId, { scanResult })
+        let exported = buildExportScanResult(scanId, { scanResult, includeSecrets: includeSecrets === true })
         if (!exported) {
             throw new Error(`export_build_failed:${engine}`)
         }
@@ -1524,6 +1545,11 @@ export class ptk_automation {
             ptkVersion: this.app?.version || 'unknown',
             schemaVersion: 1
         }
+        exported.meta.privacy = exported.meta.privacy || {}
+        exported.meta.privacy.secretsIncluded = includeSecrets === true
+        if (includeSecrets === true) {
+            exported.meta.privacy.replayableRequests = true
+        }
 
         let bodiesStrippedByPolicy = false
         let evidenceStrippedByPolicy = false
@@ -1540,6 +1566,7 @@ export class ptk_automation {
 
         if (bodiesStrippedByPolicy || evidenceStrippedByPolicy) {
             exported.meta.privacy = {
+                ...(exported.meta.privacy || {}),
                 bodiesIncluded: !bodiesStrippedByPolicy,
                 evidenceIncluded: !evidenceStrippedByPolicy
             }
@@ -1607,7 +1634,8 @@ export class ptk_automation {
         }
         const result = await exportModule.msg_export_scan_result({
             target: options?.target || 'download',
-            fileName: options?.fileName || `PTK_${String(engine || 'scan').toUpperCase()}_scan.json`
+            fileName: options?.fileName || `PTK_${String(engine || 'scan').toUpperCase()}_scan.json`,
+            includeSecrets: options?.includeSecrets === true
         })
         if (!result || result.success === false) {
             throw new Error(result?.error || 'chunked_export_failed')

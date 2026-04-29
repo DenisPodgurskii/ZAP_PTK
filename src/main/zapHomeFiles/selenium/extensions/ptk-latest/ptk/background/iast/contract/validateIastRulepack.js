@@ -6,10 +6,28 @@ import {
     pushTypeError
 } from "../../common/simpleRulepackValidation.js"
 
+const VALID_FINDING_AGGREGATION_MODES = new Set([
+    "route-source-sink",
+    "route-source-sink-callsite",
+    "source-sink",
+    "source-sink-callsite"
+])
+
 function contextFor(moduleId = null, ruleId = null) {
     return {
         moduleId: moduleId || null,
         ruleId: ruleId || null
+    }
+}
+
+function validatePresentation(presentation, path, errors, ctx) {
+    if (presentation === undefined) return
+    if (!isPlainObject(presentation)) {
+        pushTypeError(errors, path, "object", ctx)
+        return
+    }
+    if (presentation.aggregate !== undefined && !VALID_FINDING_AGGREGATION_MODES.has(String(presentation.aggregate || ""))) {
+        pushTypeError(errors, `${path}/aggregate`, "supported IAST finding aggregation mode", ctx)
     }
 }
 
@@ -25,6 +43,7 @@ function validateModule(moduleDef, index, errors) {
     if (typeof moduleDef.async !== "boolean") pushRequiredError(errors, path, "async", ctx)
     if (!isNonEmptyString(moduleDef.name)) pushRequiredError(errors, path, "name", ctx)
     if (!isPlainObject(moduleDef.metadata)) pushRequiredError(errors, path, "metadata", ctx)
+    if (isPlainObject(moduleDef.metadata)) validatePresentation(moduleDef.metadata.presentation, `${path}/metadata/presentation`, errors, ctx)
     if (!Array.isArray(moduleDef.rules)) {
         pushRequiredError(errors, path, "rules", ctx)
         return
@@ -43,6 +62,7 @@ function validateModule(moduleDef, index, errors) {
         if (ruleDef.conditions !== undefined && !isPlainObject(ruleDef.conditions)) pushTypeError(errors, `${rulePath}/conditions`, "object", ruleCtx)
         if (ruleDef.limits !== undefined && !isPlainObject(ruleDef.limits)) pushTypeError(errors, `${rulePath}/limits`, "object", ruleCtx)
         if (ruleDef.metadata !== undefined && !isPlainObject(ruleDef.metadata)) pushTypeError(errors, `${rulePath}/metadata`, "object", ruleCtx)
+        if (isPlainObject(ruleDef.metadata)) validatePresentation(ruleDef.metadata.presentation, `${rulePath}/metadata/presentation`, errors, ruleCtx)
     })
 }
 

@@ -1,3 +1,5 @@
+import { collapseDastAggregatedFindings } from "./dastFindingAggregation.js"
+
 const DEFAULT_UI_SCAN_RESULT_BYTE_LIMIT = 8 * 1024 * 1024
 const DEFAULT_UI_SCAN_RESULT_LIMITS = Object.freeze({
     maxFindings: 5000,
@@ -294,6 +296,9 @@ export class DastResultProjector {
                     param: dastEvidence.param || null,
                     payload: dastEvidence.payload || null,
                     proof: dastEvidence.proof || null,
+                    aggregate: dastEvidence.aggregate && typeof dastEvidence.aggregate === "object"
+                        ? dastEvidence.aggregate
+                        : null,
                     occurrenceCount: Number.isFinite(Number(dastEvidence.occurrenceCount))
                         ? Number(dastEvidence.occurrenceCount)
                         : null,
@@ -391,8 +396,12 @@ export class DastResultProjector {
             snapshot.analysisVersion = source.analysisVersion
         }
         const findings = Array.isArray(source.findings) ? source.findings : []
+        const collapsedFindings = collapseDastAggregatedFindings(findings)
         const recon = Array.isArray(source.recon) ? source.recon : []
-        snapshot.findings = findings
+        if (snapshot.stats && typeof snapshot.stats === "object") {
+            snapshot.stats.findingsCount = collapsedFindings.length
+        }
+        snapshot.findings = collapsedFindings
             .concat(recon)
             .slice(0, this.limits.maxFindings)
             .map((finding) => this.buildUiFindingSummary(finding))

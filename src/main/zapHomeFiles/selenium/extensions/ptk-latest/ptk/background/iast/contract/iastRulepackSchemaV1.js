@@ -69,6 +69,25 @@ export const IAST_RULEPACK_SCHEMA_V1 = {
                 "runtime"
             ]
         },
+        "findingAggregationMode": {
+            "type": "string",
+            "enum": [
+                "route-source-sink",
+                "route-source-sink-callsite",
+                "source-sink",
+                "source-sink-callsite"
+            ]
+        },
+        "presentation": {
+            "type": "object",
+            "additionalProperties": false,
+            "default": {},
+            "properties": {
+                "aggregate": {
+                    "$ref": "#/$defs/findingAggregationMode"
+                }
+            }
+        },
         "policyRef": {
             "type": "object",
             "additionalProperties": false,
@@ -135,6 +154,9 @@ export const IAST_RULEPACK_SCHEMA_V1 = {
                 },
                 "links": {
                     "$ref": "#/$defs/links"
+                },
+                "presentation": {
+                    "$ref": "#/$defs/presentation"
                 }
             }
         },
@@ -173,6 +195,9 @@ export const IAST_RULEPACK_SCHEMA_V1 = {
                 },
                 "links": {
                     "$ref": "#/$defs/links"
+                },
+                "presentation": {
+                    "$ref": "#/$defs/presentation"
                 }
             },
             "default": {}

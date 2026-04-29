@@ -1,6 +1,15 @@
 /* Author: Denis Podgurskii */
 import { ptk_utils, ptk_logger, ptk_queue, ptk_storage, ptk_ruleManager } from "../background/utils.js"
-import { createFindingFromIAST, getIastEvidencePayload } from "./iast/modules/reporting.js"
+import {
+    applyIastFindingAggregateState,
+    buildIastFindingAggregateKey,
+    buildIastFindingAggregateSample,
+    createFindingFromIAST,
+    getIastEvidencePayload,
+    mergeIastFindingAggregateOccurrence,
+    normalizeIastFindingAggregationMode,
+    resolveIastFindingPresentationAggregate
+} from "./iast/modules/reporting.js"
 import { loadCanonicalRulepack } from "./common/moduleRegistry.js"
 import { scanResultStore } from "./scanResultStore.js"
 import { normalizeEvidenceRefs } from "./analysis/evidenceRefs.js"
@@ -706,6 +715,7 @@ export class ptk_iast {
         this._pagesByKey = new Map()
         this._pagesByUrl = new Map()
         this._pageFindingIds = new Map()
+        this._iastFindingAggregateIndex = new Map()
         this._runtimeEventIndex = new Map()
         this._missingPageCounter = 0
         this._persistTimer = null
@@ -850,6 +860,7 @@ export class ptk_iast {
         this.currentRulepackOverride = null
         this.requestLookup = new Map()
         this._requestLookupByUrl = new Map()
+        this._iastFindingAggregateIndex = new Map()
         this._resetRuntimeEventIndex()
         this._resetPageIndexes()
         if (this._persistTimer) {
@@ -1467,6 +1478,7 @@ export class ptk_iast {
         try {
             const payload = buildExportScanResult(scanId, {
                 target: message?.target || "download",
+                includeSecrets: message?.includeSecrets === true,
                 scanResult: this.scanResult
             })
             if (!payload) return null
@@ -1924,6 +1936,48 @@ export class ptk_iast {
         this._schedulePersistScanResult()
     }
 
+    _lookupAggregatedFinding(aggregateKey = null) {
+        if (!aggregateKey) return null
+        if (!(this._iastFindingAggregateIndex instanceof Map)) {
+            this._iastFindingAggregateIndex = new Map()
+        }
+        const indexed = this._iastFindingAggregateIndex.get(aggregateKey)
+        if (indexed) return indexed
+        const findings = Array.isArray(this.scanResult?.findings) ? this.scanResult.findings : []
+        const existing = findings.find((finding) => finding?.evidence?.iast?.aggregate?.key === aggregateKey) || null
+        if (existing) {
+            this._iastFindingAggregateIndex.set(aggregateKey, existing)
+        }
+        return existing
+    }
+
+    _prepareFindingAggregation(prepared = null) {
+        if (!prepared?.finding) return null
+        const mode = normalizeIastFindingAggregationMode(
+            resolveIastFindingPresentationAggregate(prepared.ruleMeta, prepared.moduleMeta)
+        )
+        if (!mode) return null
+        const aggregateKey = buildIastFindingAggregateKey({
+            finding: prepared.finding,
+            ruleMeta: prepared.ruleMeta,
+            moduleMeta: prepared.moduleMeta,
+            scanId: this.scanResult?.scanId || null,
+            host: this.scanResult?.host || null
+        })
+        if (!aggregateKey) return null
+        const sample = buildIastFindingAggregateSample(prepared.finding)
+        applyIastFindingAggregateState(prepared.finding, {
+            aggregateKey,
+            mode,
+            sample
+        })
+        return {
+            mode,
+            aggregateKey,
+            sample
+        }
+    }
+
     addOrUpdateFinding(finding) {
         if (!finding || !this.scanResult?.scanId) return
         let prepared
@@ -1934,6 +1988,26 @@ export class ptk_iast {
             return
         }
         if (!prepared) return
+        const aggregation = this._prepareFindingAggregation(prepared)
+        if (aggregation?.aggregateKey) {
+            const existing = this._lookupAggregatedFinding(aggregation.aggregateKey)
+            if (existing) {
+                mergeIastFindingAggregateOccurrence(existing, prepared.finding, {
+                    sample: aggregation.sample
+                })
+                const runtimeEventChanged = this._syncRuntimeEventForFinding(existing)
+                if (runtimeEventChanged) {
+                    scanResultStore._applyAnalysisSafe(this.scanResult, { force: true })
+                }
+                this._upsertPageFromFinding(existing)
+                this.updateScanResult()
+                this.broadcastScanDelta(existing)
+                if (runtimeEventChanged) {
+                    this.broadcastScanUpdate()
+                }
+                return
+            }
+        }
         const normalizedFinding = scanResultStore.upsertFinding({
             scanId: this.scanResult.scanId,
             engine: "IAST",
@@ -1943,6 +2017,9 @@ export class ptk_iast {
         })
         if (normalizedFinding) {
             prepared.finding = normalizedFinding
+        }
+        if (aggregation?.aggregateKey && prepared.finding) {
+            this._iastFindingAggregateIndex.set(aggregation.aggregateKey, prepared.finding)
         }
         const runtimeEventChanged = this._syncRuntimeEventForFinding(prepared.finding)
         if (runtimeEventChanged) {

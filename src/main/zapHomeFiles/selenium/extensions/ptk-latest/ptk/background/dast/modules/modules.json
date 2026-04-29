@@ -3911,6 +3911,12 @@
                 "value": "$1eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.$3.",
                 "regex": "(Bearer\\s+)?(ey[A-Za-z0-9_=-]+)\\.([A-Za-z0-9_=-]+)\\.([A-Za-z0-9_-]{2,})"
               }
+            ],
+            "cookies": [
+              {
+                "operation": "remove",
+                "regex": "(ey[A-Za-z0-9_=-]+)\\.([A-Za-z0-9_=-]+)\\.([A-Za-z0-9_-]{2,})"
+              }
             ]
           },
           "validation": {
@@ -3925,99 +3931,309 @@
                   ]
                 },
                 {
-                  "==": [
-                    {
-                      "var": "attack.response.statusCode"
-                    },
-                    {
-                      "var": "original.response.statusCode"
-                    }
-                  ]
-                },
-                {
-                  "<=": [
-                    {
-                      "-": [
-                        {
-                          "var": "attack.response.length"
-                        },
-                        {
-                          "var": "original.response.length"
-                        }
-                      ]
-                    },
-                    30
-                  ]
-                },
-                {
-                  ">=": [
-                    {
-                      "-": [
-                        {
-                          "var": "attack.response.length"
-                        },
-                        {
-                          "var": "original.response.length"
-                        }
-                      ]
-                    },
-                    -30
-                  ]
-                },
-                {
                   "or": [
                     {
                       "and": [
                         {
                           "==": [
                             {
-                              "var": "module.executed.0.metadata.id"
+                              "var": "attack.response.statusCode"
                             },
-                            "jwt_probe_no_authz"
+                            {
+                              "var": "original.response.statusCode"
+                            }
                           ]
                         },
                         {
                           "or": [
                             {
-                              "!": {
-                                "==": [
-                                  {
-                                    "var": "module.executed.0.response.statusCode"
-                                  },
-                                  {
-                                    "var": "attack.response.statusCode"
-                                  }
-                                ]
-                              }
-                            },
-                            {
-                              ">": [
+                              "and": [
                                 {
-                                  "-": [
+                                  "==": [
                                     {
-                                      "var": "attack.response.length"
+                                      "var": "module.executed.0.metadata.id"
                                     },
-                                    {
-                                      "var": "module.executed.0.response.length"
-                                    }
+                                    "jwt_probe_no_authz"
                                   ]
                                 },
-                                30
+                                {
+                                  "or": [
+                                    {
+                                      "!": {
+                                        "==": [
+                                          {
+                                            "var": "module.executed.0.response.statusCode"
+                                          },
+                                          {
+                                            "var": "attack.response.statusCode"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    {
+                                      ">": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.0.response.length"
+                                            }
+                                          ]
+                                        },
+                                        30
+                                      ]
+                                    },
+                                    {
+                                      "<": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.0.response.length"
+                                            }
+                                          ]
+                                        },
+                                        -30
+                                      ]
+                                    }
+                                  ]
+                                }
                               ]
                             },
                             {
-                              "<": [
+                              "and": [
                                 {
-                                  "-": [
+                                  "==": [
                                     {
-                                      "var": "attack.response.length"
+                                      "var": "module.executed.1.metadata.id"
                                     },
-                                    {
-                                      "var": "module.executed.0.response.length"
-                                    }
+                                    "jwt_probe_no_authz"
                                   ]
                                 },
-                                -30
+                                {
+                                  "or": [
+                                    {
+                                      "!": {
+                                        "==": [
+                                          {
+                                            "var": "module.executed.1.response.statusCode"
+                                          },
+                                          {
+                                            "var": "attack.response.statusCode"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    {
+                                      ">": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.1.response.length"
+                                            }
+                                          ]
+                                        },
+                                        30
+                                      ]
+                                    },
+                                    {
+                                      "<": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.1.response.length"
+                                            }
+                                          ]
+                                        },
+                                        -30
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "and": [
+                                {
+                                  "==": [
+                                    {
+                                      "var": "module.executed.2.metadata.id"
+                                    },
+                                    "jwt_probe_no_authz"
+                                  ]
+                                },
+                                {
+                                  "or": [
+                                    {
+                                      "!": {
+                                        "==": [
+                                          {
+                                            "var": "module.executed.2.response.statusCode"
+                                          },
+                                          {
+                                            "var": "attack.response.statusCode"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    {
+                                      ">": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.2.response.length"
+                                            }
+                                          ]
+                                        },
+                                        30
+                                      ]
+                                    },
+                                    {
+                                      "<": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.2.response.length"
+                                            }
+                                          ]
+                                        },
+                                        -30
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "and": [
+                                {
+                                  "==": [
+                                    {
+                                      "var": "module.executed.3.metadata.id"
+                                    },
+                                    "jwt_probe_no_authz"
+                                  ]
+                                },
+                                {
+                                  "or": [
+                                    {
+                                      "!": {
+                                        "==": [
+                                          {
+                                            "var": "module.executed.3.response.statusCode"
+                                          },
+                                          {
+                                            "var": "attack.response.statusCode"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    {
+                                      ">": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.3.response.length"
+                                            }
+                                          ]
+                                        },
+                                        30
+                                      ]
+                                    },
+                                    {
+                                      "<": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.3.response.length"
+                                            }
+                                          ]
+                                        },
+                                        -30
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "and": [
+                                {
+                                  "==": [
+                                    {
+                                      "var": "module.executed.4.metadata.id"
+                                    },
+                                    "jwt_probe_no_authz"
+                                  ]
+                                },
+                                {
+                                  "or": [
+                                    {
+                                      "!": {
+                                        "==": [
+                                          {
+                                            "var": "module.executed.4.response.statusCode"
+                                          },
+                                          {
+                                            "var": "attack.response.statusCode"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    {
+                                      ">": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.4.response.length"
+                                            }
+                                          ]
+                                        },
+                                        30
+                                      ]
+                                    },
+                                    {
+                                      "<": [
+                                        {
+                                          "-": [
+                                            {
+                                              "var": "attack.response.length"
+                                            },
+                                            {
+                                              "var": "module.executed.4.response.length"
+                                            }
+                                          ]
+                                        },
+                                        -30
+                                      ]
+                                    }
+                                  ]
+                                }
                               ]
                             }
                           ]
@@ -4025,231 +4241,603 @@
                       ]
                     },
                     {
-                      "and": [
+                      "or": [
                         {
-                          "==": [
+                          "and": [
                             {
-                              "var": "module.executed.1.metadata.id"
-                            },
-                            "jwt_probe_no_authz"
-                          ]
-                        },
-                        {
-                          "or": [
-                            {
-                              "!": {
-                                "==": [
-                                  {
-                                    "var": "module.executed.1.response.statusCode"
-                                  },
-                                  {
-                                    "var": "attack.response.statusCode"
-                                  }
-                                ]
-                              }
-                            },
-                            {
-                              ">": [
+                              "==": [
                                 {
-                                  "-": [
-                                    {
-                                      "var": "attack.response.length"
-                                    },
-                                    {
-                                      "var": "module.executed.1.response.length"
-                                    }
-                                  ]
+                                  "var": "module.executed.0.metadata.id"
                                 },
-                                30
+                                "jwt_probe_no_authz"
+                              ]
+                            },
+                            {
+                              "==": [
+                                {
+                                  "var": "module.executed.0.response.statusCode"
+                                },
+                                401
                               ]
                             },
                             {
                               "<": [
                                 {
-                                  "-": [
+                                  "var": "original.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              ">=": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              "<": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                500
+                              ]
+                            },
+                            {
+                              "regex": [
+                                {
+                                  "var": "module.executed.0.response.body"
+                                },
+                                "No Authorization header was found|credentials_required"
+                              ]
+                            },
+                            {
+                              "!": {
+                                "regex": [
+                                  {
+                                    "var": "attack.response.body"
+                                  },
+                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                ]
+                              }
+                            },
+                            {
+                              "or": [
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.statusCode"
+                                      },
+                                      {
+                                        "var": "module.executed.0.response.statusCode"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.body"
+                                      },
+                                      {
+                                        "var": "module.executed.0.response.body"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  ">": [
                                     {
-                                      "var": "attack.response.length"
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.0.response.length"
+                                        }
+                                      ]
                                     },
-                                    {
-                                      "var": "module.executed.1.response.length"
-                                    }
+                                    30
                                   ]
                                 },
-                                -30
+                                {
+                                  "<": [
+                                    {
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.0.response.length"
+                                        }
+                                      ]
+                                    },
+                                    -30
+                                  ]
+                                }
                               ]
                             }
                           ]
-                        }
-                      ]
-                    },
-                    {
-                      "and": [
-                        {
-                          "==": [
-                            {
-                              "var": "module.executed.2.metadata.id"
-                            },
-                            "jwt_probe_no_authz"
-                          ]
                         },
                         {
-                          "or": [
+                          "and": [
                             {
-                              "!": {
-                                "==": [
-                                  {
-                                    "var": "module.executed.2.response.statusCode"
-                                  },
-                                  {
-                                    "var": "attack.response.statusCode"
-                                  }
-                                ]
-                              }
+                              "==": [
+                                {
+                                  "var": "module.executed.1.metadata.id"
+                                },
+                                "jwt_probe_no_authz"
+                              ]
                             },
                             {
-                              ">": [
+                              "==": [
                                 {
-                                  "-": [
-                                    {
-                                      "var": "attack.response.length"
-                                    },
-                                    {
-                                      "var": "module.executed.2.response.length"
-                                    }
-                                  ]
+                                  "var": "module.executed.1.response.statusCode"
                                 },
-                                30
+                                401
                               ]
                             },
                             {
                               "<": [
                                 {
-                                  "-": [
+                                  "var": "original.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              ">=": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              "<": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                500
+                              ]
+                            },
+                            {
+                              "regex": [
+                                {
+                                  "var": "module.executed.1.response.body"
+                                },
+                                "No Authorization header was found|credentials_required"
+                              ]
+                            },
+                            {
+                              "!": {
+                                "regex": [
+                                  {
+                                    "var": "attack.response.body"
+                                  },
+                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                ]
+                              }
+                            },
+                            {
+                              "or": [
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.statusCode"
+                                      },
+                                      {
+                                        "var": "module.executed.1.response.statusCode"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.body"
+                                      },
+                                      {
+                                        "var": "module.executed.1.response.body"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  ">": [
                                     {
-                                      "var": "attack.response.length"
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.1.response.length"
+                                        }
+                                      ]
                                     },
-                                    {
-                                      "var": "module.executed.2.response.length"
-                                    }
+                                    30
                                   ]
                                 },
-                                -30
+                                {
+                                  "<": [
+                                    {
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.1.response.length"
+                                        }
+                                      ]
+                                    },
+                                    -30
+                                  ]
+                                }
                               ]
                             }
                           ]
-                        }
-                      ]
-                    },
-                    {
-                      "and": [
-                        {
-                          "==": [
-                            {
-                              "var": "module.executed.3.metadata.id"
-                            },
-                            "jwt_probe_no_authz"
-                          ]
                         },
                         {
-                          "or": [
+                          "and": [
                             {
-                              "!": {
-                                "==": [
-                                  {
-                                    "var": "module.executed.3.response.statusCode"
-                                  },
-                                  {
-                                    "var": "attack.response.statusCode"
-                                  }
-                                ]
-                              }
+                              "==": [
+                                {
+                                  "var": "module.executed.2.metadata.id"
+                                },
+                                "jwt_probe_no_authz"
+                              ]
                             },
                             {
-                              ">": [
+                              "==": [
                                 {
-                                  "-": [
-                                    {
-                                      "var": "attack.response.length"
-                                    },
-                                    {
-                                      "var": "module.executed.3.response.length"
-                                    }
-                                  ]
+                                  "var": "module.executed.2.response.statusCode"
                                 },
-                                30
+                                401
                               ]
                             },
                             {
                               "<": [
                                 {
-                                  "-": [
+                                  "var": "original.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              ">=": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              "<": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                500
+                              ]
+                            },
+                            {
+                              "regex": [
+                                {
+                                  "var": "module.executed.2.response.body"
+                                },
+                                "No Authorization header was found|credentials_required"
+                              ]
+                            },
+                            {
+                              "!": {
+                                "regex": [
+                                  {
+                                    "var": "attack.response.body"
+                                  },
+                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                ]
+                              }
+                            },
+                            {
+                              "or": [
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.statusCode"
+                                      },
+                                      {
+                                        "var": "module.executed.2.response.statusCode"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.body"
+                                      },
+                                      {
+                                        "var": "module.executed.2.response.body"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  ">": [
                                     {
-                                      "var": "attack.response.length"
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.2.response.length"
+                                        }
+                                      ]
                                     },
-                                    {
-                                      "var": "module.executed.3.response.length"
-                                    }
+                                    30
                                   ]
                                 },
-                                -30
+                                {
+                                  "<": [
+                                    {
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.2.response.length"
+                                        }
+                                      ]
+                                    },
+                                    -30
+                                  ]
+                                }
                               ]
                             }
                           ]
-                        }
-                      ]
-                    },
-                    {
-                      "and": [
-                        {
-                          "==": [
-                            {
-                              "var": "module.executed.4.metadata.id"
-                            },
-                            "jwt_probe_no_authz"
-                          ]
                         },
                         {
-                          "or": [
+                          "and": [
                             {
-                              "!": {
-                                "==": [
-                                  {
-                                    "var": "module.executed.4.response.statusCode"
-                                  },
-                                  {
-                                    "var": "attack.response.statusCode"
-                                  }
-                                ]
-                              }
+                              "==": [
+                                {
+                                  "var": "module.executed.3.metadata.id"
+                                },
+                                "jwt_probe_no_authz"
+                              ]
                             },
                             {
-                              ">": [
+                              "==": [
                                 {
-                                  "-": [
-                                    {
-                                      "var": "attack.response.length"
-                                    },
-                                    {
-                                      "var": "module.executed.4.response.length"
-                                    }
-                                  ]
+                                  "var": "module.executed.3.response.statusCode"
                                 },
-                                30
+                                401
                               ]
                             },
                             {
                               "<": [
                                 {
-                                  "-": [
+                                  "var": "original.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              ">=": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              "<": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                500
+                              ]
+                            },
+                            {
+                              "regex": [
+                                {
+                                  "var": "module.executed.3.response.body"
+                                },
+                                "No Authorization header was found|credentials_required"
+                              ]
+                            },
+                            {
+                              "!": {
+                                "regex": [
+                                  {
+                                    "var": "attack.response.body"
+                                  },
+                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                ]
+                              }
+                            },
+                            {
+                              "or": [
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.statusCode"
+                                      },
+                                      {
+                                        "var": "module.executed.3.response.statusCode"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.body"
+                                      },
+                                      {
+                                        "var": "module.executed.3.response.body"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  ">": [
                                     {
-                                      "var": "attack.response.length"
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.3.response.length"
+                                        }
+                                      ]
                                     },
-                                    {
-                                      "var": "module.executed.4.response.length"
-                                    }
+                                    30
                                   ]
                                 },
-                                -30
+                                {
+                                  "<": [
+                                    {
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.3.response.length"
+                                        }
+                                      ]
+                                    },
+                                    -30
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "and": [
+                            {
+                              "==": [
+                                {
+                                  "var": "module.executed.4.metadata.id"
+                                },
+                                "jwt_probe_no_authz"
+                              ]
+                            },
+                            {
+                              "==": [
+                                {
+                                  "var": "module.executed.4.response.statusCode"
+                                },
+                                401
+                              ]
+                            },
+                            {
+                              "<": [
+                                {
+                                  "var": "original.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              ">=": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                400
+                              ]
+                            },
+                            {
+                              "<": [
+                                {
+                                  "var": "attack.response.statusCode"
+                                },
+                                500
+                              ]
+                            },
+                            {
+                              "regex": [
+                                {
+                                  "var": "module.executed.4.response.body"
+                                },
+                                "No Authorization header was found|credentials_required"
+                              ]
+                            },
+                            {
+                              "!": {
+                                "regex": [
+                                  {
+                                    "var": "attack.response.body"
+                                  },
+                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                ]
+                              }
+                            },
+                            {
+                              "or": [
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.statusCode"
+                                      },
+                                      {
+                                        "var": "module.executed.4.response.statusCode"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  "!": {
+                                    "==": [
+                                      {
+                                        "var": "attack.response.body"
+                                      },
+                                      {
+                                        "var": "module.executed.4.response.body"
+                                      }
+                                    ]
+                                  }
+                                },
+                                {
+                                  ">": [
+                                    {
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.4.response.length"
+                                        }
+                                      ]
+                                    },
+                                    30
+                                  ]
+                                },
+                                {
+                                  "<": [
+                                    {
+                                      "-": [
+                                        {
+                                          "var": "attack.response.length"
+                                        },
+                                        {
+                                          "var": "module.executed.4.response.length"
+                                        }
+                                      ]
+                                    },
+                                    -30
+                                  ]
+                                }
                               ]
                             }
                           ]
@@ -7754,6 +8342,9 @@
           "allowStrategyBulk": true,
           "allowAuthLikeTargets": false,
           "allowHardDeniedTargets": {}
+        },
+        "presentation": {
+          "aggregate": "route-param-sink"
         },
         "constants": {},
         "extensions": {}

@@ -126,17 +126,23 @@ export function redactSensitiveStrings(input) {
     return value
 }
 
-function sanitizeHeaderEntries(headers) {
+function maybeRedactSensitiveStrings(input, opts = {}) {
+    return opts?.includeSecrets === true ? input : redactSensitiveStrings(input)
+}
+
+function sanitizeHeaderEntries(headers, opts = {}) {
     if (!headers) return headers
     if (Array.isArray(headers)) {
         return headers.map(entry => {
             if (!entry || typeof entry !== "object") return entry
             const name = String(entry.name || entry.key || "").toLowerCase()
             const clone = { ...entry }
-            if (clone.value !== undefined) {
-                clone.value = SENSITIVE_HEADER_NAMES.has(name)
-                    ? "[REDACTED]"
-                    : redactSensitiveStrings(String(clone.value))
+            if (clone.value !== undefined && opts?.includeSecrets !== true) {
+                if (SENSITIVE_HEADER_NAMES.has(name)) {
+                    clone.value = "[REDACTED]"
+                } else {
+                    clone.value = redactSensitiveStrings(String(clone.value))
+                }
             }
             return clone
         })
@@ -147,7 +153,9 @@ function sanitizeHeaderEntries(headers) {
             const lower = String(key).toLowerCase()
             const value = clone[key]
             if (value === undefined || value === null) return
-            if (SENSITIVE_HEADER_NAMES.has(lower)) {
+            if (opts?.includeSecrets === true) {
+                clone[key] = value
+            } else if (SENSITIVE_HEADER_NAMES.has(lower)) {
                 clone[key] = "[REDACTED]"
             } else if (typeof value === "string") {
                 clone[key] = redactSensitiveStrings(value)
@@ -158,19 +166,19 @@ function sanitizeHeaderEntries(headers) {
     return headers
 }
 
-function sanitizeObjectStrings(value, depth = 3) {
+function sanitizeObjectStrings(value, depth = 3, opts = {}) {
     if (!value || depth <= 0) return value
     if (Array.isArray(value)) {
-        return value.map(entry => sanitizeObjectStrings(entry, depth - 1))
+        return value.map(entry => sanitizeObjectStrings(entry, depth - 1, opts))
     }
     if (typeof value === "object") {
         const clone = { ...value }
         Object.keys(clone).forEach((key) => {
             const val = clone[key]
             if (typeof val === "string") {
-                clone[key] = redactSensitiveStrings(val)
+                clone[key] = maybeRedactSensitiveStrings(val, opts)
             } else if (val && typeof val === "object") {
-                clone[key] = sanitizeObjectStrings(val, depth - 1)
+                clone[key] = sanitizeObjectStrings(val, depth - 1, opts)
             }
         })
         return clone
@@ -178,53 +186,53 @@ function sanitizeObjectStrings(value, depth = 3) {
     return value
 }
 
-function sanitizeScanConfiguration(settings) {
+function sanitizeScanConfiguration(settings, opts = {}) {
     const cloned = (settings && typeof settings === "object") ? cloneValue(settings) : {}
     if (!cloned || typeof cloned !== "object") return {}
     delete cloned.rulepack
     delete cloned.cveRulepack
     delete cloned.onResultMutation
-    return sanitizeObjectStrings(cloned, 6) || {}
+    return sanitizeObjectStrings(cloned, 6, opts) || {}
 }
 
-function sanitizeBodyObject(body, limits, labelPrefix) {
+function sanitizeBodyObject(body, limits, labelPrefix, opts = {}) {
     if (!body || typeof body !== "object") return
     if (typeof body.text === "string") {
-        body.text = sanitizeString(body.text, limits.bodyLimit, `${labelPrefix}.body.text`)
+        body.text = sanitizeString(body.text, limits.bodyLimit, `${labelPrefix}.body.text`, opts)
     }
     if (Array.isArray(body.params)) {
         body.params = body.params.map((param) => {
             if (!param || typeof param !== "object") return param
             const clone = { ...param }
             if (typeof clone.value === "string") {
-                clone.value = redactSensitiveStrings(clone.value)
+                clone.value = maybeRedactSensitiveStrings(clone.value, opts)
             }
             return clone
         })
     }
     if (body.json && typeof body.json === "object") {
-        body.json = sanitizeObjectStrings(body.json)
+        body.json = sanitizeObjectStrings(body.json, 3, opts)
     }
 }
 
-function sanitizeHttpMessage(message, { bodyLimit, rawLimit, labelPrefix }) {
+function sanitizeHttpMessage(message, { bodyLimit, rawLimit, labelPrefix }, opts = {}) {
     if (!message || typeof message !== "object") return
     if (typeof message.url === "string") {
-        message.url = redactSensitiveStrings(message.url)
+        message.url = maybeRedactSensitiveStrings(message.url, opts)
     }
     if (typeof message.ui_url === "string") {
-        message.ui_url = redactSensitiveStrings(message.ui_url)
+        message.ui_url = maybeRedactSensitiveStrings(message.ui_url, opts)
     }
     if (message.headers) {
-        message.headers = sanitizeHeaderEntries(message.headers)
+        message.headers = sanitizeHeaderEntries(message.headers, opts)
     }
     if (typeof message.raw === "string") {
-        message.raw = sanitizeString(message.raw, rawLimit, `${labelPrefix}.raw`)
+        message.raw = sanitizeString(message.raw, rawLimit, `${labelPrefix}.raw`, opts)
     }
     if (typeof message.body === "string") {
-        message.body = sanitizeString(message.body, bodyLimit, `${labelPrefix}.body`)
+        message.body = sanitizeString(message.body, bodyLimit, `${labelPrefix}.body`, opts)
     } else if (message.body && typeof message.body === "object") {
-        sanitizeBodyObject(message.body, { bodyLimit }, labelPrefix)
+        sanitizeBodyObject(message.body, { bodyLimit }, labelPrefix, opts)
     }
     if (typeof message.statusLine === "string") {
         message.statusLine = sanitizeString(message.statusLine, 512, `${labelPrefix}.statusLine`)
@@ -622,9 +630,9 @@ function trimBytesToBoundary(bytes, limit) {
     return bytes.slice(0, end)
 }
 
-export function truncateAndMarkString(value, maxBytes = 0, label = null) {
+export function truncateAndMarkString(value, maxBytes = 0, label = null, opts = {}) {
     if (typeof value !== "string") return value
-    const redacted = redactSensitiveStrings(value)
+    const redacted = maybeRedactSensitiveStrings(value, opts)
     if (!maxBytes || maxBytes <= 0) {
         return redacted
     }
@@ -644,24 +652,24 @@ export function truncateAndMarkString(value, maxBytes = 0, label = null) {
     }
 }
 
-function sanitizeString(value, maxBytes, label) {
+function sanitizeString(value, maxBytes, label, opts = {}) {
     if (typeof value === "string") {
-        return truncateAndMarkString(value, maxBytes, label)
+        return truncateAndMarkString(value, maxBytes, label, opts)
     }
     return value
 }
 
-function sanitizeArrayStrings(arr, maxBytes, label) {
+function sanitizeArrayStrings(arr, maxBytes, label, opts = {}) {
     if (!Array.isArray(arr)) return arr
     return arr.map(entry => {
         if (typeof entry === "string") {
-            return truncateAndMarkString(entry, maxBytes, label)
+            return truncateAndMarkString(entry, maxBytes, label, opts)
         }
         if (entry && typeof entry === "object") {
             const clone = { ...entry }
             Object.keys(clone).forEach(key => {
                 if (typeof clone[key] === "string") {
-                    clone[key] = truncateAndMarkString(clone[key], maxBytes, label ? `${label}.${key}` : null)
+                    clone[key] = truncateAndMarkString(clone[key], maxBytes, label ? `${label}.${key}` : null, opts)
                 }
             })
             return clone
@@ -782,57 +790,60 @@ function sanitizeSastEvidence(evidence = {}) {
     }
 }
 
-function sanitizeDastEvidence(evidence = {}) {
+function sanitizeDastEvidence(evidence = {}, opts = {}) {
     if (!evidence || typeof evidence !== "object") return
     const limits = DEFAULT_TRUNCATE_LIMITS.dast
     if (typeof evidence.proof === "string") {
-        evidence.proof = sanitizeString(evidence.proof, limits.proof, "dast.proof")
+        evidence.proof = sanitizeString(evidence.proof, limits.proof, "dast.proof", opts)
     }
     if (typeof evidence.payload === "string") {
-        evidence.payload = sanitizeString(evidence.payload, limits.payload, "dast.payload")
+        evidence.payload = sanitizeString(evidence.payload, limits.payload, "dast.payload", opts)
     }
     if (typeof evidence.param === "string") {
-        evidence.param = redactSensitiveStrings(evidence.param)
+        evidence.param = maybeRedactSensitiveStrings(evidence.param, opts)
     }
     if (typeof evidence.attack?.payload === "string") {
-        evidence.attack.payload = sanitizeString(evidence.attack.payload, limits.payload, "dast.attack.payload")
+        evidence.attack.payload = sanitizeString(evidence.attack.payload, limits.payload, "dast.attack.payload", opts)
     }
     if (typeof evidence.attack?.proof === "string") {
-        evidence.attack.proof = sanitizeString(evidence.attack.proof, limits.proof, "dast.attack.proof")
+        evidence.attack.proof = sanitizeString(evidence.attack.proof, limits.proof, "dast.attack.proof", opts)
+    }
+    if (evidence.meta) {
+        evidence.meta = sanitizeObjectStrings(evidence.meta, 4, opts)
     }
     if (evidence.attack?.meta) {
-        evidence.attack.meta = sanitizeObjectStrings(evidence.attack.meta, 3)
+        evidence.attack.meta = sanitizeObjectStrings(evidence.attack.meta, 3, opts)
     }
     sanitizeHttpMessage(evidence.request, {
         bodyLimit: limits.requestBody,
         rawLimit: limits.rawMessage,
         labelPrefix: "dast.request"
-    })
+    }, opts)
     sanitizeHttpMessage(evidence.response, {
         bodyLimit: limits.responseBody,
         rawLimit: limits.rawMessage,
         labelPrefix: "dast.response"
-    })
+    }, opts)
     sanitizeHttpMessage(evidence.attack?.request, {
         bodyLimit: limits.requestBody,
         rawLimit: limits.rawMessage,
         labelPrefix: "dast.attack.request"
-    })
+    }, opts)
     sanitizeHttpMessage(evidence.attack?.response, {
         bodyLimit: limits.responseBody,
         rawLimit: limits.rawMessage,
         labelPrefix: "dast.attack.response"
-    })
+    }, opts)
     sanitizeHttpMessage(evidence.original?.request, {
         bodyLimit: limits.requestBody,
         rawLimit: limits.rawMessage,
         labelPrefix: "dast.original.request"
-    })
+    }, opts)
     sanitizeHttpMessage(evidence.original?.response, {
         bodyLimit: limits.responseBody,
         rawLimit: limits.rawMessage,
         labelPrefix: "dast.original.response"
-    })
+    }, opts)
     // Enforce refs-only evidence for DAST to avoid duplicating full HTTP payloads.
     if (Object.prototype.hasOwnProperty.call(evidence, "request")) delete evidence.request
     if (Object.prototype.hasOwnProperty.call(evidence, "response")) delete evidence.response
@@ -949,7 +960,7 @@ function sanitizeBugBountyPayload(bugBounty, opts = {}) {
     return sanitizeBugBountyValue(clone, "bugbounty")
 }
 
-function sanitizeRequests(requests = []) {
+function sanitizeRequests(requests = [], opts = {}) {
     if (!Array.isArray(requests)) return
     const limits = DEFAULT_TRUNCATE_LIMITS.dast
     requests.forEach(record => {
@@ -958,24 +969,24 @@ function sanitizeRequests(requests = []) {
             bodyLimit: limits.requestBody,
             rawLimit: limits.rawMessage,
             labelPrefix: "dast.requests.original.request"
-        })
+        }, opts)
         sanitizeHttpMessage(record?.original?.response, {
             bodyLimit: limits.responseBody,
             rawLimit: limits.rawMessage,
             labelPrefix: "dast.requests.original.response"
-        })
+        }, opts)
         const attacks = Array.isArray(record.attacks) ? record.attacks : []
         attacks.forEach((attack, idx) => {
             sanitizeHttpMessage(attack?.request, {
                 bodyLimit: limits.requestBody,
                 rawLimit: limits.rawMessage,
                 labelPrefix: `dast.requests.attacks[${idx}].request`
-            })
+            }, opts)
             sanitizeHttpMessage(attack?.response, {
                 bodyLimit: limits.responseBody,
                 rawLimit: limits.rawMessage,
                 labelPrefix: `dast.requests.attacks[${idx}].response`
-            })
+            }, opts)
         })
     })
 }
@@ -995,7 +1006,7 @@ function sanitizeHeader(header) {
     return header
 }
 
-function sanitizeFinding(finding) {
+function sanitizeFinding(finding, opts = {}) {
     if (!finding || typeof finding !== "object") return
     const engine = (finding.engine || "").toUpperCase()
     const evidence = finding.evidence || {}
@@ -1004,7 +1015,7 @@ function sanitizeFinding(finding) {
     } else if (engine === "SAST" && evidence.sast) {
         sanitizeSastEvidence(evidence.sast)
     } else if (engine === "DAST" && evidence.dast) {
-        sanitizeDastEvidence(evidence.dast)
+        sanitizeDastEvidence(evidence.dast, opts)
     } else if (engine === "SCA" && evidence.sca) {
         sanitizeScaEvidence(evidence.sca)
     }
@@ -1028,11 +1039,11 @@ function rebuildStats(findings = []) {
 export function sanitizeScanResult(scanResult, opts = {}) {
     if (!scanResult || typeof scanResult !== "object") return scanResult
     const findings = Array.isArray(scanResult.findings) ? scanResult.findings : []
-    findings.forEach(sanitizeFinding)
+    findings.forEach(finding => sanitizeFinding(finding, opts))
     enrichFindingsForExport(findings)
     derivePagesForExport(scanResult)
     enrichGroupsForExport(scanResult)
-    sanitizeRequests(scanResult.requests)
+    sanitizeRequests(scanResult.requests, opts)
     const stats = rebuildStats(findings)
     const attacksCount = Number(scanResult?.stats?.attacksCount || 0)
     if (attacksCount) stats.attacksCount = attacksCount
@@ -1072,6 +1083,12 @@ export function sanitizeScanResult(scanResult, opts = {}) {
     const sanitizedSettings = sanitizeScanConfiguration(scanResult.settings)
     scanResult.settings = sanitizedSettings
     scanResult.scanConfiguration = cloneValue(sanitizedSettings)
+    scanResult.meta = scanResult.meta || {}
+    scanResult.meta.privacy = scanResult.meta.privacy || {}
+    scanResult.meta.privacy.secretsIncluded = opts?.includeSecrets === true
+    if (opts?.includeSecrets === true) {
+        scanResult.meta.privacy.replayableRequests = true
+    }
     sanitizeCodeArtifacts(scanResult.codeArtifacts)
     return scanResult
 }
