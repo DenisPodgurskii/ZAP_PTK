@@ -447,10 +447,6 @@ export class ptk_automation {
         }
     }
 
-    _isFirefoxRuntime() {
-        return !!browser?.runtime?.getBrowserInfo
-    }
-
     async _executeContentRuntimeFiles({ tabId = null, frameId = 0, files = [] } = {}) {
         if (!Number.isInteger(tabId) || tabId < 0) return false
         const normalizedFiles = Array.isArray(files)
@@ -458,7 +454,7 @@ export class ptk_automation {
             : []
         if (!normalizedFiles.length) return false
 
-        const isFirefox = this._isFirefoxRuntime()
+        const isFirefox = !!browser?.runtime?.getBrowserInfo
         const manifestVersion = Number(browser?.runtime?.getManifest?.()?.manifest_version || 2)
 
         if (!isFirefox && manifestVersion >= 3 && browser?.scripting?.executeScript) {
@@ -473,12 +469,12 @@ export class ptk_automation {
 
         if (browser?.tabs?.executeScript) {
             for (const file of normalizedFiles) {
-                const details = {
+                await browser.tabs.executeScript(tabId, {
                     file,
                     frameId: Number.isInteger(frameId) ? frameId : 0,
-                    runAt: 'document_idle'
-                }
-                await browser.tabs.executeScript(tabId, details)
+                    runAt: 'document_idle',
+                    matchAboutBlank: true
+                })
             }
             return true
         }
@@ -525,9 +521,8 @@ export class ptk_automation {
         }
         const profile = this._getContentRuntimeProfile({ tabId, frameId, url })
         const files = CONTENT_RUNTIME_FILES[profile.script] || []
-        const useStaticFirefoxManualRuntime = profile.script === CONTENT_RUNTIME_SCRIPT_MANUAL && this._isFirefoxRuntime()
 
-        if (files.length && !useStaticFirefoxManualRuntime) {
+        if (files.length) {
             try {
                 await this._executeContentRuntimeFiles({ tabId, frameId, files })
             } catch (error) {

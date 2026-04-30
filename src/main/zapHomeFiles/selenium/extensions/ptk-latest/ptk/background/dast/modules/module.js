@@ -1108,25 +1108,6 @@ export class ptk_module {
         return Object.assign({}, mutation, { location: 'form' })
     }
 
-    _prefersAuthorizationHeaderReporting(attack, mutations = []) {
-        if (String(attack?.id || '').toLowerCase() !== 'jwt_3') return false
-        return Array.isArray(mutations) && mutations.some((mutation) => {
-            return String(mutation?.location || '').toLowerCase() === 'header'
-                && String(mutation?.name || '').toLowerCase() === 'authorization'
-        })
-    }
-
-    _selectReportedMutation(schema, mutations = [], attack = null) {
-        if (this._prefersAuthorizationHeaderReporting(attack, mutations)) {
-            const authz = mutations.find((mutation) => {
-                return String(mutation?.location || '').toLowerCase() === 'header'
-                    && String(mutation?.name || '').toLowerCase() === 'authorization'
-            })
-            if (authz) return this._normalizeReportedMutation(schema, authz)
-        }
-        return this._normalizeReportedMutation(schema, mutations[0])
-    }
-
     _compileParamNameRegex(action) {
         return this._compileSelectorRegex(action?.nameRegex, action?.flags)
     }
@@ -4343,7 +4324,7 @@ export class ptk_module {
                     _schema.opts.strict_cookie_override = true
                 }
                 _schema.metadata.attacked = Object.assign(
-                    this._selectReportedMutation(_schema, mutations, preparedVariant),
+                    this._normalizeReportedMutation(_schema, mutations[0]),
                     tgt?.typeHint ? { typeHint: tgt.typeHint } : null
                 )
                 if (tgt?.selectorRank) {
@@ -4445,13 +4426,13 @@ export class ptk_module {
             _schema.opts.strict_cookie_override = true
         }
         if (mutations.length) {
-            _schema.metadata.attacked = this._selectReportedMutation(_schema, mutations, attack)
+            _schema.metadata.attacked = this._normalizeReportedMutation(_schema, mutations[0])
         }
 
 
         // If exactly one cookie changed in bulk mode, set attacked to that cookie to aid reporting.
         const cookieMuts = mutations.filter(m => m.location === 'cookie' && m.before !== m.after)
-        if (cookieMuts.length === 1 && !this._prefersAuthorizationHeaderReporting(attack, mutations)) {
+        if (cookieMuts.length === 1) {
             _schema.metadata.attacked = cookieMuts[0]
         }
         // If no mutation was recorded (e.g., regex didn’t match), fall back to a generic target reference.

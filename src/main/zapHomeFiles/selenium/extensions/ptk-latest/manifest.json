@@ -1,9 +1,11 @@
 {
+"update_url": "https://clients2.google.com/service/update2/crx",
+
     "author": "Denis Podgurskii",
     "name": "OWASP Penetration Testing Kit",
     "short_name": "OWASP PTK",
     "description": "OWASP Penetration Testing Kit",
-    "version": "9.9.1",
+    "version": "9.9.0",
     "manifest_version": 3,
     "incognito": "split",
     "background": {
