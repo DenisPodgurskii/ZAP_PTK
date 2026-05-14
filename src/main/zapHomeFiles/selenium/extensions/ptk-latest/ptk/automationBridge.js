@@ -11,12 +11,13 @@
         isTopFrame = true
     }
 
-    // In Cypress, AUT runs in an iframe. Allow bridge there only when automation is enabled.
-    if (!isTopFrame && !initialAutomationEnabled) return
-    if (window.PTK_AUTOMATION) return
-
     const VERSION = document.currentScript?.dataset?.ptkVersion || 'unknown'
     const BRIDGE_ID = 'ptk-automation-bridge'
+    const bridgeGeneration = Number(window.__PTK_AUTOMATION_BRIDGE_GENERATION__ || 0) + 1
+    window.__PTK_AUTOMATION_BRIDGE_GENERATION__ = bridgeGeneration
+
+    // In Cypress, AUT runs in an iframe. Allow bridge there only when automation is enabled.
+    if (!isTopFrame && !initialAutomationEnabled) return
     const PTK_AUTOMATION_CAPABILITIES = Object.freeze([
         'startSession',
         'endSession',
@@ -46,6 +47,10 @@
     }
 
     function isZapBrowserCloseRequest(options = {}) {
+        // ZAP uses this source only from its browser-close callback flow for the
+        // WebDriver-controlled tab/zapid. The DOM nonce below correlates page
+        // messages but is readable by page script, so background session lookup
+        // remains the authority for session state and close readiness.
         return options?.source === 'zap_browser_close'
     }
 
@@ -143,6 +148,7 @@
     }
 
     window.addEventListener('message', (event) => {
+        if (window.__PTK_AUTOMATION_BRIDGE_GENERATION__ !== bridgeGeneration) return
         // Only accept messages from same window
         if (event.source !== window) return
 
@@ -174,7 +180,9 @@
         }
     })
 
-    // PTK_AUTOMATION low-level compatibility bridge
+    // PTK_AUTOMATION low-level compatibility bridge. The extension deliberately
+    // overwrites page-owned objects with the same name; ZAP close decisions must
+    // flow through this bridge and then through background session lookup.
     window.PTK_AUTOMATION = {
         version: VERSION,
         bridgeId: BRIDGE_ID,

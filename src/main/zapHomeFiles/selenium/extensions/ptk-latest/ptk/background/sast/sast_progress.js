@@ -107,9 +107,20 @@ export function isStructuredSastEvent(type) {
   return SAST_STRUCTURED_EVENT_TYPES.has(type)
 }
 
+function parseCollectionGeneration(data = {}) {
+  for (const rawGeneration of [data.generation, data.collectionGeneration]) {
+    if (rawGeneration === undefined || rawGeneration === null || rawGeneration === "") continue
+    const generation = Number(rawGeneration)
+    if (!Number.isFinite(generation)) continue
+    const integerGeneration = Math.trunc(generation)
+    if (integerGeneration > 0) return integerGeneration
+  }
+  return null
+}
+
 export function applyStructuredSastProgressEvent(state = null, type, data = {}) {
   const next = state || createSastProgressState()
-  const generation = Number(data.generation || data.collectionGeneration || 0)
+  const generation = parseCollectionGeneration(data)
   const completedGeneration = Number(next.completedGeneration || 0)
   const completedState = /complete|completed|waiting_for_page_activity/i.test(`${next.analysisState || ""} ${next.collectionState || ""}`)
   const regressiveAfterCompletion = new Set([
@@ -120,7 +131,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
     "module:end"
   ])
   if (
-    generation <= 0 &&
+    generation === null &&
     completedGeneration > 0 &&
     completedState &&
     regressiveAfterCompletion.has(type)
@@ -128,7 +139,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
     return next
   }
   if (
-    generation > 0 &&
+    generation !== null &&
     completedGeneration > 0 &&
     generation <= completedGeneration &&
     !["collection:summary", "scan:summary"].includes(type)
@@ -148,7 +159,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
 
   if (type === "collection:start") {
     next.phase = "collecting"
-    next.currentGeneration = generation || Number(next.currentGeneration || 0)
+    next.currentGeneration = generation ?? Number(next.currentGeneration || 0)
     next.collectionState = "collection_pending"
     next.analysisState = "collecting"
     next.lastStatus = "Collecting page scripts"
@@ -157,7 +168,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
 
   if (type === "collection:payload") {
     next.phase = "payload_received"
-    next.currentGeneration = generation || Number(next.currentGeneration || 0)
+    next.currentGeneration = generation ?? Number(next.currentGeneration || 0)
     next.collectionState = "payload_received"
     next.analysisState = "payload_received"
     next.lastStatus = "Page scripts collected"
@@ -166,7 +177,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
 
   if (type === "collection:analysis:start") {
     next.phase = "analysis"
-    next.currentGeneration = generation || Number(next.currentGeneration || 0)
+    next.currentGeneration = generation ?? Number(next.currentGeneration || 0)
     next.totalFiles = Math.max(Number(next.totalFiles || 0), Number(data.totalFiles || 0))
     next.totalModules = Math.max(Number(next.totalModules || 0), Number(data.totalModules || 0))
     next.collectionState = "analysis_running"
@@ -177,7 +188,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
 
   if (type === "file:start") {
     next.phase = "file"
-    next.currentGeneration = generation || Number(next.currentGeneration || 0)
+    next.currentGeneration = generation ?? Number(next.currentGeneration || 0)
     next.analysisState = "analyzing"
     next.collectionState = "analysis_running"
     next.currentFile = data.file || null
@@ -192,7 +203,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
 
   if (type === "file:end") {
     next.phase = "file_complete"
-    next.currentGeneration = generation || Number(next.currentGeneration || 0)
+    next.currentGeneration = generation ?? Number(next.currentGeneration || 0)
     next.currentFile = data.file || next.currentFile || null
     next.currentFileIndex = Math.max(next.currentFileIndex || 0, Number(data.index || 0) + 1)
     next.totalFiles = Math.max(Number(next.totalFiles || 0), Number(data.totalFiles || 0))
@@ -205,7 +216,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
 
   if (type === "module:start") {
     next.phase = "module"
-    next.currentGeneration = generation || Number(next.currentGeneration || 0)
+    next.currentGeneration = generation ?? Number(next.currentGeneration || 0)
     next.analysisState = "analyzing"
     next.collectionState = "analysis_running"
     next.currentFile = data.file || next.currentFile || null
@@ -218,7 +229,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
 
   if (type === "module:end") {
     next.phase = "module_complete"
-    next.currentGeneration = generation || Number(next.currentGeneration || 0)
+    next.currentGeneration = generation ?? Number(next.currentGeneration || 0)
     next.currentFile = data.file || next.currentFile || null
     next.currentModule = data.moduleName || data.moduleId || next.currentModule || null
     next.currentModuleIndex = Number(data.moduleIndex || next.currentModuleIndex || 0)
@@ -231,7 +242,7 @@ export function applyStructuredSastProgressEvent(state = null, type, data = {}) 
 
   if (type === "collection:summary" || type === "scan:summary") {
     next.phase = "waiting"
-    next.completedGeneration = Math.max(Number(next.completedGeneration || 0), generation || Number(next.currentGeneration || 0))
+    next.completedGeneration = Math.max(Number(next.completedGeneration || 0), generation ?? Number(next.currentGeneration || 0))
     next.completedFiles = Math.max(Number(next.totalFiles || 0), Number(next.completedFiles || 0))
     next.completedModules = Math.max(Number(next.totalModules || 0), Number(next.completedModules || 0))
     next.lastCompletedFile = next.currentFile || next.lastCompletedFile || null

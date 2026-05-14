@@ -237,6 +237,25 @@ function finalizeSurfaceEntry(entry = {}) {
     }
 }
 
+function finalizeGadgetEntry(entry = {}) {
+    const routeParts = splitRouteKey(entry.routeKey)
+    const gadgetType = entry.gadgetType || entry.surfaceType || "gadget"
+    return {
+        id: entry.id || null,
+        routeKey: entry.routeKey || null,
+        path: entry.path || routeParts.pathTemplate || "/",
+        surfaceType: gadgetType,
+        gadgetType,
+        label: entry.label || null,
+        hintNames: uniqueStrings(entry.hintNames),
+        engine: entry.engine || "SAST",
+        enginesPresent: sortEngines(entry.enginesPresent),
+        pageUrls: uniqueStrings(entry.pageUrls),
+        adminLike: entry.adminLike === true,
+        evidenceRefs: normalizeEvidenceRefs(entry.evidenceRefs || [])
+    }
+}
+
 function compareRouteEntries(left = {}, right = {}) {
     if ((right.adminLike ? 1 : 0) !== (left.adminLike ? 1 : 0)) return (right.adminLike ? 1 : 0) - (left.adminLike ? 1 : 0)
     const engineDelta = (right.enginesPresent || []).length - (left.enginesPresent || []).length
@@ -534,6 +553,43 @@ function addSurfaceEntry(surfaceMap, {
     entry.evidenceRefs = mergeEvidenceRefs(entry.evidenceRefs, evidenceRefs)
 }
 
+function addGadgetEntry(gadgetMap, {
+    routeKey = null,
+    gadgetType = "gadget",
+    label = null,
+    hintNames = [],
+    engine = null,
+    pageUrls = [],
+    adminLike = false,
+    evidenceRefs = []
+} = {}) {
+    const normalizedRouteKey = toNonEmptyString(routeKey)
+    const normalizedLabel = toNonEmptyString(label) || toNonEmptyString(gadgetType)
+    if (!normalizedRouteKey || !normalizedLabel) return
+    const normalizedGadgetType = String(gadgetType || "gadget").toLowerCase()
+    const routeParts = splitRouteKey(normalizedRouteKey)
+    const entryId = `gadget:${normalizedRouteKey}|${normalizedGadgetType}|${normalizedLabel}`
+    const entry = ensureMapEntry(gadgetMap, entryId, () => ({
+        id: entryId,
+        routeKey: normalizedRouteKey,
+        path: routeParts.pathTemplate || "/",
+        surfaceType: normalizedGadgetType,
+        gadgetType: normalizedGadgetType,
+        label: normalizedLabel,
+        hintNames: [],
+        engine: "SAST",
+        enginesPresent: [],
+        pageUrls: [],
+        adminLike: false,
+        evidenceRefs: []
+    }))
+    entry.enginesPresent.push(engine)
+    entry.hintNames.push(...(Array.isArray(hintNames) ? hintNames : []))
+    entry.pageUrls.push(...(Array.isArray(pageUrls) ? pageUrls : []))
+    if (adminLike) entry.adminLike = true
+    entry.evidenceRefs = mergeEvidenceRefs(entry.evidenceRefs, evidenceRefs)
+}
+
 function consumeDastRequest(endpointMap, routeMap, record = {}, hostHint = null) {
     const requestId = toNonEmptyString(record?.id)
     const originalRequest = record?.original?.request && typeof record.original.request === "object"
@@ -658,7 +714,7 @@ function consumeRuntimeEvent(routeMap, event = {}, hostHint = null) {
     })
 }
 
-function consumeSastArtifacts(routeMap, endpointMap, graphqlMap, hiddenParamMap, surfaceMap, sastArtifacts = {}, hostHint = null) {
+function consumeSastArtifacts(routeMap, endpointMap, graphqlMap, hiddenParamMap, surfaceMap, gadgetMap, sastArtifacts = {}, hostHint = null) {
     const routes = Array.isArray(sastArtifacts?.routes) ? sastArtifacts.routes : []
     routes.forEach((artifact) => {
         const routeKey = artifact?.routeKey || buildRouteKey({
@@ -780,6 +836,35 @@ function consumeSastArtifacts(routeMap, endpointMap, graphqlMap, hiddenParamMap,
             evidenceRefs: [buildRouteEvidenceRef({ type: "artifact", id: artifact?.id || null, routeKey, kind: "surface" })]
         })
     })
+
+    const gadgets = Array.isArray(sastArtifacts?.gadgets) ? sastArtifacts.gadgets : []
+    gadgets.forEach((artifact) => {
+        const routeKey = artifact?.routeKey || buildRouteKey({
+            url: artifact?.pageUrl || "/",
+            method: "*",
+            host: hostHint
+        })
+        addGadgetEntry(gadgetMap, {
+            routeKey,
+            gadgetType: artifact?.gadgetType || artifact?.surfaceType || "gadget",
+            label: artifact?.label || artifact?.gadgetType,
+            hintNames: artifact?.hintNames || [artifact?.gadgetType, artifact?.label],
+            engine: "SAST",
+            pageUrls: artifact?.pageUrls || [artifact?.pageUrl],
+            adminLike: artifact?.adminLike === true,
+            evidenceRefs: [buildRouteEvidenceRef({ type: "artifact", id: artifact?.id || null, routeKey, kind: "gadget" })]
+        })
+        addRouteEntry(routeMap, {
+            routeKey,
+            routeType: "spa",
+            engine: "SAST",
+            source: "code_gadget",
+            hintNames: artifact?.hintNames || [artifact?.gadgetType, artifact?.label],
+            pageUrls: artifact?.pageUrls || [artifact?.pageUrl],
+            adminLike: artifact?.adminLike === true,
+            evidenceRefs: [buildRouteEvidenceRef({ type: "artifact", id: artifact?.id || null, routeKey, kind: "gadget" })]
+        })
+    })
 }
 
 function finalizeSection(map, finalizer, compare) {
@@ -813,7 +898,7 @@ export function buildApiExplorer(scanResult = {}, { relatedScans = [] } = {}) {
             ? scan.codeArtifacts.sast
             : null
         if (sastArtifacts) {
-            consumeSastArtifacts(routeMap, endpointMap, graphqlMap, hiddenParamMap, surfaceMap, sastArtifacts, hostHint)
+            consumeSastArtifacts(routeMap, endpointMap, graphqlMap, hiddenParamMap, surfaceMap, gadgetMap, sastArtifacts, hostHint)
         }
     }
 
@@ -825,7 +910,7 @@ export function buildApiExplorer(scanResult = {}, { relatedScans = [] } = {}) {
     const graphql = finalizeSection(graphqlMap, finalizeGraphqlEntry, compareGraphqlEntries)
     const hiddenParams = finalizeSection(hiddenParamMap, finalizeHiddenParamEntry, compareHiddenParamEntries)
     const surfaces = finalizeSection(surfaceMap, finalizeSurfaceEntry, compareSurfaceEntries)
-    const gadgets = finalizeSection(gadgetMap, finalizeSurfaceEntry, compareSurfaceEntries)
+    const gadgets = finalizeSection(gadgetMap, finalizeGadgetEntry, compareSurfaceEntries)
 
     return {
         summary: {

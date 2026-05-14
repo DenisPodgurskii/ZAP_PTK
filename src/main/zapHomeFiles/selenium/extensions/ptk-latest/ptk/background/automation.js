@@ -30,11 +30,21 @@ function toFiniteNumber(value, fallback = null) {
     return Number.isFinite(num) ? num : fallback
 }
 
-function cloneJsonSafe(value) {
+function cloneJsonSafe(value, { warnings = null, label = 'value' } = {}) {
     if (value === undefined || value === null) return null
     try {
         return JSON.parse(JSON.stringify(value))
-    } catch (_) {
+    } catch (err) {
+        const message = `snapshot_clone_failed:${label}:${err?.message || String(err)}`
+        if (Array.isArray(warnings) && warnings.length < 12) {
+            warnings.push(message)
+        }
+        try {
+            console.warn('[PTK Automation] Failed to clone analysis snapshot field', {
+                label,
+                error: err?.message || String(err)
+            })
+        } catch (_) { }
         return null
     }
 }
@@ -2334,6 +2344,7 @@ export class ptk_automation {
 
     _collectAnalysisSnapshot(session) {
         const engines = []
+        const warnings = []
         const summary = {
             routes: 0,
             endpoints: 0,
@@ -2353,9 +2364,6 @@ export class ptk_automation {
                     tabId: session.tabId,
                     host: session.host
                 })
-                if (scanId && session.scanIds) {
-                    session.scanIds[engineName] = scanId
-                }
             }
 
             let scanResult = this._getEngineScanResult(engineName)
@@ -2372,8 +2380,8 @@ export class ptk_automation {
                 continue
             }
 
-            const analysis = cloneJsonSafe(scanResult.analysis)
-            const codeArtifacts = cloneJsonSafe(scanResult.codeArtifacts)
+            const analysis = cloneJsonSafe(scanResult.analysis, { warnings, label: `${engineName}.analysis` })
+            const codeArtifacts = cloneJsonSafe(scanResult.codeArtifacts, { warnings, label: `${engineName}.codeArtifacts` })
             const explorer = analysis?.explorer || null
             const counts = {
                 findings: Array.isArray(scanResult.findings) ? scanResult.findings.length : 0,
@@ -2408,7 +2416,8 @@ export class ptk_automation {
         return {
             status: session?.status || 'unknown',
             engines,
-            summary
+            summary,
+            warnings
         }
     }
 
@@ -3066,32 +3075,15 @@ export class ptk_automation {
     }
 
     _finalizeActiveSessionIfExportReady(session, reason = 'unknown') {
-        if (!session || session.status === 'completed' || session.status === 'error' || session.stopRequestedAt) {
+        if (!session || session.status === 'completed' || session.status === 'error') {
             return false
         }
 
-        const engines = Array.isArray(session.engines) ? session.engines : []
-        if (!engines.length || !engines.every(engineName => this._isEngineExportReady(session, engineName, { requireStop: false }))) {
+        if (!session.stopRequestedAt) {
             return false
         }
 
-        for (const engineName of engines) {
-            const engineUpper = String(engineName || '').toUpperCase()
-            session.engineStates[engineUpper] = session.engineStates[engineUpper] || {}
-            const state = String(session.engineStates[engineUpper].status || '').toLowerCase()
-            if (state === 'running' || state === 'idle' || state === 'stopping') {
-                session.engineStates[engineUpper].status = 'stopped'
-            }
-        }
-
-        session.warnings = Array.isArray(session.warnings) ? session.warnings : []
-        session.warnings.push({
-            code: 'session_finalized_before_stop_export_ready',
-            reason,
-            at: new Date().toISOString()
-        })
-        this._finalizeSession(session, this._collectCurrentStats(session))
-        return true
+        return this._finalizeStoppedSessionIfExportReady(session, reason)
     }
 
     _finalizeStoppedSessionIfExportReady(session, reason = 'unknown') {

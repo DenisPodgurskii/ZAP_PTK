@@ -717,6 +717,10 @@ function disableAutomation() {
 }
 
 function isZapBrowserCloseBridgeMessage(data) {
+    // Manual-mode ZAP close handling is intentionally limited to stop/progress
+    // messages marked by the ZAP browser-close source. The page-visible nonce
+    // only correlates responses; safe-to-close decisions are advisory unless
+    // they travel through ZAP's callback/zapid path and background session lookup.
     if (data?.source !== 'ptk-automation') return false
     if (data?.options?.source !== 'zap_browser_close') return false
     return data.type === 'session-end' || data.type === 'get-session-progress'

@@ -39,15 +39,68 @@ import org.zaproxy.zap.extension.selenium.ExtensionSelenium;
 import org.zaproxy.zap.extension.selenium.SeleniumOptions;
 import org.zaproxy.zap.extension.selenium.SeleniumScriptUtils;
 
+/*
+ * Browser close timeout model:
+ * - BROWSER_CLOSE_TOTAL_WAIT_MS is the Java polling budget after the first PTK
+ *   close decision has returned. ZAP waits this long for progress callbacks to
+ *   report terminal state or safeToClose before forcing the browser closed.
+ * - BROWSER_CLOSE_SCRIPT_TIMEOUT_MS is the Selenium async-script budget for a
+ *   single close-decision call. It must be greater than the PTK stop budget so
+ *   WebDriver can receive PTK's callback rather than timing out first.
+ * - BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS is the stopTimeoutMs value sent both to the
+ *   ZAP progress callback response and the injected PTK close-decision script.
+ * - The injected script derives its internal call timeout directly from that
+ *   stopTimeoutMs value; there is no separate JavaScript cap to keep in sync.
+ * - Follow-up WebDriver decisions are attempted every
+ *   BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS slices while the Java polling
+ *   budget remains open. The worst-case wall-clock bound is therefore
+ *   BROWSER_CLOSE_MAX_WALL_CLOCK_MS.
+ */
+final class PtkCloseContract {
+    static final int BROWSER_CLOSE_MAX_ATTEMPTS = 12;
+    static final long BROWSER_CLOSE_WAIT_SLICE_MS = 1000;
+    static final long BROWSER_CLOSE_TOTAL_WAIT_MS =
+            BROWSER_CLOSE_MAX_ATTEMPTS * BROWSER_CLOSE_WAIT_SLICE_MS;
+    static final long BROWSER_CLOSE_SCRIPT_TIMEOUT_MS = 30000;
+    static final int BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS = 25000;
+    static final int BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS = 5;
+    static final int BROWSER_CLOSE_MAX_FOLLOW_UP_DECISIONS =
+            BROWSER_CLOSE_MAX_ATTEMPTS / BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS;
+    static final long BROWSER_CLOSE_MAX_WALL_CLOCK_MS =
+            BROWSER_CLOSE_SCRIPT_TIMEOUT_MS
+                    + BROWSER_CLOSE_TOTAL_WAIT_MS
+                    + (BROWSER_CLOSE_MAX_FOLLOW_UP_DECISIONS * BROWSER_CLOSE_SCRIPT_TIMEOUT_MS);
+
+    static {
+        if (BROWSER_CLOSE_SCRIPT_TIMEOUT_MS < BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS) {
+            throw new IllegalStateException(
+                    "PTK browser close script timeout must cover PTK stop timeout");
+        }
+    }
+
+    private PtkCloseContract() {}
+
+    static Long getCloseRequestedAtMs(Map<String, Long> closeRequestedByZapId, String zapid) {
+        if (zapid == null || zapid.isBlank()) {
+            return null;
+        }
+        return closeRequestedByZapId.get(zapid);
+    }
+
+    static void markCloseDecisionAttempted(
+            Map<String, Long> closeRequestedByZapId, String zapid, long decidedAtMs) {
+        if (zapid == null || zapid.isBlank()) {
+            return;
+        }
+        closeRequestedByZapId.putIfAbsent(zapid, decidedAtMs);
+    }
+}
+
 public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvider {
 
     private static final Logger LOGGER = LogManager.getLogger(ExtensionPtk.class);
     private static final String PREFIX = "ptk";
     private static final Gson GSON = new Gson();
-    private static final int BROWSER_CLOSE_MAX_ATTEMPTS = 12;
-    private static final long BROWSER_CLOSE_WAIT_SLICE_MS = 1000;
-    private static final long BROWSER_CLOSE_SCRIPT_TIMEOUT_MS = 30000;
-    private static final int BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS = 25000;
 
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
             List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
@@ -67,6 +120,13 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private final Map<String, Integer> alertsRaisedByZapId = new ConcurrentHashMap<>();
     private final Map<String, Long> firstAlertSeenAtMs = new ConcurrentHashMap<>();
     private final Map<String, String> lastProgressSummaryByZapId = new ConcurrentHashMap<>();
+    /*
+     * safeToClose is advisory state accepted only through the ZAP callback flow for
+     * the current zapid/WebDriver-controlled browser. Page scripts can observe the
+     * DOM nonce used by PTK automation messages, so the nonce is a correlation guard,
+     * not a secret; PTK background/session state remains the source of truth for
+     * whether work is terminal.
+     */
     private final Map<String, Boolean> safeToCloseByZapId = new ConcurrentHashMap<>();
     private final Map<String, String> lastCloseDecisionByZapId = new ConcurrentHashMap<>();
     private final Map<String, Long> closeRequestedByZapId = new ConcurrentHashMap<>();
@@ -468,6 +528,14 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             return isTerminalProgress(zapid);
         }
 
+        Long getCloseRequestedAtMs(String zapid) {
+            return PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, zapid);
+        }
+
+        void markCloseDecisionAttempted(String zapid, long decidedAtMs) {
+            PtkCloseContract.markCloseDecisionAttempted(closeRequestedByZapId, zapid, decidedAtMs);
+        }
+
         private Map<String, Object> requestPtkCloseDecision(
                 ClientCallBackUtils ccbutils, String zapid) {
             Map<String, Object> fallback = new LinkedHashMap<>();
@@ -497,17 +565,26 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             try {
                 driver.manage()
                         .timeouts()
-                        .scriptTimeout(Duration.ofMillis(BROWSER_CLOSE_SCRIPT_TIMEOUT_MS));
+                        .scriptTimeout(
+                                Duration.ofMillis(
+                                        PtkCloseContract.BROWSER_CLOSE_SCRIPT_TIMEOUT_MS));
             } catch (RuntimeException e) {
                 LOGGER.debug("PTK closeContract could not set script timeout: {}", e.getMessage());
             }
 
+            /*
+             * The source value lets PTK distinguish ZAP's browser-close path from
+             * user-driven automation calls. It is trusted only in combination with
+             * the ZAP callback URL/zapid and the WebDriver-controlled tab; PTK
+             * background/session lookup still decides whether the session is
+             * terminal and safe to close.
+             */
             String script =
                     """
                     const done = arguments[arguments.length - 1];
                     const stopTimeoutMs = arguments[0] || 10000;
                     const explicitSessionId = arguments[1] || null;
-                    const callTimeoutMs = Math.max(2000, Math.min(stopTimeoutMs, 25000));
+                    const callTimeoutMs = Math.max(2000, stopTimeoutMs);
                     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
                     const timeoutAfter = (label, ms) => new Promise((resolve) => setTimeout(() => {
                       resolve({ ok: false, code: label + '_timeout', status: 'unknown' });
@@ -699,7 +776,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 try {
                     Object rawResult =
                             js.executeAsyncScript(
-                                    script, BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS, sessionId);
+                                    script,
+                                    PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS,
+                                    sessionId);
                     return normalizeCloseScriptResult(rawResult, fallback, 0, null);
                 } catch (WebDriverException e) {
                     fallback.put("reason", "webdriver_script_failed");
@@ -717,7 +796,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     currentUrl = driver.getCurrentUrl();
                     Object rawResult =
                             js.executeAsyncScript(
-                                    script, BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS, sessionId);
+                                    script,
+                                    PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS,
+                                    sessionId);
                     Map<String, Object> result =
                             normalizeCloseScriptResult(rawResult, fallback, i, currentUrl);
                     String decision = getStringField(result, "decision");
@@ -747,7 +828,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     driver.navigate().to(targetUrl);
                     Object rawResult =
                             js.executeAsyncScript(
-                                    script, BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS, sessionId);
+                                    script,
+                                    PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS,
+                                    sessionId);
                     Map<String, Object> result =
                             normalizeCloseScriptResult(
                                     rawResult, fallback, windowHandles.size(), targetUrl);
@@ -1102,6 +1185,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         if (status != null && !status.isBlank()) {
                             scanStatus.put(zapid, status);
                         }
+                        // safeToClose is accepted only from PTK's callback response for this
+                        // zapid. It short-circuits ZAP's wait, but PTK's background/session state
+                        // is still the authority that produces the value.
                         if (safeToClose != null) {
                             safeToCloseByZapId.put(zapid, safeToClose);
                         }
@@ -1170,11 +1256,13 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                                     zapid, browserid, "progress.terminal", sinceFirstMs, extra);
                         }
                         if (zapid != null && !zapid.isBlank()) {
-                            Long closeRequestedAt = closeRequestedByZapId.get(zapid);
+                            Long closeRequestedAt = getCloseRequestedAtMs(zapid);
                             if (closeRequestedAt != null) {
                                 response.put("closeRequested", true);
                                 response.put("closeRequestedAt", closeRequestedAt);
-                                response.put("stopTimeoutMs", BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS);
+                                response.put(
+                                        "stopTimeoutMs",
+                                        PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS);
                             }
                         }
                     } else {
@@ -1247,8 +1335,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             }
             long start = System.currentTimeMillis();
             String browserid = browserIdByZapId.get(zapid);
-            closeRequestedByZapId.put(zapid, start);
             Map<String, Object> closeDecision = requestPtkCloseDecision(ccbutils, zapid);
+            markCloseDecisionAttempted(zapid, System.currentTimeMillis());
             String initialDecision = getStringField(closeDecision, "decision");
             String initialScanState = getStringField(closeDecision, "scanState");
             if ("safe_to_close".equals(initialDecision)) {
@@ -1266,8 +1354,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
 
             int count = 0;
             while (!isSafeToClose(zapid)) {
-                count++;
-                if (count >= BROWSER_CLOSE_MAX_ATTEMPTS) {
+                if (count >= PtkCloseContract.BROWSER_CLOSE_MAX_ATTEMPTS) {
                     Map<String, Object> summaryExtra =
                             buildSessionSummaryExtra(
                                     zapid,
@@ -1306,12 +1393,14 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     return;
                 }
                 try {
-                    Thread.sleep(BROWSER_CLOSE_WAIT_SLICE_MS);
+                    Thread.sleep(PtkCloseContract.BROWSER_CLOSE_WAIT_SLICE_MS);
+                    count++;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
                 }
-                if (count % 5 == 0 && !isSafeToClose(zapid)) {
+                if (count % PtkCloseContract.BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS == 0
+                        && !isSafeToClose(zapid)) {
                     closeDecision = requestPtkCloseDecision(ccbutils, zapid);
                     String followUpDecision = getStringField(closeDecision, "decision");
                     String followUpScanState = getStringField(closeDecision, "scanState");

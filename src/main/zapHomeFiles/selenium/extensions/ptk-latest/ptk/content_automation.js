@@ -145,6 +145,10 @@ function enableZapAutomationBridge() {
     automationMessageHandlerInstalled = true;
     automationNonce = `ptk-zap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
+    // The nonce is exposed to the WebDriver-controlled page as a correlation
+    // guard, not a secret. Browser-close safety is trusted only when it flows
+    // through ZAP's callback/zapid handling and the background confirms session
+    // progress for this tab.
     let nonceEl = document.getElementById('__ptk_automation_nonce__');
     if (!nonceEl) {
         nonceEl = document.createElement('div');
