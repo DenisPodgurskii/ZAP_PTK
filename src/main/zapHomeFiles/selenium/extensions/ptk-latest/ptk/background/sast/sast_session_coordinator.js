@@ -30,6 +30,9 @@ export class SastSessionCoordinator {
 
   reset() {
     this.isScanRunning = false;
+    this.sessionState = "idle";
+    this.collectionState = "idle";
+    this.analysisState = "idle";
     this.activeTabId = null;
     this.multiPageScanActive = false;
     this.spaPageSet = new Set();
@@ -42,10 +45,19 @@ export class SastSessionCoordinator {
     this.firstCollectionError = null;
     this.activeCollectionCount = 0;
     this.lastCollectionState = "idle";
+    this.currentGeneration = 0;
+    this.lastCompletedGeneration = 0;
+    this.currentCollectionId = null;
+    this.lastCompletedFile = null;
+    this.lastCompletedModule = null;
+    this.lastCompletedAt = null;
   }
 
   beginSession(tabId) {
     this.isScanRunning = true;
+    this.sessionState = "running";
+    this.collectionState = "collection_pending";
+    this.analysisState = "waiting";
     this.activeTabId = tabId;
     this.scanningRequest = false;
     this.firstCollectionStarted = false;
@@ -53,16 +65,33 @@ export class SastSessionCoordinator {
     this.firstCollectionError = null;
     this.activeCollectionCount = 0;
     this.lastCollectionState = "collection_pending";
+    this.currentGeneration = 0;
+    this.lastCompletedGeneration = 0;
+    this.currentCollectionId = null;
+    this.lastCompletedFile = null;
+    this.lastCompletedModule = null;
+    this.lastCompletedAt = null;
     this.startHeartbeat();
   }
 
   getAutomationState() {
     return {
+      sessionState: this.sessionState || (this.isScanRunning ? "running" : "idle"),
+      collectionState: this.collectionState || this.lastCollectionState || "idle",
+      analysisState: this.analysisState || "idle",
+      isSessionRunning: this.isScanRunning === true,
+      isAnalysisRunning: this.analysisState === "analyzing" || this.activeCollectionCount > 0,
       firstCollectionStarted: this.firstCollectionStarted,
       firstCollectionSettled: this.firstCollectionSettled,
       firstCollectionError: this.firstCollectionError,
       activeCollectionCount: this.activeCollectionCount,
-      collectionState: this.lastCollectionState || "idle"
+      lastCollectionState: this.lastCollectionState || "idle",
+      currentGeneration: this.currentGeneration,
+      lastCompletedGeneration: this.lastCompletedGeneration,
+      currentCollectionId: this.currentCollectionId,
+      lastCompletedFile: this.lastCompletedFile,
+      lastCompletedModule: this.lastCompletedModule,
+      lastCompletedAt: this.lastCompletedAt
     };
   }
 
@@ -70,7 +99,71 @@ export class SastSessionCoordinator {
     if (this.activeTabId !== tabId) return;
     this.activeTabId = null;
     this.isScanRunning = false;
+    this.sessionState = "stopped";
+    this.collectionState = "stopped";
+    this.analysisState = "idle";
     this.stopHeartbeat();
+  }
+
+  markStopped(status = "stopped") {
+    this.isScanRunning = false;
+    this.sessionState = status || "stopped";
+    this.collectionState = "stopped";
+    this.analysisState = "idle";
+    this.activeTabId = null;
+    this.multiPageScanActive = false;
+    this.spaScanInFlight.clear();
+    this.activeCollectionCount = 0;
+    this.scanningRequest = false;
+    this.stopHeartbeat();
+  }
+
+  beginCollection() {
+    const generation = Number(this.currentGeneration || 0) + 1;
+    this.currentGeneration = generation;
+    this.currentCollectionId = `sast_collection_${generation}`;
+    this.collectionState = "collection_pending";
+    this.analysisState = "collecting";
+    this.lastCollectionState = "collection_pending";
+    return {
+      generation,
+      collectionId: this.currentCollectionId
+    };
+  }
+
+  markCollectionAnalysis(generation) {
+    if (Number(generation || 0) !== Number(this.currentGeneration || 0)) return false;
+    this.collectionState = "analysis_running";
+    this.analysisState = "analyzing";
+    this.lastCollectionState = "scan_in_flight";
+    return true;
+  }
+
+  completeCollection(generation, details = {}) {
+    const value = Number(generation || 0);
+    if (!Number.isFinite(value) || value < Number(this.lastCompletedGeneration || 0)) {
+      return false;
+    }
+    this.lastCompletedGeneration = value;
+    this.lastCompletedFile = details.file || this.lastCompletedFile || null;
+    this.lastCompletedModule = details.module || this.lastCompletedModule || null;
+    this.lastCompletedAt = new Date().toISOString();
+    this.collectionState = this.isScanRunning ? "waiting_for_page_activity" : "completed";
+    this.analysisState = "complete";
+    this.lastCollectionState = this.collectionState;
+    return true;
+  }
+
+  failCollection(generation, error = null) {
+    const value = Number(generation || 0);
+    if (Number.isFinite(value) && value < Number(this.lastCompletedGeneration || 0)) {
+      return false;
+    }
+    this.firstCollectionError = error?.message || error || this.firstCollectionError || null;
+    this.collectionState = "collection_failed";
+    this.analysisState = "error";
+    this.lastCollectionState = "collection_failed";
+    return true;
   }
 
   async handleUpdated(tabId, info, tab) {
@@ -172,10 +265,10 @@ export class SastSessionCoordinator {
     if (this.scanningRequest) return [];
     this.scanningRequest = true;
     this.activeCollectionCount += 1;
+    const collection = this.beginCollection();
     if (!this.firstCollectionStarted) {
       this.firstCollectionStarted = true;
     }
-    this.lastCollectionState = "collection_pending";
     try {
       const delayMs = Number.isFinite(Number(opts?.delayMs))
         ? Math.max(0, Number(opts.delayMs))
@@ -196,6 +289,8 @@ export class SastSessionCoordinator {
         timeoutMs,
         retryDelayMs
       });
+      this.collectionState = "payload_received";
+      this.analysisState = "payload_received";
       this.lastCollectionState = "payload_received";
       this.recordTiming("sast.payload.received", {
         scriptsCount: Array.isArray(payload?.scripts) ? payload.scripts.length : 0,
@@ -204,18 +299,22 @@ export class SastSessionCoordinator {
           : (Array.isArray(payload?.html) ? payload.html.length : 0)
       }, null, "sast.payload.received");
       if (!payload?.scripts) return [];
-      this.lastCollectionState = "scan_in_flight";
-      return await this.scanCode(payload.scripts, payload.html, payload.file);
+      this.markCollectionAnalysis(collection.generation);
+      const findings = await this.scanCode(payload.scripts, payload.html, payload.file, {
+        generation: collection.generation,
+        collectionId: collection.collectionId
+      });
+      this.completeCollection(collection.generation, { file: payload.file || null });
+      return findings;
     } catch (err) {
-      this.firstCollectionError = err?.message || String(err);
-      this.lastCollectionState = "collection_failed";
+      this.failCollection(collection.generation, err?.message || String(err));
       throw err;
     } finally {
       this.activeCollectionCount = Math.max(0, this.activeCollectionCount - 1);
       if (this.firstCollectionStarted && this.activeCollectionCount === 0) {
         this.firstCollectionSettled = true;
-        if (this.lastCollectionState !== "collection_failed") {
-          this.lastCollectionState = "scan_complete";
+        if (this.lastCollectionState !== "collection_failed" && this.collectionState !== "waiting_for_page_activity") {
+          this.completeCollection(collection.generation);
         }
       }
       this.scanningRequest = false;

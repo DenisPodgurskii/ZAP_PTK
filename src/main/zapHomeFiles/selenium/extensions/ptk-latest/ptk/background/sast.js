@@ -114,7 +114,7 @@ export class ptk_sast {
       scanCode: this.scanCode.bind(this),
       stopBackgroundScan: this.stopBackgroundScan.bind(this),
       getProgressSnapshot: this._buildSastProgressSnapshot.bind(this),
-      getProgressStatus: () => this.progressState?.lastStatus || "Scanning",
+      getProgressStatus: this._getSastProgressStatus.bind(this),
       recordTiming: this._recordZapTiming.bind(this),
       sendPopupMessage: (message) => {
         browser.runtime.sendMessage(message).catch(() => { });
@@ -380,7 +380,7 @@ export class ptk_sast {
   }
 
   resetScanResult() {
-    this.sessionCoordinator.reset();
+    this.sessionCoordinator.markStopped("stopped");
     this.resultStore.reset();
     this.progressState = createSastProgressState();
   }
@@ -415,6 +415,11 @@ export class ptk_sast {
       scanStartMs: this.scanStartMs,
       isRunning: this.isScanRunning
     });
+  }
+
+  _getSastProgressStatus() {
+    const snapshot = this._buildSastProgressSnapshot();
+    return snapshot?.lastStatus || this.progressState?.lastStatus || "Scanning";
   }
 
   addMessageListeners() {
@@ -654,16 +659,20 @@ export class ptk_sast {
     return this.canonicalizeUrl(raw, base);
   }
 
-  async scanCode(scripts, html, file) {
+  async scanCode(scripts, html, file, options = {}) {
     this._recordZapTiming("sast.scan.start", {
       file: file || null,
-      scriptsCount: Array.isArray(scripts) ? scripts.length : 0
+      scriptsCount: Array.isArray(scripts) ? scripts.length : 0,
+      generation: options?.generation || null,
+      collectionId: options?.collectionId || null
     }, null, "sast.scan.start");
     const remoteResult = await this.transport.scanCodeRemote({
       scanId: this.scanResult.scanId,
       scripts,
       html,
       file,
+      generation: options?.generation || null,
+      collectionId: options?.collectionId || null,
       timeoutMs: 30000
     });
     if (remoteResult !== null) {
@@ -671,7 +680,7 @@ export class ptk_sast {
     }
 
     if (!this.sastEngine) return [];
-    const detail = await this.sastEngine.scanCodeDetailed(scripts, html, file);
+    const detail = await this.sastEngine.scanCodeDetailed(scripts, html, file, options);
     const findings = Array.isArray(detail?.findings) ? detail.findings : [];
     this.notifier.handleScanResultFromWorker(file, findings, detail?.artifacts || null, {
       canonicalizeFileId: this.canonicalFileId.bind(this)
@@ -1102,6 +1111,12 @@ export class ptk_sast {
       }, zapTiming, "sast.collection.requested");
     }
     this.sessionCoordinator.beginSession(tabId);
+    this.notifier.handleStructuredEvent("scan:start", {
+      scanId,
+      scanStrategy: settings,
+      totalFiles: 0,
+      totalModules: 0
+    });
     this._schedulePersistScanResult();
     opts = Object.assign({}, opts, { scanId: this.scanResult.scanId });
 

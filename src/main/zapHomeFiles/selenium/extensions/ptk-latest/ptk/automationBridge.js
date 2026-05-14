@@ -22,6 +22,7 @@
         'endSession',
         'getStats',
         'getFindings',
+        'getAnalysisSnapshot',
         'exportScan',
         'getSessionProgress',
         'exportScanChunk',
@@ -39,6 +40,34 @@
     let requestCounter = 0
     // Local cache of sessionId (background is source of truth, looks up by tabId)
     let currentSessionId = null
+
+    function usesStrictCurrentTabScope(options = {}) {
+        return options?.sessionScope === PTK_AGENT_SESSION_SCOPE
+    }
+
+    function isZapBrowserCloseRequest(options = {}) {
+        return options?.source === 'zap_browser_close'
+    }
+
+    function sessionIdForBridgeLookup(options = {}) {
+        return options?.sessionId || (usesStrictCurrentTabScope(options) ? null : currentSessionId)
+    }
+
+    function bridgeError(message, response = {}) {
+        const error = new Error(message || 'ptk_automation_request_failed')
+        error.response = response
+        return error
+    }
+
+    function diagnosticExtras(value) {
+        const response = value?.response || value
+        if (!response || typeof response !== 'object') return {}
+
+        return {
+            ...(response.sessionLookup ? { sessionLookup: response.sessionLookup } : {}),
+            ...(Array.isArray(response.warnings) ? { warnings: response.warnings } : {})
+        }
+    }
 
     // Low-level bridge transport helpers
     function sendMessage(type, payload) {
@@ -133,15 +162,15 @@
         // Validate nonce matches (require always)
         if (data.nonce !== currentNonce) return
 
-        if (data.requestId && pendingRequests.has(data.requestId)) {
-            const { resolve, reject } = pendingRequests.get(data.requestId)
-            pendingRequests.delete(data.requestId)
+            if (data.requestId && pendingRequests.has(data.requestId)) {
+                const { resolve, reject } = pendingRequests.get(data.requestId)
+                pendingRequests.delete(data.requestId)
 
-            if (data.error) {
-                reject(new Error(data.error))
-            } else {
-                resolve(data)
-            }
+                if (data.error) {
+                    reject(bridgeError(data.error, data))
+                } else {
+                    resolve(data)
+                }
         }
     })
 
@@ -237,16 +266,18 @@
          * @returns {Promise<{ok: true, status?: string, stats?: Object, findings?: Array, truncated?: boolean} | {ok: false, error: string, stats: Object}>}
          */
         async endSession(options = {}) {
-            if (this._automationEnabled === false) {
+            if (this._automationEnabled === false && !isZapBrowserCloseRequest(options)) {
                 return { ok: false, error: 'automation_disabled' }
             }
             // Background looks up session by tabId - no need to check locally
             try {
                 const response = await sendMessage('session-end', {
-                    sessionId: options?.sessionId || currentSessionId,
+                    sessionId: sessionIdForBridgeLookup(options),
                     options: {
                         sessionId: options?.sessionId,
-                        sessionScope: options?.sessionScope
+                        sessionScope: options?.sessionScope,
+                        stopTimeoutMs: options?.stopTimeoutMs,
+                        source: options?.source
                     },
                     wait: options?.wait !== false,  // default true
                     includeFindings: options?.includeFindings === true,
@@ -288,14 +319,14 @@
          * @returns {Promise<{ok: true, sessionId: string, status: string, engines: Object, summary: Object, warnings?: Array, finalSummary?: Object} | {ok: false, error: string}>}
          */
         async getSessionProgress(options = {}) {
-            if (this._automationEnabled === false) {
+            if (this._automationEnabled === false && !isZapBrowserCloseRequest(options)) {
                 return { ok: false, error: 'automation_disabled' }
             }
 
             try {
                 return await sendMessage('get-session-progress', { options })
             } catch (err) {
-                return { ok: false, error: err.message }
+                return { ok: false, error: err.message, ...diagnosticExtras(err) }
             }
         },
 
@@ -337,7 +368,7 @@
             // Background looks up session by tabId
             try {
                 const response = await sendMessage('get-findings', {
-                    sessionId: options.sessionId || currentSessionId,
+                    sessionId: sessionIdForBridgeLookup(options.lookupOptions),
                     limit: options.limit,
                     options: options.lookupOptions
                 })
@@ -349,8 +380,32 @@
                 }
             } catch (err) {
                 return options.strict
-                    ? { ok: false, error: err.message }
+                    ? { ok: false, error: err.message, ...diagnosticExtras(err) }
                     : { findings: [], truncated: false }
+            }
+        },
+
+        /**
+         * Get a compact live analysis snapshot for crawler/agent evidence.
+         * This is additive and may return unavailable on older or still-running scans.
+         * @param {Object} options
+         * @param {string} options.sessionId - Optional explicit session lookup
+         * @param {string} options.sessionScope - Optional session lookup mode
+         * @returns {Promise<{ok: true, engines: Array} | {ok: false, error: string}>}
+         */
+        async getAnalysisSnapshot(options = {}) {
+            if (this._automationEnabled === false) {
+                return { ok: false, error: 'automation_disabled' }
+            }
+            try {
+                const response = await sendMessage('get-analysis-snapshot', {
+                    sessionId: sessionIdForBridgeLookup(options),
+                    options
+                })
+                if (response.error) throw new Error(response.error)
+                return response
+            } catch (err) {
+                return { ok: false, error: err.message, ...diagnosticExtras(err) }
             }
         },
 
@@ -379,12 +434,18 @@
                     return {
                         ok: false,
                         error: response.error,
-                        warnings: response.warnings || []
+                        warnings: response.warnings || [],
+                        ...diagnosticExtras(response)
                     }
                 }
                 return response
             } catch (err) {
-                return { ok: false, error: err.message }
+                return {
+                    ok: false,
+                    error: err.message,
+                    warnings: diagnosticExtras(err).warnings || [],
+                    ...diagnosticExtras(err)
+                }
             }
         },
 

@@ -26,8 +26,8 @@ runtime?.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (type === "scan_code") {
-    const { scripts, html, file } = msg;
-    sastWorker.postMessage({ type, scanId, scripts, html, file });
+    const { scripts, html, file, generation, collectionId } = msg;
+    sastWorker.postMessage({ type, scanId, scripts, html, file, generation, collectionId });
     sendResponse?.({ ok: true });
     return true;
   }

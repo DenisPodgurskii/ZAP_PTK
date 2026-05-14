@@ -276,7 +276,7 @@ function collectSastPayload() {
         }))
         .filter(script => {
             if (!script.src) return true;
-            return /^https?:\/\//i.test(script.src);
+            return isSameOriginSastScriptUrl(script.src);
         });
     return {
         scripts: scripts,
@@ -340,6 +340,19 @@ function isExecutableSastScriptElement(scriptEl) {
     if (!rawType) return true;
     if (rawType === 'module') return true;
     return /^(?:text|application)\/(?:javascript|ecmascript|x-javascript|x-ecmascript)$/i.test(rawType);
+}
+
+function isSameOriginSastScriptUrl(src) {
+    if (!src) return true;
+    try {
+        const scriptUrl = new URL(src, document.URL);
+        const pageUrl = new URL(document.URL);
+        return scriptUrl.protocol === 'http:' || scriptUrl.protocol === 'https:'
+            ? scriptUrl.origin === pageUrl.origin
+            : false;
+    } catch (_) {
+        return false;
+    }
 }
 
 function collectScaResources() {
@@ -587,6 +600,7 @@ const SETTINGS_KEY = 'pentestkit8_settings'
 let automationEnabled = false
 let automationNonce = null
 let automationMessageHandler = null
+let zapCloseAutomationMessageHandlerInstalled = false
 
 function isCypressRunnerFrame() {
     try {
@@ -624,6 +638,7 @@ function isCypressRunnerFrame() {
             if (window.top !== window) return
         } catch (_) { return }
         installPtkAutomationBridge(ptkAutomationVersion, automationNonce, false)
+        initZapCloseAutomationMessaging()
     } else if (isCypressRunnerFrame()) {
         // Automation ON: skip Cypress runner frames
         return
@@ -699,6 +714,24 @@ function disableAutomation() {
     if (nonceEl) {
         nonceEl.remove()
     }
+}
+
+function isZapBrowserCloseBridgeMessage(data) {
+    if (data?.source !== 'ptk-automation') return false
+    if (data?.options?.source !== 'zap_browser_close') return false
+    return data.type === 'session-end' || data.type === 'get-session-progress'
+}
+
+function initZapCloseAutomationMessaging() {
+    if (zapCloseAutomationMessageHandlerInstalled) return
+    zapCloseAutomationMessageHandlerInstalled = true
+    window.addEventListener("message", (event) => {
+        if (automationEnabled) return
+        if (event.source !== window) return
+        const data = event.data
+        if (!isZapBrowserCloseBridgeMessage(data)) return
+        handleAutomationBridgeMessage(data, { responseNonce: data.nonce || '' })
+    })
 }
 
 window.addEventListener("message", (event) => {
@@ -803,12 +836,13 @@ window.addEventListener("message", (event) => {
     }
 }, false)
 
-function handleAutomationBridgeMessage(data) {
+function handleAutomationBridgeMessage(data, options = {}) {
     const validTypes = [
         'session-start',
         'session-end',
         'get-stats',
         'get-findings',
+        'get-analysis-snapshot',
         'export-scan',
         'get-session-progress',
         'export-scan-chunk',
@@ -832,7 +866,7 @@ function handleAutomationBridgeMessage(data) {
         const normalizedResponse = normalizeAutomationBridgeResponse(data.type, response)
         window.postMessage({
             source: 'ptk-extension',
-            nonce: automationNonce,  // Include nonce in response
+            nonce: options.responseNonce || automationNonce,  // Include nonce in response
             requestId: data.requestId,
             ...normalizedResponse
         }, '*')
@@ -840,7 +874,7 @@ function handleAutomationBridgeMessage(data) {
         console.error('[PTK Content] Message error:', error)
         window.postMessage({
             source: 'ptk-extension',
-            nonce: automationNonce,
+            nonce: options.responseNonce || automationNonce,
             requestId: data.requestId,
             error: error?.message || 'PTK automation error'
         }, '*')

@@ -14,10 +14,15 @@ export class SastScanBus {
     if (!this.engine?.events) return;
     const events = this.engine.events;
     events.subscribe("scan:start", (e) => this.onScanStart(e));
+    events.subscribe("collection:start", (e) => this.onCollectionStart(e));
+    events.subscribe("collection:payload", (e) => this.onCollectionPayload(e));
+    events.subscribe("collection:analysis:start", (e) => this.onCollectionAnalysisStart(e));
     events.subscribe("file:start", (e) => this.onFileStart(e));
     events.subscribe("file:end", (e) => this.onFileEnd(e));
     events.subscribe("module:start", (e) => this.onModuleStart(e));
     events.subscribe("module:end", (e) => this.onModuleEnd(e));
+    events.subscribe("collection:summary", (e) => this.onCollectionSummary(e));
+    events.subscribe("collection:error", (e) => this.onCollectionError(e));
     events.subscribe("scan:summary", (e) => this.onScanSummary(e));
     events.subscribe("scan:error", (e) => this.onScanError(e));
   }
@@ -26,12 +31,39 @@ export class SastScanBus {
     return JSON.parse(JSON.stringify(this.sast.scanResult));
   }
 
-  onScanStart(e) {
+  dispatchStructuredEvent(type, payload, { includeScanResult = false } = {}) {
+    if (this.sast?.notifier?.handleStructuredEvent) {
+      this.sast.notifier.handleStructuredEvent(type, { payload });
+      return;
+    }
+    const progress = this.sast?._buildSastProgressSnapshot?.() || payload?.progress || null;
     browser.runtime.sendMessage({
       channel: "ptk_background2popup_sast",
-      type: "scan:start",
-      payload: e
+      type,
+      payload: Object.assign({}, payload || {}, progress ? { progress } : {}),
+      ...(includeScanResult ? { scanResult: this.cloneScanResult() } : {})
     }).catch(() => { });
+  }
+
+  onScanStart(e) {
+    if (this.sast?.sessionCoordinator?.firstCollectionStarted) return;
+    this.dispatchStructuredEvent("scan:start", e);
+  }
+
+  sendCollectionEvent(type, e) {
+    this.dispatchStructuredEvent(type, e);
+  }
+
+  onCollectionStart(e) {
+    this.sendCollectionEvent("collection:start", e);
+  }
+
+  onCollectionPayload(e) {
+    this.sendCollectionEvent("collection:payload", e);
+  }
+
+  onCollectionAnalysisStart(e) {
+    this.sendCollectionEvent("collection:analysis:start", e);
   }
 
   onFileStart(e) {
@@ -45,52 +77,35 @@ export class SastScanBus {
       this.sast.scanResult.files.push(file);
     }
 
-    browser.runtime.sendMessage({
-      channel: "ptk_background2popup_sast",
-      type: "file:start",
-      payload: e
-    }).catch(() => { });
+    this.dispatchStructuredEvent("file:start", e);
   }
 
   onFileEnd(e) {
-    browser.runtime.sendMessage({
-      channel: "ptk_background2popup_sast",
-      type: "file:end",
-      payload: e
-    }).catch(() => { });
+    this.dispatchStructuredEvent("file:end", e);
   }
 
   onModuleStart(e) {
-    browser.runtime.sendMessage({
-      channel: "ptk_background2popup_sast",
-      type: "module:start",
-      payload: e
-    }).catch(() => { });
+    this.dispatchStructuredEvent("module:start", e);
   }
 
   onModuleEnd(e) {
-    browser.runtime.sendMessage({
-      channel: "ptk_background2popup_sast",
-      type: "module:end",
-      payload: e
-    }).catch(() => { });
+    this.dispatchStructuredEvent("module:end", e);
   }
 
   onScanSummary(e) {
-    browser.runtime.sendMessage({
-      channel: "ptk_background2popup_sast",
-      type: "scan:summary",
-      payload: e,
-      scanResult: this.cloneScanResult()
-    }).catch(() => { });
+    this.dispatchStructuredEvent("scan:summary", e, { includeScanResult: true });
+  }
+
+  onCollectionSummary(e) {
+    this.dispatchStructuredEvent("collection:summary", e, { includeScanResult: true });
+  }
+
+  onCollectionError(e) {
+    this.sendCollectionEvent("collection:error", e);
   }
 
   onScanError(e) {
     this.sast.isScanRunning = false;
-    browser.runtime.sendMessage({
-      channel: "ptk_background2popup_sast",
-      type: "scan:error",
-      payload: e
-    }).catch(() => { });
+    this.dispatchStructuredEvent("scan:error", e);
   }
 }

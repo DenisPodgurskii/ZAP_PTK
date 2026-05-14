@@ -247,14 +247,13 @@ export class DastSessionCoordinator {
         if (!this.state.automationSession || this.state.automationSession.id !== sessionId) {
             throw new Error("automation_session_mismatch")
         }
-        await this.state.lastAutomationSeedPromise?.catch?.(() => null)
-        await this.engine?.waitForIdle?.(timeoutMs)
         this.state.acceptIncomingRequests = false
+        await this._waitForAutomationSeedBeforeStop(timeoutMs)
         await this.engine?.waitForIdle?.(timeoutMs)
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks(null)
         }
-        const scanResult = await this.stopBackgroundScan()
+        const scanResult = await this.stopBackgroundScan({ waitForIdleBeforeStop: false })
         const stats = this.collectSeverityStats?.(scanResult) || { counts: {}, findingsCount: 0 }
         this.state.automationSession = null
         return {
@@ -274,6 +273,40 @@ export class DastSessionCoordinator {
         return {
             findingsCount: severity.findingsCount,
             bySeverity: Object.assign({}, severity.counts)
+        }
+    }
+
+    async _waitForAutomationSeedBeforeStop(timeoutMs = 180000) {
+        const seedPromise = this.state.lastAutomationSeedPromise
+        if (!seedPromise || typeof seedPromise.then !== "function") {
+            return
+        }
+
+        const waitMs = Math.max(0, Math.min(Number(timeoutMs) || 0, 5000))
+        if (!waitMs) {
+            return
+        }
+
+        let timedOut = false
+        await Promise.race([
+            seedPromise.catch(() => null),
+            new Promise((resolve) => {
+                setTimeout(() => {
+                    timedOut = true
+                    resolve(null)
+                }, waitMs)
+            })
+        ])
+
+        if (timedOut) {
+            this.state.pendingAutomationSeeds = 0
+            this.state.lastAutomationSeedResult = Object.assign({}, this.state.lastAutomationSeedResult || {}, {
+                timedOutBeforeStop: true
+            })
+            console.warn("[PTK DAST] automation seed wait timed out during stop", {
+                sessionId: this.state.automationSession?.id || null,
+                timeoutMs: waitMs
+            })
         }
     }
 }

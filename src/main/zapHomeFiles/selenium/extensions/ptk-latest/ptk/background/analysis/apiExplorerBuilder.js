@@ -795,6 +795,7 @@ export function buildApiExplorer(scanResult = {}, { relatedScans = [] } = {}) {
     const graphqlMap = new Map()
     const hiddenParamMap = new Map()
     const surfaceMap = new Map()
+    const gadgetMap = new Map()
 
     const consumeScan = (scan) => {
         if (!scan || typeof scan !== "object") return
@@ -824,6 +825,7 @@ export function buildApiExplorer(scanResult = {}, { relatedScans = [] } = {}) {
     const graphql = finalizeSection(graphqlMap, finalizeGraphqlEntry, compareGraphqlEntries)
     const hiddenParams = finalizeSection(hiddenParamMap, finalizeHiddenParamEntry, compareHiddenParamEntries)
     const surfaces = finalizeSection(surfaceMap, finalizeSurfaceEntry, compareSurfaceEntries)
+    const gadgets = finalizeSection(gadgetMap, finalizeSurfaceEntry, compareSurfaceEntries)
 
     return {
         summary: {
@@ -832,19 +834,22 @@ export function buildApiExplorer(scanResult = {}, { relatedScans = [] } = {}) {
             graphqlCount: graphql.length,
             hiddenParamCount: hiddenParams.length,
             surfaceCount: surfaces.length,
+            gadgetCount: gadgets.length,
             enginesPresent: sortEngines([
                 ...routes.flatMap((entry) => entry.enginesPresent || []),
                 ...endpoints.flatMap((entry) => entry.enginesPresent || []),
                 ...graphql.flatMap((entry) => entry.enginesPresent || []),
                 ...hiddenParams.flatMap((entry) => entry.enginesPresent || []),
-                ...surfaces.flatMap((entry) => entry.enginesPresent || [])
+                ...surfaces.flatMap((entry) => entry.enginesPresent || []),
+                ...gadgets.flatMap((entry) => entry.enginesPresent || [])
             ])
         },
         routes,
         endpoints,
         graphql,
         hiddenParams,
-        surfaces
+        surfaces,
+        gadgets
     }
 }
 
