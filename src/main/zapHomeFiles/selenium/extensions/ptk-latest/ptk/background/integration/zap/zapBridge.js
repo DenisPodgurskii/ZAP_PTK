@@ -23,6 +23,11 @@ const ZAP_PASSIVE_ENGINE_IDLE_GRACE_MS = 8000
 const ZAP_TARGET_ACTIVITY_QUIET_GRACE_MS = 2500
 const ZAP_PROGRESS_FLUSH_TIMEOUT_MS = 3000
 const ZAP_PROGRESS_DRAIN_MAX_PASSES = 4
+// Mirrors the ZAP add-on close-contract PTK stop budget. Keep this documented
+// here because the browser extension can receive closeRequested before Java's
+// WebDriver close script runs; changing the add-on value should be reviewed
+// alongside this cap.
+const ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS = 25000
 const ZAP_PROGRESS_STATUS_READY = 'ready'
 const ZAP_PROGRESS_STATUS_CALLBACK = 'callback'
 const ZAP_PROGRESS_STATUS_RUNNING = 'running'
@@ -428,10 +433,23 @@ class ZapBridge {
         this._clearProgressMonitor()
     }
 
-    _buildProgressMonitorPayload({ progress, status, message = null, engines = null }) {
+    _buildProgressMonitorPayload({ progress, status, message = null, engines = null, safeToClose = null, phase = null }) {
         const payload = {
             progress,
             status
+        }
+        const explicitPhase = toNonEmptyString(phase)
+        if (explicitPhase) {
+            payload.phase = explicitPhase
+        }
+        if (typeof safeToClose === 'boolean') {
+            payload.safeToClose = safeToClose
+        } else {
+            payload.safeToClose = progress === 100
+                || status === ZAP_PROGRESS_STATUS_COMPLETED
+                || status === ZAP_PROGRESS_STATUS_ERROR
+                || status === ZAP_PROGRESS_STATUS_CANCELLED
+                || status === 'timeout'
         }
         const text = toNonEmptyString(message)
         if (text) {
@@ -439,6 +457,20 @@ class ZapBridge {
         }
         if (engines && typeof engines === 'object' && !Array.isArray(engines)) {
             payload.engines = engines
+        }
+        return payload
+    }
+
+    _attachProgressSessionContext(payload, monitor) {
+        if (!payload || typeof payload !== 'object' || !monitor) {
+            return payload
+        }
+        if (monitor.sessionId && !payload.sessionId) {
+            payload.sessionId = monitor.sessionId
+        }
+        const targetUrl = toHttpUrl(monitor.lastRuntimeSnapshot?.targetUrl)
+        if (targetUrl && !payload.targetUrl) {
+            payload.targetUrl = targetUrl
         }
         return payload
     }
@@ -554,6 +586,41 @@ class ZapBridge {
         monitor.intervalId = setInterval(tick, ZAP_PROGRESS_HEARTBEAT_MS)
     }
 
+    async _handleZapProgressControlResponse(monitor, control = {}) {
+        if (this._progressMonitor !== monitor) {
+            return
+        }
+        if (!control || typeof control !== 'object' || control.closeRequested !== true) {
+            return
+        }
+        if (monitor.closeRequestedSent) {
+            return
+        }
+        const automation = this.app?.automation
+        if (!automation || typeof automation.requestZapSessionStop !== 'function') {
+            console.warn('[PTK ZAP] ZAP close request received but automation stop API is unavailable')
+            return
+        }
+        monitor.closeRequestedSent = true
+        const stopTimeoutMs = Number.isFinite(Number(control.stopTimeoutMs))
+            ? Math.max(1000, Math.min(Number(control.stopTimeoutMs), ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS))
+            : ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS
+        try {
+            const result = await automation.requestZapSessionStop(monitor.sessionId, {
+                timeoutMs: stopTimeoutMs,
+                source: 'zap_browser_close'
+            })
+            this._debugLog('[PTK ZAP] ZAP close request stop issued:', {
+                zapid: monitor.zapid,
+                sessionId: monitor.sessionId,
+                result
+            })
+        } catch (err) {
+            monitor.closeRequestedSent = false
+            console.warn('[PTK ZAP] Failed to request PTK stop from ZAP close signal:', err?.message || String(err))
+        }
+    }
+
     _scheduleTerminalProgress({ sessionKey, sessionId = null, zapid = null, requiredEngines = null, status = ZAP_PROGRESS_STATUS_ERROR, message = null, engines = null } = {}) {
         const payload = this._buildProgressMonitorPayload({
             progress: 100,
@@ -637,7 +704,9 @@ class ZapBridge {
         }
 
         try {
-            await this.transport.postProgressJson(payload)
+            payload = this._attachProgressSessionContext(payload, monitor)
+            const progressResponse = await this.transport.postProgressJson(payload)
+            await this._handleZapProgressControlResponse(monitor, progressResponse?.data)
             this.recordTiming({
                 phase: 'progress.post.first',
                 zapid: monitor.zapid,

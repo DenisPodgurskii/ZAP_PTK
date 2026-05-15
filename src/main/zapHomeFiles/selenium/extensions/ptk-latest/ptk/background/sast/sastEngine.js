@@ -433,9 +433,11 @@ export class sastEngine {
     return snippets;
   }
 
-  async scanCodeDetailed(scripts, html = "", file = "") {
+  async scanCodeDetailed(scripts, html = "", file = "", options = {}) {
     try {
       await this._ensureRuntimeAssets();
+      const generation = Number(options?.generation || 0) || null;
+      const collectionId = options?.collectionId || null;
 
       if (!Array.isArray(this.modules) || !this.modules.length) {
         console.warn("SAST: modules not loaded; skipping scan.");
@@ -466,8 +468,48 @@ export class sastEngine {
       // have to serialize the full DOM HTML for SAST.
       const inlineSnippets = this.normalizeInlineHandlersPayload(html);
       const totalFiles = (Array.isArray(scripts) ? scripts.length : 0) + inlineSnippets.length;
-      this.events.emit("scan:start", {
+      let collectionSummaryEmitted = false;
+      const emptySastArtifacts = () => ({
+        sast: {
+          version: 2,
+          routes: [],
+          endpoints: [],
+          graphql: [],
+          surfaces: [],
+          hiddenParams: [],
+          gadgets: []
+        }
+      });
+      const countSastArtifacts = (artifactBundle = null) => {
+        const sastArtifacts = artifactBundle?.sast && typeof artifactBundle.sast === "object"
+          ? artifactBundle.sast
+          : {};
+        return {
+          routes: Array.isArray(sastArtifacts.routes) ? sastArtifacts.routes.length : 0,
+          endpoints: Array.isArray(sastArtifacts.endpoints) ? sastArtifacts.endpoints.length : 0,
+          graphql: Array.isArray(sastArtifacts.graphql) ? sastArtifacts.graphql.length : 0,
+          surfaces: Array.isArray(sastArtifacts.surfaces) ? sastArtifacts.surfaces.length : 0,
+          hiddenParams: Array.isArray(sastArtifacts.hiddenParams) ? sastArtifacts.hiddenParams.length : 0,
+          gadgets: Array.isArray(sastArtifacts.gadgets) ? sastArtifacts.gadgets.length : 0
+        };
+      };
+      const emitCollectionSummary = ({ findings = [], artifacts = null } = {}) => {
+        if (collectionSummaryEmitted) return;
+        collectionSummaryEmitted = true;
+        this.events.emit("collection:summary", {
+          scanId: this._scanId,
+          collectionId,
+          generation,
+          totalFiles,
+          totalModules: Array.isArray(this.modules) ? this.modules.length : 0,
+          totalFindings: Array.isArray(findings) ? findings.length : Number(findings || 0),
+          totalArtifacts: countSastArtifacts(artifacts)
+        });
+      };
+      this.events.emit("collection:analysis:start", {
         scanId: this._scanId,
+        collectionId,
+        generation,
         scanStrategy: this._scanStrategy,
         totalFiles
       });
@@ -493,7 +535,7 @@ export class sastEngine {
 
       for (const script of scripts) {
         const fileId = script.src || `inline-script[#${allBodies.length}]`;
-        this.events.emit("file:start", { scanId: this._scanId, file: fileId, index: seenFiles.length, totalFiles });
+        this.events.emit("file:start", { scanId: this._scanId, collectionId, generation, file: fileId, index: seenFiles.length, totalFiles });
         pushFile(fileId);
 
         const captured = typeof script.code === "string" ? script.code : "";
@@ -602,7 +644,7 @@ export class sastEngine {
           const snippet = inlineSnippets[i];
           const normalizedSnippet = snippet.replace(/(https?:)\/\//g, "$1:\\/\\/");
           const fileId = `inline‐onclick[#${i}]`;
-          this.events.emit("file:start", { scanId: this._scanId, file: fileId, index: seenFiles.length, totalFiles });
+          this.events.emit("file:start", { scanId: this._scanId, collectionId, generation, file: fileId, index: seenFiles.length, totalFiles });
           pushFile(fileId);
           const comments = [];
           let snippetAST = null;
@@ -648,37 +690,21 @@ ${normalizedSnippet}
       }
 
       if (allBodies.length === 0) {
+        const artifacts = emptySastArtifacts();
+        emitCollectionSummary({ findings: [], artifacts });
         return {
           findings: [],
-          artifacts: {
-            sast: {
-              version: 2,
-              routes: [],
-              endpoints: [],
-              graphql: [],
-              surfaces: [],
-              hiddenParams: [],
-              gadgets: []
-            }
-          }
+          artifacts
         };
       }
       //console.info("[DBG] codeByFile keys:", Object.keys(codeByFile || {}));
 
       if (!templateAST) {
+        const artifacts = emptySastArtifacts();
+        emitCollectionSummary({ findings: [], artifacts });
         return {
           findings: [],
-          artifacts: {
-            sast: {
-              version: 2,
-              routes: [],
-              endpoints: [],
-              graphql: [],
-              surfaces: [],
-              hiddenParams: [],
-              gadgets: []
-            }
-          }
+          artifacts
         };
       }
 
@@ -792,6 +818,8 @@ ${normalizedSnippet}
         const moduleIndex = perModuleCounts.length + 1;
         this.events.emit("module:start", {
           scanId: this._scanId,
+          collectionId,
+          generation,
           file,
           moduleIndex,
           totalModules: this.modules.length,
@@ -811,6 +839,8 @@ ${normalizedSnippet}
 
         this.events.emit("module:end", {
           scanId: this._scanId,
+          collectionId,
+          generation,
           file,
           moduleIndex,
           totalModules: this.modules.length,
@@ -866,6 +896,8 @@ ${normalizedSnippet}
         const count = perFileCounts.get(f) || 0;
         this.events.emit("file:end", {
           scanId: this._scanId,
+          collectionId,
+          generation,
           file: f,
           index,
           totalFiles,
@@ -873,36 +905,25 @@ ${normalizedSnippet}
         });
       });
 
-      this.events.emit("scan:summary", {
-        scanId: this._scanId,
-        totalFiles,
-        totalModules: this.modules.length,
-        totalFindings: filteredFindings.length,
-        totalArtifacts: {
-          routes: artifacts?.sast?.routes?.length || 0,
-          endpoints: artifacts?.sast?.endpoints?.length || 0,
-          graphql: artifacts?.sast?.graphql?.length || 0,
-          surfaces: artifacts?.sast?.surfaces?.length || 0,
-          hiddenParams: artifacts?.sast?.hiddenParams?.length || 0,
-          gadgets: artifacts?.sast?.gadgets?.length || 0
-        }
-      });
+      emitCollectionSummary({ findings: filteredFindings, artifacts });
 
       return {
         findings: filteredFindings,
         artifacts
       };
     } catch (err) {
-      this.events.emit("scan:error", {
+      this.events.emit("collection:error", {
         scanId: this._scanId,
+        collectionId,
+        generation,
         error: err?.message || String(err)
       });
       throw err;
     }
   }
 
-  async scanCode(scripts, html = "", file = "") {
-    const detail = await this.scanCodeDetailed(scripts, html, file);
+  async scanCode(scripts, html = "", file = "", options = {}) {
+    const detail = await this.scanCodeDetailed(scripts, html, file, options);
     return Array.isArray(detail?.findings) ? detail.findings : [];
   }
 

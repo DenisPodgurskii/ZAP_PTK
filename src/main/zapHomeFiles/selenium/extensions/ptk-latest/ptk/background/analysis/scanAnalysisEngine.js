@@ -22,6 +22,7 @@ import runRuleTemplateRenderWorkflows from "./rules/ruleTemplateRenderWorkflows.
 import runRuleIastRuntimeSignals from "./rules/ruleIastRuntimeSignals.js"
 import runRuleSastCodeArtifacts from "./rules/ruleSastCodeArtifacts.js"
 import { buildApiExplorer } from "./apiExplorerBuilder.js"
+import { validateScanAnalysisV1 } from "./scanAnalysisSchema.js"
 
 export const ANALYSIS_VERSION = "1.7.7"
 
@@ -2647,7 +2648,7 @@ function buildAnalysis(scanResult, { caps = DEFAULT_CAPS, extraEnginesPresent = 
     const attackMap = buildAttackMap(scanResult, patterns, diffAnnotated.candidates, discovery)
     const objectInventory = buildObjectInventory(scanResult, patterns, diffAnnotated.candidates, discovery)
     const explorer = buildApiExplorer(scanResult, { relatedScans })
-    return {
+    const analysis = {
         version: ANALYSIS_VERSION,
         scanId: scanResult?.scanId || null,
         coverage,
@@ -2660,6 +2661,8 @@ function buildAnalysis(scanResult, { caps = DEFAULT_CAPS, extraEnginesPresent = 
         opportunities,
         explorer
     }
+    analysis.schemaValidation = validateScanAnalysisV1(analysis)
+    return analysis
 }
 
 export function applyScanAnalysis(scanResult, { force = false, caps = DEFAULT_CAPS, extraEnginesPresent = [], previousAnalysis = null, relatedScans = [] } = {}) {

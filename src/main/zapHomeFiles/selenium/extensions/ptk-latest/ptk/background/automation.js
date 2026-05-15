@@ -5,6 +5,7 @@ import { zapBridge } from './integration/zap/index.js'
 import buildExportScanResult from './export/buildExportScanResult.js'
 import { resultsRegistry } from './resultsRegistry.js'
 import { collapseDastAggregatedFindings } from './dast/services/dastFindingAggregation.js'
+import { sastCollectionLooksComplete } from './sast/sast_progress.js'
 
 
 /**
@@ -28,6 +29,25 @@ function toNonEmptyString(value) {
 function toFiniteNumber(value, fallback = null) {
     const num = Number(value)
     return Number.isFinite(num) ? num : fallback
+}
+
+function cloneJsonSafe(value, { warnings = null, label = 'value' } = {}) {
+    if (value === undefined || value === null) return null
+    try {
+        return JSON.parse(JSON.stringify(value))
+    } catch (err) {
+        const message = `snapshot_clone_failed:${label}:${err?.message || String(err)}`
+        if (Array.isArray(warnings) && warnings.length < 12) {
+            warnings.push(message)
+        }
+        try {
+            console.warn('[PTK Automation] Failed to clone analysis snapshot field', {
+                label,
+                error: err?.message || String(err)
+            })
+        } catch (_) { }
+        return null
+    }
 }
 
 const STRICT_CURRENT_TAB_SESSION_SCOPE = 'current-tab'
@@ -352,6 +372,7 @@ export class ptk_automation {
         this.activeSessionByTabId = new Map() // tabId -> sessionId (enforce single session per tab)
         this.lastCompletedSessionByTabId = new Map() // tabId -> sessionId
         this.lastCompletedSessionGlobal = null       // fallback for any-tab export
+        this.evictedSessions = new Map()             // bounded diagnostics for missing-session failures
         this.MAX_COMPLETED_SESSIONS = 20
         this.SESSION_TTL_MS = 24 * 60 * 60 * 1000
         this.app = null
@@ -447,6 +468,10 @@ export class ptk_automation {
         }
     }
 
+    _isFirefoxRuntime() {
+        return !!browser?.runtime?.getBrowserInfo
+    }
+
     async _executeContentRuntimeFiles({ tabId = null, frameId = 0, files = [] } = {}) {
         if (!Number.isInteger(tabId) || tabId < 0) return false
         const normalizedFiles = Array.isArray(files)
@@ -454,7 +479,7 @@ export class ptk_automation {
             : []
         if (!normalizedFiles.length) return false
 
-        const isFirefox = !!browser?.runtime?.getBrowserInfo
+        const isFirefox = this._isFirefoxRuntime()
         const manifestVersion = Number(browser?.runtime?.getManifest?.()?.manifest_version || 2)
 
         if (!isFirefox && manifestVersion >= 3 && browser?.scripting?.executeScript) {
@@ -469,12 +494,12 @@ export class ptk_automation {
 
         if (browser?.tabs?.executeScript) {
             for (const file of normalizedFiles) {
-                await browser.tabs.executeScript(tabId, {
+                const details = {
                     file,
                     frameId: Number.isInteger(frameId) ? frameId : 0,
-                    runAt: 'document_idle',
-                    matchAboutBlank: true
-                })
+                    runAt: 'document_idle'
+                }
+                await browser.tabs.executeScript(tabId, details)
             }
             return true
         }
@@ -521,8 +546,9 @@ export class ptk_automation {
         }
         const profile = this._getContentRuntimeProfile({ tabId, frameId, url })
         const files = CONTENT_RUNTIME_FILES[profile.script] || []
+        const useStaticFirefoxManualRuntime = profile.script === CONTENT_RUNTIME_SCRIPT_MANUAL && this._isFirefoxRuntime()
 
-        if (files.length) {
+        if (files.length && !useStaticFirefoxManualRuntime) {
             try {
                 await this._executeContentRuntimeFiles({ tabId, frameId, files })
             } catch (error) {
@@ -591,6 +617,34 @@ export class ptk_automation {
         return enabled
     }
 
+    _isZapAutomationBridgeRequestAllowed(message = {}, sender = {}) {
+        const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
+        if (!Number.isInteger(tabId)) return false
+
+        // This method is reached only when global PTK automation is disabled.
+        // Do not let a page-forgeable postMessage payload use
+        // { source: 'zap_browser_close' } as a privileged stop command. ZAP's
+        // close contract initiates stop through the callback control channel
+        // (requestZapSessionStop); the bridge exception here is limited to
+        // same-tab progress reads after the session is already stopping.
+        if (message?.options?.source !== 'zap_browser_close') return false
+
+        const type = String(message?.type || '').replace(/_/g, '-')
+        if (type !== 'get-session-progress') return false
+
+        const requestedSessionId = toNonEmptyString(message?.sessionId)
+            || toNonEmptyString(message?.options?.sessionId)
+        if (!requestedSessionId) {
+            return false
+        }
+
+        const session = this.sessions.get(requestedSessionId)
+        if (session?.source !== 'zap') return false
+        if (!Number.isInteger(session?.tabId) || session.tabId !== tabId) return false
+
+        return Boolean(session.stopRequestedAt)
+    }
+
     onMessage(message, sender, sendResponse) {
         if (message.channel !== 'ptk_content2background_automation') {
             return false  // Explicitly indicate we don't handle this message
@@ -604,7 +658,7 @@ export class ptk_automation {
             }
 
             // Verify automation only after app/settings bootstrap has finished.
-            if (!this.isAutomationEnabled()) {
+            if (!this.isAutomationEnabled() && !this._isZapAutomationBridgeRequestAllowed(message, sender)) {
                 console.warn('[PTK Automation] Automation is disabled in settings, rejecting request')
                 return { error: 'automation_disabled', requestId: message.requestId }
             }
@@ -937,10 +991,68 @@ export class ptk_automation {
             })
     }
 
+    async requestZapSessionStop(sessionId, options = {}) {
+        const safeSessionId = toNonEmptyString(sessionId)
+        if (!safeSessionId) {
+            return { ok: false, error: 'missing_session_id' }
+        }
+        const session = this.sessions.get(safeSessionId)
+        if (!session || session.source !== 'zap') {
+            return { ok: false, error: 'session_not_found', sessionId: safeSessionId }
+        }
+        if (session.status === 'completed' || session.status === 'error') {
+            return {
+                ok: true,
+                sessionId: safeSessionId,
+                status: session.status,
+                alreadyTerminal: true,
+                source: options?.source || null
+            }
+        }
+
+        const timeoutMs = this._normalizeStopTimeoutMs(options?.timeoutMs)
+        if (session.stopRequestedAt) {
+            return {
+                ok: true,
+                sessionId: safeSessionId,
+                status: session.status || 'stopping',
+                stopRequestedAt: session.stopRequestedAt,
+                alreadyRequested: true,
+                source: options?.source || null
+            }
+        }
+
+        session.stopRequestedAt = new Date().toISOString()
+        session.status = 'stopping'
+
+        this._stopEnginesAsync(session, timeoutMs)
+            .then(stats => {
+                this._finalizeSession(session, stats)
+            })
+            .catch(err => {
+                console.error('[PTK Automation] Async ZAP stop failed', {
+                    sessionId: safeSessionId,
+                    source: options?.source || null,
+                    error: err?.message || String(err)
+                })
+                session.status = 'error'
+                session.error = err?.message || String(err)
+            })
+
+        return {
+            ok: true,
+            sessionId: safeSessionId,
+            status: 'stopping',
+            stopRequestedAt: session.stopRequestedAt,
+            source: options?.source || null
+        }
+    }
+
     async msg_session_end(message, sender) {
         const { requestId, wait = true, options = {} } = message
         const tabId = sender?.tab?.id
         const strictCurrentTab = this._isStrictCurrentTabScope(options)
+        const stopTimeoutMs = this._normalizeStopTimeoutMs(options?.stopTimeoutMs)
 
         const resolution = this._resolveSessionForRequest({
             sessionId: options?.sessionId || message.sessionId,
@@ -962,7 +1074,7 @@ export class ptk_automation {
             session.status = 'stopping'
 
             // Fire-and-forget stop with completion handler
-            this._stopEnginesAsync(session)
+            this._stopEnginesAsync(session, stopTimeoutMs)
                 .then(stats => {
                     this._finalizeSession(session, stats)
                 })
@@ -983,7 +1095,7 @@ export class ptk_automation {
 
         // === Blocking stop (wait=true, existing behavior) ===
         try {
-            const stats = await this._stopEngines(session)
+            const stats = await this._stopEngines(session, stopTimeoutMs)
             this._finalizeSession(session, stats)
 
             let findingsPayload = null
@@ -1019,7 +1131,7 @@ export class ptk_automation {
             allowGlobalCompleted: false
         })
         if (!resolution.ok) {
-            return { error: resolution.error, requestId }
+            return { error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
         }
         const session = resolution.session
 
@@ -1027,7 +1139,8 @@ export class ptk_automation {
         return {
             findingsCount: stats.findingsCount,
             bySeverity: stats.bySeverity,
-            requestId
+            requestId,
+            sessionLookup: resolution.sessionLookup
         }
     }
 
@@ -1046,13 +1159,39 @@ export class ptk_automation {
             allowGlobalCompleted: false
         })
         if (!resolution.ok) {
-            return { ok: false, error: resolution.error, requestId }
+            return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
         }
         const session = resolution.session
 
         const cappedLimit = Math.min(limit, MAX_FINDINGS_LIMIT)
         const { findings, truncated } = this._collectFindings(session, cappedLimit)
-        return { findings, truncated, requestId }
+        return { findings, truncated, requestId, sessionLookup: resolution.sessionLookup }
+    }
+
+    async msg_get_analysis_snapshot(message, sender) {
+        const { requestId, options = {} } = message
+        const tabId = sender?.tab?.id
+        const strictCurrentTab = this._isStrictCurrentTabScope(options)
+        const resolution = this._resolveSessionForRequest({
+            sessionId: options?.sessionId || message.sessionId,
+            tabId,
+            strictCurrentTab,
+            allowActive: true,
+            allowCompleted: true,
+            allowGlobalCompleted: false
+        })
+        if (!resolution.ok) {
+            return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
+        }
+
+        const snapshot = this._collectAnalysisSnapshot(resolution.session)
+        return {
+            ok: true,
+            requestId,
+            sessionId: resolution.sessionId,
+            sessionLookup: resolution.sessionLookup,
+            ...snapshot
+        }
     }
 
     /**
@@ -1074,17 +1213,18 @@ export class ptk_automation {
         })
 
         if (!resolution.ok) {
-            return { ok: false, error: resolution.error, requestId }
+            return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
         }
 
         const snapshot = this.getSessionProgressSnapshot(resolution.sessionId)
         if (!snapshot?.ok) {
-            return { ok: false, error: snapshot?.error || 'session_not_found', requestId }
+            return { ok: false, error: snapshot?.error || 'session_not_found', requestId, sessionLookup: resolution.sessionLookup }
         }
 
         return {
             ...snapshot,
-            requestId
+            requestId,
+            sessionLookup: resolution.sessionLookup
         }
     }
 
@@ -1102,22 +1242,25 @@ export class ptk_automation {
             allowGlobalCompleted: true
         })
         if (!resolution.ok) {
-            return { ok: false, error: resolution.error, requestId }
+            return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
         }
         const session = resolution.session
+        this._finalizeActiveSessionIfExportReady(session, 'export_scan')
+        this._finalizeStoppedSessionIfExportReady(session, 'export_scan')
         if (session.status !== 'completed') {
             return {
                 ok: false,
                 error: 'session_not_completed',
                 hint: 'Call end_session() before export_scan_payload()',
-                requestId
+                requestId,
+                sessionLookup: resolution.sessionLookup
             }
         }
 
         const requestedEngine = (options.engine || 'ALL').toUpperCase().trim()
         const validEngines = ['DAST', 'IAST', 'SAST', 'SCA', 'ALL']
         if (!validEngines.includes(requestedEngine)) {
-            return { ok: false, error: 'invalid_engine', requestId }
+            return { ok: false, error: 'invalid_engine', requestId, sessionLookup: resolution.sessionLookup }
         }
 
         const enginesToExport = requestedEngine === 'ALL'
@@ -1162,7 +1305,7 @@ export class ptk_automation {
         }
 
         if (!exports.length) {
-            return { ok: false, error: 'no_exportable_results', warnings, requestId }
+            return { ok: false, error: 'no_exportable_results', warnings, requestId, sessionLookup: resolution.sessionLookup }
         }
 
         return {
@@ -1170,7 +1313,8 @@ export class ptk_automation {
             scans: exports,
             truncatedAny: exports.some(e => e.truncated),
             warnings,
-            requestId
+            requestId,
+            sessionLookup: resolution.sessionLookup
         }
     }
 
@@ -1318,7 +1462,7 @@ export class ptk_automation {
     }
 
     // Use adapter.stop() which waits for idle
-    async _stopEngines(session) {
+    async _stopEngines(session, timeoutMs = 180000) {
         const stats = { findingsCount: 0, bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 } }
 
         for (const engineName of session.engines) {
@@ -1327,7 +1471,7 @@ export class ptk_automation {
 
             try {
                 // Adapter.stop() now waits for idle and returns stats
-                const engineStats = await adapter.stop(session.id, 180000)
+                const engineStats = await adapter.stop(session.id, timeoutMs)
                 const resolvedStats = this._resolveStoppedEngineStats(engineName, session, engineStats)
                 this._mergeStats(stats, resolvedStats)
                 session.engineStates[engineName] = { status: 'stopped' }
@@ -1343,7 +1487,7 @@ export class ptk_automation {
      * Stop engines asynchronously (fire-and-forget with completion tracking)
      * Updates engineStates as each engine stops
      */
-    async _stopEnginesAsync(session) {
+    async _stopEnginesAsync(session, timeoutMs = 180000) {
         const stats = this._createEmptyStats()
 
         // Mark all engines as stopping
@@ -1362,7 +1506,7 @@ export class ptk_automation {
             }
 
             try {
-                const engineStats = await adapter.stop(session.id)
+                const engineStats = await adapter.stop(session.id, timeoutMs)
                 const resolvedStats = this._resolveStoppedEngineStats(engineName, session, engineStats)
                 session.engineStates[engineName].status = 'stopped'
 
@@ -1387,6 +1531,12 @@ export class ptk_automation {
             findingsCount: 0,
             bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
         }
+    }
+
+    _normalizeStopTimeoutMs(value) {
+        const num = Number(value)
+        if (!Number.isFinite(num) || num <= 0) return 180000
+        return Math.max(250, Math.min(180000, Math.floor(num)))
     }
 
     _extractStatsFromScanResult(scanResult) {
@@ -1824,22 +1974,23 @@ export class ptk_automation {
 
         for (const { id, finishedAt } of completedSessions) {
             if (now - finishedAt > this.SESSION_TTL_MS) {
-                this._evictSession(id)
+                this._evictSession(id, 'ttl')
             }
         }
 
         const remaining = completedSessions.filter(s => this.sessions.has(s.id))
         while (remaining.length > this.MAX_COMPLETED_SESSIONS) {
             const oldest = remaining.shift()
-            this._evictSession(oldest.id)
+            this._evictSession(oldest.id, 'max_completed_sessions')
         }
     }
 
-    _evictSession(sessionId) {
+    _evictSession(sessionId, reason = 'retention') {
         const session = this.sessions.get(sessionId)
         if (!session) return
 
         debugAutomationLog('[PTK Automation] Evicting session', sessionId)
+        this._recordEvictedSession(session, reason)
         this.sessions.delete(sessionId)
 
         if (this.lastCompletedSessionGlobal === sessionId) {
@@ -1860,7 +2011,7 @@ export class ptk_automation {
             if (session.status === 'completed' && session.finishedAt) {
                 const age = now - new Date(session.finishedAt).getTime()
                 if (maxAge && age > maxAge) {
-                    this._evictSession(id)
+                    this._evictSession(id, 'cleanup_max_age')
                 } else {
                     completedSessions.push({ id, finishedAt: new Date(session.finishedAt).getTime() })
                 }
@@ -1871,8 +2022,25 @@ export class ptk_automation {
             completedSessions.sort((a, b) => a.finishedAt - b.finishedAt)
             while (completedSessions.length > keepCount) {
                 const oldest = completedSessions.shift()
-                this._evictSession(oldest.id)
+                this._evictSession(oldest.id, 'cleanup_keep_count')
             }
+        }
+    }
+
+    _recordEvictedSession(session, reason = 'retention') {
+        if (!session || !session.id) return
+        this.evictedSessions.set(session.id, {
+            sessionId: session.id,
+            tabId: session.tabId ?? null,
+            sessionStatus: session.status || null,
+            sessionFinishedAt: session.finishedAt || null,
+            stopRequestedAt: session.stopRequestedAt || null,
+            reason,
+            evictedAt: new Date().toISOString()
+        })
+        while (this.evictedSessions.size > Math.max(20, this.MAX_COMPLETED_SESSIONS * 2)) {
+            const oldest = this.evictedSessions.keys().next().value
+            this.evictedSessions.delete(oldest)
         }
     }
 
@@ -1938,6 +2106,60 @@ export class ptk_automation {
         return options?.sessionScope === STRICT_CURRENT_TAB_SESSION_SCOPE
     }
 
+    _baseSessionLookupDiagnostics({
+        sessionId = null,
+        tabId = null,
+        strictCurrentTab = false,
+        allowActive = true,
+        allowCompleted = false,
+        allowGlobalCompleted = false
+    } = {}) {
+        const requestedSessionId = toNonEmptyString(sessionId)
+        const activeSessionIdForTab = tabId ? this.activeSessionByTabId.get(tabId) || null : null
+        const completedSessionIdForTab = tabId ? this.lastCompletedSessionByTabId.get(tabId) || null : null
+        const candidateIds = [
+            requestedSessionId,
+            activeSessionIdForTab,
+            completedSessionIdForTab,
+            this.lastCompletedSessionGlobal
+        ].filter(Boolean)
+        const evicted = candidateIds.some(id => this.evictedSessions.has(id))
+        return {
+            requestedSessionId: requestedSessionId || null,
+            tabId: tabId ?? null,
+            strictCurrentTab: strictCurrentTab === true,
+            allowActive: allowActive === true,
+            allowCompleted: allowCompleted === true,
+            allowGlobalCompleted: allowGlobalCompleted === true,
+            lookupSource: 'none',
+            activeSessionIdForTab,
+            completedSessionIdForTab,
+            globalCompletedSessionId: this.lastCompletedSessionGlobal || null,
+            sessionExists: false,
+            sessionStatus: null,
+            sessionFinishedAt: null,
+            stopRequestedAt: null,
+            retention: {
+                ttlMs: this.SESSION_TTL_MS,
+                maxCompletedSessions: this.MAX_COMPLETED_SESSIONS,
+                evicted
+            }
+        }
+    }
+
+    _sessionLookupDiagnostics(request, session = null, lookupSource = 'none') {
+        const diagnostics = this._baseSessionLookupDiagnostics(request)
+        diagnostics.lookupSource = lookupSource || 'none'
+        diagnostics.sessionExists = Boolean(session)
+        if (session) {
+            diagnostics.sessionStatus = session.status || null
+            diagnostics.sessionFinishedAt = session.finishedAt || null
+            diagnostics.stopRequestedAt = session.stopRequestedAt || null
+            diagnostics.retention.evicted = this.evictedSessions.has(session.id)
+        }
+        return diagnostics
+    }
+
     /**
      * Resolve a session for a background request.
      *
@@ -1979,23 +2201,25 @@ export class ptk_automation {
         allowCompleted = false,
         allowGlobalCompleted = false
     } = {}) {
+        const request = { sessionId, tabId, strictCurrentTab, allowActive, allowCompleted, allowGlobalCompleted }
         if (strictCurrentTab && !tabId) {
-            return { ok: false, error: 'no_tab_context' }
+            return { ok: false, error: 'no_tab_context', sessionLookup: this._sessionLookupDiagnostics(request) }
         }
 
         const explicitSessionId = toNonEmptyString(sessionId)
         if (explicitSessionId) {
             const explicitSession = this.sessions.get(explicitSessionId)
             if (!explicitSession) {
-                return { ok: false, error: 'session_not_found' }
+                return { ok: false, error: 'session_not_found', sessionLookup: this._sessionLookupDiagnostics(request) }
             }
             if (strictCurrentTab && explicitSession.tabId !== tabId) {
-                return { ok: false, error: 'session_belongs_to_another_tab' }
+                return { ok: false, error: 'session_belongs_to_another_tab', sessionLookup: this._sessionLookupDiagnostics(request, explicitSession, 'explicit-session') }
             }
             return {
                 ok: true,
                 sessionId: explicitSessionId,
-                session: explicitSession
+                session: explicitSession,
+                sessionLookup: this._sessionLookupDiagnostics(request, explicitSession, 'explicit-session')
             }
         }
 
@@ -2003,6 +2227,7 @@ export class ptk_automation {
         if (tabId && allowActive) {
             candidates.push({
                 kind: 'active',
+                lookupSource: 'active-tab',
                 tabId,
                 sessionId: this.activeSessionByTabId.get(tabId)
             })
@@ -2010,6 +2235,7 @@ export class ptk_automation {
         if (tabId && allowCompleted) {
             candidates.push({
                 kind: 'completed-tab',
+                lookupSource: 'completed-tab',
                 tabId,
                 sessionId: this.lastCompletedSessionByTabId.get(tabId)
             })
@@ -2017,6 +2243,7 @@ export class ptk_automation {
         if (!strictCurrentTab && allowGlobalCompleted) {
             candidates.push({
                 kind: 'completed-global',
+                lookupSource: 'completed-global',
                 sessionId: this.lastCompletedSessionGlobal
             })
         }
@@ -2028,7 +2255,8 @@ export class ptk_automation {
                 return {
                     ok: true,
                     sessionId: candidate.sessionId,
-                    session
+                    session,
+                    sessionLookup: this._sessionLookupDiagnostics(request, session, candidate.lookupSource)
                 }
             }
 
@@ -2041,7 +2269,7 @@ export class ptk_automation {
             }
         }
 
-        return { ok: false, error: 'session_not_found' }
+        return { ok: false, error: 'session_not_found', sessionLookup: this._sessionLookupDiagnostics(request) }
     }
 
     async _checkIastContentReady(tabId) {
@@ -2115,6 +2343,85 @@ export class ptk_automation {
         return {
             findings: allFindings.slice(0, limit),
             truncated
+        }
+    }
+
+    _collectAnalysisSnapshot(session) {
+        const engines = []
+        const warnings = []
+        const summary = {
+            routes: 0,
+            endpoints: 0,
+            graphql: 0,
+            hiddenParams: 0,
+            surfaces: 0,
+            gadgets: 0,
+            findings: 0,
+            requests: 0,
+            runtimeEvents: 0
+        }
+
+        for (const engineName of session?.engines || []) {
+            let scanId = session.scanIds?.[engineName] || null
+            if (!scanId) {
+                scanId = resultsRegistry.findScanIdForEngine(engineName, {
+                    tabId: session.tabId,
+                    host: session.host
+                })
+            }
+
+            let scanResult = this._getEngineScanResult(engineName)
+            if (scanId && scanResult?.scanId !== scanId) {
+                scanResult = resultsRegistry.get(engineName, scanId)
+            }
+            if (!scanResult || typeof scanResult !== 'object') {
+                engines.push({
+                    engine: engineName,
+                    scanId,
+                    available: false,
+                    reason: 'scan_result_unavailable'
+                })
+                continue
+            }
+
+            const analysis = cloneJsonSafe(scanResult.analysis, { warnings, label: `${engineName}.analysis` })
+            const codeArtifacts = cloneJsonSafe(scanResult.codeArtifacts, { warnings, label: `${engineName}.codeArtifacts` })
+            const explorer = analysis?.explorer || null
+            const counts = {
+                findings: Array.isArray(scanResult.findings) ? scanResult.findings.length : 0,
+                requests: Array.isArray(scanResult.requests) ? scanResult.requests.length : 0,
+                runtimeEvents: Array.isArray(scanResult.runtimeEvents) ? scanResult.runtimeEvents.length : 0,
+                routes: Array.isArray(explorer?.routes) ? explorer.routes.length : 0,
+                endpoints: Array.isArray(explorer?.endpoints) ? explorer.endpoints.length : 0,
+                graphql: Array.isArray(explorer?.graphql) ? explorer.graphql.length : 0,
+                hiddenParams: Array.isArray(explorer?.hiddenParams) ? explorer.hiddenParams.length : 0,
+                surfaces: Array.isArray(explorer?.surfaces) ? explorer.surfaces.length : 0,
+                gadgets: Array.isArray(explorer?.gadgets) ? explorer.gadgets.length : 0
+            }
+            for (const [key, value] of Object.entries(counts)) {
+                summary[key] = (summary[key] || 0) + (Number(value) || 0)
+            }
+            engines.push({
+                engine: engineName,
+                scanId: scanResult.scanId || scanId || null,
+                available: true,
+                analysisVersion: scanResult.analysisVersion || analysis?.version || null,
+                analysis,
+                explorer,
+                codeArtifacts,
+                findingsCount: counts.findings,
+                requestsCount: counts.requests,
+                runtimeEventsCount: counts.runtimeEvents,
+                startedAt: scanResult.startedAt || session.startedAt || null,
+                finishedAt: scanResult.finishedAt || scanResult.finished || session.finishedAt || null
+            })
+        }
+
+        return {
+            status: session?.status || 'unknown',
+            engines,
+            summary,
+            warnings
         }
     }
 
@@ -2413,6 +2720,7 @@ export class ptk_automation {
         const now = Date.now()
         const startedAtMs = session.startedAt ? Date.parse(session.startedAt) : now
         const elapsedMs = now - startedAtMs
+        this._finalizeStoppedSessionIfExportReady(session, 'progress_snapshot')
         const sessionStatus = this._deriveSessionStatus(session)
 
         const enginesProgress = {}
@@ -2490,6 +2798,8 @@ export class ptk_automation {
         return {
             ok: true,
             sessionId,
+            tabId: session.tabId ?? null,
+            targetUrl: session.targetUrl || session.pageUrl || null,
             sessionStatus: snapshot.status,
             stopRequestedAt: session.stopRequestedAt || null,
             requiredEngines: runtimeSnapshot.requiredEngines,
@@ -2644,13 +2954,30 @@ export class ptk_automation {
         const liveProgress = this._getLiveSastAutomationProgress() || {}
         const automationState = this.app?.sast?.sessionCoordinator?.getAutomationState?.() || {}
         const scanResult = this.app?.sast?.scanResult || null
-        const phase = liveProgress.phase || engineProgress?.phase || null
+        const normalized = this._normalizeSastRuntimeFields({
+            phase: liveProgress.phase || engineProgress?.phase || null,
+            totalFiles: liveProgress.totalFiles ?? engineProgress?.totalFiles,
+            completedFiles: liveProgress.completedFiles ?? engineProgress?.completedFiles,
+            totalModules: liveProgress.totalModules ?? engineProgress?.totalModules,
+            completedModules: liveProgress.completedModules ?? engineProgress?.completedModules,
+            currentFile: liveProgress.currentFile || engineProgress?.currentFile || null,
+            currentModule: liveProgress.currentModule || engineProgress?.currentModule || null,
+            collectionState: automationState.collectionState || liveProgress.collectionState || engineProgress?.collectionState || null,
+            analysisState: automationState.analysisState || liveProgress.analysisState || engineProgress?.analysisState || null,
+            isSessionRunning: automationState.isSessionRunning === true || liveProgress.isRunning === true || engineProgress?.isRunning === true,
+            isAnalysisRunning: automationState.isAnalysisRunning === true || liveProgress.isAnalysisRunning === true || engineProgress?.isAnalysisRunning === true,
+            activeCollectionCount: automationState.activeCollectionCount,
+            currentGeneration: automationState.currentGeneration,
+            lastCompletedGeneration: automationState.lastCompletedGeneration || liveProgress.completedGeneration || engineProgress?.lastCompletedGeneration,
+            sessionState: automationState.sessionState || liveProgress.sessionState || engineProgress?.sessionState || null
+        })
+        const phase = normalized.phase || null
         const totalFiles = toFiniteNumber(liveProgress.totalFiles ?? engineProgress?.totalFiles, 0)
         const completedFiles = toFiniteNumber(liveProgress.completedFiles ?? engineProgress?.completedFiles, 0)
         const totalModules = toFiniteNumber(liveProgress.totalModules ?? engineProgress?.totalModules, 0)
         const completedModules = toFiniteNumber(liveProgress.completedModules ?? engineProgress?.completedModules, 0)
-        const currentFile = liveProgress.currentFile || engineProgress?.currentFile || null
-        const currentModule = liveProgress.currentModule || engineProgress?.currentModule || null
+        const currentFile = normalized.currentFile || null
+        const currentModule = normalized.currentModule || null
         const lastStatus = toNonEmptyString(liveProgress.lastStatus || engineProgress?.lastStatus) || null
         const findings = toFiniteNumber(liveProgress.findings ?? engineProgress?.findings, 0)
         const hints = toFiniteNumber(liveProgress.hints ?? engineProgress?.hints, 0)
@@ -2669,7 +2996,9 @@ export class ptk_automation {
 
         return {
             status: engineState?.status || 'unknown',
-            isRunning: liveProgress.isRunning === true || engineProgress?.isRunning === true,
+            isRunning: normalized.isSessionRunning === true,
+            isSessionRunning: normalized.isSessionRunning === true,
+            isAnalysisRunning: normalized.isAnalysisRunning === true,
             phase,
             totalFiles,
             completedFiles,
@@ -2683,12 +3012,153 @@ export class ptk_automation {
             firstCollectionStarted: automationState.firstCollectionStarted === true,
             firstCollectionSettled: automationState.firstCollectionSettled === true,
             firstCollectionError: toNonEmptyString(automationState.firstCollectionError) || null,
-            activeCollectionCount: toFiniteNumber(automationState.activeCollectionCount, 0),
-            collectionState: toNonEmptyString(automationState.collectionState) || null,
+            activeCollectionCount: normalized.activeCollectionCount,
+            collectionState: normalized.collectionState || null,
+            sessionState: normalized.sessionState || null,
+            analysisState: normalized.analysisState || null,
+            currentGeneration: normalized.currentGeneration,
+            lastCompletedGeneration: normalized.lastCompletedGeneration,
+            lastCompletedFile: toNonEmptyString(automationState.lastCompletedFile) || null,
+            lastCompletedModule: toNonEmptyString(automationState.lastCompletedModule) || null,
+            lastCompletedAt: toNonEmptyString(automationState.lastCompletedAt) || null,
             lastActivityAt,
             hasObservedWork,
             error: toNonEmptyString(engineProgress?.error) || toNonEmptyString(engineState?.error) || null
         }
+    }
+
+    _normalizeSastRuntimeFields(input = {}) {
+        const totalFiles = toFiniteNumber(input.totalFiles, 0)
+        const completedFiles = toFiniteNumber(input.completedFiles, 0)
+        const totalModules = toFiniteNumber(input.totalModules, 0)
+        const completedModules = toFiniteNumber(input.completedModules, 0)
+        const currentFile = toNonEmptyString(input.currentFile) || null
+        const currentModule = toNonEmptyString(input.currentModule) || null
+        const activeCollectionCount = toFiniteNumber(input.activeCollectionCount, 0)
+        const currentGeneration = toFiniteNumber(input.currentGeneration, 0)
+        const lastCompletedGeneration = toFiniteNumber(input.lastCompletedGeneration, 0)
+        const isSessionRunning = input.isSessionRunning === true
+        const collectionLooksComplete = sastCollectionLooksComplete({
+            totalFiles,
+            completedFiles,
+            totalModules,
+            completedModules,
+            currentFile,
+            currentModule,
+            analysisState: input.analysisState,
+            collectionState: input.collectionState
+        }, { activeCollectionCount })
+        if (!collectionLooksComplete) {
+            return {
+                phase: toNonEmptyString(input.phase) || null,
+                currentFile,
+                currentModule,
+                collectionState: toNonEmptyString(input.collectionState) || null,
+                sessionState: toNonEmptyString(input.sessionState) || null,
+                analysisState: toNonEmptyString(input.analysisState) || null,
+                isSessionRunning,
+                isAnalysisRunning: input.isAnalysisRunning === true,
+                activeCollectionCount,
+                currentGeneration,
+                lastCompletedGeneration
+            }
+        }
+        return {
+            phase: 'waiting',
+            currentFile: null,
+            currentModule: null,
+            collectionState: isSessionRunning ? 'waiting_for_page_activity' : 'completed',
+            sessionState: toNonEmptyString(input.sessionState) || (isSessionRunning ? 'running' : 'completed'),
+            analysisState: 'complete',
+            isSessionRunning,
+            isAnalysisRunning: false,
+            activeCollectionCount: 0,
+            currentGeneration,
+            lastCompletedGeneration: Math.max(lastCompletedGeneration, currentGeneration)
+        }
+    }
+
+    _finalizeActiveSessionIfExportReady(session, reason = 'unknown') {
+        if (!session || session.status === 'completed' || session.status === 'error') {
+            return false
+        }
+
+        if (!session.stopRequestedAt) {
+            return false
+        }
+
+        return this._finalizeStoppedSessionIfExportReady(session, reason)
+    }
+
+    _finalizeStoppedSessionIfExportReady(session, reason = 'unknown') {
+        if (!session || session.status === 'completed' || session.status === 'error' || !session.stopRequestedAt) {
+            return false
+        }
+
+        const engines = Array.isArray(session.engines) ? session.engines : []
+        if (!engines.length) return false
+
+        if (!engines.every(engineName => this._isEngineExportReady(session, engineName, { requireStop: true }))) return false
+
+        for (const engineName of engines) {
+            const engineUpper = String(engineName || '').toUpperCase()
+            session.engineStates[engineUpper] = session.engineStates[engineUpper] || {}
+            if (session.engineStates[engineUpper].status === 'stopping') {
+                session.engineStates[engineUpper].status = 'stopped'
+            }
+        }
+
+        session.warnings = Array.isArray(session.warnings) ? session.warnings : []
+        session.warnings.push({
+            code: 'session_finalized_after_idle_stop',
+            reason,
+            at: new Date().toISOString()
+        })
+        this._finalizeSession(session, this._collectCurrentStats(session))
+        return true
+    }
+
+    _isEngineExportReady(session, engineName, { requireStop = true } = {}) {
+        const engineUpper = String(engineName || '').toUpperCase()
+        const engineState = session.engineStates?.[engineUpper] || {}
+        const progress = this._getEngineProgress(engineUpper, engineState) || {}
+        const state = String(engineState.status || '').toLowerCase()
+        const status = String(progress.status || state || '').toLowerCase()
+        const phase = String(progress.phase || '').toLowerCase()
+        if (state === 'error' || status === 'error') return true
+        if (state === 'stopped' || state === 'completed' || status === 'stopped' || status === 'completed') return true
+
+        const remaining = toFiniteNumber(progress.remaining ?? progress.progress?.remaining, 0)
+        const activeTasks = toFiniteNumber(progress.activeTasks, 0)
+        const taskQueue = toFiniteNumber(progress.taskQueue, 0)
+        const requestQueue = toFiniteNumber(progress.requestQueue, 0)
+        const pendingPlans = toFiniteNumber(progress.pendingPlans, 0)
+        const planning = toFiniteNumber(progress.planning, 0)
+        const done = toFiniteNumber(progress.progress?.done, null)
+        const total = toFiniteNumber(progress.progress?.total, null)
+        const finiteComplete = total !== null && done !== null && done >= total
+        const queueEmpty = remaining <= 0 && activeTasks <= 0 && taskQueue <= 0 && requestQueue <= 0 && pendingPlans <= 0 && planning <= 0
+        const hasExplicitWorkCounters = [
+            progress.remaining,
+            progress.progress?.remaining,
+            progress.activeTasks,
+            progress.taskQueue,
+            progress.requestQueue,
+            progress.pendingPlans,
+            progress.planning
+        ].some(value => typeof value !== 'undefined' && value !== null)
+        const sastComplete = engineUpper === 'SAST'
+            && queueEmpty
+            && (finiteComplete || progress.totalFiles > 0 && progress.completedFiles >= progress.totalFiles)
+            && !progress.currentFile
+            && !progress.currentModule
+            && !/collection_pending|payload_received|analyzing|running/i.test(`${progress.collectionState || ''} ${progress.analysisState || ''}`)
+        const passiveComplete = ['IAST', 'SCA'].includes(engineUpper) && queueEmpty && !hasExplicitWorkCounters
+        const idleComplete = (state === 'stopping' || status === 'stopping' || status === 'idle' || phase === 'idle')
+            && (hasExplicitWorkCounters || progress.idle === true || status === 'idle' || phase === 'idle')
+            && queueEmpty
+        if (requireStop && !session.stopRequestedAt) return false
+        return idleComplete || finiteComplete && queueEmpty || sastComplete || passiveComplete
     }
 
     /**
@@ -2821,17 +3291,44 @@ export class ptk_automation {
         } else if (engineUpper === 'SAST') {
             const liveProgress = this._getLiveSastAutomationProgress()
             if (liveProgress) {
-                result.phase = liveProgress.phase || null
+                const normalized = this._normalizeSastRuntimeFields({
+                    phase: liveProgress.phase || null,
+                    totalFiles: liveProgress.totalFiles,
+                    completedFiles: liveProgress.completedFiles,
+                    totalModules: liveProgress.totalModules,
+                    completedModules: liveProgress.completedModules,
+                    currentFile: liveProgress.currentFile || null,
+                    currentModule: liveProgress.currentModule || null,
+                    collectionState: liveProgress.collectionState || null,
+                    analysisState: liveProgress.analysisState || null,
+                    isSessionRunning: liveProgress.isRunning === true || liveProgress.isSessionRunning === true,
+                    isAnalysisRunning: liveProgress.isAnalysisRunning === true,
+                    activeCollectionCount: liveProgress.activeCollectionCount,
+                    currentGeneration: liveProgress.currentGeneration,
+                    lastCompletedGeneration: liveProgress.lastCompletedGeneration || liveProgress.completedGeneration
+                })
+                result.phase = normalized.phase || null
                 result.totalFiles = toFiniteNumber(liveProgress.totalFiles, 0)
                 result.completedFiles = toFiniteNumber(liveProgress.completedFiles, 0)
                 result.totalModules = toFiniteNumber(liveProgress.totalModules, 0)
                 result.completedModules = toFiniteNumber(liveProgress.completedModules, 0)
-                result.currentFile = liveProgress.currentFile || null
-                result.currentModule = liveProgress.currentModule || null
+                result.currentFile = normalized.currentFile || null
+                result.currentModule = normalized.currentModule || null
                 result.lastStatus = toNonEmptyString(liveProgress.lastStatus) || null
                 result.findings = toFiniteNumber(liveProgress.findings, 0)
                 result.hints = toFiniteNumber(liveProgress.hints, 0)
-                result.isRunning = liveProgress.isRunning === true
+                result.isRunning = normalized.isSessionRunning === true
+                result.isSessionRunning = normalized.isSessionRunning === true
+                result.isAnalysisRunning = normalized.isAnalysisRunning === true
+                result.collectionState = normalized.collectionState || null
+                result.sessionState = normalized.sessionState || null
+                result.analysisState = normalized.analysisState || null
+                result.activeCollectionCount = normalized.activeCollectionCount
+                result.currentGeneration = normalized.currentGeneration
+                result.lastCompletedGeneration = normalized.lastCompletedGeneration
+                result.lastCompletedFile = toNonEmptyString(liveProgress.lastCompletedFile) || null
+                result.lastCompletedModule = toNonEmptyString(liveProgress.lastCompletedModule) || null
+                result.lastCompletedAt = toNonEmptyString(liveProgress.lastCompletedAt) || null
                 if (result.totalFiles > 0) {
                     result.progress = {
                         done: result.completedFiles,
@@ -2851,7 +3348,7 @@ export class ptk_automation {
                     }
                 }
                 const phase = String(result.phase || '').toLowerCase()
-                result.idle = result.isRunning !== true && (phase === 'waiting' || phase === 'idle')
+                result.idle = result.isAnalysisRunning !== true && (phase === 'waiting' || phase === 'idle')
             } else {
                 result.progress = {
                     done: result.findingsCount,

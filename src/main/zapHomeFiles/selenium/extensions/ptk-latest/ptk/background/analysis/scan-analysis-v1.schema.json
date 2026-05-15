@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ptk-scan-analysis-v1.schema.json",
+  "title": "PTK Scan Analysis v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version", "explorer"],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "scanId": {
+      "type": ["string", "null"]
+    },
+    "explorer": {
+      "$ref": "#/$defs/explorer"
+    }
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "id": {
+          "type": ["string", "null"]
+        },
+        "loc": {
+          "type": "object"
+        }
+      }
+    },
+    "baseExplorerItem": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": ["string", "null"]
+        },
+        "routeKey": {
+          "type": ["string", "null"]
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "url": {
+          "type": ["string", "null"]
+        },
+        "enginesPresent": {
+          "$ref": "#/$defs/stringList"
+        },
+        "sources": {
+          "$ref": "#/$defs/stringList"
+        },
+        "authHints": {
+          "$ref": "#/$defs/stringList"
+        },
+        "pageUrls": {
+          "$ref": "#/$defs/stringList"
+        },
+        "adminLike": {
+          "type": "boolean"
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          },
+          "default": []
+        }
+      }
+    },
+    "explorer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "routes", "endpoints", "graphql", "hiddenParams", "surfaces", "gadgets"],
+      "properties": {
+        "summary": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/baseExplorerItem" },
+              {
+                "type": "object",
+                "properties": {
+                  "routeType": {
+                    "type": "string"
+                  },
+                  "frameworks": {
+                    "$ref": "#/$defs/stringList"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/baseExplorerItem" },
+              {
+                "type": "object",
+                "properties": {
+                  "paramNames": { "$ref": "#/$defs/stringList" },
+                  "bodyKeys": { "$ref": "#/$defs/stringList" },
+                  "headerNames": { "$ref": "#/$defs/stringList" },
+                  "contentTypes": { "$ref": "#/$defs/stringList" },
+                  "transports": { "$ref": "#/$defs/stringList" }
+                }
+              }
+            ]
+          }
+        },
+        "graphql": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/baseExplorerItem" },
+              {
+                "type": "object",
+                "properties": {
+                  "operationTypes": { "$ref": "#/$defs/stringList" },
+                  "operationNames": { "$ref": "#/$defs/stringList" },
+                  "rootFields": { "$ref": "#/$defs/stringList" },
+                  "variableNames": { "$ref": "#/$defs/stringList" }
+                }
+              }
+            ]
+          }
+        },
+        "hiddenParams": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/baseExplorerItem" },
+              {
+                "type": "object",
+                "properties": {
+                  "paramName": { "type": ["string", "null"] },
+                  "container": { "type": "string" },
+                  "hintTypes": { "$ref": "#/$defs/stringList" }
+                }
+              }
+            ]
+          }
+        },
+        "surfaces": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/baseExplorerItem" },
+              {
+                "type": "object",
+                "properties": {
+                  "surfaceType": { "type": "string" },
+                  "label": { "type": ["string", "null"] },
+                  "hintNames": { "$ref": "#/$defs/stringList" }
+                }
+              }
+            ]
+          }
+        },
+        "gadgets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/baseExplorerItem"
+          },
+          "default": []
+        }
+      }
+    }
+  }
+}

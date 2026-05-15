@@ -24,11 +24,16 @@ self.onmessage = async (event) => {
       const eventNames = [
         "progress",
         "scan:start",
+        "collection:start",
+        "collection:payload",
+        "collection:analysis:start",
         "file:start",
         "file:end",
         "module:start",
         "module:end",
         "findings:partial",
+        "collection:summary",
+        "collection:error",
         "scan:summary",
         "scan:error"
       ];
@@ -47,7 +52,7 @@ self.onmessage = async (event) => {
   }
 
   if (type === "scan_code") {
-    const { scripts, html, file } = msg;
+    const { scripts, html, file, generation, collectionId } = msg;
     const engine = engines.get(scanId);
     if (!engine) {
       self.postMessage({ type: "error", scanId, error: "no_engine_for_scan" });
@@ -55,7 +60,7 @@ self.onmessage = async (event) => {
     }
 
     try {
-      const detail = await engine.scanCodeDetailed(scripts, html, file);
+      const detail = await engine.scanCodeDetailed(scripts, html, file, { generation, collectionId });
       self.postMessage({
         type: "scan_result",
         scanId,

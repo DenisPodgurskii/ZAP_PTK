@@ -7,6 +7,16 @@ const runtime = (typeof browser !== 'undefined' && browser?.runtime)
     ? browser.runtime
     : (typeof chrome !== 'undefined' && chrome?.runtime ? chrome.runtime : null);
 const sharedIastBridgeActive = window.__PTK_SHARED_IAST_CONTENT_BRIDGE__ === true;
+const ptkAutomationVersion = (() => {
+    try {
+        const manifest = runtime?.getManifest ? runtime.getManifest() : null;
+        return manifest?.version || 'unknown';
+    } catch (_) {
+        return 'unknown';
+    }
+})();
+let automationNonce = null;
+let automationMessageHandlerInstalled = false;
 
 function sendRuntimeMessage(payload) {
     if (!runtime?.sendMessage) return Promise.resolve();
@@ -16,6 +26,159 @@ function sendRuntimeMessage(payload) {
         return Promise.resolve();
     }
 }
+
+function runtimeGetURL(path) {
+    if (!runtime?.getURL) return null;
+    try {
+        return runtime.getURL(path);
+    } catch (_) {
+        return null;
+    }
+}
+
+function normalizeAutomationBridgeResponse(type, response) {
+    const isSuccessfulResponse = response && response.ok !== false && response.success !== false;
+    if (type === 'export-scan-chunk' && isSuccessfulResponse) {
+        if (response.chunk instanceof Uint8Array) {
+            return response;
+        }
+
+        const serializedChunk = response.chunk;
+        if (Array.isArray(serializedChunk)) {
+            return {
+                ...response,
+                chunk: Uint8Array.from(serializedChunk)
+            };
+        }
+
+        if (serializedChunk && typeof serializedChunk === 'object') {
+            const byteKeys = Object.keys(serializedChunk)
+                .filter((key) => /^\d+$/.test(key))
+                .sort((left, right) => Number(left) - Number(right));
+
+            if (byteKeys.length) {
+                return {
+                    ...response,
+                    chunk: Uint8Array.from(byteKeys.map((key) => serializedChunk[key]))
+                };
+            }
+        }
+    }
+
+    return response;
+}
+
+function installPtkAutomationBridge(version, nonce, automationEnabledState) {
+    try {
+        if (window.PTK_AUTOMATION?.bridgeId === 'ptk-automation-bridge') return;
+        const src = runtimeGetURL('ptk/automationBridge.js');
+        if (!src) return;
+        const script = document.createElement('script');
+        script.src = src;
+        script.dataset.ptkVersion = version || 'unknown';
+        script.dataset.ptkNonce = nonce || '';
+        script.dataset.ptkAutomationEnabled = automationEnabledState ? '1' : '0';
+        const parent = document.documentElement || document.head || document.body;
+        if (parent) {
+            parent.appendChild(script);
+        }
+    } catch (_) { }
+}
+
+function notifyAutomationStatus(enabled, nonce) {
+    try {
+        window.postMessage({
+            source: 'ptk-extension',
+            type: 'automation-status',
+            enabled: enabled === true,
+            nonce: nonce || ''
+        }, '*');
+    } catch (_) { }
+}
+
+function handleAutomationBridgeMessage(data) {
+    const validTypes = [
+        'session-start',
+        'session-end',
+        'get-stats',
+        'get-findings',
+        'get-analysis-snapshot',
+        'export-scan',
+        'get-session-progress',
+        'export-scan-chunk',
+        'release-export-scan'
+    ];
+    if (!validTypes.includes(data.type)) return;
+
+    const payload = {
+        channel: 'ptk_content2background_automation',
+        type: data.type,
+        sessionId: data.sessionId,
+        options: data.options || {},
+        includeFindings: data.includeFindings === true,
+        limit: data.limit,
+        wait: data.wait,
+        pageUrl: window.location.href,
+        requestId: data.requestId
+    };
+
+    sendRuntimeMessage(payload).then((response) => {
+        const normalizedResponse = normalizeAutomationBridgeResponse(data.type, response);
+        window.postMessage({
+            source: 'ptk-extension',
+            nonce: automationNonce,
+            requestId: data.requestId,
+            ...normalizedResponse
+        }, '*');
+    }).catch((error) => {
+        window.postMessage({
+            source: 'ptk-extension',
+            nonce: automationNonce,
+            requestId: data.requestId,
+            error: error?.message || 'PTK automation error'
+        }, '*');
+    });
+}
+
+function enableZapAutomationBridge() {
+    if (automationMessageHandlerInstalled) return;
+    automationMessageHandlerInstalled = true;
+    automationNonce = `ptk-zap-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    // The nonce is exposed to the WebDriver-controlled page as a correlation
+    // guard, not a secret. Browser-close safety is trusted only when it flows
+    // through ZAP's callback/zapid handling and the background confirms session
+    // progress for this tab.
+    let nonceEl = document.getElementById('__ptk_automation_nonce__');
+    if (!nonceEl) {
+        nonceEl = document.createElement('div');
+        nonceEl.id = '__ptk_automation_nonce__';
+        nonceEl.style.display = 'none';
+        const parent = document.documentElement || document.body;
+        if (parent) parent.appendChild(nonceEl);
+    }
+    if (nonceEl) {
+        nonceEl.dataset.nonce = automationNonce;
+    }
+
+    installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true);
+    notifyAutomationStatus(true, automationNonce);
+    [50, 250, 1000].forEach((delayMs) => {
+        try {
+            setTimeout(() => notifyAutomationStatus(true, automationNonce), delayMs);
+        } catch (_) { }
+    });
+
+    window.addEventListener('message', (event) => {
+        if (event.source !== window) return;
+        const data = event.data;
+        if (data?.source !== 'ptk-automation') return;
+        if (data.nonce !== automationNonce) return;
+        handleAutomationBridgeMessage(data);
+    });
+}
+
+enableZapAutomationBridge();
 
 const SAST_INLINE_HANDLER_ATTRIBUTES = Object.freeze([
     'onclick', 'ondblclick', 'onmousedown', 'onmouseup', 'onmouseover', 'onmouseout',
@@ -74,6 +237,19 @@ function isExecutableSastScriptElement(scriptEl) {
     return /^(?:text|application)\/(?:javascript|ecmascript|x-javascript|x-ecmascript)$/i.test(rawType);
 }
 
+function isSameOriginSastScriptUrl(src) {
+    if (!src) return true;
+    try {
+        const scriptUrl = new URL(src, document.URL);
+        const pageUrl = new URL(document.URL);
+        return scriptUrl.protocol === 'http:' || scriptUrl.protocol === 'https:'
+            ? scriptUrl.origin === pageUrl.origin
+            : false;
+    } catch (_) {
+        return false;
+    }
+}
+
 function collectSastPayload() {
     const scripts = Array.from(document.scripts)
         .filter(isExecutableSastScriptElement)
@@ -83,7 +259,7 @@ function collectSastPayload() {
         }))
         .filter((script) => {
             if (!script.src) return true;
-            return /^https?:\/\//i.test(script.src);
+            return isSameOriginSastScriptUrl(script.src);
         });
 
     return {
@@ -94,6 +270,13 @@ function collectSastPayload() {
 }
 
 if (runtime?.onMessage) runtime.onMessage.addListener(function (message) {
+    if (message?.channel === 'ptk_background2content_automation' && message?.payload) {
+        try {
+            window.postMessage(message.payload, '*');
+        } catch (_) { }
+        return Promise.resolve({ ok: true });
+    }
+
     if (message?.channel === 'ptk_background2content_sast') {
         if (message.type === 'collect_scripts') {
             const payload = collectSastPayload();

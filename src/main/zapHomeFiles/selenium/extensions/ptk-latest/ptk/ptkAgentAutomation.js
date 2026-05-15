@@ -18,6 +18,7 @@
         'scanStatus',
         'stopScan',
         'getFindings',
+        'getAnalysisSnapshot',
         'exportFullReport'
     ])
     const PTK_AGENT_ENGINES = Object.freeze(['DAST', 'IAST', 'SAST', 'SCA'])
@@ -65,13 +66,14 @@
     const PTK_AGENT_SESSION_SCOPE = 'current-tab'
 
     // PTK_AGENT workflow helpers
-    function toAgentFailure(errorCode, fallback = 'unexpected_error') {
+    function toAgentFailure(errorCode, fallback = 'unexpected_error', extras = {}) {
         errorCode = errorCode || fallback
         errorCode = PTK_AGENT_ERROR_CODE_ALIASES[errorCode] || errorCode
         return {
             ok: false,
             code: errorCode,
-            message: PTK_AGENT_ERROR_MESSAGE_OVERRIDES[errorCode] || errorCode
+            message: PTK_AGENT_ERROR_MESSAGE_OVERRIDES[errorCode] || errorCode,
+            ...extras
         }
     }
 
@@ -256,10 +258,11 @@
                             status: 'none',
                             engines: {},
                             summary: null,
-                            warnings: []
+                            warnings: [],
+                            ...(result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {})
                         }
                     }
-                    return toAgentFailure(result?.error || 'session_status_failed', 'session_status_failed')
+                    return toAgentFailure(result?.error || 'session_status_failed', 'session_status_failed', result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {})
                 }
 
                 return withNormalizedWorkflowStatus({
@@ -273,6 +276,7 @@
                     engines: result?.engines ?? {},
                     summary: result?.summary ?? null,
                     warnings: Array.isArray(result?.warnings) ? result.warnings : [],
+                    ...(result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {}),
                     ...(result?.finalSummary ? { finalSummary: result.finalSummary } : {})
                 }, result?.status ?? null)
             } catch (err) {
@@ -311,7 +315,7 @@
                     ...(result?.stats ? { stats: result.stats } : {}),
                     ...(Array.isArray(result?.findings) ? { findings: result.findings } : {}),
                     ...(typeof result?.truncated !== 'undefined' ? { truncated: result.truncated } : {})
-                }, result?.status ?? null)
+                }, result?.status ?? result?.summary?.status ?? null)
             } catch (err) {
                 return toAgentFailure(err?.message || 'session_stop_failed', 'session_stop_failed')
             }
@@ -341,15 +345,53 @@
             try {
                 const result = await automation.getFindings(lookupOptions)
                 if (result?.ok === false) {
-                    return toAgentFailure(result?.error || 'get_findings_failed', 'get_findings_failed')
+                    return toAgentFailure(result?.error || 'get_findings_failed', 'get_findings_failed', result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {})
                 }
                 return {
                     ok: true,
                     findings: Array.isArray(result?.findings) ? result.findings : [],
-                    truncated: result?.truncated === true
+                    truncated: result?.truncated === true,
+                    ...(result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {})
                 }
             } catch (err) {
                 return toAgentFailure(err?.message || 'get_findings_failed', 'get_findings_failed')
+            }
+        },
+
+        /**
+         * Fetch compact PTK analysis/explorer evidence through the workflow layer.
+         * The method is optional from a product perspective, so callers should
+         * handle unavailable snapshots without failing a scan.
+         * @param {Object} options
+         * @returns {Promise<{ok: true, engines: Array, summary?: Object} | {ok: false, code: string, message: string}>}
+         */
+        async getAnalysisSnapshot(options = {}) {
+            const automation = window.PTK_AUTOMATION
+            if (!automation) {
+                return toAgentFailure('automation_bridge_unavailable')
+            }
+            if (automation._automationEnabled === false) {
+                return toAgentFailure('automation_disabled')
+            }
+            if (typeof automation.getAnalysisSnapshot !== 'function') {
+                return toAgentFailure('missing_low_level_method:getAnalysisSnapshot', 'analysis_snapshot_unavailable')
+            }
+
+            try {
+                const result = await automation.getAnalysisSnapshot(withAgentSessionScope(options))
+                if (result?.ok === false) {
+                    return toAgentFailure(result?.error || 'analysis_snapshot_unavailable', 'analysis_snapshot_unavailable', result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {})
+                }
+                return {
+                    ok: true,
+                    sessionId: result?.sessionId ?? null,
+                    engines: Array.isArray(result?.engines) ? result.engines : [],
+                    summary: result?.summary || null,
+                    warnings: Array.isArray(result?.warnings) ? result.warnings : [],
+                    ...(result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {})
+                }
+            } catch (err) {
+                return toAgentFailure(err?.message || 'analysis_snapshot_unavailable', 'analysis_snapshot_unavailable')
             }
         },
 
@@ -392,7 +434,7 @@
                 const result = await automation.exportScan(exportOptions)
                 if (result?.ok === false) {
                     return {
-                        ...toAgentFailure(result?.error || 'export_failed', 'export_failed'),
+                        ...toAgentFailure(result?.error || 'export_failed', 'export_failed', result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {}),
                         warnings: Array.isArray(result?.warnings) ? result.warnings : []
                     }
                 }
@@ -402,7 +444,8 @@
                     mode: 'retrieval-plan',
                     scans: Array.isArray(result?.scans) ? result.scans : [],
                     truncatedAny: result?.truncatedAny === true,
-                    warnings: Array.isArray(result?.warnings) ? result.warnings : []
+                    warnings: Array.isArray(result?.warnings) ? result.warnings : [],
+                    ...(result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {})
                 }
             } catch (err) {
                 return toAgentFailure(err?.message || 'export_failed', 'export_failed')

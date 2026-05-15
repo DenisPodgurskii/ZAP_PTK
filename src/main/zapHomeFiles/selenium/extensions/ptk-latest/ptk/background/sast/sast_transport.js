@@ -113,7 +113,7 @@ export class SastTransport {
     }
   }
 
-  async scanCodeRemote({ scanId, scripts, html, file, timeoutMs = 30000 } = {}) {
+  async scanCodeRemote({ scanId, scripts, html, file, generation = null, collectionId = null, timeoutMs = 30000 } = {}) {
     if (worker.isFirefox) {
       if (!this.sastWorker) return null;
       this.sastWorker.postMessage({
@@ -121,7 +121,9 @@ export class SastTransport {
         scanId,
         scripts,
         html,
-        file
+        file,
+        generation,
+        collectionId
       });
       return this.asyncSession.waitForScanResult(file, timeoutMs);
     }
@@ -134,7 +136,9 @@ export class SastTransport {
         scanId,
         scripts,
         html,
-        file
+        file,
+        generation,
+        collectionId
       });
     } catch (err) {
       console.error("Failed to send code to SAST offscreen worker", err);
@@ -199,13 +203,16 @@ export class SastTransport {
 
       if (attempt < attempts) {
         const tabUrl = await this.browserApi.tabs.get(tabId).then((tab) => tab?.url || "").catch(() => "");
+        const missingReceiver = isMissingReceiverError(lastError);
         console.warn("[SAST] Script collection retry scheduled", {
           attempt,
           attempts,
           tabId,
           tabUrl,
+          reason: missingReceiver ? "content_receiver_missing" : "collection_failed",
           error: lastError?.message || String(lastError)
         });
+        if (missingReceiver && attempt >= 2) break;
         await this.waitForSpaIdle(tabId, retryDelayMs * attempt);
       }
     }
@@ -232,6 +239,11 @@ export class SastTransport {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
+}
+
+function isMissingReceiverError(error) {
+  const message = String(error?.message || error || "");
+  return /receiving end does not exist|could not establish connection|message port closed/i.test(message);
 }
 
 export default SastTransport;

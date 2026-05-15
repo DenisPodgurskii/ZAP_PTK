@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "ptk-zap-extension-provenance-v1",
+  "package": "ZAP_PTK",
+  "extension": {
+    "name": "OWASP Penetration Testing Kit",
+    "version": "9.9.1",
+    "manifestVersion": 3
+  },
+  "note": "Chrome Web Store _metadata/verified_contents.json is store-generated and is not available for locally built pre-release CRX artifacts. This provenance file records the bundled artifact hashes used by the ZAP add-on.",
+  "paths": {
+    "chromiumCrx": "selenium/extensions/ptk-latest/ptk-latest.crx",
+    "chromiumUnpacked": "selenium/extensions/ptk-latest",
+    "firefoxXpi": "selenium/extensions/ptk-latest.xpi",
+    "manifest": "selenium/extensions/ptk-latest/manifest.json"
+  },
+  "hashes": {
+    "crxSha256": "fa9ef5a1612e9bb9ea0c048d81c366b2af2db15c8c9bfe9bebb36817441b3b1b",
+    "xpiSha256": "cc793764d6b74e8ed18ee585371c23402025acbfcb42ee51894a9de751144bd9",
+    "manifestSha256": "e932d6953f74e0e6f42ff17e25a0ac106d43ef774287dbfca04524890465bee9",
+    "unpackedTreeSha256": "724c2138ee7ac82301a7cabecc0755438c0c63f8c37d136a88580004a6e06a84"
+  },
+  "sizes": {
+    "crxBytes": 9427446,
+    "xpiBytes": 9383679,
+    "manifestBytes": 3428,
+    "unpackedFileCount": 1386
+  },
+  "createdAt": "2026-05-15T09:38:50.244Z"
+}

@@ -706,6 +706,18 @@ class ZapTransport {
             progress: payload.progress,
             status: payload.status
         }
+        if (toNonEmptyString(payload.phase)) {
+            body.phase = payload.phase.trim()
+        }
+        if (toNonEmptyString(payload.sessionId)) {
+            body.sessionId = payload.sessionId.trim()
+        }
+        if (toNonEmptyString(payload.targetUrl)) {
+            body.targetUrl = payload.targetUrl.trim()
+        }
+        if (typeof payload.safeToClose === 'boolean') {
+            body.safeToClose = payload.safeToClose
+        }
         if (toNonEmptyString(payload.message)) {
             body.message = payload.message.trim()
         }
@@ -718,7 +730,14 @@ class ZapTransport {
             body
         })
         const response = await this._postJsonWithRetry(this.progressUrl, body, 'zap_progress_failed')
-        return response
+        let data = null
+        try {
+            const text = await response.clone().text()
+            data = text ? JSON.parse(text) : null
+        } catch (err) {
+            debugLog('[PTK ZAP] Progress response parse skipped:', err?.message || String(err))
+        }
+        return { response, data }
     }
 
     // Backward-compatible alias.

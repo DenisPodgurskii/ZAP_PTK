@@ -5286,7 +5286,6 @@ export class dastEngine {
     }
 
     async _ensureSpaHarnessReady(tabId, task, taskContext) {
-        if (!this._isFirefoxRuntime()) return true
         try {
             const ping = await browser.tabs.sendMessage(tabId, { type: 'spaPing' })
             if (ping?.ok === true) {
@@ -5828,7 +5827,6 @@ export class dastEngine {
         const payload = task?.payload || {}
         const uiUrl = payload.ui_url
         const checks = payload.checks || []
-        const isFirefox = this._isFirefoxRuntime()
         const taskContext = { original: { request: { url: uiUrl || null, ui_url: uiUrl || null, method: 'GET' } } }
         if (!uiUrl) {
             this._appendRuntimeEvent(Object.assign(
@@ -5865,13 +5863,14 @@ export class dastEngine {
                 }
                 const sendChecks = () => browser.tabs.sendMessage(tabId, message)
 
-                if (isFirefox) {
-                    await this._ensureSpaHarnessReady(tabId, task, taskContext)
+                const ready = await this._ensureSpaHarnessReady(tabId, task, taskContext)
+                if (!ready) {
+                    return null
                 }
 
                 try {
                     let result = await sendChecks()
-                    if (isFirefox && this._spaResponseMissingChecks(result, checks)) {
+                    if (this._spaResponseMissingChecks(result, checks)) {
                         const reinjected = await this._injectSpaHarness(
                             tabId,
                             task,
@@ -5900,7 +5899,7 @@ export class dastEngine {
 
         try {
             const res = await runChecks()
-            if (isFirefox && this._spaResponseMissingChecks(res, checks)) {
+            if (this._spaResponseMissingChecks(res, checks)) {
                 const missingChecks = checks.filter((checkName) => !Object.prototype.hasOwnProperty.call(res || {}, checkName))
                 this._appendTaskRuntimeEvent(task, taskContext, {
                     type: 'dast_spa_filtered',
@@ -6227,18 +6226,20 @@ export class dastEngine {
         let tabId = null
         try {
             const isFirefox = typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo
+            const markedUrl = this._addSpaDialogMarker(url)
             if (isFirefox) {
-                const markedUrl = this._addSpaDialogMarker(url)
                 const tab = await browser.tabs.create({ url: markedUrl, active: false })
                 tabId = tab.id
                 await this._markSpaAttackTab(tabId, { runAt: "document_start" })
             } else {
-                const tab = await browser.tabs.create({ url: "about:blank", active: false })
+                const tab = await browser.tabs.create({ url: markedUrl, active: false })
                 tabId = tab.id
-                await this._markSpaAttackTab(tabId)
-                await browser.tabs.update(tabId, { url })
             }
             await this._waitForTabReady(tabId)
+            // Re-apply the marker on the loaded page before messaging the SPA
+            // harness so recovery logic also
+            // keeps this internal DAST tab alive while the attack runs.
+            await this._markSpaAttackTab(tabId)
             const res = await fn(tabId, url)
             return res
         } finally {

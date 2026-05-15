@@ -11,17 +11,24 @@
         isTopFrame = true
     }
 
-    // In Cypress, AUT runs in an iframe. Allow bridge there only when automation is enabled.
-    if (!isTopFrame && !initialAutomationEnabled) return
-    if (window.PTK_AUTOMATION) return
-
     const VERSION = document.currentScript?.dataset?.ptkVersion || 'unknown'
     const BRIDGE_ID = 'ptk-automation-bridge'
+    const bridgeGeneration = Number(window.__PTK_AUTOMATION_BRIDGE_GENERATION__ || 0) + 1
+    window.__PTK_AUTOMATION_BRIDGE_GENERATION__ = bridgeGeneration
+    if (typeof window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__ === 'function') {
+        try {
+            window.removeEventListener('message', window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__)
+        } catch (_) { }
+    }
+
+    // In Cypress, AUT runs in an iframe. Allow bridge there only when automation is enabled.
+    if (!isTopFrame && !initialAutomationEnabled) return
     const PTK_AUTOMATION_CAPABILITIES = Object.freeze([
         'startSession',
         'endSession',
         'getStats',
         'getFindings',
+        'getAnalysisSnapshot',
         'exportScan',
         'getSessionProgress',
         'exportScanChunk',
@@ -39,6 +46,30 @@
     let requestCounter = 0
     // Local cache of sessionId (background is source of truth, looks up by tabId)
     let currentSessionId = null
+
+    function usesStrictCurrentTabScope(options = {}) {
+        return options?.sessionScope === PTK_AGENT_SESSION_SCOPE
+    }
+
+    function sessionIdForBridgeLookup(options = {}) {
+        return options?.sessionId || (usesStrictCurrentTabScope(options) ? null : currentSessionId)
+    }
+
+    function bridgeError(message, response = {}) {
+        const error = new Error(message || 'ptk_automation_request_failed')
+        error.response = response
+        return error
+    }
+
+    function diagnosticExtras(value) {
+        const response = value?.response || value
+        if (!response || typeof response !== 'object') return {}
+
+        return {
+            ...(response.sessionLookup ? { sessionLookup: response.sessionLookup } : {}),
+            ...(Array.isArray(response.warnings) ? { warnings: response.warnings } : {})
+        }
+    }
 
     // Low-level bridge transport helpers
     function sendMessage(type, payload) {
@@ -113,7 +144,8 @@
         }
     }
 
-    window.addEventListener('message', (event) => {
+    const bridgeMessageHandler = (event) => {
+        if (window.__PTK_AUTOMATION_BRIDGE_GENERATION__ !== bridgeGeneration) return
         // Only accept messages from same window
         if (event.source !== window) return
 
@@ -121,11 +153,13 @@
         if (data?.source !== 'ptk-extension') return
 
         if (data.type === 'automation-status') {
-            if (data.nonce) {
-                currentNonce = data.nonce
-            }
-            if (window.PTK_AUTOMATION) {
-                window.PTK_AUTOMATION._automationEnabled = data.enabled === true
+            // The page can forge postMessage payloads, so this status message is
+            // intentionally non-authoritative for enabling automation. The bridge
+            // starts enabled only from the injected script dataset. Disabling is
+            // allowed as a defensive state transition; re-enabling requires a new
+            // injected bridge instance from the extension content script.
+            if (data.enabled === false && window.PTK_AUTOMATION) {
+                window.PTK_AUTOMATION._automationEnabled = false
             }
             return
         }
@@ -133,19 +167,23 @@
         // Validate nonce matches (require always)
         if (data.nonce !== currentNonce) return
 
-        if (data.requestId && pendingRequests.has(data.requestId)) {
-            const { resolve, reject } = pendingRequests.get(data.requestId)
-            pendingRequests.delete(data.requestId)
+            if (data.requestId && pendingRequests.has(data.requestId)) {
+                const { resolve, reject } = pendingRequests.get(data.requestId)
+                pendingRequests.delete(data.requestId)
 
-            if (data.error) {
-                reject(new Error(data.error))
-            } else {
-                resolve(data)
-            }
+                if (data.error) {
+                    reject(bridgeError(data.error, data))
+                } else {
+                    resolve(data)
+                }
         }
-    })
+    }
+    window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__ = bridgeMessageHandler
+    window.addEventListener('message', bridgeMessageHandler)
 
-    // PTK_AUTOMATION low-level compatibility bridge
+    // PTK_AUTOMATION low-level compatibility bridge. The extension deliberately
+    // overwrites page-owned objects with the same name; ZAP close decisions must
+    // flow through this bridge and then through background session lookup.
     window.PTK_AUTOMATION = {
         version: VERSION,
         bridgeId: BRIDGE_ID,
@@ -243,10 +281,12 @@
             // Background looks up session by tabId - no need to check locally
             try {
                 const response = await sendMessage('session-end', {
-                    sessionId: options?.sessionId || currentSessionId,
+                    sessionId: sessionIdForBridgeLookup(options),
                     options: {
                         sessionId: options?.sessionId,
-                        sessionScope: options?.sessionScope
+                        sessionScope: options?.sessionScope,
+                        stopTimeoutMs: options?.stopTimeoutMs,
+                        source: options?.source
                     },
                     wait: options?.wait !== false,  // default true
                     includeFindings: options?.includeFindings === true,
@@ -295,7 +335,7 @@
             try {
                 return await sendMessage('get-session-progress', { options })
             } catch (err) {
-                return { ok: false, error: err.message }
+                return { ok: false, error: err.message, ...diagnosticExtras(err) }
             }
         },
 
@@ -337,7 +377,7 @@
             // Background looks up session by tabId
             try {
                 const response = await sendMessage('get-findings', {
-                    sessionId: options.sessionId || currentSessionId,
+                    sessionId: sessionIdForBridgeLookup(options.lookupOptions),
                     limit: options.limit,
                     options: options.lookupOptions
                 })
@@ -349,8 +389,32 @@
                 }
             } catch (err) {
                 return options.strict
-                    ? { ok: false, error: err.message }
+                    ? { ok: false, error: err.message, ...diagnosticExtras(err) }
                     : { findings: [], truncated: false }
+            }
+        },
+
+        /**
+         * Get a compact live analysis snapshot for crawler/agent evidence.
+         * This is additive and may return unavailable on older or still-running scans.
+         * @param {Object} options
+         * @param {string} options.sessionId - Optional explicit session lookup
+         * @param {string} options.sessionScope - Optional session lookup mode
+         * @returns {Promise<{ok: true, engines: Array} | {ok: false, error: string}>}
+         */
+        async getAnalysisSnapshot(options = {}) {
+            if (this._automationEnabled === false) {
+                return { ok: false, error: 'automation_disabled' }
+            }
+            try {
+                const response = await sendMessage('get-analysis-snapshot', {
+                    sessionId: sessionIdForBridgeLookup(options),
+                    options
+                })
+                if (response.error) throw new Error(response.error)
+                return response
+            } catch (err) {
+                return { ok: false, error: err.message, ...diagnosticExtras(err) }
             }
         },
 
@@ -379,12 +443,18 @@
                     return {
                         ok: false,
                         error: response.error,
-                        warnings: response.warnings || []
+                        warnings: response.warnings || [],
+                        ...diagnosticExtras(response)
                     }
                 }
                 return response
             } catch (err) {
-                return { ok: false, error: err.message }
+                return {
+                    ok: false,
+                    error: err.message,
+                    warnings: diagnosticExtras(err).warnings || [],
+                    ...diagnosticExtras(err)
+                }
             }
         },
 

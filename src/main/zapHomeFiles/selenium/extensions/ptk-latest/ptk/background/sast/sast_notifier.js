@@ -121,7 +121,7 @@ export class SastNotifier {
       this.setProgressState(applyStructuredSastProgressEvent(this.getProgressState(), type, data));
     }
 
-    if (type === "scan:summary") {
+    if (type === "scan:summary" || type === "collection:summary") {
       this.rebuildGroupsFromFindings();
       this.updateScanResult();
       this.flushPersist();
@@ -149,7 +149,24 @@ export class SastNotifier {
       return;
     }
 
-    if (type === "file:end" || type === "scan:start" || type === "module:start" || type === "module:end") {
+    if (
+      type === "file:end" ||
+      type === "scan:start" ||
+      type === "collection:start" ||
+      type === "collection:payload" ||
+      type === "collection:analysis:start" ||
+      type === "module:start" ||
+      type === "module:end"
+    ) {
+      this.send({
+        channel: "ptk_background2popup_sast",
+        type,
+        payload: Object.assign({}, data, { progress: this.buildProgressSnapshot() })
+      });
+      return;
+    }
+
+    if (type === "collection:error") {
       this.send({
         channel: "ptk_background2popup_sast",
         type,

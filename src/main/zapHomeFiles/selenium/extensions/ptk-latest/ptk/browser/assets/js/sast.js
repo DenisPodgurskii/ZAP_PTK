@@ -2482,6 +2482,15 @@ function handleStructuredSastMessage(type, payload, scanResult) {
     hideScanForm();
     hideWelcomeForm();
   }
+  if (type === "collection:start") {
+    bindAttackProgress({ info: { message: "Collecting page scripts", progress: data.progress } });
+  }
+  if (type === "collection:payload") {
+    bindAttackProgress({ info: { message: "Page scripts collected", progress: data.progress } });
+  }
+  if (type === "collection:analysis:start") {
+    bindAttackProgress({ info: { message: "Analyzing collected scripts", progress: data.progress } });
+  }
   if (type === "file:start") {
     bindAttackProgress({ info: { message: "Analyzing file", file: data.file || "", progress: data.progress } });
     appendSastRequestIfNeeded(data.file || "");
@@ -2495,7 +2504,7 @@ function handleStructuredSastMessage(type, payload, scanResult) {
   if (type === "module:end") {
     bindAttackProgress({ info: { message: "Completed module", file: data.moduleName || data.moduleId || "", progress: data.progress } });
   }
-  if (type === "scan:summary") {
+  if (type === "scan:summary" || type === "collection:summary") {
     bindAttackProgress({
       info: {
         message: sessionRunning
@@ -2521,6 +2530,9 @@ function handleStructuredSastMessage(type, payload, scanResult) {
       });
       return;
     }
+  }
+  if (type === "collection:error") {
+    bindAttackProgress({ info: { message: "Script collection blocked", file: data.error || "", progress: data.progress } });
   }
   if (type === "scan:error") {
     bindAttackProgress({ info: { message: "Scan error", file: data.error || "", progress: data.progress } });
