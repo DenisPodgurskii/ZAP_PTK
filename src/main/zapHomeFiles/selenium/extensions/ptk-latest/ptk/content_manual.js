@@ -717,10 +717,10 @@ function disableAutomation() {
 }
 
 function isZapBrowserCloseBridgeMessage(data) {
-    // Manual-mode ZAP close handling is intentionally limited to stop/progress
-    // messages marked by the ZAP browser-close source. The page-visible nonce
-    // only correlates responses; safe-to-close decisions are advisory unless
-    // they travel through ZAP's callback/zapid path and background session lookup.
+    // Manual-mode pages must not be able to bypass automation_disabled by
+    // crafting a zap_browser_close message with the DOM-readable nonce. ZAP close
+    // cooperation is supported through the automation content script path where
+    // the bridge is already enabled for the WebDriver-controlled tab.
     if (data?.source !== 'ptk-automation') return false
     if (data?.options?.source !== 'zap_browser_close') return false
     return data.type === 'session-end' || data.type === 'get-session-progress'
@@ -734,7 +734,13 @@ function initZapCloseAutomationMessaging() {
         if (event.source !== window) return
         const data = event.data
         if (!isZapBrowserCloseBridgeMessage(data)) return
-        handleAutomationBridgeMessage(data, { responseNonce: data.nonce || '' })
+        window.postMessage({
+            source: 'ptk-extension',
+            nonce: data.nonce || '',
+            requestId: data.requestId,
+            ok: false,
+            error: 'automation_disabled'
+        }, '*')
     })
 }
 
@@ -896,7 +902,7 @@ function initPtkAutomationMessaging() {
 }
 
 function installPtkAutomationBridge(version, nonce, automationEnabledState) {
-    if (window.PTK_AUTOMATION) {
+    if (window.PTK_AUTOMATION?.bridgeId === 'ptk-automation-bridge') {
         return
     }
     const script = document.createElement('script')

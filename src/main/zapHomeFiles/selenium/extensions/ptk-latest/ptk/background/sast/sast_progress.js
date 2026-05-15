@@ -45,6 +45,25 @@ export function countSastFindingKinds(target = null) {
   return counts
 }
 
+export function sastCollectionLooksComplete(progressState = {}, { activeCollectionCount = 0 } = {}) {
+  const totalFiles = Number(progressState.totalFiles || 0)
+  const completedFiles = Number(progressState.completedFiles || 0)
+  const totalModules = Number(progressState.totalModules || 0)
+  const completedModules = Number(progressState.completedModules || 0)
+  const currentFile = progressState.currentFile || null
+  const currentModule = progressState.currentModule || null
+  const filesComplete = totalFiles > 0 && completedFiles >= totalFiles
+  const modulesComplete = totalModules > 0 && completedModules >= totalModules
+  const stateText = `${progressState.analysisState || ""} ${progressState.collectionState || ""}`
+  const stateLooksComplete = /complete|completed|waiting_for_page_activity|idle/i.test(stateText)
+    && !/analysis_running|analyzing|payload_received|collecting|collection_pending/i.test(stateText)
+  return (filesComplete || modulesComplete)
+    && (!currentFile || stateLooksComplete)
+    && (!currentModule || stateLooksComplete)
+    && Number(activeCollectionCount || 0) <= 0
+    && !/error|failed/i.test(stateText)
+}
+
 export function buildSastProgressSnapshot({
   state = null,
   scanResult = null,
@@ -60,15 +79,7 @@ export function buildSastProgressSnapshot({
   const completedModules = Number(progressState.completedModules || 0)
   const currentFile = progressState.currentFile || null
   const currentModule = progressState.currentModule || null
-  const filesComplete = totalFiles > 0 && completedFiles >= totalFiles
-  const modulesComplete = totalModules > 0 && completedModules >= totalModules
-  const stateText = `${progressState.analysisState || ""} ${progressState.collectionState || ""}`
-  const stateLooksComplete = /complete|completed|waiting_for_page_activity|idle/i.test(stateText)
-    && !/analysis_running|analyzing|payload_received|collecting|collection_pending/i.test(stateText)
-  const collectionLooksComplete = (filesComplete || modulesComplete)
-    && (!currentFile || stateLooksComplete)
-    && (!currentModule || stateLooksComplete)
-    && !/error|failed/i.test(`${progressState.analysisState || ""} ${progressState.collectionState || ""}`)
+  const collectionLooksComplete = sastCollectionLooksComplete(progressState)
   const phase = collectionLooksComplete ? "waiting" : (progressState.phase || "idle")
   const analysisState = collectionLooksComplete ? "complete" : (progressState.analysisState || "idle")
   const collectionState = collectionLooksComplete
@@ -272,6 +283,7 @@ export default {
   SAST_STRUCTURED_EVENT_TYPES,
   createSastProgressState,
   countSastFindingKinds,
+  sastCollectionLooksComplete,
   buildSastProgressSnapshot,
   isStructuredSastEvent,
   applyStructuredSastProgressEvent

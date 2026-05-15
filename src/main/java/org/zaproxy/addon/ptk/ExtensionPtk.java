@@ -94,6 +94,10 @@ final class PtkCloseContract {
         }
         closeRequestedByZapId.putIfAbsent(zapid, decidedAtMs);
     }
+
+    static boolean canAcceptSafeToClose(Map<String, Long> closeRequestedByZapId, String zapid) {
+        return getCloseRequestedAtMs(closeRequestedByZapId, zapid) != null;
+    }
 }
 
 public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvider {
@@ -615,9 +619,12 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                       try {
                         await refreshAutomationStatus();
                         const automation = window.PTK_AUTOMATION;
-                        if (automation && explicitSessionId && typeof automation.endSession === 'function') {
-                          const readProgress = () => typeof automation.getSessionProgress === 'function'
-                            ? withTimeout(automation.getSessionProgress({ sessionId: explicitSessionId, source: 'zap_browser_close' }), 'scan_status', 3000)
+                        const trustedAutomation = automation && automation.bridgeId === 'ptk-automation-bridge'
+                          ? automation
+                          : null;
+                        if (trustedAutomation && explicitSessionId && typeof trustedAutomation.endSession === 'function') {
+                          const readProgress = () => typeof trustedAutomation.getSessionProgress === 'function'
+                            ? withTimeout(trustedAutomation.getSessionProgress({ sessionId: explicitSessionId, source: 'zap_browser_close' }), 'scan_status', 3000)
                             : Promise.resolve(null);
                           const waitForTerminal = async (maxMs) => {
                             const deadline = Date.now() + Math.max(0, maxMs || 0);
@@ -653,7 +660,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             return;
                           }
                           const stop = await withTimeout(
-                            automation.endSession({
+                            trustedAutomation.endSession({
                               sessionId: explicitSessionId,
                               wait: false,
                               source: 'zap_browser_close',
@@ -665,7 +672,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                           if (stop && stop.error === 'automation_disabled') {
                             await refreshAutomationStatus();
                             const retryStop = await withTimeout(
-                              automation.endSession({
+                              trustedAutomation.endSession({
                                 sessionId: explicitSessionId,
                                 wait: false,
                                 source: 'zap_browser_close',
@@ -700,7 +707,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             participant: 'ptk',
                             decision: 'not_applicable',
                             scanState: 'unknown',
-                            reason: automation ? 'ptk_agent_unavailable' : 'ptk_automation_unavailable'
+                            reason: automation && !trustedAutomation ? 'ptk_automation_untrusted' : automation ? 'ptk_agent_unavailable' : 'ptk_automation_unavailable'
                           });
                           return;
                         }
@@ -1185,11 +1192,19 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         if (status != null && !status.isBlank()) {
                             scanStatus.put(zapid, status);
                         }
-                        // safeToClose is accepted only from PTK's callback response for this
-                        // zapid. It short-circuits ZAP's wait, but PTK's background/session state
-                        // is still the authority that produces the value.
+                        // safeToClose is accepted only after ZAP has explicitly asked the
+                        // WebDriver-controlled tab for a PTK close decision. This prevents
+                        // ordinary page/progress callbacks from pre-setting close readiness.
                         if (safeToClose != null) {
-                            safeToCloseByZapId.put(zapid, safeToClose);
+                            if (PtkCloseContract.canAcceptSafeToClose(
+                                    closeRequestedByZapId, zapid)) {
+                                safeToCloseByZapId.put(zapid, safeToClose);
+                            } else {
+                                LOGGER.debug(
+                                        "PTK ignored safeToClose before close request zapid={} value={}",
+                                        zapid,
+                                        safeToClose);
+                            }
                         }
                         boolean firstProgress = firstProgressLogged.add(zapid);
                         long finishedAt = System.currentTimeMillis();

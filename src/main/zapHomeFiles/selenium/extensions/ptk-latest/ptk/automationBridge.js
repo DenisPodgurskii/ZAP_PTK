@@ -15,6 +15,11 @@
     const BRIDGE_ID = 'ptk-automation-bridge'
     const bridgeGeneration = Number(window.__PTK_AUTOMATION_BRIDGE_GENERATION__ || 0) + 1
     window.__PTK_AUTOMATION_BRIDGE_GENERATION__ = bridgeGeneration
+    if (typeof window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__ === 'function') {
+        try {
+            window.removeEventListener('message', window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__)
+        } catch (_) { }
+    }
 
     // In Cypress, AUT runs in an iframe. Allow bridge there only when automation is enabled.
     if (!isTopFrame && !initialAutomationEnabled) return
@@ -44,14 +49,6 @@
 
     function usesStrictCurrentTabScope(options = {}) {
         return options?.sessionScope === PTK_AGENT_SESSION_SCOPE
-    }
-
-    function isZapBrowserCloseRequest(options = {}) {
-        // ZAP uses this source only from its browser-close callback flow for the
-        // WebDriver-controlled tab/zapid. The DOM nonce below correlates page
-        // messages but is readable by page script, so background session lookup
-        // remains the authority for session state and close readiness.
-        return options?.source === 'zap_browser_close'
     }
 
     function sessionIdForBridgeLookup(options = {}) {
@@ -147,7 +144,7 @@
         }
     }
 
-    window.addEventListener('message', (event) => {
+    const bridgeMessageHandler = (event) => {
         if (window.__PTK_AUTOMATION_BRIDGE_GENERATION__ !== bridgeGeneration) return
         // Only accept messages from same window
         if (event.source !== window) return
@@ -156,11 +153,13 @@
         if (data?.source !== 'ptk-extension') return
 
         if (data.type === 'automation-status') {
-            if (data.nonce) {
-                currentNonce = data.nonce
-            }
-            if (window.PTK_AUTOMATION) {
-                window.PTK_AUTOMATION._automationEnabled = data.enabled === true
+            // The page can forge postMessage payloads, so this status message is
+            // intentionally non-authoritative for enabling automation. The bridge
+            // starts enabled only from the injected script dataset. Disabling is
+            // allowed as a defensive state transition; re-enabling requires a new
+            // injected bridge instance from the extension content script.
+            if (data.enabled === false && window.PTK_AUTOMATION) {
+                window.PTK_AUTOMATION._automationEnabled = false
             }
             return
         }
@@ -178,7 +177,9 @@
                     resolve(data)
                 }
         }
-    })
+    }
+    window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__ = bridgeMessageHandler
+    window.addEventListener('message', bridgeMessageHandler)
 
     // PTK_AUTOMATION low-level compatibility bridge. The extension deliberately
     // overwrites page-owned objects with the same name; ZAP close decisions must
@@ -274,7 +275,7 @@
          * @returns {Promise<{ok: true, status?: string, stats?: Object, findings?: Array, truncated?: boolean} | {ok: false, error: string, stats: Object}>}
          */
         async endSession(options = {}) {
-            if (this._automationEnabled === false && !isZapBrowserCloseRequest(options)) {
+            if (this._automationEnabled === false) {
                 return { ok: false, error: 'automation_disabled' }
             }
             // Background looks up session by tabId - no need to check locally
@@ -327,7 +328,7 @@
          * @returns {Promise<{ok: true, sessionId: string, status: string, engines: Object, summary: Object, warnings?: Array, finalSummary?: Object} | {ok: false, error: string}>}
          */
         async getSessionProgress(options = {}) {
-            if (this._automationEnabled === false && !isZapBrowserCloseRequest(options)) {
+            if (this._automationEnabled === false) {
                 return { ok: false, error: 'automation_disabled' }
             }
 

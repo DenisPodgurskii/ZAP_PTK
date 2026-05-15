@@ -70,7 +70,7 @@ function normalizeAutomationBridgeResponse(type, response) {
 
 function installPtkAutomationBridge(version, nonce, automationEnabledState) {
     try {
-        if (window.PTK_AUTOMATION) return;
+        if (window.PTK_AUTOMATION?.bridgeId === 'ptk-automation-bridge') return;
         const src = runtimeGetURL('ptk/automationBridge.js');
         if (!src) return;
         const script = document.createElement('script');

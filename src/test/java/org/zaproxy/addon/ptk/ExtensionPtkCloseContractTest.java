@@ -38,10 +38,12 @@ class ExtensionPtkCloseContractTest {
         Map<String, Long> closeRequestedByZapId = new ConcurrentHashMap<>();
 
         assertNull(PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, "zap-1"));
+        assertEquals(false, PtkCloseContract.canAcceptSafeToClose(closeRequestedByZapId, "zap-1"));
 
         PtkCloseContract.markCloseDecisionAttempted(closeRequestedByZapId, "zap-1", 123L);
 
         assertEquals(123L, PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, "zap-1"));
+        assertEquals(true, PtkCloseContract.canAcceptSafeToClose(closeRequestedByZapId, "zap-1"));
     }
 
     @Test

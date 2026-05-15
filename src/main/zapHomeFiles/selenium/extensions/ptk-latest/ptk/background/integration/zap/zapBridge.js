@@ -23,6 +23,11 @@ const ZAP_PASSIVE_ENGINE_IDLE_GRACE_MS = 8000
 const ZAP_TARGET_ACTIVITY_QUIET_GRACE_MS = 2500
 const ZAP_PROGRESS_FLUSH_TIMEOUT_MS = 3000
 const ZAP_PROGRESS_DRAIN_MAX_PASSES = 4
+// Mirrors the ZAP add-on close-contract PTK stop budget. Keep this documented
+// here because the browser extension can receive closeRequested before Java's
+// WebDriver close script runs; changing the add-on value should be reviewed
+// alongside this cap.
+const ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS = 25000
 const ZAP_PROGRESS_STATUS_READY = 'ready'
 const ZAP_PROGRESS_STATUS_CALLBACK = 'callback'
 const ZAP_PROGRESS_STATUS_RUNNING = 'running'
@@ -598,8 +603,8 @@ class ZapBridge {
         }
         monitor.closeRequestedSent = true
         const stopTimeoutMs = Number.isFinite(Number(control.stopTimeoutMs))
-            ? Math.max(1000, Math.min(Number(control.stopTimeoutMs), 60000))
-            : 10000
+            ? Math.max(1000, Math.min(Number(control.stopTimeoutMs), ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS))
+            : ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS
         try {
             const result = await automation.requestZapSessionStop(monitor.sessionId, {
                 timeoutMs: stopTimeoutMs,

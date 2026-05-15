@@ -5,6 +5,7 @@ import { zapBridge } from './integration/zap/index.js'
 import buildExportScanResult from './export/buildExportScanResult.js'
 import { resultsRegistry } from './resultsRegistry.js'
 import { collapseDastAggregatedFindings } from './dast/services/dastFindingAggregation.js'
+import { sastCollectionLooksComplete } from './sast/sast_progress.js'
 
 
 /**
@@ -3034,16 +3035,16 @@ export class ptk_automation {
         const currentGeneration = toFiniteNumber(input.currentGeneration, 0)
         const lastCompletedGeneration = toFiniteNumber(input.lastCompletedGeneration, 0)
         const isSessionRunning = input.isSessionRunning === true
-        const filesComplete = totalFiles > 0 && completedFiles >= totalFiles
-        const modulesComplete = totalModules > 0 && completedModules >= totalModules
-        const stateText = `${input.analysisState || ''} ${input.collectionState || ''}`
-        const stateLooksComplete = /complete|completed|waiting_for_page_activity|idle/i.test(stateText)
-            && !/analysis_running|analyzing|payload_received|collecting|collection_pending/i.test(stateText)
-        const collectionLooksComplete = (filesComplete || modulesComplete)
-            && (!currentFile || stateLooksComplete)
-            && (!currentModule || stateLooksComplete)
-            && activeCollectionCount <= 0
-            && !/error|failed/i.test(`${input.analysisState || ''} ${input.collectionState || ''}`)
+        const collectionLooksComplete = sastCollectionLooksComplete({
+            totalFiles,
+            completedFiles,
+            totalModules,
+            completedModules,
+            currentFile,
+            currentModule,
+            analysisState: input.analysisState,
+            collectionState: input.collectionState
+        }, { activeCollectionCount })
         if (!collectionLooksComplete) {
             return {
                 phase: toNonEmptyString(input.phase) || null,
