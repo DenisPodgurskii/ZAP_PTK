@@ -14,8 +14,16 @@
     "manifest": "selenium/extensions/ptk-latest/manifest.json"
   },
   "hashes": {
-    "crxSha256": "a7f192bf6cdbdfc78a0e579de0ccbd0afacd0e97f1dfec64d805eb839cb59e27",
-    "xpiSha256": "e3e3f3b4e3f9b49b30cce62b4f0b51bb78836f286e5fa5c653a53e2e04d2b5ba",
-    "manifestSha256": "e932d6953f74e0e6f42ff17e25a0ac106d43ef774287dbfca04524890465bee9"
-  }
+    "crxSha256": "fa9ef5a1612e9bb9ea0c048d81c366b2af2db15c8c9bfe9bebb36817441b3b1b",
+    "xpiSha256": "cc793764d6b74e8ed18ee585371c23402025acbfcb42ee51894a9de751144bd9",
+    "manifestSha256": "e932d6953f74e0e6f42ff17e25a0ac106d43ef774287dbfca04524890465bee9",
+    "unpackedTreeSha256": "724c2138ee7ac82301a7cabecc0755438c0c63f8c37d136a88580004a6e06a84"
+  },
+  "sizes": {
+    "crxBytes": 9427446,
+    "xpiBytes": 9383679,
+    "manifestBytes": 3428,
+    "unpackedFileCount": 1386
+  },
+  "createdAt": "2026-05-15T09:38:50.244Z"
 }

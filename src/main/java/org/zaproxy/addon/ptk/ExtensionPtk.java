@@ -2,6 +2,7 @@ package org.zaproxy.addon.ptk;
 
 import com.google.gson.Gson;
 import java.lang.reflect.Method;
+import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -97,6 +98,38 @@ final class PtkCloseContract {
 
     static boolean canAcceptSafeToClose(Map<String, Long> closeRequestedByZapId, String zapid) {
         return getCloseRequestedAtMs(closeRequestedByZapId, zapid) != null;
+    }
+
+    static String normalizeHttpTargetUrl(String targetUrl) {
+        if (targetUrl == null || targetUrl.isBlank()) {
+            return null;
+        }
+        try {
+            URI uri = new URI(targetUrl.trim()).normalize();
+            String scheme = uri.getScheme();
+            if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+                return null;
+            }
+            if (uri.getHost() == null || uri.getHost().isBlank()) {
+                return null;
+            }
+            return uri.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static boolean rememberInitialTargetUrl(
+            Map<String, String> targetUrlByZapId, String zapid, String targetUrl) {
+        if (zapid == null || zapid.isBlank()) {
+            return false;
+        }
+        String normalized = normalizeHttpTargetUrl(targetUrl);
+        if (normalized == null) {
+            return false;
+        }
+        String existing = targetUrlByZapId.putIfAbsent(zapid, normalized);
+        return existing == null || existing.equals(normalized);
     }
 }
 
@@ -828,8 +861,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 }
             }
             String targetUrl = targetUrlByZapId.get(zapid);
-            if (targetUrl != null
-                    && (targetUrl.startsWith("http://") || targetUrl.startsWith("https://"))) {
+            if (targetUrl != null) {
                 try {
                     driver.switchTo().window(windowHandles.get(0));
                     driver.navigate().to(targetUrl);
@@ -1186,7 +1218,15 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             sessionIdByZapId.put(zapid, sessionId);
                         }
                         if (targetUrl != null && !targetUrl.isBlank()) {
-                            targetUrlByZapId.put(zapid, targetUrl);
+                            boolean rememberedTarget =
+                                    PtkCloseContract.rememberInitialTargetUrl(
+                                            targetUrlByZapId, zapid, targetUrl);
+                            if (!rememberedTarget) {
+                                LOGGER.debug(
+                                        "PTK ignored progress targetUrl update zapid={} value={}",
+                                        zapid,
+                                        targetUrl);
+                            }
                         }
                         scanProgress.put(zapid, progress.intValue());
                         if (status != null && !status.isBlank()) {
@@ -1195,10 +1235,12 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         // safeToClose is accepted only after ZAP has explicitly asked the
                         // WebDriver-controlled tab for a PTK close decision. This prevents
                         // ordinary page/progress callbacks from pre-setting close readiness.
+                        boolean acceptedSafeToClose = false;
                         if (safeToClose != null) {
                             if (PtkCloseContract.canAcceptSafeToClose(
                                     closeRequestedByZapId, zapid)) {
                                 safeToCloseByZapId.put(zapid, safeToClose);
+                                acceptedSafeToClose = Boolean.TRUE.equals(safeToClose);
                             } else {
                                 LOGGER.debug(
                                         "PTK ignored safeToClose before close request zapid={} value={}",
@@ -1211,7 +1253,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         markCallbackStart(zapid);
                         Long sinceFirstMs = getElapsedSinceFirst(zapid, finishedAt);
                         boolean terminalProgress =
-                                Boolean.TRUE.equals(safeToClose)
+                                acceptedSafeToClose
                                         || isTerminalProgressValue(progress.intValue(), status);
                         if (terminalProgress && zapid != null && !zapid.isBlank()) {
                             terminalProgressLogged.add(zapid);

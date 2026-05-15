@@ -619,9 +619,18 @@ export class ptk_automation {
 
     _isZapAutomationBridgeRequestAllowed(message = {}, sender = {}) {
         const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
-        if (this._isZapManagedActiveSessionForTab(tabId)) {
-            return true
-        }
+        if (!Number.isInteger(tabId)) return false
+
+        // This method is reached only when global PTK automation is disabled.
+        // Do not let a page-forgeable postMessage payload use
+        // { source: 'zap_browser_close' } as a privileged stop command. ZAP's
+        // close contract initiates stop through the callback control channel
+        // (requestZapSessionStop); the bridge exception here is limited to
+        // same-tab progress reads after the session is already stopping.
+        if (message?.options?.source !== 'zap_browser_close') return false
+
+        const type = String(message?.type || '').replace(/_/g, '-')
+        if (type !== 'get-session-progress') return false
 
         const requestedSessionId = toNonEmptyString(message?.sessionId)
             || toNonEmptyString(message?.options?.sessionId)
@@ -630,16 +639,10 @@ export class ptk_automation {
         }
 
         const session = this.sessions.get(requestedSessionId)
-        if (session?.source === 'zap') {
-            return true
-        }
+        if (session?.source !== 'zap') return false
+        if (!Number.isInteger(session?.tabId) || session.tabId !== tabId) return false
 
-        const requestedByZapCloseContract = message?.options?.source === 'zap_browser_close'
-        if (!requestedByZapCloseContract) {
-            return false
-        }
-
-        return Number.isInteger(tabId)
+        return Boolean(session.stopRequestedAt)
     }
 
     onMessage(message, sender, sendResponse) {

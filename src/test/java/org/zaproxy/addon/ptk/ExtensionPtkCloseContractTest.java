@@ -57,4 +57,32 @@ class ExtensionPtkCloseContractTest {
         assertNull(PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, null));
         assertNull(PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, ""));
     }
+
+    @Test
+    void targetUrlMustBeHttpAndStoredFirstWins() {
+        Map<String, String> targetUrlByZapId = new ConcurrentHashMap<>();
+
+        assertNull(PtkCloseContract.normalizeHttpTargetUrl("javascript:alert(1)"));
+        assertNull(PtkCloseContract.normalizeHttpTargetUrl("https:///missing-host"));
+        assertEquals(
+                "https://example.test/app",
+                PtkCloseContract.normalizeHttpTargetUrl(" https://example.test/app "));
+
+        assertEquals(
+                true,
+                PtkCloseContract.rememberInitialTargetUrl(
+                        targetUrlByZapId, "zap-1", "https://example.test/app"));
+        assertEquals("https://example.test/app", targetUrlByZapId.get("zap-1"));
+
+        assertEquals(
+                false,
+                PtkCloseContract.rememberInitialTargetUrl(
+                        targetUrlByZapId, "zap-1", "https://attacker.test/close"));
+        assertEquals("https://example.test/app", targetUrlByZapId.get("zap-1"));
+
+        assertEquals(
+                true,
+                PtkCloseContract.rememberInitialTargetUrl(
+                        targetUrlByZapId, "zap-1", "https://example.test/app"));
+    }
 }
