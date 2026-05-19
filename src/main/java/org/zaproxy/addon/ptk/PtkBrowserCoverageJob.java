@@ -312,6 +312,7 @@ class PtkBrowserCoverageJob extends AutomationJob {
                 .getExtension(ExtensionClientIntegration.class);
     }
 
+    // Split from getClientExtension() so tests can exercise runJob without live ZAP extensions.
     protected boolean isClientExtensionAvailable() {
         return getClientExtension() != null;
     }
@@ -320,6 +321,7 @@ class PtkBrowserCoverageJob extends AutomationJob {
         return Control.getSingleton().getExtensionLoader().getExtension(ExtensionSelenium.class);
     }
 
+    // Split from getSeleniumExtension() so tests can exercise runJob without live ZAP extensions.
     protected boolean isSeleniumExtensionAvailable() {
         return getSeleniumExtension() != null;
     }

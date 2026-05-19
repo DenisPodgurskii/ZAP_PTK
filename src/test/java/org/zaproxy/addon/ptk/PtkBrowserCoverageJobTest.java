@@ -15,7 +15,7 @@ class PtkBrowserCoverageJobTest {
 
     @Test
     void runJobReportsMissingConfiguredUrlsWhenBrowserEvidenceNeverArrives() {
-        ExtensionPtk ptk = new ExtensionPtk();
+        ExtensionPtk ptk = newPtkForTest();
         TestBrowserCoverageJob job = new TestBrowserCoverageJob(ptk);
         job.getParameters().setSource("none");
         job.getParameters().setUrls("https://example.test/a\nhttps://example.test/b");
@@ -34,6 +34,11 @@ class PtkBrowserCoverageJobTest {
                 List.of(List.of("https://example.test/a", "https://example.test/b")), job.batches);
         assertEquals(2, progress.getErrors().size());
         assertTrue(progress.getErrors().get(0).contains("not_browser_loaded"));
+    }
+
+    private static ExtensionPtk newPtkForTest() {
+        // ExtensionPtk is expected to stay side-effect free at construction time.
+        return new ExtensionPtk();
     }
 
     private static final class TestBrowserCoverageJob extends PtkBrowserCoverageJob {
