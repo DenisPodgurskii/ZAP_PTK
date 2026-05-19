@@ -10,10 +10,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.configuration.XMLConfiguration;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -110,69 +114,75 @@ final class PtkBrowserCoverageJob extends AutomationJob {
             pending.add(new CoverageTarget(url));
         }
 
-        while (!pending.isEmpty() && !stopRequested) {
-            pending = pruneAlreadySatisfiedTargets(pending, requirePtkSession);
-            if (pending.isEmpty()) {
-                break;
-            }
-
-            List<CoverageTarget> batch = new ArrayList<>();
-            int batchLimit = batchLimitForNextTargets(pending, concurrency, retryConcurrency);
-            while (!pending.isEmpty() && batch.size() < batchLimit) {
-                batch.add(pending.remove(0));
-            }
-            boolean retryBatch = batch.stream().anyMatch(target -> target.attempts > 0);
-            if (retryBatch && batchLimit < concurrency) {
-                progress.info(
-                        "PTK browser coverage retry batch: urls="
-                                + batch.size()
-                                + " browsers="
-                                + batchLimit);
-            }
-
-            List<RunningAttempt> running = new ArrayList<>();
-            for (CoverageTarget target : batch) {
-                target.attempts += 1;
-                ptk.recordBrowserCoverageScheduled(target.url, target.attempts);
-                running.add(new RunningAttempt(target, System.currentTimeMillis()));
-                if (launchStaggerMs > 0 && running.size() < batch.size()) {
-                    quietSleep(launchStaggerMs);
+        ExecutorService executor =
+                Executors.newFixedThreadPool(concurrency, browserCoverageThreadFactory());
+        try {
+            while (!pending.isEmpty() && !stopRequested) {
+                pending = pruneAlreadySatisfiedTargets(pending, requirePtkSession);
+                if (pending.isEmpty()) {
+                    break;
                 }
-            }
 
-            runDirectAttempts(client, selenium, running, progress, requirePtkSession);
-            quietSleep(evidenceGraceMs());
+                List<CoverageTarget> batch = new ArrayList<>();
+                int batchLimit = batchLimitForNextTargets(pending, concurrency, retryConcurrency);
+                while (!pending.isEmpty() && batch.size() < batchLimit) {
+                    batch.add(pending.remove(0));
+                }
+                boolean retryBatch = batch.stream().anyMatch(target -> target.attempts > 0);
+                if (retryBatch && batchLimit < concurrency) {
+                    progress.info(
+                            "PTK browser coverage retry batch: urls="
+                                    + batch.size()
+                                    + " browsers="
+                                    + batchLimit);
+                }
 
-            for (RunningAttempt attempt : running) {
-                CoverageTarget target = attempt.target;
-                BrowserCoverageSnapshot snapshot = ptk.getBrowserCoverageSnapshot(target.url);
-                target.finalState = snapshot.classify(requirePtkSession);
-                if (isCoverageSatisfied(snapshot, requirePtkSession)) {
-                    data.loadedUrls += 1;
+                List<RunningAttempt> running = new ArrayList<>();
+                for (CoverageTarget target : batch) {
+                    target.attempts += 1;
+                    ptk.recordBrowserCoverageScheduled(target.url, target.attempts);
+                    running.add(new RunningAttempt(target, System.currentTimeMillis()));
+                    if (launchStaggerMs > 0 && running.size() < batch.size()) {
+                        quietSleep(launchStaggerMs);
+                    }
+                }
+
+                runDirectAttempts(executor, client, selenium, running, progress, requirePtkSession);
+                quietSleep(evidenceGraceMs());
+
+                for (RunningAttempt attempt : running) {
+                    CoverageTarget target = attempt.target;
+                    BrowserCoverageSnapshot snapshot = ptk.getBrowserCoverageSnapshot(target.url);
+                    target.finalState = snapshot.classify(requirePtkSession);
+                    if (isCoverageSatisfied(snapshot, requirePtkSession)) {
+                        data.loadedUrls += 1;
+                        ptk.logBrowserCoverageResult(
+                                target.url, target.attempts, target.finalState, snapshot, true);
+                        continue;
+                    }
+                    if (target.attempts <= maxRetries && !stopRequested) {
+                        pending.add(target);
+                        continue;
+                    }
+                    data.missingUrls += 1;
                     ptk.logBrowserCoverageResult(
                             target.url, target.attempts, target.finalState, snapshot, true);
-                    continue;
-                }
-                if (target.attempts <= maxRetries && !stopRequested) {
-                    pending.add(target);
-                    continue;
-                }
-                data.missingUrls += 1;
-                ptk.logBrowserCoverageResult(
-                        target.url, target.attempts, target.finalState, snapshot, true);
-                String message =
-                        "PTK browser coverage missing URL "
-                                + target.url
-                                + " state="
-                                + target.finalState
-                                + " attempts="
-                                + target.attempts;
-                if (failOnMissingBrowserLoad) {
-                    progress.error(message);
-                } else {
-                    progress.warn(message);
+                    String message =
+                            "PTK browser coverage missing URL "
+                                    + target.url
+                                    + " state="
+                                    + target.finalState
+                                    + " attempts="
+                                    + target.attempts;
+                    if (failOnMissingBrowserLoad) {
+                        progress.error(message);
+                    } else {
+                        progress.warn(message);
+                    }
                 }
             }
+        } finally {
+            executor.shutdownNow();
         }
 
         progress.info(
@@ -383,6 +393,7 @@ final class PtkBrowserCoverageJob extends AutomationJob {
     }
 
     private void runDirectAttempts(
+            ExecutorService executor,
             ExtensionClientIntegration client,
             ExtensionSelenium selenium,
             List<RunningAttempt> running,
@@ -391,7 +402,6 @@ final class PtkBrowserCoverageJob extends AutomationJob {
         if (running.isEmpty()) {
             return;
         }
-        ExecutorService executor = Executors.newFixedThreadPool(Math.max(1, running.size()));
         List<Future<?>> futures = new ArrayList<>();
         for (RunningAttempt attempt : running) {
             futures.add(
@@ -404,49 +414,63 @@ final class PtkBrowserCoverageJob extends AutomationJob {
                                             progress,
                                             requirePtkSession)));
         }
-        executor.shutdown();
         long timeoutMs =
                 Math.max(30_000L, attemptTimeoutSecs() * 1000L)
                         + ptk.browserCloseMaxWallClockMs()
                         + 5_000L;
-        try {
-            if (!executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)) {
-                executor.shutdownNow();
-                for (int i = 0; i < futures.size(); i++) {
-                    Future<?> future = futures.get(i);
-                    if (!future.isDone()) {
-                        future.cancel(true);
-                        RunningAttempt attempt = running.get(i);
-                        BrowserCoverageSnapshot snapshot =
-                                ptk.getBrowserCoverageSnapshot(attempt.target.url);
-                        if (isCoverageSatisfied(snapshot, requirePtkSession)) {
-                            continue;
-                        }
-                        attempt.target.finalState = "browser_session_invalid:attempt_timeout";
-                        ptk.recordBrowserCoverageInvalid(
-                                null, attempt.target.url, "attempt_timeout", null);
-                    }
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            executor.shutdownNow();
-            for (RunningAttempt attempt : running) {
-                attempt.target.finalState = "browser_session_invalid:interrupted";
-            }
-        }
-        for (Future<?> future : futures) {
-            if (!future.isDone() || future.isCancelled()) {
-                continue;
-            }
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        for (int i = 0; i < futures.size(); i++) {
+            Future<?> future = futures.get(i);
+            long remainingMs = Math.max(1L, deadline - System.currentTimeMillis());
             try {
-                future.get();
-            } catch (Exception e) {
+                future.get(remainingMs, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                cancelTimedOutAttempt(future, running.get(i), requirePtkSession);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                cancelTimedOutAttempt(future, running.get(i), requirePtkSession);
+                for (int j = i + 1; j < futures.size(); j++) {
+                    cancelTimedOutAttempt(futures.get(j), running.get(j), requirePtkSession);
+                }
+                return;
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
                 progress.warn(
-                        "PTK browser coverage direct attempt failed: "
-                                + (e.getMessage() != null ? e.getMessage() : e.getClass()));
+                        "PTK browser coverage browser attempt failed for "
+                                + running.get(i).target.url
+                                + ": "
+                                + cause.getMessage());
             }
         }
+        for (int i = 0; i < futures.size(); i++) {
+            Future<?> future = futures.get(i);
+            if (!future.isDone()) {
+                cancelTimedOutAttempt(future, running.get(i), requirePtkSession);
+            }
+        }
+    }
+
+    private void cancelTimedOutAttempt(
+            Future<?> future, RunningAttempt attempt, boolean requirePtkSession) {
+        if (future != null) {
+            future.cancel(true);
+        }
+        BrowserCoverageSnapshot snapshot = ptk.getBrowserCoverageSnapshot(attempt.target.url);
+        if (isCoverageSatisfied(snapshot, requirePtkSession)) {
+            return;
+        }
+        attempt.target.finalState = "browser_session_invalid:attempt_timeout";
+        ptk.recordBrowserCoverageInvalid(null, attempt.target.url, "attempt_timeout", null);
+    }
+
+    private static ThreadFactory browserCoverageThreadFactory() {
+        AtomicInteger sequence = new AtomicInteger();
+        return runnable -> {
+            Thread thread =
+                    new Thread(runnable, "ptk-browser-coverage-" + sequence.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        };
     }
 
     private void runDirectAttempt(
@@ -658,6 +682,9 @@ final class PtkBrowserCoverageJob extends AutomationJob {
             Object driver = method.invoke(process);
             return driver instanceof WebDriver webDriver ? webDriver : null;
         } catch (ReflectiveOperationException | RuntimeException e) {
+            LOGGER.warn(
+                    "PTK_REFLECTION_FALLBACK component=client-spider-webdriver reason={}",
+                    e.getMessage());
             throw new IllegalStateException(
                     "Failed to read WebDriver from ClientSpider process", e);
         }
@@ -1185,6 +1212,11 @@ final class PtkBrowserCoverageJob extends AutomationJob {
             } catch (ReflectiveOperationException | RuntimeException e) {
                 ptk.recordBrowserCoverageInvalid(
                         zapid, targetUrl, "webdriver_script_failed", e.getMessage());
+                LOGGER.warn(
+                        "PTK_REFLECTION_FALLBACK component=client-spider-shutdown zapid={} url={} reason={}",
+                        zapid,
+                        targetUrl,
+                        e.getMessage());
                 progress.warn(
                         "PTK browser coverage ClientSpider process shutdown failed for "
                                 + targetUrl
@@ -1239,6 +1271,9 @@ final class PtkBrowserCoverageJob extends AutomationJob {
         } catch (ReflectiveOperationException | RuntimeException e) {
             // Best-effort cleanup only. The WebDriver process and callback proxy are already
             // closed.
+            LOGGER.warn(
+                    "PTK_REFLECTION_FALLBACK component=client-spider-unload reason={}",
+                    e.getMessage());
         }
     }
 
@@ -1397,7 +1432,6 @@ final class PtkBrowserCoverageJob extends AutomationJob {
 
     public static final class Parameters extends AutomationData {
         private String context;
-        private String user;
         private String source = "contextUrls";
         private String url;
         private String urls;
@@ -1422,14 +1456,6 @@ final class PtkBrowserCoverageJob extends AutomationJob {
 
         public void setContext(String context) {
             this.context = context;
-        }
-
-        public String getUser() {
-            return user;
-        }
-
-        public void setUser(String user) {
-            this.user = user;
         }
 
         public String getSource() {

@@ -29,13 +29,10 @@ final class BrowserCoverageEvidence {
         }
         if ("ptk_session_established".equals(event)) {
             ptkSessionEstablished.incrementAndGet();
-            browserLoaded.incrementAndGet();
             return;
         }
         if ("ptk_analysis_ready".equals(event)) {
             ptkAnalysisReady.incrementAndGet();
-            ptkSessionEstablished.incrementAndGet();
-            browserLoaded.incrementAndGet();
             return;
         }
         if ("browser_session_invalid".equals(event)) {

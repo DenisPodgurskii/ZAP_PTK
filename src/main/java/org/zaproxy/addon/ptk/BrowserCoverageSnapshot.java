@@ -17,11 +17,11 @@ record BrowserCoverageSnapshot(
     }
 
     boolean hasBrowserLoad() {
-        return browserLoaded > 0;
+        return browserLoaded > 0 || ptkSessionEstablished > 0 || ptkAnalysisReady > 0;
     }
 
     boolean hasPtkSession() {
-        return ptkSessionEstablished > 0;
+        return ptkSessionEstablished > 0 || ptkAnalysisReady > 0;
     }
 
     boolean hasPtkAnalysisReady() {

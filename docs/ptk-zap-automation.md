@@ -136,6 +136,18 @@ Supported parameters:
 | `failOnMissingBrowserLoad` | If true, the job can fail the automation plan on missing browser load/session evidence. |
 | `logoutAvoidance` | Pass-through logout avoidance option for direct browser attempts. |
 
+The job also reports close-contract state through `PTK_TIMING` and `PTK_CLOSE_CONTRACT` log lines. Important close states are:
+
+| State | Meaning |
+|---|---|
+| `safe_to_close` | PTK reported terminal progress or an accepted safe close decision after ZAP requested close. |
+| `forced_closed` | ZAP exhausted the bounded close budget and closed the browser without terminal PTK evidence. |
+| `engine_incomplete` | PTK stopped but at least one engine reported incomplete/cancelled work. Treat findings as usable only with lifecycle warning. |
+| `completionStatus` | PTK engine completion status returned by the browser-side close decision. |
+| `zapProgressTerminalPosted` | PTK says it posted a terminal progress callback to ZAP. ZAP does not treat this as analysis-ready by itself. |
+
+`safeToClose=true` from progress callbacks is ignored until ZAP has recorded that it started a close request for the zapid. This prevents regular progress callbacks from pre-setting close readiness.
+
 Coverage classifications:
 
 | Classification | Meaning |
@@ -152,25 +164,12 @@ Use `source: historyUrls` when `spiderClient` has already discovered target URLs
 
 Use `source: contextUrls` only when you want to verify context seed URLs. It will not check every URL discovered by the traditional spider.
 
-## Firing Range Validation
+## Validation
 
-For Firing Range `/escape/`, the current hard DAST gate is 16 unique PTK DAST XSS URL-alert pairs in ZAP output.
-
-The current local capacity target is 5 browsers per run when this laptop cannot reliably handle 8 or 12 browsers. That is an environment-capacity decision, not a rulepack or strategy change.
-
-Recommended local canaries:
-
-```text
-edge, 5 browsers, headed
-edge-headless, 5 browsers
-firefox, 5 browsers, headed
-firefox-headless, 5 browsers
-```
-
-For each run, check both:
+For each automation validation run, check both:
 
 - lifecycle: loaded browsers, PTK sessions, forced close count, invalid session count
-- findings: 16 unique DAST XSS URL-alert pairs
+- findings: expected unique PTK findings for the target and rule configuration
 
 If the finding gate passes but lifecycle shows forced close or missing sessions, do not call the run clean. Treat it as "finding evidence valid, lifecycle warning open".
 

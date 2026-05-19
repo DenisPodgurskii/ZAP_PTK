@@ -90,6 +90,45 @@ class ExtensionPtkCloseContractTest {
     }
 
     @Test
+    void browserCoverageTargetUsesSeparateNormalizedFirstWinsMapping() {
+        Map<String, String> closeTargets = new ConcurrentHashMap<>();
+        Map<String, String> coverageTargets = new ConcurrentHashMap<>();
+
+        assertEquals(
+                true,
+                PtkCloseContract.rememberInitialTargetUrl(
+                        closeTargets, "zap-1", "https://example.test/current"));
+        assertEquals(
+                true,
+                PtkCloseContract.rememberBrowserCoverageTargetUrl(
+                        coverageTargets, "zap-1", "https://example.test/address/"));
+
+        assertEquals("https://example.test/current", closeTargets.get("zap-1"));
+        assertEquals("https://example.test/address/index.html", coverageTargets.get("zap-1"));
+        assertEquals(
+                false,
+                PtkCloseContract.rememberBrowserCoverageTargetUrl(
+                        coverageTargets, "zap-1", "https://attacker.test/address/"));
+        assertEquals("https://example.test/address/index.html", coverageTargets.get("zap-1"));
+    }
+
+    @Test
+    void closedZapIdsAreBoundedAndExpire() {
+        Map<String, Long> closedZapIds = new ConcurrentHashMap<>();
+
+        PtkCloseContract.rememberClosedZapId(closedZapIds, "old", 1L);
+        assertEquals(false, PtkCloseContract.isRecentlyClosedZapId(closedZapIds, "old", 70_000L));
+
+        for (int i = 0; i < PtkCloseContract.CLOSED_ZAPID_MAX_ENTRIES + 25; i++) {
+            PtkCloseContract.rememberClosedZapId(closedZapIds, "zap-" + i, 80_000L + i);
+        }
+
+        assertTrue(closedZapIds.size() <= PtkCloseContract.CLOSED_ZAPID_MAX_ENTRIES);
+        assertEquals(
+                true, PtkCloseContract.isRecentlyClosedZapId(closedZapIds, "zap-1024", 81_100L));
+    }
+
+    @Test
     void runningStatusIsNotTerminalJustBecauseProgressReachedOneHundred() {
         assertEquals(false, PtkCloseContract.isTerminalProgressValue(100, "running"));
         assertEquals(false, PtkCloseContract.isTerminalProgressValue(100, "ready"));
@@ -199,8 +238,24 @@ class ExtensionPtkCloseContractTest {
         evidence.record("ptk_session_established", Map.of("progress", 0));
 
         BrowserCoverageSnapshot snapshot = evidence.snapshot("https://example.test/a");
-        assertEquals(2, snapshot.browserLoaded());
+        assertEquals(1, snapshot.browserLoaded());
         assertEquals(1, snapshot.ptkSessionEstablished());
+        assertEquals("browser_loaded", snapshot.classify(true));
+    }
+
+    @Test
+    void ptkAnalysisReadyKeepsIndependentCountersButSatisfiesReadiness() {
+        BrowserCoverageEvidence evidence = new BrowserCoverageEvidence();
+
+        evidence.scheduled(1);
+        evidence.record("ptk_analysis_ready", Map.of("readiness", "ready"));
+
+        BrowserCoverageSnapshot snapshot = evidence.snapshot("https://example.test/a");
+        assertEquals(0, snapshot.browserLoaded());
+        assertEquals(0, snapshot.ptkSessionEstablished());
+        assertEquals(1, snapshot.ptkAnalysisReady());
+        assertEquals(true, snapshot.hasBrowserLoad());
+        assertEquals(true, snapshot.hasPtkSession());
         assertEquals("browser_loaded", snapshot.classify(true));
     }
 

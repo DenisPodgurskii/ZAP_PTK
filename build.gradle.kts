@@ -15,6 +15,28 @@ repositories {
     }
 }
 
+val automationVersion = "0.60.0"
+val automationZapFile =
+    layout.buildDirectory.file("zap-addons/automation-beta-$automationVersion.zap")
+val automationZapUrl =
+    "https://github.com/zaproxy/zap-extensions/releases/download/" +
+        "automation-v$automationVersion/automation-beta-$automationVersion.zap"
+
+val downloadAutomationZap by tasks.registering {
+    outputs.file(automationZapFile)
+    doLast {
+        val outputFile = automationZapFile.get().asFile
+        outputFile.parentFile.mkdirs()
+        ant.withGroovyBuilder {
+            "get"(
+                "src" to automationZapUrl,
+                "dest" to outputFile,
+                "usetimestamp" to true,
+            )
+        }
+    }
+}
+
 description = "Adds the OWASP PTK extension to browsers launched from ZAP."
 
 zapAddOn {
@@ -47,11 +69,8 @@ zapAddOn {
 }
 
 dependencies {
-    val zapWeeklyDir =
-        providers.environmentVariable("ZAP_WEEKLY_DIR")
-            .orElse("/Users/ptk/dev/ZAP-weekly/ZAP_D-2026-05-05")
-    compileOnly(files(zapWeeklyDir.map { "$it/plugin/automation-beta-0.60.0.zap" }))
-    compileOnly(files(zapWeeklyDir.map { "$it/tmp/addOnData/database/0.10.0/libs/jackson-annotations-2.21.jar" }))
+    compileOnly(files(automationZapFile))
+    compileOnly("com.fasterxml.jackson.core:jackson-annotations:2.20")
     compileOnly("org.zaproxy.addon:client:0.22.0-SNAPSHOT")
     compileOnly("org.zaproxy.addon:selenium:15.43.0")
     compileOnly("org.projectlombok:lombok:1.18.34")
@@ -68,6 +87,7 @@ java {
 }
 
 tasks.withType<JavaCompile>().configureEach {
+    dependsOn(downloadAutomationZap)
     val lintFlags = mutableListOf("-processing")
     if (JavaVersion.current().getMajorVersion() >= "21") {
         lintFlags.add("-this-escape")
