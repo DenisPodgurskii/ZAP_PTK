@@ -19,6 +19,10 @@ This ZAP add-on enables seamless integration between ZAP and OWASP PTK, allowing
 
 For more information about OWASP PTK, visit [https://pentestkit.co.uk/](https://pentestkit.co.uk/)
 
+## Automation Documentation
+
+For PTK/ZAP automation plan structure, close-contract behavior, browser evidence logs, and diagnostic jobs such as `ptkBrowserCoverage`, see [docs/ptk-zap-automation.md](docs/ptk-zap-automation.md).
+
 ## Development Notes
 
 To deploy to `../zaprozy` : `./gradlew copyZapAddOn`
@@ -26,4 +30,3 @@ To deploy to `../zaprozy` : `./gradlew copyZapAddOn`
 To deploy to `../zaproxy` and use a local add-on : `./gradlew copyZapAddOn --include-build=../zap-extensions`
 
 To apply code formatting: `./gradlew spotlessApply`
-

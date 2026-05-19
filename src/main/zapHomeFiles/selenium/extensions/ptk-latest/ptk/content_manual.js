@@ -13,6 +13,8 @@ const runtime = (typeof browser !== 'undefined' && browser?.runtime)
     ? browser.runtime
     : (typeof chrome !== 'undefined' && chrome?.runtime ? chrome.runtime : null);
 const sharedIastBridgeActive = window.__PTK_SHARED_IAST_CONTENT_BRIDGE__ === true;
+const PTK_IAST_PAGE_TO_CONTENT_EVENT = 'ptk:iast:page-to-content:v1';
+const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
 
 const PTK_SPA_ATTACK_TAB_MARKER = 'ptk_spa_attack_tab';
 const PTK_SPA_DIALOG_PARAM = 'ptk_dast=1';
@@ -64,6 +66,92 @@ function sendRuntimeMessage(payload) {
     } catch (_) {
         return Promise.resolve();
     }
+}
+
+function parseIastBridgeEventDetail(detail) {
+    if (!detail) return null;
+    if (typeof detail === 'object') return detail;
+    if (typeof detail !== 'string') return null;
+    try {
+        const parsed = JSON.parse(detail);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function dispatchIastBridgeToPage(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    try {
+        window.dispatchEvent(new CustomEvent(PTK_IAST_CONTENT_TO_PAGE_EVENT, {
+            detail: JSON.stringify(payload)
+        }));
+    } catch (_) { }
+}
+
+function handleIastPageBridgePayload(data) {
+    data = data || {};
+
+    if (data?.ptk_iast) {
+        const type = data?.ptk_iast === 'runtime_signal' ? 'runtime_signal' : 'finding_report';
+        browser.runtime.sendMessage({
+            channel: "ptk_content_iast2background_iast",
+            type,
+            finding: type === 'finding_report' ? data.finding : undefined,
+            signal: type === 'runtime_signal' ? data.signal : undefined
+        }).catch(e => e);
+        return true;
+    }
+
+    if (data?.channel === 'ptk_iast_agent_ready') {
+        browser.runtime.sendMessage({
+            channel: "ptk_content_iast2background_iast",
+            type: "agent_ready"
+        }).catch(e => e);
+        return true;
+    }
+
+    if (data?.channel === 'ptk_iast_agent_failed') {
+        browser.runtime.sendMessage({
+            channel: "ptk_content_iast2background_iast",
+            type: "agent_failed",
+            error: data?.error || null
+        }).catch(e => e);
+        return true;
+    }
+
+    if (data?.channel === 'ptk_iast_runtime_health') {
+        browser.runtime.sendMessage({
+            channel: "ptk_content_iast2background_iast",
+            type: "runtime_health",
+            health: data?.health && typeof data.health === 'object' ? data.health : null
+        }).catch(e => e);
+        return true;
+    }
+
+    if (data?.channel === 'ptk_content_iast_request_modules') {
+        browser.runtime.sendMessage({
+            channel: 'ptk_content_iast2background_request_modules'
+        }).then(resp => {
+            dispatchIastBridgeToPage({
+                channel: 'ptk_background_iast2content_modules',
+                iastModules: resp?.iastModules || null,
+                iastModulesSignature: resp?.iastModulesSignature || null,
+                scanStrategy: resp?.scanStrategy || null
+            });
+        }).catch(err => {
+            try {
+                console.warn('[PTK IAST] content failed to fetch modules', err);
+            } catch (_) { }
+            dispatchIastBridgeToPage({
+                channel: 'ptk_background_iast2content_modules',
+                iastModules: null
+            });
+        });
+        return true;
+    }
+
+    return false;
 }
 
 function normalizeAutomationBridgeResponse(type, response) {
@@ -237,10 +325,15 @@ setInterval(function () {
         }).catch(e => {
             //try { console.warn('[PTK][SPA][content] failed to send spa_url_changed', e) } catch (_) { }
         })
+        let sastPayload = null
+        try {
+            sastPayload = collectSastPayload()
+        } catch (_) { }
         sendRuntimeMessage({
             channel: "ptk_content_sast2background_sast",
             type: "spa_url_changed",
-            url: href
+            url: href,
+            sastPayload
         }).catch(e => {
             // try { console.warn('[PTK][SPA][content] failed to send spa_url_changed to SAST', e) } catch (_) { }
         })
@@ -268,16 +361,35 @@ setInterval(function () {
 
 
 function collectSastPayload() {
-    const scripts = Array.from(document.scripts)
+    const currentScripts = Array.from(document.scripts)
         .filter(isExecutableSastScriptElement)
         .map(s => ({
-            src: s.src || null,
-            code: s.src ? null : s.innerText
+            src: normalizeSastScriptSrc(s.src || null),
+            code: s.src ? null : normalizeSastScriptCode(s.innerText || s.textContent || '')
         }))
         .filter(script => {
             if (!script.src) return true;
             return isSameOriginSastScriptUrl(script.src);
         });
+
+    const scripts = [];
+    const seen = new Set();
+    const addScript = (script) => {
+        if (!script || (script.src && !isSameOriginSastScriptUrl(script.src))) return;
+        const normalized = {
+            src: normalizeSastScriptSrc(script.src || null),
+            code: script.src ? null : normalizeSastScriptCode(script.code || '')
+        };
+        if (!normalized.src && !String(normalized.code || '').trim()) return;
+        const key = makeSastScriptKey(normalized);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        scripts.push(normalized);
+    };
+
+    currentScripts.forEach(addScript);
+    getPtkEarlySastScriptRegistry().forEach(addScript);
+
     return {
         scripts: scripts,
         html: collectSastInlineHandlers(),
@@ -352,6 +464,38 @@ function isSameOriginSastScriptUrl(src) {
             : false;
     } catch (_) {
         return false;
+    }
+}
+
+function normalizeSastScriptCode(value) {
+    if (typeof value !== 'string') return '';
+    const maxCodeChars = 512 * 1024;
+    return value.length > maxCodeChars ? value.slice(0, maxCodeChars) : value;
+}
+
+function normalizeSastScriptSrc(src) {
+    if (!src) return null;
+    try {
+        return new URL(src, document.URL).href;
+    } catch (_) {
+        return String(src || '') || null;
+    }
+}
+
+function makeSastScriptKey(script) {
+    const src = normalizeSastScriptSrc(script?.src || null);
+    if (src) return `src:${src}`;
+    const code = normalizeSastScriptCode(script?.code || '');
+    return code ? `inline:${code}` : '';
+}
+
+function getPtkEarlySastScriptRegistry() {
+    try {
+        return Array.isArray(window.__PTK_SAST_EARLY_SCRIPT_REGISTRY__)
+            ? window.__PTK_SAST_EARLY_SCRIPT_REGISTRY__
+            : [];
+    } catch (_) {
+        return [];
     }
 }
 
@@ -531,22 +675,20 @@ if (runtime?.onMessage) runtime.onMessage.addListener(function (message, sender,
     }
 
     if (!sharedIastBridgeActive && message.channel == "ptk_background_iast2content_modules" && message.iastModules) {
-        try {
-            window.postMessage({
-                channel: 'ptk_background_iast2content_modules',
-                iastModules: message.iastModules
-            }, '*')
-        } catch (_) { }
+        dispatchIastBridgeToPage({
+            channel: 'ptk_background_iast2content_modules',
+            iastModules: message.iastModules,
+            iastModulesSignature: message.iastModulesSignature || null,
+            scanStrategy: message.scanStrategy || null
+        })
         return Promise.resolve({ ok: true })
     }
 
     if (!sharedIastBridgeActive && message.channel == "ptk_background_iast2content_token_origin") {
-        try {
-            window.postMessage({
-                channel: 'ptk_background_iast2content_token_origin',
-                tokens: Array.isArray(message.tokens) ? message.tokens : []
-            }, '*')
-        } catch (_) { }
+        dispatchIastBridgeToPage({
+            channel: 'ptk_background_iast2content_token_origin',
+            tokens: Array.isArray(message.tokens) ? message.tokens : []
+        })
         return Promise.resolve({ ok: true })
     }
 
@@ -680,6 +822,8 @@ function enableAutomation() {
         document.documentElement.appendChild(nonceEl)
     }
     nonceEl.dataset.nonce = automationNonce
+    nonceEl.dataset.automationEnabled = '1'
+    nonceEl.dataset.automationRuntime = 'manual'
 
     installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true)
     notifyAutomationStatus(true, automationNonce)
@@ -716,13 +860,22 @@ function disableAutomation() {
     }
 }
 
+function isZapAutomationRuntimeActive() {
+    if (window.__PTK_CONTENT_AUTOMATION_LOADED__ === true) return true
+    if (window.__PTK_CONTENT_AUTOMATION_ACTIVE__ === true) return true
+    return false
+}
+
 function isZapBrowserCloseBridgeMessage(data) {
     // Manual-mode pages must not be able to bypass automation_disabled by
-    // crafting a zap_browser_close message with the DOM-readable nonce. ZAP close
-    // cooperation is supported through the automation content script path where
-    // the bridge is already enabled for the WebDriver-controlled tab.
+    // crafting broad automation messages with the DOM-readable nonce. The only
+    // manual-mode exception is the browser-close contract for an explicit ZAP
+    // session; the background still verifies source, same-tab ownership, and
+    // session state before allowing progress/stop.
     if (data?.source !== 'ptk-automation') return false
     if (data?.options?.source !== 'zap_browser_close') return false
+    const sessionId = data?.sessionId || data?.options?.sessionId
+    if (typeof sessionId !== 'string' || !sessionId.trim()) return false
     return data.type === 'session-end' || data.type === 'get-session-progress'
 }
 
@@ -734,15 +887,14 @@ function initZapCloseAutomationMessaging() {
         if (event.source !== window) return
         const data = event.data
         if (!isZapBrowserCloseBridgeMessage(data)) return
-        window.postMessage({
-            source: 'ptk-extension',
-            nonce: data.nonce || '',
-            requestId: data.requestId,
-            ok: false,
-            error: 'automation_disabled'
-        }, '*')
+        handleAutomationBridgeMessage(data, { responseNonce: data.nonce || '' })
     })
 }
+
+window.addEventListener(PTK_IAST_PAGE_TO_CONTENT_EVENT, (event) => {
+    if (sharedIastBridgeActive) return
+    handleIastPageBridgePayload(parseIastBridgeEventDetail(event?.detail))
+}, false)
 
 window.addEventListener("message", (event) => {
     const data = event.data || {}
@@ -765,66 +917,7 @@ window.addEventListener("message", (event) => {
     // Note: ptk-automation messages are handled conditionally via automationMessageHandler
     // when automation is enabled in settings
 
-    if (!sharedIastBridgeActive && data?.ptk_iast) {
-        const type = data?.ptk_iast === 'runtime_signal' ? 'runtime_signal' : 'finding_report'
-        browser.runtime.sendMessage({
-            channel: "ptk_content_iast2background_iast",
-            type,
-            finding: type === 'finding_report' ? data.finding : undefined,
-            signal: type === 'runtime_signal' ? data.signal : undefined
-        }).catch(e => e)
-        return
-    }
-
-    if (!sharedIastBridgeActive && data?.channel === 'ptk_iast_agent_ready') {
-        browser.runtime.sendMessage({
-            channel: "ptk_content_iast2background_iast",
-            type: "agent_ready"
-        }).catch(e => e)
-        return
-    }
-
-    if (!sharedIastBridgeActive && data?.channel === 'ptk_iast_agent_failed') {
-        browser.runtime.sendMessage({
-            channel: "ptk_content_iast2background_iast",
-            type: "agent_failed",
-            error: data?.error || null
-        }).catch(e => e)
-        return
-    }
-
-    if (!sharedIastBridgeActive && data?.channel === 'ptk_iast_runtime_health') {
-        browser.runtime.sendMessage({
-            channel: "ptk_content_iast2background_iast",
-            type: "runtime_health",
-            health: data?.health && typeof data.health === 'object' ? data.health : null
-        }).catch(e => e)
-        return
-    }
-
-    if (!sharedIastBridgeActive && data?.channel === 'ptk_content_iast_request_modules') {
-        browser.runtime.sendMessage({
-            channel: 'ptk_content_iast2background_request_modules'
-        }).then(resp => {
-            try {
-                window.postMessage({
-                    channel: 'ptk_background_iast2content_modules',
-                    iastModules: resp?.iastModules || null,
-                    iastModulesSignature: resp?.iastModulesSignature || null,
-                    scanStrategy: resp?.scanStrategy || null
-                }, '*')
-            } catch (_) { }
-        }).catch(err => {
-            try {
-                console.warn('[PTK IAST] content failed to fetch modules', err)
-            } catch (_) { }
-            try {
-                window.postMessage({
-                    channel: 'ptk_background_iast2content_modules',
-                    iastModules: null
-                }, '*')
-            } catch (_) { }
-        })
+    if (!sharedIastBridgeActive && handleIastPageBridgePayload(data)) {
         return
     }
 
@@ -902,14 +995,19 @@ function initPtkAutomationMessaging() {
 }
 
 function installPtkAutomationBridge(version, nonce, automationEnabledState) {
-    if (window.PTK_AUTOMATION?.bridgeId === 'ptk-automation-bridge') {
-        return
-    }
+    const existingBridge = window.PTK_AUTOMATION?.bridgeId === 'ptk-automation-bridge'
+        ? window.PTK_AUTOMATION
+        : null
+    if (existingBridge && !(automationEnabledState === true && existingBridge._automationEnabled === false)) return
     const script = document.createElement('script')
-    script.src = browser.runtime.getURL('ptk/automationBridge.js')
+    const bridgeUrl = browser.runtime.getURL('ptk/automationBridge.js')
+    script.src = bridgeUrl
     script.dataset.ptkVersion = version || 'unknown'
     script.dataset.ptkNonce = nonce || ''  // Pass nonce to bridge
     script.dataset.ptkAutomationEnabled = automationEnabledState ? '1' : '0'
+    try {
+        script.dataset.ptkExtensionOrigin = new URL(bridgeUrl).origin
+    } catch (_) { }
     const parent = document.documentElement || document.head || document.body
     parent.appendChild(script)
 }

@@ -38,6 +38,20 @@ let iastScanStrategy = 'SMART'
 const lastIastModuleDeliveryByTab = new Map()
 const inFlightIastModuleSendByTab = new Map()
 
+function normalizeIastBackgroundStrategy(value = 'SMART') {
+    return String(value || '').trim().toUpperCase() === 'COMPREHENSIVE'
+        ? 'COMPREHENSIVE'
+        : 'SMART'
+}
+
+function buildIastAgentScriptFiles(scanStrategy = 'SMART', { isFirefox = false } = {}) {
+    const prefix = isFirefox ? 'content/' : 'ptk/content/'
+    const strategy = normalizeIastBackgroundStrategy(scanStrategy)
+    return strategy === 'COMPREHENSIVE'
+        ? [`${prefix}iast_comprehensive_bootstrap.js`, `${prefix}iast.js`]
+        : [`${prefix}iast.js`]
+}
+
 function clearIastModuleSendTracking(tabId = null) {
     if (tabId == null) {
         lastIastModuleDeliveryByTab.clear()
@@ -264,8 +278,53 @@ export function buildDefaultIastRuntimeHealthTelemetry(overrides = {}) {
         degradedHookGroups: Array.isArray(overrides?.degradedHookGroups) ? overrides.degradedHookGroups.slice() : [],
         globallyDisabledHookGroups: Array.isArray(overrides?.globallyDisabledHookGroups) ? overrides.globallyDisabledHookGroups.slice() : [],
         hookGroupFailures,
+        modulesLoaded: overrides?.modulesLoaded === true,
+        modulesSignature: overrides?.modulesSignature || null,
+        pendingFindingReports: Number.isFinite(Number(overrides?.pendingFindingReports))
+            ? Number(overrides.pendingFindingReports)
+            : null,
+        flushedPendingFindingReports: Number.isFinite(Number(overrides?.flushedPendingFindingReports))
+            ? Number(overrides.flushedPendingFindingReports)
+            : null,
+        url: overrides?.url || null,
+        agentBootUrl: overrides?.agentBootUrl || null,
+        documentReadyState: overrides?.documentReadyState || null,
+        agentBootReadyState: overrides?.agentBootReadyState || null,
+        agentBootAt: Number.isFinite(Number(overrides?.agentBootAt)) ? Number(overrides.agentBootAt) : null,
+        navigationStart: Number.isFinite(Number(overrides?.navigationStart)) ? Number(overrides.navigationStart) : null,
+        agentBootDelayMs: Number.isFinite(Number(overrides?.agentBootDelayMs)) ? Number(overrides.agentBootDelayMs) : null,
+        agentBootAfterLoad: overrides?.agentBootAfterLoad === true,
         updatedAt: overrides?.updatedAt || null,
         error: overrides?.error || null
+    }
+}
+
+function buildDefaultIastAutomationTelemetry(overrides = {}) {
+    const expectedTabId = overrides?.expectedTabId
+    const lastSenderTabId = overrides?.lastSenderTabId
+    return {
+        scanStrategy: normalizeIastBackgroundStrategy(overrides?.scanStrategy || iastScanStrategy),
+        agentReadyCount: Number(overrides?.agentReadyCount || 0),
+        agentFailedCount: Number(overrides?.agentFailedCount || 0),
+        runtimeHealthCount: Number(overrides?.runtimeHealthCount || 0),
+        findingReportsAccepted: Number(overrides?.findingReportsAccepted || 0),
+        findingReportsDroppedInactive: Number(overrides?.findingReportsDroppedInactive || 0),
+        findingReportsDroppedTabMismatch: Number(overrides?.findingReportsDroppedTabMismatch || 0),
+        runtimeSignalsAccepted: Number(overrides?.runtimeSignalsAccepted || 0),
+        runtimeSignalsDroppedInactive: Number(overrides?.runtimeSignalsDroppedInactive || 0),
+        runtimeSignalsDroppedTabMismatch: Number(overrides?.runtimeSignalsDroppedTabMismatch || 0),
+        modulesSentOk: Number(overrides?.modulesSentOk || 0),
+        modulesSentSkipped: Number(overrides?.modulesSentSkipped || 0),
+        modulesSentError: Number(overrides?.modulesSentError || 0),
+        expectedTabId: expectedTabId !== null && expectedTabId !== undefined && Number.isInteger(Number(expectedTabId))
+            ? Number(expectedTabId)
+            : null,
+        lastSenderTabId: lastSenderTabId !== null && lastSenderTabId !== undefined && Number.isInteger(Number(lastSenderTabId))
+            ? Number(lastSenderTabId)
+            : null,
+        lastDroppedReason: overrides?.lastDroppedReason || null,
+        lastModuleSendResult: overrides?.lastModuleSendResult || null,
+        lastUpdatedAt: overrides?.lastUpdatedAt || null
     }
 }
 
@@ -895,6 +954,7 @@ export class ptk_iast {
                 files: [],
                 iastTelemetry: {
                     activation: null,
+                    automation: buildDefaultIastAutomationTelemetry(),
                     noise: null
                 }
             }
@@ -908,11 +968,88 @@ export class ptk_iast {
         const activation = existing.activation && typeof existing.activation === 'object'
             ? existing.activation
             : null
+        const automation = existing.automation && typeof existing.automation === 'object'
+            ? buildDefaultIastAutomationTelemetry(existing.automation)
+            : buildDefaultIastAutomationTelemetry({
+                scanStrategy: this.scanResult?.settings?.iastScanStrategy || iastScanStrategy,
+                expectedTabId: this.scanResult?.tabId ?? null
+            })
         const noise = computeIastNoiseTelemetry(this.scanResult || {})
         this.scanResult.iastTelemetry = {
             activation: cloneIastValue(activation, null),
+            automation,
             noise
         }
+    }
+
+    _updateIastAutomationTelemetry(patch = {}, { persist = false, immediate = false } = {}) {
+        if (!this.scanResult) return false
+        const existingTelemetry = this.scanResult.iastTelemetry && typeof this.scanResult.iastTelemetry === 'object'
+            ? this.scanResult.iastTelemetry
+            : {}
+        const previous = existingTelemetry.automation && typeof existingTelemetry.automation === 'object'
+            ? existingTelemetry.automation
+            : buildDefaultIastAutomationTelemetry({
+                scanStrategy: this.scanResult?.settings?.iastScanStrategy || iastScanStrategy,
+                expectedTabId: this.scanResult?.tabId ?? null
+            })
+        const next = buildDefaultIastAutomationTelemetry(Object.assign({}, previous, patch, {
+            scanStrategy: patch.scanStrategy || previous.scanStrategy || this.scanResult?.settings?.iastScanStrategy || iastScanStrategy,
+            expectedTabId: patch.expectedTabId ?? previous.expectedTabId ?? this.scanResult?.tabId ?? null,
+            lastUpdatedAt: patch.lastUpdatedAt || Date.now()
+        }))
+        if (JSON.stringify(previous) === JSON.stringify(next)) return false
+        this.scanResult.iastTelemetry = Object.assign({}, existingTelemetry, {
+            automation: next,
+            activation: existingTelemetry.activation || null,
+            noise: existingTelemetry.noise || computeIastNoiseTelemetry(this.scanResult || {})
+        })
+        if (persist) {
+            this.updateScanResult({ persist, immediate })
+        }
+        return true
+    }
+
+    _incrementIastAutomationTelemetry(counterName, patch = {}, opts = {}) {
+        const existing = this.scanResult?.iastTelemetry?.automation || {}
+        const nextValue = Number(existing?.[counterName] || 0) + 1
+        return this._updateIastAutomationTelemetry(Object.assign({}, patch, {
+            [counterName]: nextValue
+        }), opts)
+    }
+
+    _recordIastModuleSendResult(result = null, opts = {}) {
+        const normalized = result && typeof result === 'object'
+            ? {
+                ok: result.ok !== false,
+                skipped: result.skipped === true,
+                reason: result.reason || null,
+                error: result.error || null,
+                signature: result.signature || null
+            }
+            : {
+                ok: false,
+                skipped: false,
+                reason: null,
+                error: 'no_result',
+                signature: null
+            }
+        const existing = this.scanResult?.iastTelemetry?.automation || {}
+        const patch = {
+            lastModuleSendResult: normalized,
+            scanStrategy: opts.scanStrategy || existing.scanStrategy || this.scanResult?.settings?.iastScanStrategy || iastScanStrategy
+        }
+        if (normalized.ok && normalized.skipped) {
+            patch.modulesSentSkipped = Number(existing.modulesSentSkipped || 0) + 1
+        } else if (normalized.ok) {
+            patch.modulesSentOk = Number(existing.modulesSentOk || 0) + 1
+        } else {
+            patch.modulesSentError = Number(existing.modulesSentError || 0) + 1
+        }
+        this._updateIastAutomationTelemetry(patch, {
+            persist: opts.persist === true,
+            immediate: opts.immediate === true
+        })
     }
 
     _updateRuntimeHealthTelemetry(health, { persist = true, immediate = false } = {}) {
@@ -1113,7 +1250,11 @@ export class ptk_iast {
         if (message.channel == "ptk_content_iast2background_iast") {
 
             if (message.type == 'finding_report') {
+                const senderTabId = sender?.tab?.id
                 if (this.isScanRunning && this.scanResult.tabId == sender.tab.id) {
+                    this._incrementIastAutomationTelemetry('findingReportsAccepted', {
+                        lastSenderTabId: senderTabId
+                    })
                     try {
                         const finding = createFindingFromIAST(message.finding, {
                             scanId: this.scanResult.scanId,
@@ -1125,20 +1266,43 @@ export class ptk_iast {
                         console.warn('[PTK IAST][background] createFindingFromIAST failed', e)
                     }
                 } else {
-                    // Ignore findings when scan is not active or tab mismatches.
+                    const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
+                    this._incrementIastAutomationTelemetry(
+                        reason === 'tab_mismatch' ? 'findingReportsDroppedTabMismatch' : 'findingReportsDroppedInactive',
+                        {
+                            lastSenderTabId: senderTabId,
+                            lastDroppedReason: reason
+                        }
+                    )
                 }
                 return
             }
 
             if (message.type === 'runtime_signal') {
+                const senderTabId = sender?.tab?.id
                 if (this.isScanRunning && this.scanResult.tabId == sender.tab.id) {
+                    this._incrementIastAutomationTelemetry('runtimeSignalsAccepted', {
+                        lastSenderTabId: senderTabId
+                    })
                     this.addOrUpdateRuntimeSignal(message.signal)
+                } else {
+                    const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
+                    this._incrementIastAutomationTelemetry(
+                        reason === 'tab_mismatch' ? 'runtimeSignalsDroppedTabMismatch' : 'runtimeSignalsDroppedInactive',
+                        {
+                            lastSenderTabId: senderTabId,
+                            lastDroppedReason: reason
+                        }
+                    )
                 }
                 return
             }
 
             if (message.type === 'runtime_health') {
                 if (this.isScanRunning && this.scanResult?.tabId == sender?.tab?.id) {
+                    this._incrementIastAutomationTelemetry('runtimeHealthCount', {
+                        lastSenderTabId: sender?.tab?.id
+                    })
                     this._recordZapTiming('iast.runtime.health.first', null, {
                         state: message?.health?.state || null
                     }, 'iast.runtime.health.first')
@@ -1154,6 +1318,9 @@ export class ptk_iast {
                 if (tabId != null) {
                     this.agentReadyTabs.add(tabId)
                     this.agentFailedTabs.delete(tabId)
+                    this._incrementIastAutomationTelemetry('agentReadyCount', {
+                        lastSenderTabId: tabId
+                    })
                     if (this.isScanRunning && this.scanResult?.tabId == tabId) {
                         if (this._updateRuntimeHealthTelemetry({
                             state: 'normal',
@@ -1164,6 +1331,8 @@ export class ptk_iast {
                         }
                     }
                     sendIastModulesToContent(tabId, 1, this.currentRulepackLoadOptions || {})
+                        .then(result => this._recordIastModuleSendResult(result))
+                        .catch(err => this._recordIastModuleSendResult({ ok: false, error: err?.message || String(err) }))
                 }
                 return
             }
@@ -1173,6 +1342,10 @@ export class ptk_iast {
                 if (tabId != null) {
                     this.agentReadyTabs.delete(tabId)
                     this.agentFailedTabs.set(tabId, message?.error || 'agent_load_failed')
+                    this._incrementIastAutomationTelemetry('agentFailedCount', {
+                        lastSenderTabId: tabId,
+                        lastDroppedReason: message?.error || 'agent_load_failed'
+                    }, { persist: true, immediate: true })
                     if (this.isScanRunning && this.scanResult?.tabId == tabId) {
                         if (this._updateRuntimeHealthTelemetry({
                             state: 'agent_failed',
@@ -1487,7 +1660,8 @@ export class ptk_iast {
                 bytes: compressed.body,
                 fileName: message?.fileName || "PTK_IAST_scan.json",
                 contentType: compressed.contentType,
-                compression: compressed.compression
+                compression: compressed.compression,
+                owner: message?.owner || null
             })
             if (!descriptor) {
                 return { success: false, error: "empty_export_payload" }
@@ -1504,7 +1678,7 @@ export class ptk_iast {
     }
 
     async msg_export_scan_chunk(message) {
-        const chunk = this.exportChunkStore.getChunk(message?.exportId, message?.index)
+        const chunk = this.exportChunkStore.getChunk(message?.exportId, message?.index, message?.owner || null)
         if (!chunk) {
             return { success: false, error: "export_not_found_or_expired" }
         }
@@ -1519,7 +1693,7 @@ export class ptk_iast {
     }
 
     async msg_release_export_scan(message) {
-        const released = this.exportChunkStore.release(message?.exportId)
+        const released = this.exportChunkStore.release(message?.exportId, message?.owner || null)
         return { success: released }
     }
 
@@ -1853,10 +2027,14 @@ export class ptk_iast {
         }
         this.scanResult.iastTelemetry = {
             activation: activationTelemetry,
+            automation: buildDefaultIastAutomationTelemetry({
+                scanStrategy: scanStrategy || 'SMART',
+                expectedTabId: tabId
+            }),
             noise: computeIastNoiseTelemetry(this.scanResult)
         }
         this.broadcastScanUpdate()
-        this.registerScript()
+        await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART')
         this.addListeners()
         const devtoolsStartedAt = Date.now()
         await this.attachDevtoolsDebugger(tabId)
@@ -1880,6 +2058,10 @@ export class ptk_iast {
         }
         const modulesSentAt = Date.now()
         const moduleSendResult = await sendIastModulesToContent(tabId, 1, this.currentRulepackLoadOptions || {})
+        this._recordIastModuleSendResult(moduleSendResult, {
+            persist: false,
+            scanStrategy: this.scanResult.settings.iastScanStrategy || 'SMART'
+        })
         this._recordZapTiming('iast.modules.sent', zapTiming, {
             durationMs: Date.now() - modulesSentAt,
             result: moduleSendResult?.ok === false ? 'error' : (moduleSendResult?.skipped ? 'skipped' : 'ok')
@@ -1887,7 +2069,7 @@ export class ptk_iast {
         this.broadcastScanUpdate()
     }
 
-    async stopBackgroundScan() {
+    async stopBackgroundScan(options = {}) {
         browser.tabs.sendMessage(this.scanResult.tabId, {
             channel: "ptk_background_iast2content",
             type: "clean iast result"
@@ -1913,7 +2095,9 @@ export class ptk_iast {
         scanResultStore._applyAnalysisSafe(this.scanResult, { force: true })
         await this._flushPersistScanResult()
         this.broadcastScanUpdate()
-        await refreshFinishedDastAnalysisIfNeeded()
+        if (options?.skipPostStopAnalysis !== true) {
+            await refreshFinishedDastAnalysisIfNeeded()
+        }
         return this.scanResult
     }
 
@@ -3041,19 +3225,24 @@ export class ptk_iast {
         return false
     }
 
-    registerScript() {
-        // Firefox MV2 uses different path structure than Chrome MV3
-        const file = !worker.isFirefox ? 'ptk/content/iast.js' : 'content/iast.js'
+    async registerScript(scanStrategy = 'SMART') {
+        const files = buildIastAgentScriptFiles(scanStrategy, { isFirefox: worker.isFirefox === true })
         try {
-            browser.scripting.registerContentScripts([{
+            if (!browser?.scripting?.registerContentScripts) {
+                return false
+            }
+            await this.unregisterScript()
+            await browser.scripting.registerContentScripts([{
                 id: 'iast-agent',
-                js: [file],
+                js: files,
                 matches: ['<all_urls>'],
                 runAt: 'document_start',
                 world: 'MAIN'
-            }]).then(() => { });
+            }])
+            return true
         } catch (e) {
             console.warn('[PTK IAST] Failed to register IAST script:', e);
+            return false
         }
     }
 
@@ -3102,12 +3291,34 @@ export class ptk_iast {
             return Array.isArray(results) ? results.some(entry => entry?.result === true) : true
         }
 
-        // MV3 path (Chromium). Avoid in Firefox MV2 where scripting exists but behaves differently.
+        // MV3 path (Chromium). Execute the agent file directly in the MAIN
+        // world first; inserting a chrome-extension:// script tag can be
+        // blocked by the page CSP and was unreliable in ZAP headless runs.
         if (!worker?.isFirefox && browser?.scripting?.executeScript) {
             try {
-                return await injectByScriptTag((options) => browser.scripting.executeScript(options))
+                await browser.scripting.executeScript({
+                    target: { tabId },
+                    world: 'MAIN',
+                    func: (strategy) => {
+                        try {
+                            window.__PTK_IAST_SCAN_STRATEGY__ = strategy || 'SMART'
+                        } catch (_) { }
+                    },
+                    args: [normalizedStrategy]
+                })
+                const results = await browser.scripting.executeScript({
+                    target: { tabId },
+                    world: 'MAIN',
+                    files: [file]
+                })
+                return Array.isArray(results) ? results.length > 0 : true
             } catch (e) {
-                try { console.warn('[PTK IAST] executeScript failed:', e?.message || e) } catch (_) { }
+                try { console.warn('[PTK IAST] executeScript file injection failed:', e?.message || e) } catch (_) { }
+                try {
+                    return await injectByScriptTag((options) => browser.scripting.executeScript(options))
+                } catch (fallbackError) {
+                    try { console.warn('[PTK IAST] executeScript script-tag fallback failed:', fallbackError?.message || fallbackError) } catch (_) { }
+                }
             }
         }
 
@@ -3165,6 +3376,8 @@ export class ptk_iast {
 }
 
 export const __iastTestHooks = {
+    buildDefaultIastRuntimeHealthTelemetry,
+    buildIastAgentScriptFiles,
     buildIastModulesSignature,
     clearIastModuleSendTracking,
     getIastModuleDeliveryState,

@@ -12,7 +12,7 @@ export class DastExportService {
         this.compressPayload = compressPayload
     }
 
-    async createChunkedExport(scanResult, { target = "download", fileName = "PTK_DAST_scan.json", includeSecrets = false } = {}) {
+    async createChunkedExport(scanResult, { target = "download", fileName = "PTK_DAST_scan.json", includeSecrets = false, owner = null } = {}) {
         if (!scanResult || typeof scanResult !== "object") return null
         const payload = this.lifecycleService?.buildExportPayload?.(scanResult, {
             target,
@@ -24,7 +24,8 @@ export class DastExportService {
             bytes: compressed.body,
             fileName,
             contentType: compressed.contentType,
-            compression: compressed.compression
+            compression: compressed.compression,
+            owner
         })
         if (!descriptor) {
             return { success: false, error: "empty_export_payload" }
@@ -36,8 +37,8 @@ export class DastExportService {
         }
     }
 
-    getChunk(exportId, index) {
-        const chunk = this.chunkStore.getChunk(exportId, index)
+    getChunk(exportId, index, owner = null) {
+        const chunk = this.chunkStore.getChunk(exportId, index, owner)
         if (!chunk) {
             return { success: false, error: "export_not_found_or_expired" }
         }
@@ -51,8 +52,8 @@ export class DastExportService {
         }
     }
 
-    release(exportId) {
-        return { success: this.chunkStore.release(exportId) }
+    release(exportId, owner = null) {
+        return { success: this.chunkStore.release(exportId, owner) }
     }
 }
 

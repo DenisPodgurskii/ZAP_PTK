@@ -7,6 +7,19 @@ import { resultsRegistry } from './resultsRegistry.js'
 import { collapseDastAggregatedFindings } from './dast/services/dastFindingAggregation.js'
 import { sastCollectionLooksComplete } from './sast/sast_progress.js'
 
+// Mirrors the add-on close-contract PTK stop budget. This is a drain budget
+// for current engine work, not permission to start new work during close.
+const ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS = 25000
+const ZAP_CLOSE_TERMINAL_FALLBACK_POLL_MS = 100
+const STRICT_CURRENT_TAB_SESSION_SCOPE = 'current-tab'
+const PAGE_EXPORT_OWNER = 'page-automation-export'
+const PAGE_EXPORT_MODE = 'evidence'
+const REPLAYABLE_EXPORT_OWNER = 'sdk-replayable-export'
+const REPLAYABLE_EXPORT_MODE = 'replayable'
+const REPLAYABLE_EXPORT_TTL_MS = 5 * 60 * 1000
+const REPLAYABLE_EXPORT_MAX_CHUNKS = 512
+const PRIVILEGED_SERVICE_WORKER_URL = 'extension-service-worker'
+const REPLAYABLE_EXPORT_REQUIRED_ERROR = 'replayable_export_requires_privileged_extension_export'
 
 /**
  * Helper: wait until condition is true or timeout
@@ -31,6 +44,84 @@ function toFiniteNumber(value, fallback = null) {
     return Number.isFinite(num) ? num : fallback
 }
 
+function makeRandomToken(prefix = 'ptk') {
+    try {
+        if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+            return `${prefix}_${globalThis.crypto.randomUUID()}`
+        }
+        const bytes = new Uint8Array(16)
+        globalThis.crypto.getRandomValues(bytes)
+        return `${prefix}_${Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')}`
+    } catch (_) {
+        return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`
+    }
+}
+
+async function sha256Hex(value) {
+    const input = String(value || '')
+    if (!input) return null
+    try {
+        if (globalThis.crypto?.subtle && typeof TextEncoder !== 'undefined') {
+            const bytes = new TextEncoder().encode(input)
+            const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+            return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')
+        }
+    } catch (_) { }
+    return `plain:${input}`
+}
+
+function bytesToBase64(value) {
+    const bytes = value instanceof Uint8Array
+        ? value
+        : value instanceof ArrayBuffer
+            ? new Uint8Array(value)
+            : Array.isArray(value)
+                ? Uint8Array.from(value)
+                : new Uint8Array(0)
+    let binary = ''
+    const chunkSize = 0x8000
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+    }
+    if (typeof btoa === 'function') return btoa(binary)
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64')
+    throw new Error('base64_unavailable')
+}
+
+function normalizeExportMode(value, fallback = PAGE_EXPORT_MODE) {
+    return String(value || fallback).trim().toLowerCase()
+}
+
+function isZapBrowserCloseOptions(options = {}) {
+    return options && typeof options === 'object' && options.source === 'zap_browser_close'
+}
+
+function senderFrameId(sender = {}) {
+    return Number.isInteger(sender?.frameId) ? sender.frameId : 0
+}
+
+function sameDocumentUrl(left, right, baseUrl = '') {
+    try {
+        const a = new URL(String(left || ''), baseUrl || undefined)
+        const b = new URL(String(right || ''), baseUrl || undefined)
+        return a.origin === b.origin
+            && a.pathname === b.pathname
+            && a.search === b.search
+            && a.hash === b.hash
+    } catch (_) {
+        return String(left || '') === String(right || '')
+    }
+}
+
+function isHttpPageUrl(value) {
+    try {
+        const parsed = new URL(String(value || ''))
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+    } catch (_) {
+        return false
+    }
+}
+
 function cloneJsonSafe(value, { warnings = null, label = 'value' } = {}) {
     if (value === undefined || value === null) return null
     try {
@@ -50,7 +141,6 @@ function cloneJsonSafe(value, { warnings = null, label = 'value' } = {}) {
     }
 }
 
-const STRICT_CURRENT_TAB_SESSION_SCOPE = 'current-tab'
 const ACTIVE_SESSION_STATUSES = new Set(['starting', 'running', 'stopping'])
 // Keep findings responses bounded to the long-standing bridge/background cap.
 const MAX_FINDINGS_LIMIT = 500
@@ -75,6 +165,18 @@ const CONTENT_RUNTIME_FILES = Object.freeze({
     [CONTENT_RUNTIME_SCRIPT_MANUAL]: ['ptk/content_manual.js', 'ptk/content/spa_hash_harness.js'],
     [CONTENT_RUNTIME_SCRIPT_AUTOMATION]: ['ptk/content_automation.js']
 })
+
+function isHttpZapTargetUrl(value) {
+    if (typeof value !== 'string' || !value.trim()) return false
+    try {
+        const parsed = new URL(value)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+        if (String(parsed.hostname || '').toLowerCase() === 'zap') return false
+        return true
+    } catch (_) {
+        return false
+    }
+}
 
 function sleep(ms) {
     if (!(Number.isFinite(Number(ms)) && Number(ms) > 0)) {
@@ -176,12 +278,12 @@ class EngineAdapter {
                 }
             })
         },
-        stop: async (sessionId, timeoutMs = 180000) => {
+        stop: async (sessionId, timeoutMs = 180000, options = {}) => {
             const dast = this.app?.dast || this.app?.rattacker
             const automationState = this.automationModule?._getDastAutomationCoordinatorState?.(sessionId)
             if (!automationState?.automationSession) return this._createEmptyStats()
-            // Use stopAutomationSession which waits for idle and returns stats
-            return dast.stopAutomationSession(sessionId, timeoutMs)
+            // Use stopAutomationSession which quiesces/drains and returns stats.
+            return dast.stopAutomationSession(sessionId, timeoutMs, options)
         },
         getStats: () => this._extractStats((this.app?.dast || this.app?.rattacker)?.scanResult),
         getFindings: (limit = 100) => this._extractFindings((this.app?.dast || this.app?.rattacker)?.scanResult, limit, 'DAST'),
@@ -235,13 +337,27 @@ class EngineAdapter {
             }
             return { ok: true }
         },
-        stop: async (sessionId, timeoutMs = 60000) => {
+        stop: async (sessionId, timeoutMs = 60000, options = {}) => {
             const iast = this.app?.iast
             if (!iast?.isScanRunning) return this._createEmptyStats()
-            iast.stopBackgroundScan()
-            // Wait until scan actually stops
-            await waitUntil(() => !iast.isScanRunning, timeoutMs)
-            return this._extractStats(iast.scanResult)
+            const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
+            const effectiveTimeoutMs = zapCloseRequest
+                ? Math.min(timeoutMs, ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS)
+                : timeoutMs
+            const stopPromise = iast.stopBackgroundScan({
+                skipPostStopAnalysis: zapCloseRequest
+            })
+            // stopBackgroundScan clears isScanRunning early, but still flushes
+            // normalized findings asynchronously. Await it so ZAP export/final
+            // progress does not race ahead of IAST persistence.
+            const stopped = await Promise.race([
+                Promise.resolve(stopPromise).then(() => true),
+                sleep(effectiveTimeoutMs).then(() => false)
+            ])
+            return Object.assign(this._extractStats(iast.scanResult), {
+                completionStatus: stopped ? 'completed' : 'engine_incomplete',
+                drained: stopped
+            })
         },
         getStats: () => this._extractStats(this.app?.iast?.scanResult),
         getFindings: (limit = 100) => this._extractFindings(this.app?.iast?.scanResult, limit, 'IAST'),
@@ -278,12 +394,31 @@ class EngineAdapter {
             }
             await sast.runBackgroundScan(tabId, host, { policyCode: options?.policyCode || 'SMART' }, sastOpts)
         },
-        stop: async (sessionId, timeoutMs = 60000) => {
+        stop: async (sessionId, timeoutMs = 60000, options = {}) => {
             const sast = this.app?.sast
             if (!sast?.isScanRunning) return this._createEmptyStats()
-            sast.stopBackgroundScan()
-            await waitUntil(() => !sast.isScanRunning, timeoutMs)
-            return this._extractStats(sast.scanResult)
+            const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
+            const effectiveTimeoutMs = zapCloseRequest
+                ? Math.min(timeoutMs, ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS)
+                : timeoutMs
+            let collectionDrained = true
+            if (zapCloseRequest && typeof sast.waitForCollectionIdle === 'function') {
+                collectionDrained = await sast.waitForCollectionIdle({
+                    timeoutMs: Math.max(250, Math.floor(effectiveTimeoutMs * 0.8))
+                })
+            }
+            const stopPromise = sast.stopBackgroundScan({
+                skipPostStopAnalysis: zapCloseRequest
+            })
+            const stopped = await Promise.race([
+                Promise.resolve(stopPromise).then(() => true),
+                sleep(effectiveTimeoutMs).then(() => false)
+            ])
+            const drained = stopped && collectionDrained !== false
+            return Object.assign(this._extractStats(sast.scanResult), {
+                completionStatus: drained ? 'completed' : 'engine_incomplete',
+                drained
+            })
         },
         getStats: () => this._extractStats(this.app?.sast?.scanResult),
         getFindings: (limit = 100) => this._extractFindings(this.app?.sast?.scanResult, limit, 'SAST'),
@@ -299,12 +434,19 @@ class EngineAdapter {
             // Just call runBackgroundScan - it handles "already running" internally
             await sca.runBackgroundScan(tabId, host)
         },
-        stop: async (sessionId, timeoutMs = 60000) => {
+        stop: async (sessionId, timeoutMs = 60000, options = {}) => {
             const sca = this.app?.sca
             if (!sca?.isScanRunning) return this._createEmptyStats()
+            const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
+            const effectiveTimeoutMs = zapCloseRequest
+                ? Math.min(timeoutMs, ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS)
+                : timeoutMs
             sca.stopBackgroundScan()
-            await waitUntil(() => !sca.isScanRunning, timeoutMs)
-            return this._extractStats(sca.scanResult)
+            const stopped = await waitUntil(() => !sca.isScanRunning, effectiveTimeoutMs)
+            return Object.assign(this._extractStats(sca.scanResult), {
+                completionStatus: stopped ? 'completed' : 'engine_incomplete',
+                drained: stopped
+            })
         },
         getStats: () => this._extractStats(this.app?.sca?.scanResult),
         getFindings: (limit = 100) => this._extractFindings(this.app?.sca?.scanResult, limit, 'SCA'),
@@ -373,12 +515,14 @@ export class ptk_automation {
         this.lastCompletedSessionByTabId = new Map() // tabId -> sessionId
         this.lastCompletedSessionGlobal = null       // fallback for any-tab export
         this.evictedSessions = new Map()             // bounded diagnostics for missing-session failures
+        this.replayableExportLeases = new Map()      // leaseId -> privileged replayable export metadata
         this.MAX_COMPLETED_SESSIONS = 20
         this.SESSION_TTL_MS = 24 * 60 * 60 * 1000
         this.app = null
         this.engines = null
         this.zap = zapBridge                  // ZAP integration module
         this._unsubscribeZapContentRuntimeRefresh = null
+        this._installPrivilegedReplayableExportApi()
         this.addMessageListeners()
     }
 
@@ -458,6 +602,14 @@ export class ptk_automation {
                 mode: CONTENT_RUNTIME_MODE_AUTOMATION,
                 script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
                 reason: 'zap_tab_claimed'
+            }
+        }
+
+        if (isTopFrame && isZapActive && isHttpZapTargetUrl(safeUrl)) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_AUTOMATION,
+                script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
+                reason: 'zap_active_target'
             }
         }
 
@@ -544,6 +696,22 @@ export class ptk_automation {
                 })
             }
         }
+        if (frameId === 0 && isHttpZapTargetUrl(url)) {
+            try {
+                this.zap?.transport?.processContentObservedTargetUrl?.({
+                    tabId,
+                    frameId,
+                    url
+                })
+            } catch (error) {
+                console.warn('[PTK Automation] Failed to process target URL for ZAP detection', {
+                    tabId,
+                    frameId,
+                    url,
+                    error: error?.message || String(error)
+                })
+            }
+        }
         const profile = this._getContentRuntimeProfile({ tabId, frameId, url })
         const files = CONTENT_RUNTIME_FILES[profile.script] || []
         const useStaticFirefoxManualRuntime = profile.script === CONTENT_RUNTIME_SCRIPT_MANUAL && this._isFirefoxRuntime()
@@ -622,30 +790,71 @@ export class ptk_automation {
         if (!Number.isInteger(tabId)) return false
 
         // This method is reached only when global PTK automation is disabled.
-        // Do not let a page-forgeable postMessage payload use
-        // { source: 'zap_browser_close' } as a privileged stop command. ZAP's
-        // close contract initiates stop through the callback control channel
-        // (requestZapSessionStop); the bridge exception here is limited to
-        // same-tab progress reads after the session is already stopping.
+        // The exception is intentionally narrow: ZAP-managed browser-close
+        // scripts may read progress and request stop for the explicit ZAP
+        // session attached to the same tab. All other automation commands remain
+        // blocked, and the background session lookup still owns the decision.
         if (message?.options?.source !== 'zap_browser_close') return false
 
         const type = String(message?.type || '').replace(/_/g, '-')
-        if (type !== 'get-session-progress') return false
+        if (type !== 'get-session-progress' && type !== 'session-end') return false
 
         const requestedSessionId = toNonEmptyString(message?.sessionId)
             || toNonEmptyString(message?.options?.sessionId)
         if (!requestedSessionId) {
-            return false
+            return this._isZapManagedActiveSessionForTab(tabId)
         }
 
         const session = this.sessions.get(requestedSessionId)
         if (session?.source !== 'zap') return false
-        if (!Number.isInteger(session?.tabId) || session.tabId !== tabId) return false
+        // In ZAP client-spider runs, Firefox can close a WebDriver browser tab
+        // that differs from the tab which originally started the ZAP PTK
+        // session. The close contract is intentionally narrower than general
+        // automation: it requires an explicit ZAP-owned PTK session id and only
+        // permits progress reads or non-blocking stop requests.
+        const sameTab = Number.isInteger(session?.tabId) && session.tabId === tabId
+        const requestedZapId = toNonEmptyString(message?.options?.zapid)
+        const sessionZapKey = toNonEmptyString(session?.zapSessionKey)
+        const sameZapSession = Boolean(
+            requestedZapId
+            && sessionZapKey
+            && sessionZapKey.endsWith(`|${requestedZapId}`)
+        )
+        if (!sameTab && !sameZapSession) return false
+        if (type === 'session-end' && (session.status === 'completed' || session.status === 'error')) {
+            return false
+        }
 
-        return Boolean(session.stopRequestedAt)
+        return true
     }
 
     onMessage(message, sender, sendResponse) {
+        if (message.channel === 'ptk_privileged_replayable_export') {
+            ;(async () => {
+                if (this.app?.ready && typeof this.app.ready.then === 'function') {
+                    await this.app.ready
+                }
+                const caller = this._privilegedCallerFromSender(sender, message?.transport || message?.request?.transport)
+                const type = String(message.type || '').replace(/-/g, '_')
+                if (type === 'ptk_privileged_replayable_export') {
+                    return await this.ptk_privileged_replayable_export(message.request || message.options || message, caller)
+                }
+                if (type === 'ptk_privileged_replayable_export_chunk') {
+                    return await this.ptk_privileged_replayable_export_chunk(message.request || message.options || message, caller)
+                }
+                if (type === 'ptk_privileged_replayable_export_release') {
+                    return await this.ptk_privileged_replayable_export_release(message.request || message.options || message, caller)
+                }
+                return { ok: false, error: 'unknown_privileged_export_message', requestId: message.requestId }
+            })().then(result => {
+                sendResponse(result)
+            }).catch(e => {
+                console.error('[PTK Automation] Privileged replayable export error:', e)
+                sendResponse({ ok: false, error: e?.message || String(e), requestId: message.requestId })
+            })
+            return true
+        }
+
         if (message.channel !== 'ptk_content2background_automation') {
             return false  // Explicitly indicate we don't handle this message
         }
@@ -690,6 +899,7 @@ export class ptk_automation {
         debugAutomationLog('[PTK Automation] msg_session_start called', { message, sender: sender?.tab?.id })
         const { options, pageUrl, requestId } = message
         const tabId = sender?.tab?.id
+        const frameId = senderFrameId(sender)
 
         if (!tabId) {
             console.error('[PTK Automation] No tab context')
@@ -722,6 +932,7 @@ export class ptk_automation {
         const session = {
             id: sessionId,
             tabId,
+            frameId,
             host,
             project: options?.project || null,
             testRunId: options?.testRunId || null,
@@ -743,11 +954,11 @@ export class ptk_automation {
         try {
             await this._startEngines(session)
             session.status = 'running'
-            return { sessionId, status: 'started', requestId }
+            return { sessionId, tabId, frameId, status: 'started', requestId }
         } catch (err) {
             session.status = 'error'
             session.error = err.message
-            return { sessionId, status: 'error', error: err.message, requestId }
+            return { sessionId, tabId, frameId, status: 'error', error: err.message, requestId }
         }
     }
 
@@ -838,6 +1049,7 @@ export class ptk_automation {
         const session = {
             id: sessionId,
             tabId,
+            frameId: 0,
             host,
             project: 'zap',
             testRunId: null,
@@ -1012,10 +1224,18 @@ export class ptk_automation {
 
         const timeoutMs = this._normalizeStopTimeoutMs(options?.timeoutMs)
         if (session.stopRequestedAt) {
+            if (options?.source === 'zap_browser_close') {
+                await this._completeZapCloseFallbackAfterGrace(session, {
+                    zapid: options?.zapid,
+                    timeoutMs
+                })
+            }
             return {
                 ok: true,
                 sessionId: safeSessionId,
                 status: session.status || 'stopping',
+                completionStatus: session.completionStatus || session.summary?.status || null,
+                summary: session.summary || null,
                 stopRequestedAt: session.stopRequestedAt,
                 alreadyRequested: true,
                 source: options?.source || null
@@ -1024,9 +1244,17 @@ export class ptk_automation {
 
         session.stopRequestedAt = new Date().toISOString()
         session.status = 'stopping'
+        session.stopInProgress = true
 
-        this._stopEnginesAsync(session, timeoutMs)
+        this._stopEnginesAsync(session, timeoutMs, {
+            source: options?.source || null,
+            zapCloseRequest: options?.source === 'zap_browser_close'
+        })
             .then(stats => {
+                session.stopInProgress = false
+                if (session.status === 'completed' || session.status === 'error') {
+                    return
+                }
                 this._finalizeSession(session, stats)
             })
             .catch(err => {
@@ -1035,14 +1263,28 @@ export class ptk_automation {
                     source: options?.source || null,
                     error: err?.message || String(err)
                 })
+                session.stopInProgress = false
                 session.status = 'error'
                 session.error = err?.message || String(err)
             })
 
+        if (options?.source === 'zap_browser_close') {
+            this._scheduleZapCloseTerminalFallback(session, {
+                zapid: options?.zapid,
+                timeoutMs
+            })
+            await this._completeZapCloseFallbackAfterGrace(session, {
+                zapid: options?.zapid,
+                timeoutMs
+            })
+        }
+
         return {
             ok: true,
             sessionId: safeSessionId,
-            status: 'stopping',
+            status: session.status || 'stopping',
+            completionStatus: session.completionStatus || session.summary?.status || null,
+            summary: session.summary || null,
             stopRequestedAt: session.stopRequestedAt,
             source: options?.source || null
         }
@@ -1072,24 +1314,53 @@ export class ptk_automation {
             // Mark stop requested
             session.stopRequestedAt = new Date().toISOString()
             session.status = 'stopping'
+            session.stopInProgress = true
 
             // Fire-and-forget stop with completion handler
-            this._stopEnginesAsync(session, stopTimeoutMs)
+            this._stopEnginesAsync(session, stopTimeoutMs, {
+                source: options?.source || null,
+                zapCloseRequest: options?.source === 'zap_browser_close'
+            })
                 .then(stats => {
+                    session.stopInProgress = false
+                    if (session.status === 'completed' || session.status === 'error') {
+                        return
+                    }
                     this._finalizeSession(session, stats)
                 })
                 .catch(err => {
                     console.error('[PTK Automation] Async stop failed', err)
+                    session.stopInProgress = false
                     session.status = 'error'
                     session.error = err.message
                 })
 
+            if (options?.source === 'zap_browser_close') {
+                this._scheduleZapCloseTerminalFallback(session, {
+                    zapid: options?.zapid,
+                    timeoutMs: stopTimeoutMs
+                })
+                await this._completeZapCloseFallbackAfterGrace(session, {
+                    zapid: options?.zapid,
+                    timeoutMs: stopTimeoutMs
+                })
+            }
+
             // Return immediately
             // NOTE: Do NOT clear activeSessionByTabId yet - wait until completed
+            if (options?.source !== 'zap_browser_close') {
+                return {
+                    ok: true,
+                    requestId,
+                    summary: { status: 'stopping' }
+                }
+            }
             return {
                 ok: true,
                 requestId,
-                summary: { status: 'stopping' }
+                status: session.status || 'stopping',
+                completionStatus: session.completionStatus || session.summary?.status || null,
+                summary: session.summary || { status: session.status || 'stopping' }
             }
         }
 
@@ -1216,35 +1487,604 @@ export class ptk_automation {
             return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
         }
 
+        if (isZapBrowserCloseOptions(options)) {
+            this._ensureZapSastCurrentPageCollection(resolution.session, tabId, options)
+                .catch((err) => {
+                    console.warn('[PTK Automation] Failed to ensure ZAP SAST current-page collection', {
+                        sessionId: resolution.sessionId,
+                        tabId,
+                        error: err?.message || String(err)
+                    })
+                })
+        }
+
         const snapshot = this.getSessionProgressSnapshot(resolution.sessionId)
         if (!snapshot?.ok) {
             return { ok: false, error: snapshot?.error || 'session_not_found', requestId, sessionLookup: resolution.sessionLookup }
         }
 
+        let zapCloseProgress = {}
+        if (isZapBrowserCloseOptions(options)) {
+            const terminalStatus = ['none', 'completed', 'error', 'timeout', 'cancelled']
+            let zapProgressTerminalPosted = this.zap?.transport?.isSessionTerminal?.({
+                zapid: options?.zapid,
+                sessionId: resolution.sessionId
+            }) === true
+            let zapTerminalPost = null
+            if (!zapProgressTerminalPosted && terminalStatus.includes(String(snapshot.status || '').toLowerCase())) {
+                try {
+                    zapTerminalPost = await this.zap?.postTerminalProgressForClose?.({
+                        zapid: options?.zapid,
+                        sessionId: resolution.sessionId
+                    })
+                    zapProgressTerminalPosted = this.zap?.transport?.isSessionTerminal?.({
+                        zapid: options?.zapid,
+                        sessionId: resolution.sessionId
+                    }) === true
+                } catch (err) {
+                    zapTerminalPost = {
+                        ok: false,
+                        posted: false,
+                        reason: err?.message || String(err)
+                    }
+                }
+            }
+            zapCloseProgress = {
+                zapProgressTerminalPosted,
+                zapProgressTerminalDetails: this.zap?.transport?.getSessionTerminalDetails?.() || null,
+                zapTerminalPost,
+                zapPublisherDrain: await this._getZapPublisherDrainState()
+            }
+        }
+
         return {
             ...snapshot,
+            ...zapCloseProgress,
             requestId,
             sessionLookup: resolution.sessionLookup
+        }
+    }
+
+    async _ensureZapSastCurrentPageCollection(session, tabId, options = {}) {
+        if (!session || !Array.isArray(session.engines) || !session.engines.includes('SAST')) {
+            return false
+        }
+        if (session.status !== ENGINE_STATUS_RUNNING || session.stopRequestedAt) {
+            return false
+        }
+        if (!Number.isInteger(Number(tabId))) {
+            return false
+        }
+        const sast = this.app?.sast || null
+        if (!sast || typeof sast.collectAndScanTab !== 'function') {
+            return false
+        }
+        const coordinator = sast.sessionCoordinator || null
+        const state = coordinator?.getAutomationState?.() || {}
+        if (state.isSessionRunning === false || sast.isScanRunning === false) {
+            return false
+        }
+
+        let currentUrl = toNonEmptyString(options?.currentUrl) || null
+        if (!currentUrl) {
+            try {
+                const tab = await browser.tabs.get(Number(tabId))
+                currentUrl = toNonEmptyString(tab?.url) || null
+            } catch (_) { }
+        }
+        if (!isHttpPageUrl(currentUrl)) {
+            return false
+        }
+        if (/\/zapCallBackUrl\//i.test(currentUrl)) {
+            return false
+        }
+
+        const hasCompletedEvidence = [
+            state.lastCompletedScriptsCount,
+            state.lastCompletedHtmlChars,
+            state.lastCompletedFindingsCount,
+            state.lastCompletedArtifactsCount
+        ].some((value) => typeof value !== 'undefined' && value !== null)
+        if (sameDocumentUrl(state.lastCompletedFile, currentUrl, currentUrl)
+            && hasCompletedEvidence
+            && (state.lastCompletedAt || state.lastCompletedCollectionId)) {
+            return false
+        }
+
+        const activeOrPending = toFiniteNumber(state.activeCollectionCount, 0) > 0
+            || toFiniteNumber(state.pendingCollectionCount, 0) > 0
+            || state.collectionState === 'collection_pending'
+            || state.collectionState === 'payload_received'
+            || state.collectionState === 'analysis_running'
+            || state.analysisState === 'collecting'
+            || state.analysisState === 'analyzing'
+        if (activeOrPending && sameDocumentUrl(state.currentCollectionFile, currentUrl, currentUrl)) {
+            return false
+        }
+
+        const now = Date.now()
+        if (!(session.zapSastCurrentPageCollectionRequests instanceof Map)) {
+            session.zapSastCurrentPageCollectionRequests = new Map()
+        }
+        const previousRequestedAt = session.zapSastCurrentPageCollectionRequests.get(currentUrl)
+        if (Number.isFinite(previousRequestedAt) && now - previousRequestedAt < 8000) {
+            return false
+        }
+        session.zapSastCurrentPageCollectionRequests.set(currentUrl, now)
+
+        if (session.zapSastCurrentPageCollectionRequests.size > 20) {
+            const oldest = session.zapSastCurrentPageCollectionRequests.keys().next().value
+            if (oldest) session.zapSastCurrentPageCollectionRequests.delete(oldest)
+        }
+
+        this._recordZapTiming(session, 'sast.collection.ensure_current_page', {
+            tabId: Number(tabId),
+            currentUrl
+        })
+        sast.collectAndScanTab(Number(tabId), {
+            delayMs: 50,
+            attempts: 4,
+            timeoutMs: 12000,
+            retryDelayMs: 600,
+            expectedUrl: currentUrl,
+            source: 'zap_progress_current_page'
+        }).catch((err) => {
+            console.warn('[PTK Automation] ZAP SAST current-page collection failed', {
+                sessionId: session.id,
+                tabId: Number(tabId),
+                currentUrl,
+                error: err?.message || String(err)
+            })
+        })
+        return true
+    }
+
+    _installPrivilegedReplayableExportApi() {
+        const serviceWorkerCaller = () => ({
+            callerType: 'privileged-sdk-export',
+            extensionOwned: true,
+            transport: 'service-worker',
+            senderId: this._getRuntimeId(),
+            senderUrl: PRIVILEGED_SERVICE_WORKER_URL
+        })
+        try {
+            globalThis.PTK_PRIVILEGED_REPLAYABLE_EXPORT = (request = {}) => {
+                return this.ptk_privileged_replayable_export(request, serviceWorkerCaller())
+            }
+            globalThis.PTK_PRIVILEGED_REPLAYABLE_EXPORT_CHUNK = (request = {}) => {
+                return this.ptk_privileged_replayable_export_chunk(request, serviceWorkerCaller())
+            }
+            globalThis.PTK_PRIVILEGED_REPLAYABLE_EXPORT_RELEASE = (request = {}) => {
+                return this.ptk_privileged_replayable_export_release(request, serviceWorkerCaller())
+            }
+        } catch (_) { }
+    }
+
+    _getRuntimeId() {
+        const browserRuntimeId = typeof browser !== 'undefined' ? browser?.runtime?.id : null
+        const chromeRuntimeId = typeof chrome !== 'undefined' ? chrome?.runtime?.id : null
+        return browserRuntimeId || chromeRuntimeId || null
+    }
+
+    _privilegedCallerFromSender(sender = {}, transport = null) {
+        const normalizedTransport = String(transport || '').trim().toLowerCase()
+        const runtimeId = this._getRuntimeId()
+        return {
+            callerType: 'privileged-sdk-export',
+            extensionOwned: sender?.id && runtimeId ? sender.id === runtimeId : false,
+            transport: normalizedTransport || 'extension-page',
+            senderId: sender?.id || null,
+            senderUrl: sender?.url || null,
+            exportTabId: Number.isInteger(sender?.tab?.id) ? sender.tab.id : null,
+            frameId: senderFrameId(sender)
+        }
+    }
+
+    _cleanupReplayableExportLeases(now = Date.now()) {
+        for (const [leaseId, lease] of this.replayableExportLeases.entries()) {
+            if (!lease || lease.expiresAt <= now || lease.released === true) {
+                this.replayableExportLeases.delete(leaseId)
+            }
+        }
+    }
+
+    _isPrivilegedReplayableCallerAllowed(caller = {}, request = {}) {
+        const transport = String(caller?.transport || request?.transport || '').trim().toLowerCase()
+        const runtimeId = this._getRuntimeId()
+        if (transport === 'service-worker') {
+            return caller?.extensionOwned === true
+                && caller?.senderUrl === PRIVILEGED_SERVICE_WORKER_URL
+                && (!runtimeId || !caller?.senderId || caller.senderId === runtimeId)
+        }
+        if (transport === 'extension-page') {
+            if (caller?.extensionOwned !== true) return false
+            if (runtimeId && caller?.senderId !== runtimeId) return false
+            const senderUrl = toNonEmptyString(caller?.senderUrl)
+            if (!senderUrl) return false
+            try {
+                const parsed = new URL(senderUrl)
+                if (parsed.protocol !== 'chrome-extension:' && parsed.protocol !== 'moz-extension:') return false
+                if (runtimeId && parsed.hostname !== runtimeId) return false
+                return parsed.pathname === '/ptk/automation/export.html'
+                    && parsed.search === ''
+                    && parsed.hash === ''
+            } catch (_) {
+                return false
+            }
+        }
+        return false
+    }
+
+    async _validatePrivilegedReplayableRequest(request = {}, caller = {}, { requireLease = false } = {}) {
+        const requestId = request?.requestId || null
+        const transport = String(request?.transport || caller?.transport || '').trim().toLowerCase()
+        if (!this._isPrivilegedReplayableCallerAllowed({ ...caller, transport }, request)) {
+            return { ok: false, error: REPLAYABLE_EXPORT_REQUIRED_ERROR, requestId }
+        }
+
+        if (normalizeExportMode(request?.exportMode, '') !== REPLAYABLE_EXPORT_MODE
+            || request?.includeSecrets !== true
+            || request?.sensitive !== true) {
+            return { ok: false, error: 'invalid_replayable_export_request', requestId }
+        }
+
+        if (!toNonEmptyString(request?.sessionId)) {
+            return { ok: false, error: 'session_id_required', requestId }
+        }
+        if (!Number.isInteger(Number(request?.originalScanTabId))) {
+            return { ok: false, error: 'original_scan_tab_required', requestId }
+        }
+
+        const resolution = this._resolveSessionForRequest({
+            sessionId: request.sessionId,
+            tabId: Number(request.originalScanTabId),
+            strictCurrentTab: true,
+            allowActive: false,
+            allowCompleted: true,
+            allowGlobalCompleted: false
+        })
+        if (!resolution.ok) {
+            return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
+        }
+
+        const session = resolution.session
+        this._finalizeStoppedSessionIfExportReady(session, 'privileged_replayable_export')
+        if (session.status !== 'completed') {
+            return {
+                ok: false,
+                error: 'session_not_completed',
+                hint: 'Call end_session() before replayable export.',
+                requestId,
+                sessionLookup: resolution.sessionLookup
+            }
+        }
+        if (Number(session.tabId) !== Number(request.originalScanTabId)) {
+            return { ok: false, error: 'session_belongs_to_another_tab', requestId, sessionLookup: resolution.sessionLookup }
+        }
+
+        let lease = null
+        if (requireLease) {
+            this._cleanupReplayableExportLeases()
+            lease = this.replayableExportLeases.get(String(request?.leaseId || '')) || null
+            if (!lease) {
+                return { ok: false, error: 'replayable_export_lease_not_found', requestId, sessionLookup: resolution.sessionLookup }
+            }
+            if (lease.sessionId !== session.id
+                || Number(lease.originalScanTabId) !== Number(session.tabId)
+                || lease.transport !== transport
+                || (request?.sdkRunId && lease.sdkRunId !== request.sdkRunId)) {
+                return { ok: false, error: 'replayable_export_lease_mismatch', requestId, sessionLookup: resolution.sessionLookup }
+            }
+        }
+
+        return {
+            ok: true,
+            requestId,
+            transport,
+            session,
+            sessionLookup: resolution.sessionLookup,
+            lease
+        }
+    }
+
+    _validateReplayableNonce({ nonce = null, nonceHash = null, sdkRunId = null } = {}) {
+        const normalizedNonce = toNonEmptyString(nonce)
+        const normalizedNonceHash = toNonEmptyString(nonceHash)
+        if (!normalizedNonce && !normalizedNonceHash) return false
+        for (const lease of this.replayableExportLeases.values()) {
+            if (!lease || lease.released === true || lease.expiresAt <= Date.now()) continue
+            if (sdkRunId && lease.sdkRunId && lease.sdkRunId !== sdkRunId) continue
+            if (normalizedNonceHash && lease.nonceHash === normalizedNonceHash) return false
+        }
+        return true
+    }
+
+    _replayableExportOwner(session, lease, engine) {
+        return {
+            sessionId: session?.id || null,
+            tabId: Number.isInteger(session?.tabId) ? session.tabId : Number(session?.tabId),
+            originalScanTabId: Number.isInteger(session?.tabId) ? session.tabId : Number(session?.tabId),
+            frameId: Number.isInteger(session?.frameId) ? session.frameId : 0,
+            topFrameId: 0,
+            engine: String(engine || '').trim().toUpperCase(),
+            exportMode: REPLAYABLE_EXPORT_MODE,
+            owner: REPLAYABLE_EXPORT_OWNER,
+            transport: lease?.transport || null,
+            sdkRunId: lease?.sdkRunId || null,
+            leaseId: lease?.leaseId || null,
+            nonceHash: lease?.nonceHash || null
+        }
+    }
+
+    async _buildPrivilegedReplayableChunkedExport(engine, session, lease, options = {}) {
+        const exportModule = this._getEngineExportModule(engine)
+        if (!exportModule?.msg_export_scan_result) {
+            throw new Error('chunked_export_not_supported')
+        }
+        const owner = this._replayableExportOwner(session, lease, engine)
+        const result = await exportModule.msg_export_scan_result({
+            target: options?.target || 'sdk-replayable-export',
+            fileName: options?.fileName || `PTK_${String(engine || 'scan').toUpperCase()}_replayable_scan.json`,
+            includeSecrets: true,
+            owner
+        })
+        if (!result || result.success === false) {
+            throw new Error(result?.error || 'chunked_export_failed')
+        }
+        if (result.exportMode !== 'chunked') {
+            throw new Error('chunked_export_not_available')
+        }
+        return {
+            engine,
+            exportMode: REPLAYABLE_EXPORT_MODE,
+            sensitive: true,
+            secretsIncluded: true,
+            replayableRequests: true,
+            sessionId: session?.id || null,
+            originalScanTabId: Number(session?.tabId),
+            leaseId: lease.leaseId,
+            exportId: result.exportId,
+            fileName: result.fileName,
+            size: result.size,
+            chunkSize: result.chunkSize,
+            chunkCount: result.chunkCount,
+            contentType: result.contentType,
+            compression: result.compression,
+            expiresAt: result.expiresAt,
+            owner: REPLAYABLE_EXPORT_OWNER,
+            transport: lease.transport,
+            sdkRunId: lease.sdkRunId || null,
+            privacy: {
+                exportMode: REPLAYABLE_EXPORT_MODE,
+                secretsIncluded: true,
+                replayableRequests: true,
+                sensitiveArtifact: true
+            }
+        }
+    }
+
+    async ptk_privileged_replayable_export(request = {}, caller = {}) {
+        const requestId = request?.requestId || null
+        if (this.app?.ready && typeof this.app.ready.then === 'function') {
+            await this.app.ready
+        }
+        this._cleanupReplayableExportLeases()
+        const nonceHash = toNonEmptyString(request?.nonceHash) || await sha256Hex(request?.nonce)
+        if (!this._validateReplayableNonce({
+            nonce: request?.nonce,
+            nonceHash,
+            sdkRunId: request?.sdkRunId || null
+        })) {
+            return { ok: false, error: 'replayable_export_nonce_reused_or_missing', requestId }
+        }
+        const validation = await this._validatePrivilegedReplayableRequest({
+            ...request,
+            nonceHash
+        }, caller)
+        if (!validation.ok) return validation
+
+        const session = validation.session
+        const requestedEngine = String(request?.engine || 'ALL').trim().toUpperCase()
+        const validEngines = ['DAST', 'IAST', 'SAST', 'SCA', 'ALL']
+        if (!validEngines.includes(requestedEngine)) {
+            return { ok: false, error: 'invalid_engine', requestId, sessionLookup: validation.sessionLookup }
+        }
+        const enginesToExport = requestedEngine === 'ALL' ? session.engines : [requestedEngine]
+        session.scanIds = session.scanIds && typeof session.scanIds === 'object' ? session.scanIds : {}
+        const lease = {
+            leaseId: makeRandomToken('replayable_lease'),
+            sessionId: session.id,
+            originalScanTabId: Number(session.tabId),
+            engine: requestedEngine,
+            transport: validation.transport,
+            sdk: toNonEmptyString(request?.sdk) || null,
+            sdkRunId: toNonEmptyString(request?.sdkRunId) || makeRandomToken('sdk_run'),
+            nonceHash,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + REPLAYABLE_EXPORT_TTL_MS,
+            released: false,
+            exports: new Map()
+        }
+
+        const warnings = []
+        const scans = []
+        for (const engine of enginesToExport) {
+            let scanId = session.scanIds?.[engine] || null
+            if (!scanId) {
+                scanId = resultsRegistry.findScanIdForEngine(engine, {
+                    tabId: session.tabId,
+                    host: session.host
+                })
+                if (scanId) session.scanIds[engine] = scanId
+            }
+            if (!scanId) {
+                warnings.push(`engine_result_missing:${engine}`)
+                continue
+            }
+            try {
+                const exported = await this._buildPrivilegedReplayableChunkedExport(engine, session, lease, request)
+                if (Number(exported.chunkCount) > REPLAYABLE_EXPORT_MAX_CHUNKS) {
+                    warnings.push(`export_too_many_chunks:${engine}`)
+                    continue
+                }
+                lease.exports.set(engine, {
+                    exportId: exported.exportId,
+                    chunkCount: exported.chunkCount
+                })
+                scans.push(exported)
+            } catch (err) {
+                warnings.push(`export_failed:${engine}:${err?.message || String(err)}`)
+            }
+        }
+
+        if (!scans.length) {
+            return { ok: false, error: 'no_exportable_results', warnings, requestId, sessionLookup: validation.sessionLookup }
+        }
+        this.replayableExportLeases.set(lease.leaseId, lease)
+        return {
+            ok: true,
+            requestId,
+            exportMode: REPLAYABLE_EXPORT_MODE,
+            sensitive: true,
+            secretsIncluded: true,
+            replayableRequests: true,
+            sensitiveArtifact: true,
+            leaseId: lease.leaseId,
+            sessionId: session.id,
+            originalScanTabId: Number(session.tabId),
+            transport: lease.transport,
+            sdkRunId: lease.sdkRunId,
+            expiresAt: lease.expiresAt,
+            scans,
+            warnings,
+            sessionLookup: validation.sessionLookup,
+            privacy: {
+                exportMode: REPLAYABLE_EXPORT_MODE,
+                secretsIncluded: true,
+                replayableRequests: true,
+                sensitiveArtifact: true
+            }
+        }
+    }
+
+    async ptk_privileged_replayable_export_chunk(request = {}, caller = {}) {
+        const requestId = request?.requestId || null
+        const validation = await this._validatePrivilegedReplayableRequest(request, caller, { requireLease: true })
+        if (!validation.ok) return validation
+
+        const engine = String(request?.engine || '').trim().toUpperCase()
+        if (!engine) return { ok: false, error: 'engine_required', requestId }
+        const leaseEntry = validation.lease.exports.get(engine)
+        if (!leaseEntry || leaseEntry.exportId !== request?.exportId) {
+            return { ok: false, error: 'replayable_export_lease_mismatch', requestId }
+        }
+        const exportModule = this._getEngineExportModule(engine)
+        if (!exportModule?.msg_export_scan_chunk) {
+            return { ok: false, error: 'chunked_export_not_supported', requestId, engine }
+        }
+        const owner = this._replayableExportOwner(validation.session, validation.lease, engine)
+        try {
+            const result = await exportModule.msg_export_scan_chunk({
+                exportId: request.exportId,
+                index: request.index,
+                owner
+            })
+            if (!result || result.success === false) {
+                return { ok: false, error: result?.error || 'chunk_read_failed', requestId, engine }
+            }
+            return {
+                ok: true,
+                requestId,
+                engine,
+                exportMode: REPLAYABLE_EXPORT_MODE,
+                sensitive: true,
+                exportId: result.exportId,
+                index: result.index,
+                chunkCount: result.chunkCount,
+                chunkBase64: bytesToBase64(result.chunk)
+            }
+        } catch (err) {
+            return { ok: false, error: err?.message || 'chunk_read_failed', requestId, engine }
+        }
+    }
+
+    async ptk_privileged_replayable_export_release(request = {}, caller = {}) {
+        const requestId = request?.requestId || null
+        const validation = await this._validatePrivilegedReplayableRequest(request, caller, { requireLease: true })
+        if (!validation.ok) return validation
+
+        const requestedEngine = String(request?.engine || 'ALL').trim().toUpperCase()
+        const engines = requestedEngine === 'ALL'
+            ? Array.from(validation.lease.exports.keys())
+            : [requestedEngine]
+        const released = {}
+        for (const engine of engines) {
+            const leaseEntry = validation.lease.exports.get(engine)
+            if (!leaseEntry) {
+                released[engine] = false
+                continue
+            }
+            const exportModule = this._getEngineExportModule(engine)
+            const owner = this._replayableExportOwner(validation.session, validation.lease, engine)
+            try {
+                const result = await exportModule?.msg_release_export_scan?.({
+                    exportId: leaseEntry.exportId,
+                    owner
+                })
+                released[engine] = result?.success === true
+            } catch (_) {
+                released[engine] = false
+            }
+            validation.lease.exports.delete(engine)
+        }
+        if (validation.lease.exports.size === 0) {
+            validation.lease.released = true
+            this.replayableExportLeases.delete(validation.lease.leaseId)
+        }
+        return {
+            ok: Object.values(released).some(Boolean),
+            requestId,
+            leaseId: validation.lease.leaseId,
+            released
         }
     }
 
     async msg_export_scan(message, sender) {
         const { requestId, options = {} } = message
         const tabId = sender?.tab?.id
+        const requestedMode = String(options?.exportMode || PAGE_EXPORT_MODE).trim().toLowerCase()
 
-        const strictCurrentTab = this._isStrictCurrentTabScope(options)
+        if (options?.includeSecrets === true || requestedMode === 'replayable') {
+            return this._rejectReplayablePageExport(requestId)
+        }
+
+        const exportOptions = {
+            ...options,
+            includeSecrets: false,
+            exportMode: PAGE_EXPORT_MODE,
+            sessionScope: STRICT_CURRENT_TAB_SESSION_SCOPE
+        }
+        const strictCurrentTab = true
         const resolution = this._resolveSessionForRequest({
-            sessionId: options.sessionId,
+            sessionId: exportOptions.sessionId,
             tabId,
             strictCurrentTab,
-            allowActive: strictCurrentTab,
+            allowActive: true,
             allowCompleted: true,
-            allowGlobalCompleted: true
+            allowGlobalCompleted: false
         })
         if (!resolution.ok) {
             return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
         }
         const session = resolution.session
+        if (!this._isAuthorizedSessionFrame(session, sender)) {
+            return {
+                ok: false,
+                error: 'session_belongs_to_another_frame',
+                requestId,
+                sessionLookup: resolution.sessionLookup
+            }
+        }
         this._finalizeActiveSessionIfExportReady(session, 'export_scan')
         this._finalizeStoppedSessionIfExportReady(session, 'export_scan')
         if (session.status !== 'completed') {
@@ -1257,7 +2097,7 @@ export class ptk_automation {
             }
         }
 
-        const requestedEngine = (options.engine || 'ALL').toUpperCase().trim()
+        const requestedEngine = (exportOptions.engine || 'ALL').toUpperCase().trim()
         const validEngines = ['DAST', 'IAST', 'SAST', 'SCA', 'ALL']
         if (!validEngines.includes(requestedEngine)) {
             return { ok: false, error: 'invalid_engine', requestId, sessionLookup: resolution.sessionLookup }
@@ -1291,12 +2131,15 @@ export class ptk_automation {
             try {
                 let scanExport = null
                 try {
-                    scanExport = await this._buildEngineExport(engine, scanId, session, options)
+                    scanExport = await this._buildEngineExport(engine, scanId, session, exportOptions)
                 } catch (err) {
                     if (!allowChunked || String(err?.message || '') !== 'export_too_large') {
                         throw err
                     }
-                    scanExport = await this._buildEngineChunkedExport(engine, session, options)
+                    scanExport = await this._buildEngineChunkedExport(engine, session, {
+                        ...exportOptions,
+                        owner: this._pageExportOwner(session, sender, engine, PAGE_EXPORT_MODE)
+                    })
                 }
                 exports.push(scanExport)
             } catch (err) {
@@ -1318,12 +2161,35 @@ export class ptk_automation {
         }
     }
 
-    async msg_export_scan_chunk(message) {
+    async msg_export_scan_chunk(message, sender) {
         const { requestId, options = {} } = message
         const engine = String(options.engine || '').trim().toUpperCase()
         if (!engine) {
             return { ok: false, error: 'engine_required', requestId }
         }
+        if (String(options?.exportMode || '').toLowerCase() === 'replayable' || options?.includeSecrets === true) {
+            return this._rejectReplayablePageExport(requestId)
+        }
+        const resolution = this._resolveSessionForRequest({
+            sessionId: options.sessionId,
+            tabId: sender?.tab?.id,
+            strictCurrentTab: true,
+            allowActive: false,
+            allowCompleted: true,
+            allowGlobalCompleted: false
+        })
+        if (!resolution.ok) {
+            return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
+        }
+        if (!this._isAuthorizedSessionFrame(resolution.session, sender)) {
+            return {
+                ok: false,
+                error: 'session_belongs_to_another_frame',
+                requestId,
+                sessionLookup: resolution.sessionLookup
+            }
+        }
+        const owner = this._pageExportOwner(resolution.session, sender, engine, PAGE_EXPORT_MODE)
         const exportModule = this._getEngineExportModule(engine)
         if (!exportModule?.msg_export_scan_chunk) {
             return { ok: false, error: 'chunked_export_not_supported', requestId, engine }
@@ -1331,7 +2197,8 @@ export class ptk_automation {
         try {
             const result = await exportModule.msg_export_scan_chunk({
                 exportId: options.exportId,
-                index: options.index
+                index: options.index,
+                owner
             })
             return {
                 ...(result || {}),
@@ -1343,19 +2210,43 @@ export class ptk_automation {
         }
     }
 
-    async msg_release_export_scan(message) {
+    async msg_release_export_scan(message, sender) {
         const { requestId, options = {} } = message
         const engine = String(options.engine || '').trim().toUpperCase()
         if (!engine) {
             return { ok: false, error: 'engine_required', requestId }
         }
+        if (String(options?.exportMode || '').toLowerCase() === 'replayable' || options?.includeSecrets === true) {
+            return this._rejectReplayablePageExport(requestId)
+        }
+        const resolution = this._resolveSessionForRequest({
+            sessionId: options.sessionId,
+            tabId: sender?.tab?.id,
+            strictCurrentTab: true,
+            allowActive: false,
+            allowCompleted: true,
+            allowGlobalCompleted: false
+        })
+        if (!resolution.ok) {
+            return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
+        }
+        if (!this._isAuthorizedSessionFrame(resolution.session, sender)) {
+            return {
+                ok: false,
+                error: 'session_belongs_to_another_frame',
+                requestId,
+                sessionLookup: resolution.sessionLookup
+            }
+        }
+        const owner = this._pageExportOwner(resolution.session, sender, engine, PAGE_EXPORT_MODE)
         const exportModule = this._getEngineExportModule(engine)
         if (!exportModule?.msg_release_export_scan) {
             return { ok: false, error: 'chunked_export_not_supported', requestId, engine }
         }
         try {
             const result = await exportModule.msg_release_export_scan({
-                exportId: options.exportId
+                exportId: options.exportId,
+                owner
             })
             return {
                 ...(result || {}),
@@ -1462,7 +2353,7 @@ export class ptk_automation {
     }
 
     // Use adapter.stop() which waits for idle
-    async _stopEngines(session, timeoutMs = 180000) {
+    async _stopEngines(session, timeoutMs = 180000, options = {}) {
         const stats = { findingsCount: 0, bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 } }
 
         for (const engineName of session.engines) {
@@ -1470,11 +2361,16 @@ export class ptk_automation {
             if (!adapter) continue
 
             try {
-                // Adapter.stop() now waits for idle and returns stats
-                const engineStats = await adapter.stop(session.id, timeoutMs)
+                const engineStats = await adapter.stop(session.id, timeoutMs, options)
                 const resolvedStats = this._resolveStoppedEngineStats(engineName, session, engineStats)
                 this._mergeStats(stats, resolvedStats)
-                session.engineStates[engineName] = { status: 'stopped' }
+                const incomplete = engineStats?.completionStatus === 'engine_incomplete'
+                session.engineStates[engineName] = Object.assign({}, session.engineStates[engineName], {
+                    status: incomplete ? 'cancelled' : 'stopped',
+                    completionStatus: engineStats?.completionStatus || (incomplete ? 'engine_incomplete' : 'completed'),
+                    drained: engineStats?.drained !== false
+                })
+                if (incomplete) stats.completionStatus = 'engine_incomplete'
             } catch (err) {
                 session.engineStates[engineName] = { status: 'error', error: err.message }
             }
@@ -1483,12 +2379,42 @@ export class ptk_automation {
         return stats
     }
 
+    async _stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options = {}) {
+        const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
+        const boundedTimeoutMs = zapCloseRequest
+            ? Math.min(this._normalizeStopTimeoutMs(timeoutMs), ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS)
+            : this._normalizeStopTimeoutMs(timeoutMs)
+        let timer = null
+        const timeoutResult = new Promise(resolve => {
+            timer = setTimeout(() => {
+                resolve({
+                    __ptkStopTimedOut: true,
+                    findingsCount: 0,
+                    bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+                    completionStatus: 'engine_incomplete',
+                    drained: false
+                })
+            }, boundedTimeoutMs)
+        })
+        try {
+            const result = await Promise.race([
+                Promise.resolve(adapter.stop(session.id, boundedTimeoutMs, options)),
+                timeoutResult
+            ])
+            return result
+        } finally {
+            if (timer) clearTimeout(timer)
+        }
+    }
+
     /**
      * Stop engines asynchronously (fire-and-forget with completion tracking)
      * Updates engineStates as each engine stops
      */
-    async _stopEnginesAsync(session, timeoutMs = 180000) {
+    async _stopEnginesAsync(session, timeoutMs = 180000, options = {}) {
         const stats = this._createEmptyStats()
+        stats.completionStatus = 'completed'
+        stats.incompleteEngines = []
 
         // Mark all engines as stopping
         for (const engineName of session.engines) {
@@ -1506,9 +2432,20 @@ export class ptk_automation {
             }
 
             try {
-                const engineStats = await adapter.stop(session.id, timeoutMs)
+                const engineStats = await this._stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options)
                 const resolvedStats = this._resolveStoppedEngineStats(engineName, session, engineStats)
-                session.engineStates[engineName].status = 'stopped'
+                const timedOut = engineStats?.__ptkStopTimedOut === true
+                const incomplete = timedOut || engineStats?.completionStatus === 'engine_incomplete'
+                session.engineStates[engineName] = Object.assign({}, session.engineStates[engineName], {
+                    status: incomplete ? 'cancelled' : 'stopped',
+                    completionStatus: incomplete ? 'engine_incomplete' : (engineStats?.completionStatus || 'completed'),
+                    drained: engineStats?.drained !== false && !timedOut,
+                    stopTimedOut: timedOut || undefined
+                })
+                if (incomplete) {
+                    stats.completionStatus = 'engine_incomplete'
+                    stats.incompleteEngines.push(engineName)
+                }
 
                 // Aggregate stats
                 stats.findingsCount += resolvedStats?.findingsCount || 0
@@ -1578,6 +2515,21 @@ export class ptk_automation {
         maybeAdopt(this._getEngineScanResult(engineName))
 
         const adapter = this.engines?.getAdapter(engineName) || null
+        try {
+            const adapterStats = adapter?.getStats?.()
+            if (Number(adapterStats?.findingsCount || 0) > Number(best.findingsCount || 0)) {
+                best.findingsCount = Number(adapterStats.findingsCount || 0)
+                best.bySeverity = Object.assign(
+                    { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+                    adapterStats.bySeverity || {}
+                )
+            }
+        } catch (err) {
+            debugAutomationLog('[PTK Automation] Failed to collect stopped engine stats from adapter', {
+                engineName,
+                error: err?.message || String(err)
+            })
+        }
         let scanId = session?.scanIds?.[engineName] || adapter?.getScanId?.() || null
         if (!scanId && session) {
             scanId = resultsRegistry.findScanIdForEngine(engineName, {
@@ -1600,19 +2552,31 @@ export class ptk_automation {
      * Called from both sync and async stop paths
      */
     _finalizeSession(session, stats) {
+        if (session?.zapCloseTerminalFallbackTimer) {
+            clearTimeout(session.zapCloseTerminalFallbackTimer)
+            delete session.zapCloseTerminalFallbackTimer
+        }
         // Final scanId capture
         this._finalScanIdCapture(session)
 
+        const completionStatus = stats?.completionStatus === 'engine_incomplete'
+            || (Array.isArray(stats?.incompleteEngines) && stats.incompleteEngines.length > 0)
+            ? 'engine_incomplete'
+            : 'completed'
         session.finishedAt = new Date().toISOString()
         session.status = 'completed'
+        session.completionStatus = completionStatus
 
         // Store summary for get-session-progress to return
         session.summary = {
-            status: 'completed',
+            status: completionStatus,
             stats: {
                 findingsCount: stats.findingsCount,
                 bySeverity: stats.bySeverity
             }
+        }
+        if (Array.isArray(stats?.incompleteEngines) && stats.incompleteEngines.length > 0) {
+            session.summary.incompleteEngines = stats.incompleteEngines
         }
 
         // Update tracking for export
@@ -1628,6 +2592,98 @@ export class ptk_automation {
         this._enforceSessionRetention()
 
         debugAutomationLog('[PTK Automation] Session finalized', session.id)
+    }
+
+    _scheduleZapCloseTerminalFallback(session, { zapid = null, timeoutMs = ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS } = {}) {
+        if (!session || session.status === 'completed' || session.status === 'error') return
+        if (session.zapCloseTerminalFallbackTimer) {
+            clearTimeout(session.zapCloseTerminalFallbackTimer)
+        }
+
+        const fallbackMs = Math.max(250, Math.min(
+            ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS,
+            this._normalizeStopTimeoutMs(timeoutMs)
+        ))
+
+        session.zapCloseTerminalFallbackTimer = setTimeout(() => {
+            this._finalizeZapCloseSessionIncomplete(session, {
+                reason: 'zap_close_stop_timeout',
+                zapid
+            })
+        }, fallbackMs)
+    }
+
+    async _completeZapCloseFallbackAfterGrace(session, { zapid = null, timeoutMs = ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS } = {}) {
+        if (!session || session.status === 'completed' || session.status === 'error') return false
+        const deadlineMs = Date.now() + Math.max(250, Math.min(
+            ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS,
+            this._normalizeStopTimeoutMs(timeoutMs)
+        ))
+        while (Date.now() < deadlineMs) {
+            if (!session || session.status === 'completed' || session.status === 'error') return false
+            await sleep(ZAP_CLOSE_TERMINAL_FALLBACK_POLL_MS)
+        }
+        if (!session || session.status === 'completed' || session.status === 'error') return false
+        return this._finalizeZapCloseSessionIncomplete(session, {
+            reason: 'zap_close_stop_bounded',
+            zapid
+        })
+    }
+
+    async _finalizeZapCloseSessionIncomplete(session, { reason = 'zap_close_stop_timeout', zapid = null } = {}) {
+        if (!session || session.status === 'completed' || session.status === 'error') return false
+        if (!session.stopRequestedAt) return false
+
+        if (session.zapCloseTerminalFallbackTimer) {
+            clearTimeout(session.zapCloseTerminalFallbackTimer)
+            delete session.zapCloseTerminalFallbackTimer
+        }
+
+        const stats = this._collectCurrentStats(session)
+        stats.completionStatus = 'engine_incomplete'
+        stats.incompleteEngines = []
+
+        const engines = Array.isArray(session.engines) ? session.engines : []
+        for (const engineName of engines) {
+            const engineUpper = String(engineName || '').toUpperCase()
+            session.engineStates[engineUpper] = session.engineStates[engineUpper] || {}
+            const state = String(session.engineStates[engineUpper].status || '').toLowerCase()
+            if (state !== 'stopped' && state !== 'completed' && state !== 'error') {
+                session.engineStates[engineUpper] = Object.assign({}, session.engineStates[engineUpper], {
+                    status: 'cancelled',
+                    completionStatus: 'engine_incomplete',
+                    drained: false,
+                    stopTimedOut: true
+                })
+                stats.incompleteEngines.push(engineUpper)
+            }
+        }
+
+        if (!stats.incompleteEngines.length && engines.length > 0) {
+            stats.completionStatus = 'completed'
+        }
+
+        session.stopInProgress = false
+        session.warnings = Array.isArray(session.warnings) ? session.warnings : []
+        session.warnings.push({
+            code: reason,
+            at: new Date().toISOString()
+        })
+        this._finalizeSession(session, stats)
+
+        try {
+            await this.zap?.postTerminalProgressForClose?.({
+                sessionId: session.id,
+                zapid
+            })
+        } catch (err) {
+            debugAutomationLog('[PTK Automation] Failed to post ZAP-close fallback terminal progress', {
+                sessionId: session.id,
+                error: err?.message || String(err)
+            })
+        }
+
+        return true
     }
 
     _finalScanIdCapture(session) {
@@ -1665,6 +2721,9 @@ export class ptk_automation {
             includeSecrets = false,
             maxExportBytes = 25 * 1024 * 1024
         } = options
+        if (includeSecrets === true || String(options?.exportMode || '').toLowerCase() === 'replayable') {
+            throw new Error(REPLAYABLE_EXPORT_REQUIRED_ERROR)
+        }
 
         const scanResult = resultsRegistry.get(engine, scanId)
         if (!scanResult) {
@@ -1692,6 +2751,8 @@ export class ptk_automation {
         }
         exported.meta.privacy = exported.meta.privacy || {}
         exported.meta.privacy.secretsIncluded = includeSecrets === true
+        exported.meta.privacy.exportMode = PAGE_EXPORT_MODE
+        exported.meta.privacy.redactionEnforced = true
         if (includeSecrets === true) {
             exported.meta.privacy.replayableRequests = true
         }
@@ -1773,6 +2834,9 @@ export class ptk_automation {
     }
 
     async _buildEngineChunkedExport(engine, session, options = {}) {
+        if (options?.includeSecrets === true || String(options?.exportMode || '').toLowerCase() === 'replayable') {
+            throw new Error(REPLAYABLE_EXPORT_REQUIRED_ERROR)
+        }
         const exportModule = this._getEngineExportModule(engine)
         if (!exportModule?.msg_export_scan_result) {
             throw new Error('chunked_export_not_supported')
@@ -1780,7 +2844,8 @@ export class ptk_automation {
         const result = await exportModule.msg_export_scan_result({
             target: options?.target || 'download',
             fileName: options?.fileName || `PTK_${String(engine || 'scan').toUpperCase()}_scan.json`,
-            includeSecrets: options?.includeSecrets === true
+            includeSecrets: options?.includeSecrets === true,
+            owner: options?.owner || null
         })
         if (!result || result.success === false) {
             throw new Error(result?.error || 'chunked_export_failed')
@@ -1791,6 +2856,9 @@ export class ptk_automation {
         return {
             engine,
             exportMode: 'chunked',
+            sessionId: session?.id || null,
+            tabId: session?.tabId ?? null,
+            frameId: Number.isInteger(session?.frameId) ? session.frameId : 0,
             exportId: result.exportId,
             fileName: result.fileName,
             size: result.size,
@@ -2104,6 +3172,34 @@ export class ptk_automation {
      */
     _isStrictCurrentTabScope(options = {}) {
         return options?.sessionScope === STRICT_CURRENT_TAB_SESSION_SCOPE
+    }
+
+    _isAuthorizedSessionFrame(session = null, sender = {}) {
+        if (!session) return false
+        const expectedFrameId = Number.isInteger(session.frameId) ? session.frameId : 0
+        return senderFrameId(sender) === expectedFrameId
+    }
+
+    _pageExportOwner(session = null, sender = {}, engine = 'ALL', exportMode = PAGE_EXPORT_MODE) {
+        if (!session) return null
+        return {
+            sessionId: session.id,
+            tabId: session.tabId,
+            frameId: Number.isInteger(session.frameId) ? session.frameId : 0,
+            topFrameId: 0,
+            engine: String(engine || 'ALL').toUpperCase(),
+            exportMode,
+            owner: PAGE_EXPORT_OWNER
+        }
+    }
+
+    _rejectReplayablePageExport(requestId, extra = {}) {
+        return {
+            ok: false,
+            error: REPLAYABLE_EXPORT_REQUIRED_ERROR,
+            requestId,
+            ...extra
+        }
     }
 
     _baseSessionLookupDiagnostics({
@@ -2464,9 +3560,22 @@ export class ptk_automation {
     _selectImmediateZapStartupEngines(engineNames = []) {
         const normalized = Array.isArray(engineNames) ? engineNames.filter(Boolean) : []
         if (!normalized.length) return []
-        if (normalized.includes('DAST')) {
-            return ['DAST']
+        const immediate = []
+        if (normalized.includes('IAST')) {
+            // IAST must be registered before DAST/client navigation executes
+            // page-load DOM sinks. Deferring it misses load-time DOM mutation XSS.
+            immediate.push('IAST')
         }
+        if (normalized.includes('DAST')) {
+            immediate.push('DAST')
+        }
+        if (normalized.includes('SAST')) {
+            // ZAP browser coverage closes short-lived pages quickly. Starting
+            // SAST in the initial engine group makes current-page script
+            // collection deterministic instead of racing a deferred timer.
+            immediate.push('SAST')
+        }
+        if (immediate.length) return immediate
         return [normalized[0]]
     }
 
@@ -2597,7 +3706,15 @@ export class ptk_automation {
                 }
             }
             if (engineName === 'IAST' && session.source === 'zap') {
-                mergedOptions.waitForReady = false
+                if (mergedOptions.policyCode == null && mergedOptions.scanStrategy != null) {
+                    mergedOptions.policyCode = mergedOptions.scanStrategy
+                }
+                if (mergedOptions.waitForReady == null) {
+                    mergedOptions.waitForReady = true
+                }
+                if (!(Number.isFinite(Number(mergedOptions.agentReadyTimeoutMs)) && Number(mergedOptions.agentReadyTimeoutMs) > 0)) {
+                    mergedOptions.agentReadyTimeoutMs = 5000
+                }
             }
 
             this._recordZapTiming(session, `${enginePhasePrefix}.begin`)
@@ -2731,7 +3848,7 @@ export class ptk_automation {
 
         for (const engineName of session.engines) {
             const engineState = session.engineStates[engineName] || {}
-            const progress = this._getEngineProgress(engineName, engineState)
+            const progress = this._getEngineProgress(engineName, engineState, session)
             enginesProgress[engineName] = progress
             if (!firstEngineError && typeof engineState?.error === 'string' && engineState.error.trim()) {
                 firstEngineError = `${engineName}:${engineState.error.trim()}`
@@ -2757,6 +3874,7 @@ export class ptk_automation {
             ok: true,
             sessionId: session.id,
             status: sessionStatus,
+            completionStatus: session.completionStatus || session.summary?.status || sessionStatus,
             error: session.error || firstEngineError || null,
             startedAt: session.startedAt,
             finishedAt: session.finishedAt,
@@ -2801,6 +3919,7 @@ export class ptk_automation {
             tabId: session.tabId ?? null,
             targetUrl: session.targetUrl || session.pageUrl || null,
             sessionStatus: snapshot.status,
+            completionStatus: snapshot.completionStatus || session.completionStatus || null,
             stopRequestedAt: session.stopRequestedAt || null,
             requiredEngines: runtimeSnapshot.requiredEngines,
             engines: runtimeSnapshot.engines,
@@ -2819,7 +3938,7 @@ export class ptk_automation {
 
         for (const engineName of requiredEngines) {
             const engineState = session?.engineStates?.[engineName] || {}
-            const engineProgress = snapshot?.engines?.[engineName] || this._getEngineProgress(engineName, engineState)
+            const engineProgress = snapshot?.engines?.[engineName] || this._getEngineProgress(engineName, engineState, session)
             let telemetry = null
 
             if (engineName === 'DAST') {
@@ -2866,9 +3985,13 @@ export class ptk_automation {
         const requestQueue = toFiniteNumber(engineProgress?.requestQueue, 0)
         const pendingPlans = toFiniteNumber(engineProgress?.pendingPlans, 0)
         const planning = toFiniteNumber(engineProgress?.planning, 0)
+        const pendingCaptures = toFiniteNumber(engineProgress?.pendingCaptures, 0)
         const pendingAutomationSeeds = hasCoordinatorState
             ? toFiniteNumber(coordinatorState?.pendingAutomationSeeds, 0)
             : 0
+        const stopResult = hasCoordinatorState && coordinatorState?.lastAutomationStopResult
+            ? coordinatorState.lastAutomationStopResult
+            : null
         const lastActivityAt = engineProgress?.lastActivityAt || null
         const hasObservedWork = [
             planned,
@@ -2879,6 +4002,7 @@ export class ptk_automation {
             requestQueue,
             pendingPlans,
             planning,
+            pendingCaptures,
             pendingAutomationSeeds,
             toFiniteNumber(engineProgress?.findingsCount, 0)
         ].some(value => Number.isFinite(value) && value > 0) || Boolean(toNonEmptyString(lastActivityAt))
@@ -2895,7 +4019,11 @@ export class ptk_automation {
             requestQueue,
             pendingPlans,
             planning,
+            pendingCaptures,
+            captureStats: engineProgress?.captureStats || null,
             pendingAutomationSeeds,
+            skippedDueToStrategy: toFiniteNumber(engineProgress?.skippedDueToStrategy, 0),
+            scanStrategy: toNonEmptyString(engineProgress?.scanStrategy) || null,
             seededRequests: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.seeded, 0),
             proxySeededRequests: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.proxySeeded, 0),
             historySeededRequests: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeeded, 0),
@@ -2903,6 +4031,8 @@ export class ptk_automation {
             historySeedTotalAvailable: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedTotalAvailable, 0),
             historySeedDroppedByCap: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedDroppedByCap, 0),
             historySeedDuplicatesSkipped: toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedDuplicatesSkipped, 0),
+            completionStatus: toNonEmptyString(stopResult?.completionStatus) || null,
+            stopDrain: stopResult?.drain || null,
             lastActivityAt,
             interactionRequired: hasCoordinatorState
                 ? coordinatorState.requireUserInteractionBeforeCapture !== false
@@ -2929,6 +4059,15 @@ export class ptk_automation {
         const requestsCount = Array.isArray(scanResult?.requests) ? scanResult.requests.length : 0
         const runtimeEventsCount = Array.isArray(scanResult?.runtimeEvents) ? scanResult.runtimeEvents.length : 0
         const findingsCount = Array.isArray(scanResult?.findings) ? scanResult.findings.length : toFiniteNumber(engineProgress?.findingsCount, 0)
+        const iastTelemetry = scanResult?.iastTelemetry && typeof scanResult.iastTelemetry === 'object'
+            ? scanResult.iastTelemetry
+            : {}
+        const automationTelemetry = iastTelemetry.automation && typeof iastTelemetry.automation === 'object'
+            ? iastTelemetry.automation
+            : {}
+        const runtimeHealth = iastTelemetry.activation?.runtimeHealth && typeof iastTelemetry.activation.runtimeHealth === 'object'
+            ? iastTelemetry.activation.runtimeHealth
+            : null
         const hasAgentProbe = typeof iast?.isAgentReady === 'function'
         const agentReady = Number.isInteger(tabId)
             ? (hasAgentProbe ? iast.isAgentReady(tabId) : !!iast?.agentReadyTabs?.has?.(tabId))
@@ -2936,16 +4075,56 @@ export class ptk_automation {
         const activityError = Number.isInteger(tabId)
             ? toNonEmptyString(iast?.agentFailedTabs?.get?.(tabId))
             : null
+        const modulesSentOk = toFiniteNumber(automationTelemetry?.modulesSentOk, 0)
+        const modulesSentError = toFiniteNumber(automationTelemetry?.modulesSentError, 0)
+        const runtimeHealthCount = toFiniteNumber(automationTelemetry?.runtimeHealthCount, 0)
+        const findingReportsAccepted = toFiniteNumber(automationTelemetry?.findingReportsAccepted, 0)
+        const runtimeSignalsAccepted = toFiniteNumber(automationTelemetry?.runtimeSignalsAccepted, 0)
+        const lastSenderTabId = Number.isInteger(Number(automationTelemetry?.lastSenderTabId))
+            ? Number(automationTelemetry.lastSenderTabId)
+            : null
+        const moduleDeliveryObserved = runtimeHealth?.modulesLoaded === true
+            || (modulesSentOk > 0 && (!Number.isInteger(tabId) || lastSenderTabId === null || lastSenderTabId === tabId))
+        const agentObservedActivity = findingReportsAccepted > 0
+            || runtimeSignalsAccepted > 0
+            || runtimeHealthCount > 0
+            || runtimeEventsCount > 0
+            || findingsCount > 0
 
         return {
             status: engineState?.status || 'unknown',
             isScanRunning: iast?.isScanRunning === true,
             agentReady,
+            modulesLoaded: runtimeHealth?.modulesLoaded === true,
+            modulesSignature: toNonEmptyString(runtimeHealth?.modulesSignature) || null,
+            pendingFindingReports: toFiniteNumber(runtimeHealth?.pendingFindingReports, 0),
+            flushedPendingFindingReports: toFiniteNumber(runtimeHealth?.flushedPendingFindingReports, 0),
+            runtimeUrl: runtimeHealth?.url || null,
+            agentBootUrl: runtimeHealth?.agentBootUrl || null,
+            documentReadyState: runtimeHealth?.documentReadyState || null,
+            agentBootReadyState: runtimeHealth?.agentBootReadyState || null,
+            agentBootAfterLoad: runtimeHealth?.agentBootAfterLoad === true,
+            agentBootDelayMs: Number.isFinite(Number(runtimeHealth?.agentBootDelayMs))
+                ? Number(runtimeHealth.agentBootDelayMs)
+                : null,
+            modulesSentOk,
+            modulesSentSkipped: toFiniteNumber(automationTelemetry?.modulesSentSkipped, 0),
+            modulesSentError,
+            runtimeHealthCount,
+            findingReportsAccepted,
+            runtimeSignalsAccepted,
+            lastModuleSendResult: automationTelemetry?.lastModuleSendResult || null,
+            lastSenderTabId: automationTelemetry?.lastSenderTabId ?? null,
+            moduleDeliveryObserved,
             requestsCount,
             runtimeEventsCount,
             findingsCount,
+            scanStrategy: scanResult?.settings?.iastScanStrategy || automationTelemetry.scanStrategy || null,
+            automationTelemetry,
+            runtimeHealth,
             lastActivityAt,
-            hasObservedActivity: requestsCount > 0 || runtimeEventsCount > 0 || findingsCount > 0 || Boolean(toNonEmptyString(lastActivityAt)),
+            agentObservedActivity,
+            hasObservedActivity: agentObservedActivity || requestsCount > 0 || Boolean(toNonEmptyString(lastActivityAt)),
             error: toNonEmptyString(engineProgress?.error) || toNonEmptyString(engineState?.error) || activityError || null
         }
     }
@@ -2967,6 +4146,7 @@ export class ptk_automation {
             isSessionRunning: automationState.isSessionRunning === true || liveProgress.isRunning === true || engineProgress?.isRunning === true,
             isAnalysisRunning: automationState.isAnalysisRunning === true || liveProgress.isAnalysisRunning === true || engineProgress?.isAnalysisRunning === true,
             activeCollectionCount: automationState.activeCollectionCount,
+            pendingCollectionCount: automationState.pendingCollectionCount ?? liveProgress.pendingCollectionCount ?? engineProgress?.pendingCollectionCount,
             currentGeneration: automationState.currentGeneration,
             lastCompletedGeneration: automationState.lastCompletedGeneration || liveProgress.completedGeneration || engineProgress?.lastCompletedGeneration,
             sessionState: automationState.sessionState || liveProgress.sessionState || engineProgress?.sessionState || null
@@ -3013,13 +4193,26 @@ export class ptk_automation {
             firstCollectionSettled: automationState.firstCollectionSettled === true,
             firstCollectionError: toNonEmptyString(automationState.firstCollectionError) || null,
             activeCollectionCount: normalized.activeCollectionCount,
+            pendingCollectionCount: toFiniteNumber(automationState.pendingCollectionCount ?? liveProgress.pendingCollectionCount ?? engineProgress?.pendingCollectionCount, 0),
             collectionState: normalized.collectionState || null,
             sessionState: normalized.sessionState || null,
             analysisState: normalized.analysisState || null,
             currentGeneration: normalized.currentGeneration,
             lastCompletedGeneration: normalized.lastCompletedGeneration,
+            currentCollectionId: toNonEmptyString(automationState.currentCollectionId) || null,
+            currentCollectionFile: toNonEmptyString(automationState.currentCollectionFile) || null,
+            currentCollectionScriptsCount: toFiniteNumber(automationState.currentCollectionScriptsCount),
+            currentCollectionHtmlChars: toFiniteNumber(automationState.currentCollectionHtmlChars),
+            currentCollectionFindingsCount: toFiniteNumber(automationState.currentCollectionFindingsCount),
+            currentCollectionStartedAt: toNonEmptyString(automationState.currentCollectionStartedAt) || null,
+            currentCollectionPayloadAt: toNonEmptyString(automationState.currentCollectionPayloadAt) || null,
+            lastCompletedCollectionId: toNonEmptyString(automationState.lastCompletedCollectionId) || null,
             lastCompletedFile: toNonEmptyString(automationState.lastCompletedFile) || null,
             lastCompletedModule: toNonEmptyString(automationState.lastCompletedModule) || null,
+            lastCompletedScriptsCount: toFiniteNumber(automationState.lastCompletedScriptsCount),
+            lastCompletedHtmlChars: toFiniteNumber(automationState.lastCompletedHtmlChars),
+            lastCompletedFindingsCount: toFiniteNumber(automationState.lastCompletedFindingsCount),
+            lastCompletedArtifactsCount: toFiniteNumber(automationState.lastCompletedArtifactsCount),
             lastCompletedAt: toNonEmptyString(automationState.lastCompletedAt) || null,
             lastActivityAt,
             hasObservedWork,
@@ -3094,6 +4287,9 @@ export class ptk_automation {
         if (!session || session.status === 'completed' || session.status === 'error' || !session.stopRequestedAt) {
             return false
         }
+        if (session.stopInProgress === true) {
+            return false
+        }
 
         const engines = Array.isArray(session.engines) ? session.engines : []
         if (!engines.length) return false
@@ -3121,7 +4317,7 @@ export class ptk_automation {
     _isEngineExportReady(session, engineName, { requireStop = true } = {}) {
         const engineUpper = String(engineName || '').toUpperCase()
         const engineState = session.engineStates?.[engineUpper] || {}
-        const progress = this._getEngineProgress(engineUpper, engineState) || {}
+        const progress = this._getEngineProgress(engineUpper, engineState, session) || {}
         const state = String(engineState.status || '').toLowerCase()
         const status = String(progress.status || state || '').toLowerCase()
         const phase = String(progress.phase || '').toLowerCase()
@@ -3134,10 +4330,11 @@ export class ptk_automation {
         const requestQueue = toFiniteNumber(progress.requestQueue, 0)
         const pendingPlans = toFiniteNumber(progress.pendingPlans, 0)
         const planning = toFiniteNumber(progress.planning, 0)
+        const pendingCaptures = toFiniteNumber(progress.pendingCaptures, 0)
         const done = toFiniteNumber(progress.progress?.done, null)
         const total = toFiniteNumber(progress.progress?.total, null)
         const finiteComplete = total !== null && done !== null && done >= total
-        const queueEmpty = remaining <= 0 && activeTasks <= 0 && taskQueue <= 0 && requestQueue <= 0 && pendingPlans <= 0 && planning <= 0
+        const queueEmpty = remaining <= 0 && activeTasks <= 0 && taskQueue <= 0 && requestQueue <= 0 && pendingPlans <= 0 && planning <= 0 && pendingCaptures <= 0
         const hasExplicitWorkCounters = [
             progress.remaining,
             progress.progress?.remaining,
@@ -3145,7 +4342,8 @@ export class ptk_automation {
             progress.taskQueue,
             progress.requestQueue,
             progress.pendingPlans,
-            progress.planning
+            progress.planning,
+            progress.pendingCaptures
         ].some(value => typeof value !== 'undefined' && value !== null)
         const sastComplete = engineUpper === 'SAST'
             && queueEmpty
@@ -3206,7 +4404,7 @@ export class ptk_automation {
      * Get progress for a single engine (fast, no blocking)
      * Uses existing stats from scanResult, avoids scanning findings array
      */
-    _getEngineProgress(engineName, engineState) {
+    _getEngineProgress(engineName, engineState, session = null) {
         const engineUpper = engineName.toUpperCase()
         const adapter = this.engines?.getAdapter(engineUpper) || null
         let liveIsRunning = false
@@ -3252,6 +4450,9 @@ export class ptk_automation {
         // Engine-specific progress
         if (engineUpper === 'DAST') {
             const liveProgress = this._getDastAutomationProgress()
+            const coordinatorState = session?.id
+                ? this._getDastAutomationCoordinatorState(session.id)
+                : null
             result.phase = liveProgress?.phase || this._getDastPhase()
             if (liveProgress) {
                 result.progress = {
@@ -3267,6 +4468,18 @@ export class ptk_automation {
                 result.requestQueue = liveProgress.requestQueue ?? 0
                 result.pendingPlans = liveProgress.pendingPlans ?? 0
                 result.planning = liveProgress.planning ?? 0
+                result.pendingCaptures = liveProgress.pendingCaptures ?? 0
+                result.captureStats = liveProgress.captureStats || null
+                result.skippedDueToStrategy = liveProgress.skippedDueToStrategy ?? 0
+                result.scanStrategy = liveProgress.scanStrategy || null
+                result.pendingAutomationSeeds = toFiniteNumber(coordinatorState?.pendingAutomationSeeds, 0)
+                result.seededRequests = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.seeded, 0)
+                result.proxySeededRequests = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.proxySeeded, 0)
+                result.historySeededRequests = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeeded, 0)
+                result.historySeedInputCount = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedInputCount, 0)
+                result.historySeedTotalAvailable = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedTotalAvailable, 0)
+                result.historySeedDroppedByCap = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedDroppedByCap, 0)
+                result.historySeedDuplicatesSkipped = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedDuplicatesSkipped, 0)
                 result.lastActivityAt = liveProgress.lastActivityAt || result.lastActivityAt
                 if (engineState.status === 'running' && result.idle) {
                     result.status = 'idle'
@@ -3290,6 +4503,7 @@ export class ptk_automation {
             }
         } else if (engineUpper === 'SAST') {
             const liveProgress = this._getLiveSastAutomationProgress()
+            const automationState = this.app?.sast?.sessionCoordinator?.getAutomationState?.() || {}
             if (liveProgress) {
                 const normalized = this._normalizeSastRuntimeFields({
                     phase: liveProgress.phase || null,
@@ -3299,13 +4513,15 @@ export class ptk_automation {
                     completedModules: liveProgress.completedModules,
                     currentFile: liveProgress.currentFile || null,
                     currentModule: liveProgress.currentModule || null,
-                    collectionState: liveProgress.collectionState || null,
-                    analysisState: liveProgress.analysisState || null,
-                    isSessionRunning: liveProgress.isRunning === true || liveProgress.isSessionRunning === true,
-                    isAnalysisRunning: liveProgress.isAnalysisRunning === true,
-                    activeCollectionCount: liveProgress.activeCollectionCount,
-                    currentGeneration: liveProgress.currentGeneration,
-                    lastCompletedGeneration: liveProgress.lastCompletedGeneration || liveProgress.completedGeneration
+                    collectionState: automationState.collectionState || liveProgress.collectionState || null,
+                    analysisState: automationState.analysisState || liveProgress.analysisState || null,
+                    sessionState: automationState.sessionState || liveProgress.sessionState || null,
+                    isSessionRunning: automationState.isSessionRunning === true || liveProgress.isRunning === true || liveProgress.isSessionRunning === true,
+                    isAnalysisRunning: automationState.isAnalysisRunning === true || liveProgress.isAnalysisRunning === true,
+                    activeCollectionCount: automationState.activeCollectionCount ?? liveProgress.activeCollectionCount,
+                    pendingCollectionCount: automationState.pendingCollectionCount ?? liveProgress.pendingCollectionCount,
+                    currentGeneration: automationState.currentGeneration ?? liveProgress.currentGeneration,
+                    lastCompletedGeneration: automationState.lastCompletedGeneration || liveProgress.lastCompletedGeneration || liveProgress.completedGeneration
                 })
                 result.phase = normalized.phase || null
                 result.totalFiles = toFiniteNumber(liveProgress.totalFiles, 0)
@@ -3323,12 +4539,34 @@ export class ptk_automation {
                 result.collectionState = normalized.collectionState || null
                 result.sessionState = normalized.sessionState || null
                 result.analysisState = normalized.analysisState || null
+                result.firstCollectionStarted = automationState.firstCollectionStarted === true
+                result.firstCollectionSettled = automationState.firstCollectionSettled === true
+                result.firstCollectionError = toNonEmptyString(automationState.firstCollectionError) || null
+                result.initialCollectionDeferred = automationState.initialCollectionDeferred || null
                 result.activeCollectionCount = normalized.activeCollectionCount
+                result.pendingCollectionCount = toFiniteNumber(automationState.pendingCollectionCount ?? liveProgress.pendingCollectionCount, 0)
                 result.currentGeneration = normalized.currentGeneration
                 result.lastCompletedGeneration = normalized.lastCompletedGeneration
-                result.lastCompletedFile = toNonEmptyString(liveProgress.lastCompletedFile) || null
-                result.lastCompletedModule = toNonEmptyString(liveProgress.lastCompletedModule) || null
-                result.lastCompletedAt = toNonEmptyString(liveProgress.lastCompletedAt) || null
+                result.currentCollectionId = toNonEmptyString(automationState.currentCollectionId || liveProgress.currentCollectionId) || null
+                result.currentCollectionFile = toNonEmptyString(automationState.currentCollectionFile || liveProgress.currentCollectionFile) || null
+                result.currentCollectionScriptsCount = toFiniteNumber(automationState.currentCollectionScriptsCount ?? liveProgress.currentCollectionScriptsCount)
+                result.currentCollectionHtmlChars = toFiniteNumber(automationState.currentCollectionHtmlChars ?? liveProgress.currentCollectionHtmlChars)
+                result.currentCollectionFindingsCount = toFiniteNumber(automationState.currentCollectionFindingsCount ?? liveProgress.currentCollectionFindingsCount)
+                result.currentCollectionStartedAt = toNonEmptyString(automationState.currentCollectionStartedAt || liveProgress.currentCollectionStartedAt) || null
+                result.currentCollectionPayloadAt = toNonEmptyString(automationState.currentCollectionPayloadAt || liveProgress.currentCollectionPayloadAt) || null
+                result.lastCompletedCollectionId = toNonEmptyString(automationState.lastCompletedCollectionId || liveProgress.lastCompletedCollectionId) || null
+                result.lastCompletedFile = toNonEmptyString(automationState.lastCompletedFile || liveProgress.lastCompletedFile) || null
+                result.lastCompletedModule = toNonEmptyString(automationState.lastCompletedModule || liveProgress.lastCompletedModule) || null
+                result.lastCompletedScriptsCount = toFiniteNumber(automationState.lastCompletedScriptsCount ?? liveProgress.lastCompletedScriptsCount)
+                result.lastCompletedHtmlChars = toFiniteNumber(automationState.lastCompletedHtmlChars ?? liveProgress.lastCompletedHtmlChars)
+                result.lastCompletedFindingsCount = toFiniteNumber(automationState.lastCompletedFindingsCount ?? liveProgress.lastCompletedFindingsCount)
+                result.lastCompletedArtifactsCount = toFiniteNumber(automationState.lastCompletedArtifactsCount ?? liveProgress.lastCompletedArtifactsCount)
+                result.lastCompletedAt = toNonEmptyString(automationState.lastCompletedAt || liveProgress.lastCompletedAt) || null
+                result.hasObservedCollection = result.firstCollectionStarted
+                    || result.firstCollectionSettled
+                    || toFiniteNumber(result.currentGeneration, 0) > 0
+                    || toFiniteNumber(result.lastCompletedGeneration, 0) > 0
+                    || Boolean(result.currentCollectionFile || result.lastCompletedFile)
                 if (result.totalFiles > 0) {
                     result.progress = {
                         done: result.completedFiles,
@@ -3357,12 +4595,73 @@ export class ptk_automation {
                 result.idle = !result.isRunning
             }
         } else {
+            if (engineUpper === 'IAST') {
+                const iast = this.app?.iast || null
+                const scanResult = iast?.scanResult || null
+                const automationTelemetry = scanResult?.iastTelemetry?.automation || {}
+                const runtimeHealth = scanResult?.iastTelemetry?.activation?.runtimeHealth || null
+                const sessionTabId = Number.isInteger(Number(session?.tabId)) ? Number(session.tabId) : null
+                const scanResultTabId = Number.isInteger(Number(scanResult?.tabId)) ? Number(scanResult.tabId) : null
+                const tabId = sessionTabId ?? scanResultTabId
+                result.requestsCount = Array.isArray(scanResult?.requests) ? scanResult.requests.length : 0
+                result.runtimeEventsCount = Array.isArray(scanResult?.runtimeEvents) ? scanResult.runtimeEvents.length : 0
+                result.findingsCount = Array.isArray(scanResult?.findings)
+                    ? scanResult.findings.length
+                    : result.findingsCount
+                result.agentReady = tabId !== null
+                    ? (typeof iast?.isAgentReady === 'function'
+                        ? iast.isAgentReady(tabId)
+                        : iast?.agentReadyTabs?.has?.(tabId) === true)
+                    : Array.from(iast?.agentReadyTabs || []).length > 0
+                result.modulesSentOk = toFiniteNumber(automationTelemetry?.modulesSentOk, 0)
+                result.modulesSentSkipped = toFiniteNumber(automationTelemetry?.modulesSentSkipped, 0)
+                result.modulesSentError = toFiniteNumber(automationTelemetry?.modulesSentError, 0)
+                result.runtimeHealthState = runtimeHealth?.state || null
+                result.modulesLoaded = runtimeHealth?.modulesLoaded === true
+                result.modulesSignature = toNonEmptyString(runtimeHealth?.modulesSignature) || null
+                result.pendingFindingReports = toFiniteNumber(runtimeHealth?.pendingFindingReports, 0)
+                result.flushedPendingFindingReports = toFiniteNumber(runtimeHealth?.flushedPendingFindingReports, 0)
+                result.runtimeUrl = runtimeHealth?.url || null
+                result.agentBootUrl = runtimeHealth?.agentBootUrl || null
+                result.documentReadyState = runtimeHealth?.documentReadyState || null
+                result.agentBootReadyState = runtimeHealth?.agentBootReadyState || null
+                result.agentBootAfterLoad = runtimeHealth?.agentBootAfterLoad === true
+                result.agentBootDelayMs = Number.isFinite(Number(runtimeHealth?.agentBootDelayMs))
+                    ? Number(runtimeHealth.agentBootDelayMs)
+                    : null
+                result.runtimeHealthCount = toFiniteNumber(automationTelemetry?.runtimeHealthCount, 0)
+                result.findingReportsAccepted = toFiniteNumber(automationTelemetry?.findingReportsAccepted, 0)
+                result.runtimeSignalsAccepted = toFiniteNumber(automationTelemetry?.runtimeSignalsAccepted, 0)
+                result.lastModuleSendResult = automationTelemetry?.lastModuleSendResult || null
+                result.lastSenderTabId = automationTelemetry?.lastSenderTabId ?? null
+                const lastSenderTabId = Number.isInteger(Number(result.lastSenderTabId))
+                    ? Number(result.lastSenderTabId)
+                    : null
+                result.moduleDeliveryObserved = result.modulesLoaded === true
+                    || (result.modulesSentOk > 0 && (tabId === null || lastSenderTabId === null || lastSenderTabId === tabId))
+                result.agentObservedActivity = result.findingReportsAccepted > 0
+                    || result.runtimeSignalsAccepted > 0
+                    || result.runtimeHealthCount > 0
+                    || result.runtimeEventsCount > 0
+                    || result.findingsCount > 0
+                result.readyEvidence = result.agentReady === true && result.modulesLoaded === true
+                    ? 'agent_modules_ready'
+                    : (result.findingReportsAccepted > 0 || result.findingsCount > 0
+                        ? 'finding_activity'
+                        : (result.runtimeSignalsAccepted > 0 || result.runtimeHealthCount > 0 || result.runtimeEventsCount > 0
+                            ? 'runtime_activity'
+                            : (result.moduleDeliveryObserved ? 'module_delivery' : null)))
+                result.idle = result.pendingFindingReports === 0
+                    && result.modulesSentError === 0
+                    && Boolean(result.readyEvidence)
+            } else {
+                result.idle = !result.isRunning
+            }
             // IAST/SCA: limited progress info
             result.progress = {
                 done: result.findingsCount,
                 total: null
             }
-            result.idle = !result.isRunning
         }
 
         return result
@@ -3420,6 +4719,50 @@ export class ptk_automation {
 
     _getLiveSastAutomationProgress() {
         const snapshot = this.app?.sast?._buildSastProgressSnapshot?.()
-        return snapshot && typeof snapshot === 'object' ? snapshot : null
+        if (!snapshot || typeof snapshot !== 'object') return null
+        const automationState = this.app?.sast?.sessionCoordinator?.getAutomationState?.() || {}
+        return Object.assign({}, snapshot, {
+            sessionState: automationState.sessionState || snapshot.sessionState || null,
+            collectionState: automationState.collectionState || snapshot.collectionState || null,
+            analysisState: automationState.analysisState || snapshot.analysisState || null,
+            isSessionRunning: automationState.isSessionRunning === true || snapshot.isRunning === true,
+            isAnalysisRunning: automationState.isAnalysisRunning === true || snapshot.isAnalysisRunning === true,
+            firstCollectionStarted: automationState.firstCollectionStarted === true,
+            firstCollectionSettled: automationState.firstCollectionSettled === true,
+            firstCollectionError: automationState.firstCollectionError || null,
+            activeCollectionCount: automationState.activeCollectionCount,
+            pendingCollectionCount: automationState.pendingCollectionCount,
+            currentGeneration: automationState.currentGeneration ?? snapshot.currentGeneration,
+            lastCompletedGeneration: automationState.lastCompletedGeneration ?? snapshot.completedGeneration,
+            currentCollectionId: automationState.currentCollectionId || null,
+            currentCollectionFile: automationState.currentCollectionFile || null,
+            currentCollectionScriptsCount: automationState.currentCollectionScriptsCount,
+            currentCollectionHtmlChars: automationState.currentCollectionHtmlChars,
+            currentCollectionFindingsCount: automationState.currentCollectionFindingsCount,
+            currentCollectionStartedAt: automationState.currentCollectionStartedAt || null,
+            currentCollectionPayloadAt: automationState.currentCollectionPayloadAt || null,
+            lastCompletedFile: automationState.lastCompletedFile || snapshot.lastCompletedFile || null,
+            lastCompletedModule: automationState.lastCompletedModule || snapshot.lastCompletedModule || null,
+            lastCompletedCollectionId: automationState.lastCompletedCollectionId || null,
+            lastCompletedScriptsCount: automationState.lastCompletedScriptsCount,
+            lastCompletedHtmlChars: automationState.lastCompletedHtmlChars,
+            lastCompletedFindingsCount: automationState.lastCompletedFindingsCount,
+            lastCompletedArtifactsCount: automationState.lastCompletedArtifactsCount,
+            lastCompletedAt: automationState.lastCompletedAt || null
+        })
+    }
+
+    async _getZapPublisherDrainState() {
+        try {
+            if (!this.zap?.publisher || typeof this.zap.publisher.getDrainState !== 'function') {
+                return null
+            }
+            return await this.zap.publisher.getDrainState()
+        } catch (err) {
+            return {
+                drained: false,
+                error: err?.message || String(err)
+            }
+        }
     }
 }

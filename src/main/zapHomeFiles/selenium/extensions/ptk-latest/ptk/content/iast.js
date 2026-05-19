@@ -1,8 +1,35 @@
 /* Author: Denis Podgurskii */
 ;(() => {
+const PTK_IAST_PAGE_TO_CONTENT_EVENT = 'ptk:iast:page-to-content:v1';
+const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
+
+function parseIastBridgeEventDetail(detail) {
+    if (!detail) return null;
+    if (typeof detail === 'object') return detail;
+    if (typeof detail !== 'string') return null;
+    try {
+        const parsed = JSON.parse(detail);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function emitIastPageBridgeMessage(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    try {
+        const detail = JSON.stringify(payload);
+        const event = new CustomEvent(PTK_IAST_PAGE_TO_CONTENT_EVENT, { detail });
+        window.dispatchEvent(event);
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 if (globalThis.__PTK_IAST_AGENT_LOADED__) {
     try {
-        globalThis.postMessage({ channel: 'ptk_iast_agent_ready' }, '*');
+        emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready' });
     } catch (_) { }
     return;
 }
@@ -504,6 +531,9 @@ const IAST_RULE_INDEX = {
     byRuleId: Object.create(null),
 };
 let __IAST_LAST_MODULES_REQUEST__ = 0;
+const IAST_PENDING_FINDING_REPORTS = [];
+const IAST_PENDING_FINDING_REPORTS_MAX = 100;
+let IAST_FLUSHED_PENDING_FINDING_REPORTS_COUNT = 0;
 const IAST_HOOK_FAILURE_THRESHOLD = 3;
 const IAST_RUNTIME_DEGRADED_GROUP_THRESHOLD = 3;
 const IAST_RUNTIME_DEGRADED_DISABLED_GROUPS = new Set([
@@ -526,11 +556,22 @@ function createIastHookRuntimeState() {
     };
 }
 const IAST_HOOK_GROUPS = createIastHookRuntimeState();
+const IAST_PROVISIONAL_PRE_MODULE_HOOK_GROUPS = new Set(FREE_SAFE_HOOK_GROUPS);
 const IAST_TRUSTED_HTML_RESTRICTION = {
     checked: false,
     enforced: false,
     message: null
 };
+
+function enableProvisionalPreModuleHooks() {
+    if (IAST_MODULES || IAST_RUNTIME_PLAN) return;
+    IAST_PROVISIONAL_PRE_MODULE_HOOK_GROUPS.forEach((groupId) => {
+        IAST_HOOK_GROUPS.enabled.add(groupId);
+    });
+}
+
+enableProvisionalPreModuleHooks();
+
 function normalizeIastHookErrorMessage(error) {
     try {
         if (typeof error?.message === 'string' && error.message) {
@@ -612,6 +653,20 @@ function buildIastRuntimeHealthPayload() {
         degradedHookGroups: Array.from(IAST_HOOK_GROUPS.degraded || []).sort(),
         globallyDisabledHookGroups: Array.from(IAST_HOOK_GROUPS.globallyDisabled || []).sort(),
         hookGroupFailures,
+        modulesLoaded: Boolean(IAST_MODULES),
+        modulesSignature: IAST_MODULES_SIGNATURE || null,
+        pendingFindingReports: IAST_PENDING_FINDING_REPORTS.length,
+        flushedPendingFindingReports: IAST_FLUSHED_PENDING_FINDING_REPORTS_COUNT,
+        url: (() => { try { return window.location.href || null; } catch (_) { return null; } })(),
+        agentBootUrl: IAST_AGENT_BOOT_URL,
+        documentReadyState: (() => { try { return document.readyState || null; } catch (_) { return null; } })(),
+        agentBootReadyState: IAST_AGENT_BOOT_READY_STATE,
+        agentBootAt: IAST_AGENT_BOOT_AT,
+        navigationStart: IAST_AGENT_BOOT_NAVIGATION_START,
+        agentBootDelayMs: IAST_AGENT_BOOT_NAVIGATION_START != null
+            ? Math.max(0, Math.round(IAST_AGENT_BOOT_AT - IAST_AGENT_BOOT_NAVIGATION_START))
+            : null,
+        agentBootAfterLoad: IAST_AGENT_BOOT_READY_STATE === 'complete',
         updatedAt: Date.now()
     };
 }
@@ -623,7 +678,11 @@ function emitIastRuntimeHealthUpdate({ force = false } = {}) {
             enabledHookGroups: payload.enabledHookGroups,
             degradedHookGroups: payload.degradedHookGroups,
             globallyDisabledHookGroups: payload.globallyDisabledHookGroups,
-            hookGroupFailures: payload.hookGroupFailures
+            hookGroupFailures: payload.hookGroupFailures,
+            modulesLoaded: payload.modulesLoaded,
+            modulesSignature: payload.modulesSignature,
+            pendingFindingReports: payload.pendingFindingReports,
+            flushedPendingFindingReports: payload.flushedPendingFindingReports
         });
         if (!force && signature === IAST_LAST_RUNTIME_HEALTH_KEY) {
             return;
@@ -695,7 +754,27 @@ let IAST_MUTATION_FLUSH_SCHEDULED = false;
 const IAST_MUTATION_BATCH_SIZE = 2;
 const IAST_MUTATION_QUEUE_MAX = 50;
 const IAST_TAINT_ACTIVITY_WINDOW_MS = 5000;
+function readIastNavigationStartMs() {
+    try {
+        if (typeof performance !== 'undefined') {
+            if (Number.isFinite(Number(performance.timeOrigin))) {
+                return Number(performance.timeOrigin);
+            }
+            if (performance.timing && Number.isFinite(Number(performance.timing.navigationStart))) {
+                return Number(performance.timing.navigationStart);
+            }
+        }
+    } catch (_) { }
+    return null;
+}
 const IAST_AGENT_BOOT_AT = Date.now();
+const IAST_AGENT_BOOT_URL = (() => {
+    try { return window.location.href || null; } catch (_) { return null; }
+})();
+const IAST_AGENT_BOOT_READY_STATE = (() => {
+    try { return document.readyState || null; } catch (_) { return null; }
+})();
+const IAST_AGENT_BOOT_NAVIGATION_START = readIastNavigationStartMs();
 const IAST_SMART_STARTUP_SUPPRESS_MS = 2500;
 const IAST_HEAVY_COOLDOWN_MS = 4000;
 const IAST_HEAVY_MAX_PER_SEC = 8;
@@ -879,6 +958,8 @@ function initIastRuleIndex(modulesJson, options = {}) {
     const nextSignature = String(options?.signature || '').trim()
         || buildIastModulesSignature(modulesJson, options?.scanStrategy || null);
     if (nextSignature && IAST_MODULES_SIGNATURE === nextSignature) {
+        flushPendingIastFindingReports();
+        emitIastRuntimeHealthUpdate({ force: true });
         return false;
     }
 
@@ -895,9 +976,31 @@ function initIastRuleIndex(modulesJson, options = {}) {
     });
 
     applyIastRuntimePlan(IAST_RUNTIME_PLAN);
+    flushPendingIastFindingReports();
+    emitIastRuntimeHealthUpdate({ force: true });
 
     //__PTK_IAST_DBG__ && __PTK_IAST_DBG__('IAST: rule index initialised', IAST_RULE_INDEX);
     return true;
+}
+
+function queuePendingIastFindingReport(args) {
+    if (!args || typeof args !== 'object') return;
+    if (IAST_PENDING_FINDING_REPORTS.length >= IAST_PENDING_FINDING_REPORTS_MAX) {
+        IAST_PENDING_FINDING_REPORTS.shift();
+    }
+    IAST_PENDING_FINDING_REPORTS.push(args);
+}
+
+function flushPendingIastFindingReports() {
+    if (!IAST_MODULES || !IAST_PENDING_FINDING_REPORTS.length) return;
+    const pending = IAST_PENDING_FINDING_REPORTS.splice(0, IAST_PENDING_FINDING_REPORTS.length);
+    IAST_FLUSHED_PENDING_FINDING_REPORTS_COUNT += pending.length;
+    pending.forEach((args) => {
+        try {
+            reportFinding(args);
+        } catch (_) { }
+    });
+    emitIastRuntimeHealthUpdate({ force: true });
 }
 
 function mergeLinks(baseLinks, overrideLinks) {
@@ -950,8 +1053,8 @@ function getIastRuleByRuleId(ruleId) {
     return ruleId ? IAST_RULE_INDEX.byRuleId[ruleId] || null : null;
 }
 
-window.addEventListener('message', (event) => {
-    const data = event.data || {}
+function handleBackgroundIastBridgeMessage(data) {
+    data = data || {}
     if (data.channel === 'ptk_background_iast2content_modules') {
         if (data.scanStrategy) setIastScanStrategy(data.scanStrategy);
         if (!data.iastModules) return;
@@ -969,7 +1072,15 @@ window.addEventListener('message', (event) => {
             });
         }
     }
-})
+}
+
+window.addEventListener(PTK_IAST_CONTENT_TO_PAGE_EVENT, (event) => {
+    handleBackgroundIastBridgeMessage(parseIastBridgeEventDetail(event?.detail));
+}, false);
+
+window.addEventListener('message', (event) => {
+    handleBackgroundIastBridgeMessage(event.data || {});
+}, false);
 
 // On load, request the current IAST modules from background (helps after reloads)
 try {
@@ -985,7 +1096,7 @@ function requestModulesFromBackground(force = false) {
     }
     __IAST_LAST_MODULES_REQUEST__ = now;
     try {
-        window.postMessage({ channel: 'ptk_content_iast_request_modules' }, '*');
+        emitIastPageBridgeMessage({ channel: 'ptk_content_iast_request_modules' });
     } catch (e) {
         __PTK_IAST_DBG__ && __PTK_IAST_DBG__('IAST: modules request exception', e);
     }
@@ -1269,7 +1380,9 @@ function scheduleExecutableBootstrapSweep(reason = 'bootstrap') {
         clearTimeout(IAST_EXECUTABLE_BOOTSTRAP_SWEEP.timer);
         IAST_EXECUTABLE_BOOTSTRAP_SWEEP.timer = null;
     }
-    const delay = Math.max(200, IAST_SMART_STARTUP_SUPPRESS_MS - (Date.now() - IAST_AGENT_BOOT_AT) + 200);
+    const delay = reason === 'modules_loaded'
+        ? 50
+        : Math.max(200, IAST_SMART_STARTUP_SUPPRESS_MS - (Date.now() - IAST_AGENT_BOOT_AT) + 200);
     IAST_EXECUTABLE_BOOTSTRAP_SWEEP.scheduledAt = Date.now();
     IAST_EXECUTABLE_BOOTSTRAP_SWEEP.timer = setTimeout(() => {
         IAST_EXECUTABLE_BOOTSTRAP_SWEEP.timer = null;
@@ -3067,10 +3180,48 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
     window.__IAST_REFRESH_ROUTE_SOURCES__ = refreshLocationSources;
     // Storage wrappers
     const proto = Storage.prototype;
+    const storageAreaName = (store) => {
+        try {
+            return store === localStorage ? 'localStorage' : 'sessionStorage';
+        } catch (_) {
+            return 'storage';
+        }
+    };
+    if (typeof proto.getItem === 'function' && !proto.getItem.__ptk_iast_wrapped__) {
+        const originalGetItem = proto.getItem;
+        const wrappedGetItem = function (k) {
+            const value = originalGetItem.apply(this, arguments);
+            try {
+                if (isInternalStorageKey(k)) {
+                    return value;
+                }
+                if (!isTrackableDynamicSourceValue(value)) {
+                    return value;
+                }
+                const area = storageAreaName(this);
+                record(`${area}:${k}`, value, {
+                    label: `${area}["${k}"]`,
+                    detail: k,
+                    type: area,
+                    sourceKind: area,
+                    taintKind: isTokenLikeValue(value) ? 'secret' : 'user_input',
+                    op: `${area}.getItem`,
+                    storageArea: area,
+                    storageKey: k,
+                    trackActivity: true
+                });
+            } catch (_) {
+                // preserve native storage behavior if source registration fails
+            }
+            return value;
+        };
+        wrappedGetItem.__ptk_iast_wrapped__ = true;
+        proto.getItem = wrappedGetItem;
+    }
     ['setItem', 'removeItem', 'clear'].forEach(fn => {
         const orig = proto[fn];
         proto[fn] = function (k, v) {
-            const area = this === localStorage ? 'localStorage' : 'sessionStorage';
+            const area = storageAreaName(this);
             if (fn === 'setItem') {
                 if (isInternalStorageKey(k)) {
                     return orig.apply(this, arguments);
@@ -3128,9 +3279,9 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                     }, IAST_ORIGIN_WAIT_MS);
                 }
             }
-            if (fn === 'removeItem') delete taints[`${this === localStorage ? 'localStorage' : 'sessionStorage'}:${k}`];
+            if (fn === 'removeItem') delete taints[`${storageAreaName(this)}:${k}`];
             if (fn === 'clear') Object.keys(taints)
-                .filter(x => x.startsWith(this === localStorage ? 'localStorage:' : 'sessionStorage:'))
+                .filter(x => x.startsWith(`${storageAreaName(this)}:`))
                 .forEach(x => delete taints[x]);
             return orig.apply(this, arguments);
         };
@@ -3656,7 +3807,7 @@ function matchesTaint(input) {
     try { arr = JSON.parse(data); } catch { arr = null; }
     if (Array.isArray(arr)) {
         arr.forEach(msg => {
-            try { window.postMessage(msg, '*'); }
+            try { emitIastPageBridgeMessage(msg); }
             catch (e) {/*ignore*/ }
         });
     }
@@ -3694,13 +3845,13 @@ function postBufferedIastMessage(msg) {
         }
         buf.push(msg);
         localStorage.setItem(key, JSON.stringify(buf));
-        window.postMessage(msg, '*');
+        emitIastPageBridgeMessage(msg);
     });
 }
 
 function postDirectIastMessage(msg) {
     withoutHooks(() => {
-        window.postMessage(msg, '*');
+        emitIastPageBridgeMessage(msg);
     });
 }
 
@@ -3885,6 +4036,7 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
     // Require rule catalog
     if (!IAST_MODULES) {
         //__PTK_IAST_DBG__ && __PTK_IAST_DBG__('IAST: skip finding, modules not loaded yet', { sinkId, ruleId });
+        queuePendingIastFindingReport({ type, sink, sinkId, ruleId, category, severity: severityOverride, matched, source, sources, context });
         requestModulesFromBackground();
         return;
     }
@@ -4223,7 +4375,7 @@ function getIastMessageTargetLabel(target, prefix = 'target') {
 
 function isIastInternalMessagePayload(data) {
     if (!data || typeof data !== 'object') return false;
-    if (data.ptk_iast || data.ptk_ws || data.source === 'ptk-automation') return true;
+    if (data.ptk_iast || data.ptk_ws || data.source === 'ptk-automation' || data.source === 'ptk-extension') return true;
     return typeof data.channel === 'string' && data.channel.startsWith('ptk_');
 }
 
@@ -4635,6 +4787,80 @@ function sanitizeSourcesForRule(ruleEntry, sources) {
         const kind = src?.sourceKind || src?.type || '';
         return kind && allowed.includes(kind);
     });
+}
+
+function isTopLevelPathSegmentSource(source) {
+    const key = String(source?.key || source?.source || '');
+    return /^path:segment:0(?::|$)/.test(key);
+}
+
+function isPathSegmentSource(source) {
+    const key = String(source?.key || source?.source || '');
+    return /^path:segment:\d+(?::|$)/.test(key);
+}
+
+function isDeeperPathSegmentSource(source) {
+    const key = String(source?.key || source?.source || '');
+    const match = key.match(/^path:segment:(\d+)(?::|$)/);
+    return Boolean(match && Number(match[1]) > 0);
+}
+
+function isRouteNamespaceSource(source) {
+    const key = String(source?.key || source?.source || '');
+    return key === 'path:pathname'
+        || key === 'route:client'
+        || key === 'history:state'
+        || isPathSegmentSource(source);
+}
+
+function shouldSuppressTopLevelPathSegmentDomMutation(sinkId, sources) {
+    if (sinkId !== 'dom.mutation') return false;
+    if (!Array.isArray(sources) || !sources.length) return false;
+    const hasTopLevelSegment = sources.some((source) => isTopLevelPathSegmentSource(source));
+    if (!hasTopLevelSegment) return false;
+    const hasSpecificRouteSegment = sources.some((source) => isDeeperPathSegmentSource(source));
+    if (hasSpecificRouteSegment) return false;
+    return sources.every((source) => isRouteNamespaceSource(source));
+}
+
+function isModulesLoadedBootstrapDomMutation(context) {
+    const reason = String(context?.bootstrapReason || context?.sink || '').toLowerCase();
+    return reason === 'modules_loaded';
+}
+
+function shouldSuppressModulesLoadedRouteDomMutation(sinkId, context, sources) {
+    if (sinkId !== 'dom.mutation') return false;
+    if (!isModulesLoadedBootstrapDomMutation(context)) return false;
+    if (!Array.isArray(sources) || !sources.length) return false;
+    return sources.every((source) => isRouteNamespaceSource(source));
+}
+
+function isFunctionCodeExecutionSink(sinkId) {
+    return sinkId === 'code.function.constructor' || sinkId === 'code.function.apply';
+}
+
+function isLowSignalPlainSourceValue(value) {
+    if (value == null) return false;
+    const trimmed = String(value).trim();
+    if (!trimmed || trimmed.length > 24) return false;
+    return /^[A-Za-z_$][\w$.-]*$/.test(trimmed);
+}
+
+function isLowSignalFunctionCodeSource(source) {
+    if (!source || typeof source !== 'object') return false;
+    const key = String(source.key || source.source || '');
+    const rawValue = source.value != null ? source.value : source.raw;
+    if (!isLowSignalPlainSourceValue(rawValue)) return false;
+    if (isPathSegmentSource(source)) return true;
+    return key.startsWith('query:')
+        || key.startsWith('hash:param:')
+        || key.startsWith('body:param:');
+}
+
+function shouldSuppressLowSignalFunctionCodeMatch(sinkId, sources) {
+    if (!isFunctionCodeExecutionSink(sinkId)) return false;
+    if (!Array.isArray(sources) || !sources.length) return false;
+    return sources.every((source) => isLowSignalFunctionCodeSource(source));
 }
 
 function shouldSuppressForSanitizer(ruleEntry, value) {
@@ -5236,6 +5462,23 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
         candidateRuleIds: candidates.map((entry) => entry?.ruleId || null),
         taintedSourceKinds: taintedSources.map((src) => src?.sourceKind || src?.kind || null)
     };
+    if (!IAST_MODULES) {
+        reportFinding({
+            type: info.type || info.sinkId || 'iast_sink',
+            sink: info.sink || sinkId || 'iast_sink',
+            sinkId,
+            ruleId: info.ruleId || null,
+            matched: match.raw,
+            source: taintedSources[0] || match.source,
+            sources: taintedSources,
+            severity: info.severity || null,
+            context
+        });
+        window.__PTK_IAST_LAST_REPORT_DEBUG__ = Object.assign({}, window.__PTK_IAST_LAST_REPORT_DEBUG__ || {}, {
+            reason: 'queued_before_modules'
+        });
+        return true;
+    }
     if (!candidates.length) return false;
     const sinkArgs = buildSinkArgs(context);
     const sourceRefsFromSubstring = (sources) => sources.map(src => ({
@@ -5286,6 +5529,30 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
                 reason: 'filtered_sources_empty',
                 allowedSources: Array.isArray(ruleEntry.sources) ? ruleEntry.sources.slice() : [],
                 taintedSourceKinds: taintedSources.map((src) => src?.sourceKind || src?.kind || null)
+            });
+            continue;
+        }
+        if (shouldSuppressTopLevelPathSegmentDomMutation(sinkId, filteredSources)) {
+            window.__PTK_IAST_LAST_REPORT_DEBUG__ = Object.assign({}, window.__PTK_IAST_LAST_REPORT_DEBUG__ || {}, {
+                ruleId: ruleEntry.ruleId,
+                reason: 'top_level_path_segment_dom_mutation_suppressed',
+                taintedSourceKeys: filteredSources.map((src) => src?.key || src?.source || null)
+            });
+            continue;
+        }
+        if (shouldSuppressModulesLoadedRouteDomMutation(sinkId, context, filteredSources)) {
+            window.__PTK_IAST_LAST_REPORT_DEBUG__ = Object.assign({}, window.__PTK_IAST_LAST_REPORT_DEBUG__ || {}, {
+                ruleId: ruleEntry.ruleId,
+                reason: 'modules_loaded_route_dom_mutation_suppressed',
+                taintedSourceKeys: filteredSources.map((src) => src?.key || src?.source || null)
+            });
+            continue;
+        }
+        if (shouldSuppressLowSignalFunctionCodeMatch(sinkId, filteredSources)) {
+            window.__PTK_IAST_LAST_REPORT_DEBUG__ = Object.assign({}, window.__PTK_IAST_LAST_REPORT_DEBUG__ || {}, {
+                ruleId: ruleEntry.ruleId,
+                reason: 'low_signal_function_code_match_suppressed',
+                taintedSourceKeys: filteredSources.map((src) => src?.key || src?.source || null)
             });
             continue;
         }
@@ -5890,7 +6157,17 @@ function scanInlineEvents(htmlFragment) {
                     const parser = new DOMParser();
                     return parser.parseFromString(coerceDomParserMarkup(html), 'text/html');
                 });
-                traverseAndReport(doc.body, 'document.write');
+                const reported = traverseAndReport(doc.body, 'document.write');
+                if (!reported) {
+                    const m = matchesTaint(html);
+                    if (m) {
+                        maybeReportTaintedValue(html, {
+                            type: 'xss-via-document.write',
+                            sink: 'document.write',
+                            sinkId: 'document.write'
+                        }, { value: html, element: document?.activeElement || null, fallbackReason: 'direct_tainted_html_sink' }, m);
+                    }
+                }
             } catch (_) {
                 const m = matchesTaint(html);
                 if (m) {
@@ -5931,6 +6208,7 @@ function scanInlineEvents(htmlFragment) {
             }
             return seen.size < 3;
         });
+        return seen.size;
     }
 })();
 
@@ -5958,7 +6236,19 @@ if (!isTrustedTypesHtmlRestricted()) {
                     }
                     try {
                         const frag = withInternalHtmlParser(() => document.createRange().createContextualFragment(htmlString));
-                        traverseAndReport(frag, `xss-via-${prop}`);
+                        const reported = typeof traverseAndReport === 'function'
+                            ? traverseAndReport(frag, `xss-via-${prop}`)
+                            : 0;
+                        if (!reported) {
+                            const m = matchesTaint(htmlString);
+                            if (m) {
+                                maybeReportTaintedValue(htmlString, {
+                                    type: `xss-via-${prop}`,
+                                    sink: prop,
+                                    sinkId: prop === 'innerHTML' ? 'dom.innerHTML' : 'dom.outerHTML'
+                                }, { value: htmlString, element: this, domPath: getDomPath(this), fallbackReason: 'direct_tainted_html_sink' }, m);
+                            }
+                        }
                     } catch (_) {
                         const m = matchesTaint(htmlString);
                         if (m) {
@@ -6002,7 +6292,19 @@ if (!isTrustedTypesHtmlRestricted()) {
             }
             try {
                 const frag = withInternalHtmlParser(() => document.createRange().createContextualFragment(htmlString));
-                traverseAndReport(frag, `insertAdjacentHTML(${pos})`);
+                const reported = typeof traverseAndReport === 'function'
+                    ? traverseAndReport(frag, `insertAdjacentHTML(${pos})`)
+                    : 0;
+                if (!reported) {
+                    const m = matchesTaint(htmlString);
+                    if (m) {
+                        maybeReportTaintedValue(htmlString, {
+                            type: 'xss-via-insertAdjacentHTML',
+                            sink: 'insertAdjacentHTML',
+                            sinkId: 'dom.insertAdjacentHTML'
+                        }, { value: htmlString, element: this, position: pos, fallbackReason: 'direct_tainted_html_sink' }, m);
+                    }
+                }
             } catch (_) {
                 const m = matchesTaint(htmlString);
                 if (m) {
@@ -7897,7 +8199,7 @@ if (!isTrustedTypesHtmlRestricted()) {
         return getWrappedMessageHandler(listener, wrapKey, (original) => function (event) {
             try {
                 if (isIastInternalMessagePayload(event?.data)) {
-                    return original.apply(this, arguments);
+                    return undefined;
                 }
                 const payload = safeSerializeValue(event?.data);
                 if (payload) {
@@ -8281,6 +8583,6 @@ if (!isTrustedTypesHtmlRestricted()) {
 })();
 
 try {
-    window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*');
+    emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready' });
 } catch (_) { }
 })();

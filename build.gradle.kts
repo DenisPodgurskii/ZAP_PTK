@@ -36,6 +36,7 @@ zapAddOn {
 
         dependencies {
             addOns {
+                register("automation")
                 register("selenium")
                 register("client") {
                     version.set(">=0.21.0")
@@ -46,6 +47,11 @@ zapAddOn {
 }
 
 dependencies {
+    val zapWeeklyDir =
+        providers.environmentVariable("ZAP_WEEKLY_DIR")
+            .orElse("/Users/ptk/dev/ZAP-weekly/ZAP_D-2026-05-05")
+    compileOnly(files(zapWeeklyDir.map { "$it/plugin/automation-beta-0.60.0.zap" }))
+    compileOnly(files(zapWeeklyDir.map { "$it/tmp/addOnData/database/0.10.0/libs/jackson-annotations-2.21.jar" }))
     compileOnly("org.zaproxy.addon:client:0.22.0-SNAPSHOT")
     compileOnly("org.zaproxy.addon:selenium:15.43.0")
     compileOnly("org.projectlombok:lombok:1.18.34")

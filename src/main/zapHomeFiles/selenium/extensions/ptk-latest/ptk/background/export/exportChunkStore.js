@@ -30,6 +30,40 @@ function toPositiveInteger(value, fallback) {
     return Math.floor(n)
 }
 
+function normalizeOwner(owner = null) {
+    if (!owner || typeof owner !== "object") return null
+    const normalized = {}
+    for (const key of [
+        "sessionId",
+        "tabId",
+        "originalScanTabId",
+        "frameId",
+        "topFrameId",
+        "engine",
+        "exportMode",
+        "owner",
+        "transport",
+        "sdkRunId",
+        "leaseId",
+        "nonceHash"
+    ]) {
+        const value = owner[key]
+        if (value === undefined || value === null || value === "") continue
+        normalized[key] = typeof value === "string" ? value : value
+    }
+    return Object.keys(normalized).length ? normalized : null
+}
+
+function ownerMatches(actual = null, expected = null) {
+    if (!actual) return true
+    const normalizedExpected = normalizeOwner(expected)
+    if (!normalizedExpected) return false
+    for (const [key, value] of Object.entries(actual)) {
+        if (normalizedExpected[key] !== value) return false
+    }
+    return true
+}
+
 export class ExportChunkStore {
     constructor(opts = {}) {
         this.prefix = String(opts.prefix || "scan")
@@ -60,7 +94,7 @@ export class ExportChunkStore {
         }
     }
 
-    createEntry({ bytes, fileName, contentType = "application/gzip", compression = "gzip" } = {}) {
+    createEntry({ bytes, fileName, contentType = "application/gzip", compression = "gzip", owner = null } = {}) {
         const payload = toBytes(bytes)
         if (!payload.length) return null
         const now = Date.now()
@@ -77,6 +111,7 @@ export class ExportChunkStore {
             chunkCount,
             contentType: contentType || "application/gzip",
             compression: compression || "gzip",
+            owner: normalizeOwner(owner),
             bytes: payload
         }
         this.entries.set(exportId, entry)
@@ -89,16 +124,18 @@ export class ExportChunkStore {
             chunkCount: entry.chunkCount,
             contentType: entry.contentType,
             compression: entry.compression,
-            expiresAt: entry.expiresAt
+            expiresAt: entry.expiresAt,
+            owner: entry.owner ? { ...entry.owner } : undefined
         }
     }
 
-    getChunk(exportId, index) {
+    getChunk(exportId, index, owner = null) {
         this._cleanupExpired()
         const id = String(exportId || "")
         if (!id) return null
         const entry = this.entries.get(id)
         if (!entry) return null
+        if (!ownerMatches(entry.owner, owner)) return null
         const chunkIndex = Number(index)
         if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= entry.chunkCount) {
             return null
@@ -112,13 +149,17 @@ export class ExportChunkStore {
             chunk: entry.bytes.slice(start, end),
             fileName: entry.fileName,
             contentType: entry.contentType,
-            compression: entry.compression
+            compression: entry.compression,
+            owner: entry.owner ? { ...entry.owner } : undefined
         }
     }
 
-    release(exportId) {
+    release(exportId, owner = null) {
         const id = String(exportId || "")
         if (!id) return false
+        const entry = this.entries.get(id)
+        if (!entry) return false
+        if (!ownerMatches(entry.owner, owner)) return false
         return this.entries.delete(id)
     }
 }

@@ -321,6 +321,7 @@ export class dastEngine {
         this.authzDiffService = new AuthzDiffService()
         this.reset()
         this.automationHooks = null
+        this.captureProgressProvider = null
         this.sessionProfileStore = settings?.sessionProfileStore || null
         this._resultMutationListener = typeof settings?.onResultMutation === 'function'
             ? settings.onResultMutation
@@ -3594,14 +3595,17 @@ export class dastEngine {
         const taskQueue = this._taskQueueCount()
         const requestQueue = this._requestQueue?.size ? this._requestQueue.size() : 0
         const pendingPlans = this._activePlans?.size || 0
+        const captureStats = this._captureProgressSnapshot()
+        const pendingCaptures = Math.max(0, Number(captureStats?.pendingObservedRequests || 0))
         const nonExecuted = Math.max(planned - executed, 0)
         const planning = this.inProgress ? 1 : 0
-        const pipelineRemaining = Math.max(taskQueue + activeTasks + requestQueue + pendingPlans + planning, 0)
+        const pipelineRemaining = Math.max(taskQueue + activeTasks + requestQueue + pendingPlans + planning + pendingCaptures, 0)
         const remaining = pipelineRemaining
-        const isIdle = Boolean(this.isRunning && requestQueue === 0 && taskQueue === 0 && pendingPlans === 0 && activeTasks === 0 && planning === 0)
+        const isIdle = Boolean(this.isRunning && requestQueue === 0 && taskQueue === 0 && pendingPlans === 0 && activeTasks === 0 && planning === 0 && pendingCaptures === 0)
         return {
             planned,
             executed,
+            skippedDueToStrategy: Number(this.scanStats?.skippedDueToStrategy || 0),
             remaining,
             nonExecuted,
             activeTasks,
@@ -3609,9 +3613,12 @@ export class dastEngine {
             requestQueue,
             pendingPlans,
             planning,
+            pendingCaptures,
+            captureStats,
             isRunning: !!this.isRunning,
             isIdle,
             phase: this.isRunning ? (isIdle ? 'idle' : 'scanning') : 'stopped',
+            scanStrategy: this.strategyConfig?.strategy || DEFAULT_SCAN_STRATEGY,
             lastActivityAt: this._lastProgressAt ? new Date(this._lastProgressAt).toISOString() : null
         }
     }
@@ -3637,6 +3644,7 @@ export class dastEngine {
             progress.requestQueue,
             progress.pendingPlans,
             progress.planning || 0,
+            progress.pendingCaptures || 0,
             progress.isRunning ? 1 : 0,
             progress.isIdle ? 1 : 0
         ].join('|')
@@ -5236,6 +5244,15 @@ export class dastEngine {
 
     _isFirefoxRuntime() {
         return typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo
+    }
+
+    _supportsActiveRequestTrackingListeners() {
+        return !!(
+            typeof browser !== 'undefined'
+            && browser?.webRequest?.onBeforeRequest
+            && browser?.webRequest?.onBeforeSendHeaders
+            && browser?.webRequest?.onHeadersReceived
+        )
     }
 
     _spaResponseMissingChecks(response, checks = []) {
@@ -7425,6 +7442,8 @@ export class dastEngine {
             if (isFirefox) {
                 request.useListeners = true
                 schema.opts.use_dnr = false
+            } else if (this._supportsActiveRequestTrackingListeners()) {
+                request.trackWithListeners = true
             }
             if (isSmugglingH1) {
                 schema.opts.override_headers = true
@@ -7474,6 +7493,8 @@ export class dastEngine {
         if (isFirefox) {
             request.useListeners = true
             _schema.opts.use_dnr = false
+        } else if (this._supportsActiveRequestTrackingListeners()) {
+            request.trackWithListeners = true
         }
         _schema.opts.override_headers = true
         _schema.opts.follow_redirect = true
@@ -8671,6 +8692,44 @@ export class dastEngine {
         }
     }
 
+    setCaptureProgressProvider(provider) {
+        this.captureProgressProvider = provider && typeof provider === 'object'
+            ? provider
+            : null
+    }
+
+    _captureProgressSnapshot() {
+        const provider = this.captureProgressProvider
+        if (!provider || typeof provider !== 'object') {
+            return {
+                pendingObservedRequests: 0
+            }
+        }
+        if (typeof provider.getCaptureStats === 'function') {
+            try {
+                const stats = provider.getCaptureStats()
+                if (stats && typeof stats === 'object') return stats
+            } catch (_) { }
+        }
+        if (typeof provider.getPendingObservedRequestCount === 'function') {
+            try {
+                return {
+                    pendingObservedRequests: Math.max(0, Number(provider.getPendingObservedRequestCount() || 0))
+                }
+            } catch (_) { }
+        }
+        return {
+            pendingObservedRequests: 0
+        }
+    }
+
+    notifyCaptureProgressChanged() {
+        try {
+            this._emitProgress({ name: 'Observed request capture progress' })
+        } catch (_) { }
+        this._notifyIdleResolvers()
+    }
+
     _automationTaskStarted() {
         const hooks = this.automationHooks
         if (!hooks || typeof hooks.onTaskStarted !== 'function') {
@@ -8941,7 +9000,8 @@ export class dastEngine {
         const noPlans = !this._activePlans?.size
         const noActiveTasks = (this.activeCount || 0) === 0
         const notBuilding = this.inProgress === false
-        return queueEmpty && noTaskQueue && noPlans && noActiveTasks && notBuilding && this.isRunning
+        const noPendingCaptures = Math.max(0, Number(this._captureProgressSnapshot()?.pendingObservedRequests || 0)) === 0
+        return queueEmpty && noTaskQueue && noPlans && noActiveTasks && notBuilding && noPendingCaptures && this.isRunning
     }
 
     _notifyIdleResolvers() {

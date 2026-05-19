@@ -583,7 +583,8 @@ export class ptk_sca {
                 bytes: compressed.body,
                 fileName: message?.fileName || "PTK_SCA_scan.json",
                 contentType: compressed.contentType,
-                compression: compressed.compression
+                compression: compressed.compression,
+                owner: message?.owner || null
             })
             if (!descriptor) {
                 return { success: false, error: "empty_export_payload" }
@@ -600,7 +601,7 @@ export class ptk_sca {
     }
 
     async msg_export_scan_chunk(message) {
-        const chunk = this.exportChunkStore.getChunk(message?.exportId, message?.index)
+        const chunk = this.exportChunkStore.getChunk(message?.exportId, message?.index, message?.owner || null)
         if (!chunk) {
             return { success: false, error: "export_not_found_or_expired" }
         }
@@ -615,7 +616,7 @@ export class ptk_sca {
     }
 
     async msg_release_export_scan(message) {
-        const released = this.exportChunkStore.release(message?.exportId)
+        const released = this.exportChunkStore.release(message?.exportId, message?.owner || null)
         return { success: released }
     }
 

@@ -414,6 +414,9 @@
             if (automation._automationEnabled === false) {
                 return toAgentFailure('automation_disabled')
             }
+            if (options?.includeSecrets === true || String(options?.exportMode || '').toLowerCase() === 'replayable') {
+                return toAgentFailure('replayable_export_requires_privileged_extension_export', 'replayable_export_requires_privileged_extension_export')
+            }
 
             const transfer = String(options?.transfer || '').trim()
             if (transfer && transfer !== 'retrieval-plan') {
@@ -423,6 +426,8 @@
             const exportOptions = {
                 ...options,
                 sessionScope: PTK_AGENT_SESSION_SCOPE,
+                includeSecrets: false,
+                exportMode: 'evidence',
                 allowChunked: true,
                 // Force the low-level exporter into chunked mode so exportFullReport
                 // always returns a retrieval-plan descriptor instead of inline data.

@@ -52,6 +52,25 @@ function collectObservedPageUrls(...sources) {
   return uniqueStringList(collected);
 }
 
+function stableHashHex(value) {
+  const text = String(value || "");
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return `${(h2 >>> 0).toString(16).padStart(8, "0")}${(h1 >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function sanitizeIdPart(value, fallback = "part") {
+  const normalized = toNonEmptyString(value) || fallback;
+  return normalized.replace(/[^a-zA-Z0-9_.:-]+/g, "_").slice(0, 80) || fallback;
+}
+
 export class SastResultStore {
   constructor({
     storageKey = "ptk_sast",
@@ -260,8 +279,15 @@ export class SastResultStore {
     const findingKind = finding.findingKind || finding?.evidence?.sast?.findingKind || "finding";
     const sinkContext = finding?.evidence?.sast?.sinkContext || null;
     const sourceTier = finding?.evidence?.sast?.sourceTier || null;
+    const stableFindingId = [
+      scanId || "scan",
+      "SAST",
+      sanitizeIdPart(moduleId, "module"),
+      sanitizeIdPart(ruleId, "rule"),
+      stableHashHex(fingerprint)
+    ].join("::");
     const unifiedFinding = {
-      id: `${scanId || 'scan'}::SAST::${moduleId}::${ruleId}::${index}`,
+      id: stableFindingId,
       engine: "SAST",
       scanId,
       moduleId,
