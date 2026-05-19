@@ -40,7 +40,7 @@ import org.zaproxy.zap.ZAP;
 import org.zaproxy.zap.extension.selenium.ExtensionSelenium;
 import org.zaproxy.zap.model.Context;
 
-final class PtkBrowserCoverageJob extends AutomationJob {
+class PtkBrowserCoverageJob extends AutomationJob {
 
     private static final Logger LOGGER = LogManager.getLogger(PtkBrowserCoverageJob.class);
     private static final String JOB_TYPE = "ptkBrowserCoverage";
@@ -65,20 +65,24 @@ final class PtkBrowserCoverageJob extends AutomationJob {
         this.ptk = ptk;
     }
 
+    protected ExtensionPtk getPtk() {
+        return ptk;
+    }
+
     @Override
     public void runJob(AutomationEnvironment env, AutomationProgress progress) {
         stopRequested = false;
-        ExtensionClientIntegration client = getClientExtension();
-        if (client == null) {
+        if (!isClientExtensionAvailable()) {
             progress.error(
                     "PTK browser coverage cannot run: Client Integration add-on unavailable");
             return;
         }
-        ExtensionSelenium selenium = getSeleniumExtension();
-        if (selenium == null) {
+        if (!isSeleniumExtensionAvailable()) {
             progress.error("PTK browser coverage cannot run: Selenium add-on unavailable");
             return;
         }
+        ExtensionClientIntegration client = getClientExtension();
+        ExtensionSelenium selenium = getSeleniumExtension();
 
         Context context = resolveContext(env);
         List<String> urls = resolveUrls(env, context);
@@ -302,14 +306,22 @@ final class PtkBrowserCoverageJob extends AutomationJob {
         return parameters;
     }
 
-    private ExtensionClientIntegration getClientExtension() {
+    protected ExtensionClientIntegration getClientExtension() {
         return Control.getSingleton()
                 .getExtensionLoader()
                 .getExtension(ExtensionClientIntegration.class);
     }
 
-    private ExtensionSelenium getSeleniumExtension() {
+    protected boolean isClientExtensionAvailable() {
+        return getClientExtension() != null;
+    }
+
+    protected ExtensionSelenium getSeleniumExtension() {
         return Control.getSingleton().getExtensionLoader().getExtension(ExtensionSelenium.class);
+    }
+
+    protected boolean isSeleniumExtensionAvailable() {
+        return getSeleniumExtension() != null;
     }
 
     private Context resolveContext(AutomationEnvironment env) {
@@ -392,7 +404,7 @@ final class PtkBrowserCoverageJob extends AutomationJob {
         }
     }
 
-    private void runDirectAttempts(
+    protected void runDirectAttempts(
             ExecutorService executor,
             ExtensionClientIntegration client,
             ExtensionSelenium selenium,
@@ -1595,8 +1607,8 @@ final class PtkBrowserCoverageJob extends AutomationJob {
         }
     }
 
-    private static final class CoverageTarget {
-        private final String url;
+    protected static final class CoverageTarget {
+        final String url;
         private int attempts;
         private String finalState = "pending";
         private String lastError;
@@ -1606,8 +1618,8 @@ final class PtkBrowserCoverageJob extends AutomationJob {
         }
     }
 
-    private static final class RunningAttempt {
-        private final CoverageTarget target;
+    protected static final class RunningAttempt {
+        final CoverageTarget target;
 
         @SuppressWarnings("unused")
         private final long startedAtMs;

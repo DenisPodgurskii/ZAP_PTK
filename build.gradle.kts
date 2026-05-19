@@ -23,7 +23,10 @@ val automationZapUrl =
         "automation-v$automationVersion/automation-beta-$automationVersion.zap"
 
 val downloadAutomationZap by tasks.registering {
+    inputs.property("automationVersion", automationVersion)
+    inputs.property("automationZapUrl", automationZapUrl)
     outputs.file(automationZapFile)
+    outputs.upToDateWhen { automationZapFile.get().asFile.isFile }
     doLast {
         val outputFile = automationZapFile.get().asFile
         outputFile.parentFile.mkdirs()
@@ -77,6 +80,14 @@ dependencies {
     annotationProcessor("org.projectlombok:lombok:1.18.34")
     implementation("com.google.code.gson:gson:2.10.1")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testCompileOnly(files(automationZapFile))
+    testCompileOnly("com.fasterxml.jackson.core:jackson-annotations:2.20")
+    testCompileOnly("org.zaproxy.addon:client:0.22.0-SNAPSHOT")
+    testCompileOnly("org.zaproxy.addon:selenium:15.43.0")
+    testRuntimeOnly(files(automationZapFile))
+    testRuntimeOnly("com.fasterxml.jackson.core:jackson-annotations:2.20")
+    testRuntimeOnly("org.zaproxy.addon:client:0.22.0-SNAPSHOT")
+    testRuntimeOnly("org.zaproxy.addon:selenium:15.43.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
