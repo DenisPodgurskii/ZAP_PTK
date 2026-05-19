@@ -212,7 +212,6 @@ export class SastTransport {
           reason: missingReceiver ? "content_receiver_missing" : "collection_failed",
           error: lastError?.message || String(lastError)
         });
-        if (missingReceiver && attempt >= 2) break;
         await this.waitForSpaIdle(tabId, retryDelayMs * attempt);
       }
     }

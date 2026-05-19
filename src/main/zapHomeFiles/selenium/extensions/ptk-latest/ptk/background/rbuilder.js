@@ -390,6 +390,7 @@ export class ptk_request {
 
     async init() {
         this.useListeners = false
+        this.trackWithListeners = false
         this.trackingRequest = null
     }
 
@@ -810,7 +811,8 @@ export class ptk_request {
     }
 
     async sendRequest(schema) {
-        if (this.useListeners) this.addListeners()
+        const shouldUseTrackingListeners = this.useListeners || this.trackWithListeners
+        if (shouldUseTrackingListeners) this.addListeners()
         // ptk_ruleManager.getDynamicRules()
         // ptk_ruleManager.getSessionRules()
         let ruleId = null
@@ -931,7 +933,7 @@ export class ptk_request {
         schema.request.headers = effectiveHeaders
 
         const syncStoredHeadersForAttempt = () => {
-            if (!this.useListeners || !ptkReqId) return
+            if (!shouldUseTrackingListeners || !ptkReqId) return
             const webRequestHeaders = Object.entries(h).map(([name, value]) => ({ name, value }))
             ptk_request._storedHeaderMap.set(ptkReqId, {
                 headers: webRequestHeaders,
@@ -1116,7 +1118,7 @@ export class ptk_request {
             } finally {
                 clearTimeout(timeoutId)
                 self.trackingRequest = null
-                if (this.useListeners) self.removeListeners()
+                if (shouldUseTrackingListeners) self.removeListeners()
                 if (ruleId) {
                     await ptk_ruleManager.removeSessionRule(ruleId)
                 }

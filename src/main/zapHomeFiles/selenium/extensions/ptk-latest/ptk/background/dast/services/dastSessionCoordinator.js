@@ -25,6 +25,30 @@ function shouldLogAutomationSeedSummary() {
     return globalThis.__PTK_AUTOMATION_DEBUG__ === true
 }
 
+function toPositiveNumber(value, fallback) {
+    const num = Number(value)
+    return Number.isFinite(num) && num > 0 ? num : fallback
+}
+
+function withTimeout(promise, timeoutMs) {
+    const boundedMs = Math.max(0, Number(timeoutMs) || 0)
+    if (!boundedMs) {
+        return Promise.resolve({ timedOut: true })
+    }
+
+    let timer = null
+    return Promise.race([
+        Promise.resolve(promise)
+            .then(() => ({ timedOut: false }))
+            .catch(error => ({ timedOut: false, error })),
+        new Promise(resolve => {
+            timer = setTimeout(() => resolve({ timedOut: true }), boundedMs)
+        })
+    ]).finally(() => {
+        if (timer) clearTimeout(timer)
+    })
+}
+
 export class DastSessionCoordinator {
     constructor({
         engine = null,
@@ -58,6 +82,84 @@ export class DastSessionCoordinator {
         this.getScanResult = getScanResult
         this.notifyScanCompleted = notifyScanCompleted
         this.collectSeverityStats = collectSeverityStats
+    }
+
+    _collectDrainSnapshot() {
+        const progress = typeof this.engine?.getProgressSnapshot === 'function'
+            ? this.engine.getProgressSnapshot()
+            : null
+        const requestQueue = toPositiveNumber(progress?.requestQueue, 0)
+        const taskQueue = toPositiveNumber(progress?.taskQueue, 0)
+        const pendingPlans = toPositiveNumber(progress?.pendingPlans, 0)
+        const activeTasks = toPositiveNumber(progress?.activeTasks, 0)
+        const planning = toPositiveNumber(progress?.planning, 0)
+        const pendingCaptures = toPositiveNumber(progress?.pendingCaptures, 0)
+        const remaining = toPositiveNumber(progress?.remaining, 0)
+        const pendingAutomationSeeds = toPositiveNumber(this.state.pendingAutomationSeeds, 0)
+        const pendingWork = requestQueue + taskQueue + pendingPlans + activeTasks + planning + pendingAutomationSeeds + pendingCaptures
+        return {
+            isRunning: this.engine?.isRunning === true,
+            idle: progress?.isIdle === true,
+            planned: toPositiveNumber(progress?.planned, 0),
+            executed: toPositiveNumber(progress?.executed, 0),
+            remaining,
+            requestQueue,
+            taskQueue,
+            pendingPlans,
+            activeTasks,
+            planning,
+            pendingCaptures,
+            pendingAutomationSeeds,
+            pendingWork
+        }
+    }
+
+    _isDrainSnapshotIdle(snapshot = null) {
+        if (!snapshot || typeof snapshot !== 'object') return true
+        return toPositiveNumber(snapshot.pendingWork, 0) <= 0
+            && toPositiveNumber(snapshot.remaining, 0) <= 0
+    }
+
+    _resolveZapCloseDrainTimeout(timeoutMs, options = {}) {
+        const explicit = Number(options?.drainTimeoutMs)
+        if (Number.isFinite(explicit) && explicit >= 0) {
+            return Math.max(0, Math.floor(explicit))
+        }
+        const budget = toPositiveNumber(timeoutMs, 25000)
+        // Keep enough time for stopBackgroundScan(), finding persistence, and the
+        // ZAP terminal progress callback. The drain is best-effort; unstarted tail
+        // work is marked engine_incomplete instead of letting ZAP force-close.
+        return Math.max(500, Math.min(20000, Math.floor(budget * 0.72)))
+    }
+
+    async _drainBeforeZapClose(timeoutMs, options = {}) {
+        const before = this._collectDrainSnapshot()
+        if (this._isDrainSnapshotIdle(before)) {
+            return {
+                mode: 'zap_close',
+                drainTimeoutMs: 0,
+                drained: true,
+                timedOut: false,
+                before,
+                after: before
+            }
+        }
+
+        const drainTimeoutMs = this._resolveZapCloseDrainTimeout(timeoutMs, options)
+        const waitResult = await withTimeout(
+            this.engine?.waitForIdle?.(drainTimeoutMs),
+            drainTimeoutMs
+        )
+        const after = this._collectDrainSnapshot()
+        return {
+            mode: 'zap_close',
+            drainTimeoutMs,
+            drained: this._isDrainSnapshotIdle(after),
+            timedOut: waitResult.timedOut === true,
+            error: waitResult.error?.message || waitResult.error || null,
+            before,
+            after
+        }
     }
 
     getState() {
@@ -112,6 +214,7 @@ export class DastSessionCoordinator {
     async stopBackgroundScan(options = {}) {
         const waitForIdleBeforeStop = options?.waitForIdleBeforeStop !== false
         const idleTimeoutMs = Number.isFinite(options?.idleTimeoutMs) ? Number(options.idleTimeoutMs) : 120000
+        const skipPostStopAnalysis = options?.skipPostStopAnalysis === true
 
         this.state.acceptIncomingRequests = false
         this.state.userInteractionUnlocked = false
@@ -130,9 +233,11 @@ export class DastSessionCoordinator {
         const scanResult = this.getScanResult?.() || this.engine?.scanResult || null
         if (scanResult) {
             scanResult.finished = new Date().toISOString()
-            try {
-                this.applyAnalysis?.(scanResult, true)
-            } catch (_) { }
+            if (!skipPostStopAnalysis) {
+                try {
+                    this.applyAnalysis?.(scanResult, true)
+                } catch (_) { }
+            }
         }
 
         if (!this.state.sentAllAttacksCompleted) {
@@ -243,19 +348,47 @@ export class DastSessionCoordinator {
         return seedPromise
     }
 
-    async stopAutomationSession(sessionId, timeoutMs = 180000) {
+    async stopAutomationSession(sessionId, timeoutMs = 180000, options = {}) {
         if (!this.state.automationSession || this.state.automationSession.id !== sessionId) {
             throw new Error("automation_session_mismatch")
         }
+        const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
+        const normalizedTimeoutMs = toPositiveNumber(timeoutMs, 180000)
+        let drainResult = {
+            mode: zapCloseRequest ? 'zap_close' : 'normal',
+            drained: true,
+            timedOut: false,
+            before: this._collectDrainSnapshot(),
+            after: null
+        }
+
         this.state.acceptIncomingRequests = false
-        await this._waitForAutomationSeedBeforeStop(timeoutMs)
-        await this.engine?.waitForIdle?.(timeoutMs)
+        await this._waitForAutomationSeedBeforeStop(zapCloseRequest
+            ? Math.min(normalizedTimeoutMs, 1500)
+            : normalizedTimeoutMs)
+        if (zapCloseRequest) {
+            drainResult = await this._drainBeforeZapClose(normalizedTimeoutMs, options)
+        } else {
+            await this.engine?.waitForIdle?.(normalizedTimeoutMs)
+            drainResult.after = this._collectDrainSnapshot()
+            drainResult.drained = this._isDrainSnapshotIdle(drainResult.after)
+        }
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks(null)
         }
-        const scanResult = await this.stopBackgroundScan({ waitForIdleBeforeStop: false })
+        const scanResult = await this.stopBackgroundScan({
+            waitForIdleBeforeStop: false,
+            skipPostStopAnalysis: zapCloseRequest
+        })
         const stats = this.collectSeverityStats?.(scanResult) || { counts: {}, findingsCount: 0 }
         this.state.automationSession = null
+        const completionStatus = drainResult.drained ? 'completed' : 'engine_incomplete'
+        this.state.lastAutomationStopResult = {
+            completionStatus,
+            zapCloseRequest,
+            drain: drainResult,
+            finishedAt: new Date().toISOString()
+        }
         return {
             findingsCount: stats.findingsCount,
             bySeverity: Object.assign({
@@ -264,7 +397,11 @@ export class DastSessionCoordinator {
                 medium: 0,
                 high: 0,
                 critical: 0
-            }, stats.counts || {})
+            }, stats.counts || {}),
+            completionStatus,
+            zapCloseRequest,
+            drained: drainResult.drained,
+            drain: drainResult
         }
     }
 

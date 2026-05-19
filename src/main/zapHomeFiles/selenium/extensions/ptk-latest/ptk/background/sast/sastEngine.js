@@ -91,6 +91,12 @@ function decodeHtmlEntities(str) {
   });
 }
 
+function isExecutableScriptType(rawType) {
+  const type = String(rawType || "").trim().toLowerCase();
+  if (!type || type === "module") return true;
+  return /^(?:text|application)\/(?:javascript|ecmascript|x-javascript|x-ecmascript)$/i.test(type);
+}
+
 function normalizeInlineHandlerSnippetKey(value) {
   return String(value || "").trim().replace(/\s+/g, " ").replace(/;+\s*$/g, "");
 }
@@ -210,6 +216,11 @@ export class sastEngine {
     this._scanId = opts?.scanId || null;
     this._FINDINGS_LIMIT = opts?.FINDINGS_LIMIT || 300
     this._allowFetchExternalScripts = opts?.allowFetchExternalScripts !== false;
+    this._allowFetchPageSourceScripts = opts?.allowFetchPageSourceScripts !== false;
+    this._maxFetchedPageSourceBytes = Number.isFinite(Number(opts?.maxFetchedPageSourceBytes))
+      ? Math.max(0, Number(opts.maxFetchedPageSourceBytes))
+      : 2 * 1024 * 1024;
+    this._pageSourceScriptCache = new Map();
 
     // Catalog-driven libraries (optional; no policy needed)
     this._catalog = {};
@@ -433,6 +444,90 @@ export class sastEngine {
     return snippets;
   }
 
+  extractScriptsFromPageSource(html, pageUrl = "") {
+    if (typeof html !== "string" || !html) return [];
+    const pageOrigin = safeOrigin(pageUrl);
+    const scripts = [];
+    const seen = new Set();
+    const scriptTagRe = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+    const attrRe = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+
+    const parseAttrs = (rawAttrs = "") => {
+      const attrs = Object.create(null);
+      let match;
+      while ((match = attrRe.exec(rawAttrs)) !== null) {
+        const name = String(match[1] || "").trim().toLowerCase();
+        if (!name) continue;
+        attrs[name] = decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? "");
+      }
+      return attrs;
+    };
+
+    const addScript = (script) => {
+      if (!script) return;
+      const src = script.src || null;
+      const code = src ? null : String(script.code || "");
+      if (!src && !code.trim()) return;
+      const key = src ? `src:${src}` : `inline:${code}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      scripts.push({ src, code });
+    };
+
+    let match;
+    while ((match = scriptTagRe.exec(html)) !== null) {
+      const attrs = parseAttrs(match[1] || "");
+      if (!isExecutableScriptType(attrs.type || "")) continue;
+      if (attrs.src) {
+        try {
+          const resolved = new URL(attrs.src, pageUrl).href;
+          if (pageOrigin && safeOrigin(resolved) !== pageOrigin) continue;
+          addScript({ src: resolved, code: null });
+        } catch (_) { }
+        continue;
+      }
+      addScript({ src: null, code: decodeHtmlEntities(match[2] || "") });
+    }
+
+    return scripts;
+  }
+
+  async collectPageSourceScripts(pageUrl = "") {
+    if (!this._allowFetchPageSourceScripts || !pageUrl) return [];
+    let fetchUrl;
+    try {
+      const parsed = new URL(pageUrl);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return [];
+      parsed.hash = "";
+      fetchUrl = parsed.href;
+    } catch (_) {
+      return [];
+    }
+
+    if (this._pageSourceScriptCache.has(fetchUrl)) {
+      return this._pageSourceScriptCache.get(fetchUrl);
+    }
+
+    try {
+      const response = await fetch(fetchUrl, { credentials: "include" });
+      if (!response?.ok) {
+        this._pageSourceScriptCache.set(fetchUrl, []);
+        return [];
+      }
+      const text = await response.text();
+      const bounded = this._maxFetchedPageSourceBytes > 0 && text.length > this._maxFetchedPageSourceBytes
+        ? text.slice(0, this._maxFetchedPageSourceBytes)
+        : text;
+      const scripts = this.extractScriptsFromPageSource(bounded, fetchUrl);
+      this._pageSourceScriptCache.set(fetchUrl, scripts);
+      return scripts;
+    } catch (err) {
+      console.warn("[SAST] page source fetch failed:", fetchUrl, err?.message || String(err));
+      this._pageSourceScriptCache.set(fetchUrl, []);
+      return [];
+    }
+  }
+
   async scanCodeDetailed(scripts, html = "", file = "", options = {}) {
     try {
       await this._ensureRuntimeAssets();
@@ -457,7 +552,27 @@ export class sastEngine {
         };
       }
 
-      scripts = scripts.sort((a, b) => {
+      const pageSourceScripts = await this.collectPageSourceScripts(file);
+      if (pageSourceScripts.length) {
+        const seen = new Set();
+        const merged = [];
+        const keyForScript = (script) => {
+          if (script?.src) return `src:${script.src}`;
+          const code = typeof script?.code === "string" ? script.code : "";
+          return code.trim() ? `inline:${code}` : "";
+        };
+        const addScript = (script) => {
+          const key = keyForScript(script);
+          if (!key || seen.has(key)) return;
+          seen.add(key);
+          merged.push(script);
+        };
+        pageSourceScripts.forEach(addScript);
+        (Array.isArray(scripts) ? scripts : []).forEach(addScript);
+        scripts = merged;
+      }
+
+      scripts = (Array.isArray(scripts) ? scripts : []).sort((a, b) => {
         const aIsInline = a.src === null;
         const bIsInline = b.src === null;
         if (aIsInline === bIsInline) return 0;
@@ -532,9 +647,10 @@ export class sastEngine {
           seenFiles.push({ file: id, index: fileIndex++ });
         }
       };
+      const pageScopedInlineFileId = (label) => file ? `${file} :: ${label}` : label;
 
       for (const script of scripts) {
-        const fileId = script.src || `inline-script[#${allBodies.length}]`;
+        const fileId = script.src || pageScopedInlineFileId(`inline-script[#${allBodies.length}]`);
         this.events.emit("file:start", { scanId: this._scanId, collectionId, generation, file: fileId, index: seenFiles.length, totalFiles });
         pushFile(fileId);
 
@@ -643,7 +759,7 @@ export class sastEngine {
         for (let i = 0; i < inlineSnippets.length; i++) {
           const snippet = inlineSnippets[i];
           const normalizedSnippet = snippet.replace(/(https?:)\/\//g, "$1:\\/\\/");
-          const fileId = `inline‐onclick[#${i}]`;
+          const fileId = pageScopedInlineFileId(`inline-onclick[#${i}]`);
           this.events.emit("file:start", { scanId: this._scanId, collectionId, generation, file: fileId, index: seenFiles.length, totalFiles });
           pushFile(fileId);
           const comments = [];

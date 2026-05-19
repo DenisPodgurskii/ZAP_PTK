@@ -48,9 +48,34 @@ function resolveCanonicalUrl(...values) {
     return null
 }
 
-function buildLocation(finding = {}) {
+function collectObservedPageUrls(finding = {}) {
     const location = toObject(finding.location) || {}
-    const url = resolveCanonicalUrl(location.runtimeUrl, location.url, location.pageUrl)
+    const values = [
+        location.pageUrls,
+        location.runtimeUrls,
+        location.urls,
+        location.observedUrls,
+        location.runtimeUrl,
+        location.url,
+        location.pageUrl
+    ]
+    const seen = new Set()
+    const urls = []
+    for (const value of values) {
+        const entries = Array.isArray(value) ? value : [value]
+        for (const entry of entries) {
+            const url = toNonEmptyString(entry)
+            if (!url || seen.has(url)) continue
+            seen.add(url)
+            urls.push(url)
+        }
+    }
+    return urls
+}
+
+function buildLocation(finding = {}, { pageUrlOverride = null } = {}) {
+    const location = toObject(finding.location) || {}
+    const url = resolveCanonicalUrl(pageUrlOverride, location.runtimeUrl, location.url, location.pageUrl)
     return {
         url,
         route: toNonEmptyString(location.route) || null,
@@ -123,24 +148,27 @@ function buildRootSummary({ finding = {}, proof, source, sink }) {
     return truncate(`${base} to sink ${sinkLabel}`, 1024)
 }
 
-export function toSastFinding(finding, { scanId } = {}) {
+export function toSastFinding(finding, { scanId, pageUrlOverride = null } = {}) {
     if (!finding || typeof finding !== 'object') return null
     const moduleId = toNonEmptyString(finding.moduleId)
     const ruleId = toNonEmptyString(finding.ruleId)
     const findingLocation = toObject(finding.location) || {}
-    const location = buildLocation(finding)
+    const location = buildLocation(finding, { pageUrlOverride })
     if (!moduleId || !ruleId || !toNonEmptyString(findingLocation.file)) return null
 
     const evidence = toObject(finding?.evidence?.sast) || {}
     const source = buildSourceOrSink(evidence.source)
     const sink = buildSourceOrSink(evidence.sink)
-    const fingerprint = toNonEmptyString(finding.fingerprint)
+    const baseFingerprint = toNonEmptyString(finding.fingerprint)
         || stableHash(`${findingLocation.file || ''}|${findingLocation.line || ''}|${moduleId}|${ruleId}|${sink.label || ''}`)
+    const urlSalt = toNonEmptyString(location.url)
+    const fingerprint = urlSalt ? `${baseFingerprint}::url:${stableHash(urlSalt)}` : baseFingerprint
     const proof = buildProof(finding)
     const summary = buildRootSummary({ finding, proof, source, sink })
+    const baseId = toNonEmptyString(finding.id) || baseFingerprint
 
     return {
-        id: toNonEmptyString(finding.id) || fingerprint,
+        id: urlSalt ? `${baseId}::url:${stableHash(urlSalt)}` : baseId,
         fingerprint,
         moduleId,
         ruleId,
@@ -154,4 +182,15 @@ export function toSastFinding(finding, { scanId } = {}) {
         trace: sanitizeTrace(evidence.trace || finding.trace),
         codeSnippet: truncate(evidence.codeSnippet || finding.codeSnippet || null, MAX_CODE_SNIPPET_LEN)
     }
+}
+
+export function toSastFindings(finding, options = {}) {
+    const urls = collectObservedPageUrls(finding)
+    if (!urls.length) {
+        const mapped = toSastFinding(finding, options)
+        return mapped ? [mapped] : []
+    }
+    return urls
+        .map((url) => toSastFinding(finding, Object.assign({}, options, { pageUrlOverride: url })))
+        .filter(Boolean)
 }

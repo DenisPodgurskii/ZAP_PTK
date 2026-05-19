@@ -13,7 +13,8 @@ const RETRY_DELAYS_MS = [250, 1000, 4000]
 const TARGET_PARAM_KEYS = ['url', 'target', 'targetUrl', 'scanUrl', 'startUrl', 'site']
 const DETECTION_DEDUPE_WINDOW_MS = 3000
 const CONFIG_INITIAL_FETCH_DELAY_MS = 0
-const CONFIG_DIRECT_FETCH_RETRY_DELAYS_MS = [0, 400, 1200, 2400]
+const CONFIG_DIRECT_FETCH_RETRY_DELAYS_MS = [0, 250]
+const CONFIG_DIRECT_FETCH_TIMEOUT_MS = 900
 const QUICKSTART_URL_REGEX = /^https?:\/\/zap\/OTHER\/quickstartlaunch\/other\/startPage\//i
 const QUICKSTART_PROBE_COOLDOWN_MS = 5000
 const QUICKSTART_SCRIPT_FETCH_LIMIT = 8
@@ -22,7 +23,7 @@ const HISTORY_BOOTSTRAP_LOOKBACK_MS = 60 * 1000
 const HISTORY_BOOTSTRAP_MAX_RESULTS = 5
 const STARTUP_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 2000, 5000]
 const POST_CALLBACK_CANDIDATE_MAX_RESULTS = 30
-const DAST_HISTORY_SEED_MAX_RESULTS = 30
+const DAST_HISTORY_SEED_MAX_RESULTS = 256
 const DAST_HISTORY_SEED_SEARCH_MAX_RESULTS = Math.max(
     120,
     DAST_HISTORY_SEED_MAX_RESULTS * 4,
@@ -44,8 +45,10 @@ const ZAP_ALLOWED_DEBUG_PREFIXES = [
     '[PTK ZAP] No callback URL stored',
     '[PTK ZAP] No zapid stored',
     '[PTK ZAP] Fetching config from:',
+    '[PTK ZAP] Config request attempt threw:',
     '[PTK ZAP] Config accepted from non-OK',
     '[PTK ZAP] Config response data:',
+    '[PTK ZAP] Config fetch diagnostics summary:',
     '[PTK ZAP] Config unavailable'
 ]
 
@@ -89,6 +92,21 @@ function summarizeFetchError(err) {
         name: err?.name || null,
         message: err?.message || String(err || ''),
         stack
+    }
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG_DIRECT_FETCH_TIMEOUT_MS) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || typeof AbortController === 'undefined') {
+        return fetch(url, options)
+    }
+    const controller = new AbortController()
+    const timeout = setTimeout(() => {
+        try { controller.abort() } catch (_) { }
+    }, Math.max(1, timeoutMs))
+    try {
+        return await fetch(url, Object.assign({}, options || {}, { signal: controller.signal }))
+    } finally {
+        clearTimeout(timeout)
     }
 }
 
@@ -384,6 +402,7 @@ class ZapTransport {
 
     clearSessionTerminal() {
         this._activeSessionTerminal = false
+        this._activeSessionTerminalDetails = null
     }
 
     markSessionTerminal(details = {}) {
@@ -391,12 +410,40 @@ class ZapTransport {
             return
         }
         this._activeSessionTerminal = true
-        this._lifecycleLog('zapTransport.sessionTerminal', {
-            status: toNonEmptyString(details.status),
+        this._activeSessionTerminalDetails = {
+            status: toNonEmptyString(details.status) || null,
             progress: Number.isFinite(Number(details.progress)) ? Number(details.progress) : null,
             zapid: toNonEmptyString(details.zapid) || this.zapid || null,
-            sessionId: toNonEmptyString(details.sessionId)
+            sessionId: toNonEmptyString(details.sessionId) || null,
+            markedAt: new Date().toISOString()
+        }
+        this._lifecycleLog('zapTransport.sessionTerminal', {
+            status: this._activeSessionTerminalDetails.status,
+            progress: this._activeSessionTerminalDetails.progress,
+            zapid: this._activeSessionTerminalDetails.zapid,
+            sessionId: this._activeSessionTerminalDetails.sessionId
         })
+    }
+
+    isSessionTerminal(details = {}) {
+        if (!this._activeSessionTerminal) {
+            return false
+        }
+        const expectedZapId = toNonEmptyString(details.zapid)
+        const expectedSessionId = toNonEmptyString(details.sessionId)
+        if (expectedZapId && this._activeSessionTerminalDetails?.zapid && expectedZapId !== this._activeSessionTerminalDetails.zapid) {
+            return false
+        }
+        if (expectedSessionId && this._activeSessionTerminalDetails?.sessionId && expectedSessionId !== this._activeSessionTerminalDetails.sessionId) {
+            return false
+        }
+        return true
+    }
+
+    getSessionTerminalDetails() {
+        return this._activeSessionTerminalDetails
+            ? Object.assign({}, this._activeSessionTerminalDetails)
+            : null
     }
 
     handleStartupGateOpened(source = 'unknown') {
@@ -635,6 +682,26 @@ class ZapTransport {
         })
     }
 
+    processContentObservedTargetUrl({ tabId = null, frameId = 0, url = '' } = {}) {
+        if (!this.isActive()) {
+            return false
+        }
+        if (frameId !== 0) {
+            return false
+        }
+        const targetUrl = safeParseUrl(url)
+        if (!targetUrl || isZapBootstrapUrl(targetUrl)) {
+            return false
+        }
+
+        this._logCaughtUrl('content.zapTarget', {
+            tabId,
+            frameId,
+            url: targetUrl
+        })
+        return true
+    }
+
     async _postJsonWithRetry(url, obj, errorCode) {
         if (!url) {
             throw new Error(errorCode)
@@ -773,7 +840,7 @@ class ZapTransport {
             }
 
             try {
-                const response = await fetch(this.configUrl, {
+                const response = await fetchWithTimeout(this.configUrl, {
                     method: 'POST',
                     headers: {
                         'Accept': 'application/json',
@@ -785,7 +852,7 @@ class ZapTransport {
                     }),
                     cache: 'no-store',
                     credentials: 'include'
-                })
+                }, CONFIG_DIRECT_FETCH_TIMEOUT_MS)
 
                 const responseMeta = {
                     status: response.status,

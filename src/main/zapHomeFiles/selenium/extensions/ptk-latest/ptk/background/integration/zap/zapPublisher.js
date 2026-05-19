@@ -2,7 +2,7 @@
 
 import { toDastFinding } from './zapDastMapper.js'
 import { toIastFinding } from './zapIastMapper.js'
-import { toSastFinding } from './zapSastMapper.js'
+import { toSastFindings } from './zapSastMapper.js'
 import { isZapExportableFinding } from './zapFindingFilter.js'
 
 const ENGINES = ['DAST', 'IAST', 'SAST']
@@ -236,9 +236,10 @@ export default class ZapPublisher {
 
         this.apiValidated = true
         const hasFindScanIdForEngine = typeof this.resultsRegistry?.findScanIdForEngine === 'function'
+        const hasFindScanIdsForEngine = typeof this.resultsRegistry?.findScanIdsForEngine === 'function'
         const hasGet = typeof this.resultsRegistry?.get === 'function'
 
-        if (!hasFindScanIdForEngine || !hasGet) {
+        if ((!hasFindScanIdForEngine && !hasFindScanIdsForEngine) || !hasGet) {
             if (!this.missingApiWarned) {
                 console.warn('[PTK ZAP] resultsRegistry API missing required methods; publisher disabled')
                 this.missingApiWarned = true
@@ -343,7 +344,7 @@ export default class ZapPublisher {
                         scanId,
                         findings,
                         scanResult,
-                        mapper: toSastFinding,
+                        mapper: toSastFindings,
                         sender: (payload) => this.zapBridge.sendSastFindingsBatch(payload)
                     })
                     continue
@@ -359,30 +360,31 @@ export default class ZapPublisher {
     }
 
     async _resolveScanIdsForEngine(engine, host) {
-        if (engine === 'DAST') {
-            const managedScanIds = normalizeScanIds(
-                typeof this.zapBridge?.getManagedScanIdsForEngine === 'function'
-                    ? await this.zapBridge.getManagedScanIdsForEngine(engine)
-                    : []
-            )
-            let storedScanIds = []
+        const managedScanIds = normalizeScanIds(
+            typeof this.zapBridge?.getManagedScanIdsForEngine === 'function'
+                ? await this.zapBridge.getManagedScanIdsForEngine(engine)
+                : []
+        )
+        let storedScanIds = []
 
-            if (typeof this.resultsRegistry?.findScanIdsForEngine === 'function') {
-                const hints = { host: host || null }
-                if (Number.isFinite(this.activeSinceMs)) {
-                    hints.startedAfterMs = Math.max(0, this.activeSinceMs - ZAP_SESSION_SCAN_LOOKBACK_MS)
-                }
-                storedScanIds = normalizeScanIds(await this.resultsRegistry.findScanIdsForEngine(engine, hints))
+        if (typeof this.resultsRegistry?.findScanIdsForEngine === 'function') {
+            const hints = { host: host || null }
+            if (Number.isFinite(this.activeSinceMs)) {
+                hints.startedAfterMs = Math.max(0, this.activeSinceMs - ZAP_SESSION_SCAN_LOOKBACK_MS)
             }
-
-            const scanIds = normalizeScanIds([...managedScanIds, ...storedScanIds])
-            if (scanIds.length) return scanIds
+            storedScanIds = normalizeScanIds(await this.resultsRegistry.findScanIdsForEngine(engine, hints))
         }
 
-        const scanId = await this.resultsRegistry.findScanIdForEngine(engine, {
-            host: host || null
-        })
-        return normalizeScanIds(scanId)
+        const scanIds = normalizeScanIds([...managedScanIds, ...storedScanIds])
+        if (scanIds.length) return scanIds
+
+        if (typeof this.resultsRegistry?.findScanIdForEngine === 'function') {
+            const scanId = await this.resultsRegistry.findScanIdForEngine(engine, {
+                host: host || null
+            })
+            return normalizeScanIds(scanId)
+        }
+        return []
     }
 
     _collectDastSourceFindings(scanResult) {
@@ -602,20 +604,25 @@ export default class ZapPublisher {
                 continue
             }
 
-            const mapped = mapper(finding, { scanId, scanResult })
-            if (!mapped) {
+            const mappedResult = mapper(finding, { scanId, scanResult })
+            const mappedFindings = Array.isArray(mappedResult)
+                ? mappedResult.filter(Boolean)
+                : (mappedResult ? [mappedResult] : [])
+            if (!mappedFindings.length) {
                 skippedMapper += 1
                 continue
             }
 
-            const findingKey = this._getMappedFindingKey(mapped)
-            const signature = stableStringify(mapped)
-            if (!this._shouldPublishFindingVersion(key, findingKey, signature)) {
-                alreadyPublished += 1
-                continue
-            }
+            for (const mapped of mappedFindings) {
+                const findingKey = this._getMappedFindingKey(mapped)
+                const signature = stableStringify(mapped)
+                if (!this._shouldPublishFindingVersion(key, findingKey, signature)) {
+                    alreadyPublished += 1
+                    continue
+                }
 
-            entries.push({ mapped, findingKey, signature })
+                entries.push({ mapped, findingKey, signature })
+            }
         }
 
         return {
@@ -641,7 +648,7 @@ export default class ZapPublisher {
             }).entries.length
         }
 
-        const mapper = engine === 'IAST' ? toIastFinding : toSastFinding
+        const mapper = engine === 'IAST' ? toIastFinding : toSastFindings
         const findings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
         return this._collectPendingMappedFindings({
             key,

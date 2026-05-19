@@ -96,6 +96,229 @@ function isZapCallbackPageUrl(rawUrl) {
     }
 }
 
+const SAST_INLINE_HANDLER_ATTRIBUTES = Object.freeze([
+    'onclick', 'ondblclick', 'onmousedown', 'onmouseup', 'onmouseover', 'onmouseout',
+    'onmousemove', 'onmouseenter', 'onmouseleave', 'onkeydown', 'onkeyup', 'onkeypress',
+    'oninput', 'onchange', 'onfocus', 'onblur', 'onsubmit', 'onreset', 'onselect',
+    'oncontextmenu', 'onwheel', 'ondrag', 'ondrop', 'onload', 'onunload', 'onabort',
+    'onerror', 'onresize', 'onscroll'
+]);
+const SAST_INLINE_HANDLER_ATTRIBUTE_SET = new Set(SAST_INLINE_HANDLER_ATTRIBUTES);
+const SAST_INLINE_HANDLER_SELECTOR = SAST_INLINE_HANDLER_ATTRIBUTES.map((attr) => `[${attr}]`).join(',');
+const SAST_EARLY_SCRIPT_REGISTRY_KEY = '__PTK_SAST_EARLY_SCRIPT_REGISTRY__';
+const SAST_EARLY_SCRIPT_KEYS_KEY = '__PTK_SAST_EARLY_SCRIPT_KEYS__';
+const SAST_EARLY_SCRIPT_CAPTURE_INSTALLED_KEY = '__PTK_SAST_EARLY_SCRIPT_CAPTURE_INSTALLED__';
+const SAST_EARLY_SCRIPT_MAX_ENTRIES = 250;
+const SAST_EARLY_SCRIPT_MAX_CODE_CHARS = 512 * 1024;
+
+function getPtkEarlySastScriptRegistry() {
+    try {
+        if (!Array.isArray(window[SAST_EARLY_SCRIPT_REGISTRY_KEY])) {
+            window[SAST_EARLY_SCRIPT_REGISTRY_KEY] = [];
+        }
+        return window[SAST_EARLY_SCRIPT_REGISTRY_KEY];
+    } catch (_) {
+        return [];
+    }
+}
+
+function getPtkEarlySastScriptKeySet() {
+    try {
+        if (!(window[SAST_EARLY_SCRIPT_KEYS_KEY] instanceof Set)) {
+            window[SAST_EARLY_SCRIPT_KEYS_KEY] = new Set();
+        }
+        return window[SAST_EARLY_SCRIPT_KEYS_KEY];
+    } catch (_) {
+        return new Set();
+    }
+}
+
+function normalizeSastScriptCode(value) {
+    if (typeof value !== 'string') return '';
+    return value.length > SAST_EARLY_SCRIPT_MAX_CODE_CHARS
+        ? value.slice(0, SAST_EARLY_SCRIPT_MAX_CODE_CHARS)
+        : value;
+}
+
+function normalizeSastScriptSrc(src) {
+    if (!src) return null;
+    try {
+        return new URL(src, document.URL).href;
+    } catch (_) {
+        return String(src || '') || null;
+    }
+}
+
+function makeSastScriptKey(script) {
+    const src = normalizeSastScriptSrc(script?.src || null);
+    if (src) return `src:${src}`;
+    const code = normalizeSastScriptCode(script?.code || '');
+    return code ? `inline:${code}` : '';
+}
+
+function rememberEarlySastScriptElement(scriptEl, reason = 'observer') {
+    if (!isExecutableSastScriptElement(scriptEl)) return;
+    const src = normalizeSastScriptSrc(scriptEl?.src || null);
+    const code = src ? null : normalizeSastScriptCode(scriptEl?.textContent || scriptEl?.innerText || '');
+    if (!src && !String(code || '').trim()) return;
+
+    const key = src ? `src:${src}` : `inline:${code}`;
+    if (!key) return;
+
+    const seen = getPtkEarlySastScriptKeySet();
+    if (seen.has(key)) return;
+
+    const registry = getPtkEarlySastScriptRegistry();
+    if (registry.length >= SAST_EARLY_SCRIPT_MAX_ENTRIES) return;
+
+    seen.add(key);
+    registry.push({
+        src,
+        code,
+        capturedAt: Date.now(),
+        captureUrl: getCurrentHref() || document.URL || '',
+        reason
+    });
+}
+
+function scanCurrentDocumentScriptsForSast(reason = 'scan') {
+    try {
+        Array.from(document.scripts || []).forEach((script) => rememberEarlySastScriptElement(script, reason));
+    } catch (_) { }
+}
+
+function installEarlySastScriptCapture() {
+    try {
+        if (window[SAST_EARLY_SCRIPT_CAPTURE_INSTALLED_KEY] === true) return;
+        window[SAST_EARLY_SCRIPT_CAPTURE_INSTALLED_KEY] = true;
+    } catch (_) {
+        return;
+    }
+
+    scanCurrentDocumentScriptsForSast('document_start');
+
+    if (typeof MutationObserver === 'function') {
+        try {
+            const observer = new MutationObserver((mutations) => {
+                for (const mutation of mutations || []) {
+                    for (const node of Array.from(mutation?.addedNodes || [])) {
+                        if (!node) continue;
+                        if (String(node.nodeName || '').toLowerCase() === 'script') {
+                            rememberEarlySastScriptElement(node, 'mutation');
+                        }
+                        if (typeof node.querySelectorAll === 'function') {
+                            try {
+                                Array.from(node.querySelectorAll('script')).forEach((script) => {
+                                    rememberEarlySastScriptElement(script, 'mutation_descendant');
+                                });
+                            } catch (_) { }
+                        }
+                    }
+                }
+            });
+            observer.observe(document, { childList: true, subtree: true });
+        } catch (_) { }
+    }
+
+    [0, 25, 100, 250, 500, 1000, 2000].forEach((delay) => {
+        try {
+            setTimeout(() => scanCurrentDocumentScriptsForSast(`timer_${delay}`), delay);
+        } catch (_) { }
+    });
+}
+
+function normalizeSastInlineHandlerKey(value) {
+    return String(value || '').trim().replace(/\s+/g, ' ').replace(/;+\s*$/g, '');
+}
+
+function collectSastInlineHandlers() {
+    if (typeof document?.querySelectorAll !== 'function') return [];
+
+    let elements = [];
+    try {
+        elements = Array.from(document.querySelectorAll(SAST_INLINE_HANDLER_SELECTOR));
+    } catch (_) {
+        return [];
+    }
+
+    const snippets = [];
+    const seen = new Set();
+    for (const element of elements) {
+        const attrNames = typeof element?.getAttributeNames === 'function'
+            ? element.getAttributeNames()
+            : Array.from(element?.attributes || [], (attr) => attr?.name).filter(Boolean);
+        for (const rawName of attrNames) {
+            const attrName = String(rawName || '').trim().toLowerCase();
+            if (!SAST_INLINE_HANDLER_ATTRIBUTE_SET.has(attrName)) continue;
+            const value = typeof element?.getAttribute === 'function'
+                ? element.getAttribute(attrName)
+                : null;
+            if (typeof value !== 'string') continue;
+            const key = normalizeSastInlineHandlerKey(value);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            snippets.push(value);
+        }
+    }
+    return snippets;
+}
+
+function isExecutableSastScriptElement(scriptEl) {
+    if (!scriptEl) return false;
+    const rawType = String(scriptEl.type || '').trim().toLowerCase();
+    if (!rawType || rawType === 'module') return true;
+    return /^(?:text|application)\/(?:javascript|ecmascript|x-javascript|x-ecmascript)$/i.test(rawType);
+}
+
+function isSameOriginSastScriptUrl(src) {
+    if (!src) return true;
+    try {
+        const scriptUrl = new URL(src, document.URL);
+        const pageUrl = new URL(document.URL);
+        return scriptUrl.protocol === 'http:' || scriptUrl.protocol === 'https:'
+            ? scriptUrl.origin === pageUrl.origin
+            : false;
+    } catch (_) {
+        return false;
+    }
+}
+
+function collectSastPayload() {
+    scanCurrentDocumentScriptsForSast('collect');
+
+    const currentScripts = Array.from(document.scripts || [])
+        .filter(isExecutableSastScriptElement)
+        .map((script) => ({
+            src: normalizeSastScriptSrc(script.src || null),
+            code: script.src ? null : normalizeSastScriptCode(script.innerText || script.textContent || '')
+        }))
+        .filter((script) => !script.src || isSameOriginSastScriptUrl(script.src));
+
+    const scripts = [];
+    const seen = new Set();
+    const addScript = (script) => {
+        if (!script || (script.src && !isSameOriginSastScriptUrl(script.src))) return;
+        const normalized = {
+            src: normalizeSastScriptSrc(script.src || null),
+            code: script.src ? null : normalizeSastScriptCode(script.code || '')
+        };
+        if (!normalized.src && !String(normalized.code || '').trim()) return;
+        const key = makeSastScriptKey(normalized);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        scripts.push(normalized);
+    };
+
+    currentScripts.forEach(addScript);
+    getPtkEarlySastScriptRegistry().forEach(addScript);
+
+    return {
+        scripts,
+        html: collectSastInlineHandlers(),
+        file: document.URL
+    };
+}
+
 function notifyZapCallbackPageIfPresent(reason = 'document_start') {
     if (!isTopFrame()) return;
     const href = getCurrentHref();
@@ -113,44 +336,32 @@ function installSharedIastBridge() {
         return;
     }
     window.__PTK_SHARED_IAST_CONTENT_BRIDGE__ = true;
+    const PTK_IAST_PAGE_TO_CONTENT_EVENT = 'ptk:iast:page-to-content:v1';
+    const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
 
-    if (runtime?.onMessage) {
-        runtime.onMessage.addListener((message) => {
-            if (message?.channel === 'ptk_background_iast2content') {
-                if (message.type === 'clean iast result') {
-                    localStorage.removeItem('ptk_iast_buffer');
-                }
-                if (message.type === 'ping') {
-                    return Promise.resolve({ ok: true });
-                }
-            }
-
-            if (message?.channel === 'ptk_background_iast2content_modules' && message.iastModules) {
-                try {
-                    window.postMessage({
-                        channel: 'ptk_background_iast2content_modules',
-                        iastModules: message.iastModules
-                    }, '*');
-                } catch (_) { }
-                return Promise.resolve({ ok: true });
-            }
-
-            if (message?.channel === 'ptk_background_iast2content_token_origin') {
-                try {
-                    window.postMessage({
-                        channel: 'ptk_background_iast2content_token_origin',
-                        tokens: Array.isArray(message.tokens) ? message.tokens : []
-                    }, '*');
-                } catch (_) { }
-                return Promise.resolve({ ok: true });
-            }
-
-            return undefined;
-        });
+    function parseIastBridgeEventDetail(detail) {
+        if (!detail) return null;
+        if (typeof detail === 'object') return detail;
+        if (typeof detail !== 'string') return null;
+        try {
+            const parsed = JSON.parse(detail);
+            return parsed && typeof parsed === 'object' ? parsed : null;
+        } catch (_) {
+            return null;
+        }
     }
 
-    window.addEventListener('message', (event) => {
-        const data = event.data || {};
+    function dispatchIastBridgeToPage(payload) {
+        if (!payload || typeof payload !== 'object') return;
+        try {
+            window.dispatchEvent(new CustomEvent(PTK_IAST_CONTENT_TO_PAGE_EVENT, {
+                detail: JSON.stringify(payload)
+            }));
+        } catch (_) { }
+    }
+
+    function handleIastPageBridgePayload(data) {
+        data = data || {};
 
         if (data?.ptk_iast) {
             const type = data?.ptk_iast === 'runtime_signal' ? 'runtime_signal' : 'finding_report';
@@ -193,23 +404,60 @@ function installSharedIastBridge() {
             sendRuntimeMessage({
                 channel: 'ptk_content_iast2background_request_modules'
             }).then((resp) => {
-                try {
-                    window.postMessage({
-                        channel: 'ptk_background_iast2content_modules',
-                        iastModules: resp?.iastModules || null,
-                        iastModulesSignature: resp?.iastModulesSignature || null,
-                        scanStrategy: resp?.scanStrategy || null
-                    }, '*');
-                } catch (_) { }
+                dispatchIastBridgeToPage({
+                    channel: 'ptk_background_iast2content_modules',
+                    iastModules: resp?.iastModules || null,
+                    iastModulesSignature: resp?.iastModulesSignature || null,
+                    scanStrategy: resp?.scanStrategy || null
+                });
             }).catch(() => {
-                try {
-                    window.postMessage({
-                        channel: 'ptk_background_iast2content_modules',
-                        iastModules: null
-                    }, '*');
-                } catch (_) { }
+                dispatchIastBridgeToPage({
+                    channel: 'ptk_background_iast2content_modules',
+                    iastModules: null
+                });
             });
         }
+    }
+
+    if (runtime?.onMessage) {
+        runtime.onMessage.addListener((message) => {
+            if (message?.channel === 'ptk_background_iast2content') {
+                if (message.type === 'clean iast result') {
+                    localStorage.removeItem('ptk_iast_buffer');
+                }
+                if (message.type === 'ping') {
+                    return Promise.resolve({ ok: true });
+                }
+            }
+
+            if (message?.channel === 'ptk_background_iast2content_modules' && message.iastModules) {
+                dispatchIastBridgeToPage({
+                    channel: 'ptk_background_iast2content_modules',
+                    iastModules: message.iastModules,
+                    iastModulesSignature: message.iastModulesSignature || null,
+                    scanStrategy: message.scanStrategy || null
+                });
+                return Promise.resolve({ ok: true });
+            }
+
+            if (message?.channel === 'ptk_background_iast2content_token_origin') {
+                dispatchIastBridgeToPage({
+                    channel: 'ptk_background_iast2content_token_origin',
+                    tokens: Array.isArray(message.tokens) ? message.tokens : []
+                });
+                return Promise.resolve({ ok: true });
+            }
+
+            return undefined;
+        });
+    }
+
+    window.addEventListener(PTK_IAST_PAGE_TO_CONTENT_EVENT, (event) => {
+        handleIastPageBridgePayload(parseIastBridgeEventDetail(event?.detail));
+    }, false);
+
+    window.addEventListener('message', (event) => {
+        handleIastPageBridgePayload(event.data || {});
     }, false);
 }
 
@@ -253,12 +501,49 @@ function requestRuntimeProfile(reason = 'document_start') {
 
 if (runtime?.onMessage) {
     runtime.onMessage.addListener((message) => {
+        if (message?.channel === 'ptk_background2content_sast') {
+            if (message.type === 'collect_scripts') {
+                const payload = collectSastPayload();
+                sendRuntimeMessage({
+                    channel: 'ptk_content_sast2background_sast',
+                    type: 'scripts_collected',
+                    requestId: message.requestId || null,
+                    ...payload
+                }).catch(() => { });
+                return Promise.resolve({ ok: true });
+            }
+
+            if (message.type === 'sast_set_hash') {
+                const targetHash = typeof message.hash === 'string' ? message.hash : '';
+                if (window.location.hash !== targetHash) {
+                    window.location.hash = targetHash;
+                }
+                return Promise.resolve({ ok: true, url: document.URL });
+            }
+
+            if (message.type === 'sast_wait_ready') {
+                const delayMs = Number(message.delayMs || 300);
+                const waitReady = () => new Promise((resolve) => {
+                    if (document.readyState === 'complete') return resolve();
+                    const onReady = () => {
+                        window.removeEventListener('load', onReady);
+                        resolve();
+                    };
+                    window.addEventListener('load', onReady);
+                });
+                return waitReady()
+                    .then(() => new Promise((resolve) => setTimeout(resolve, delayMs)))
+                    .then(() => ({ ok: true, url: document.URL }));
+            }
+        }
+
         if (message?.channel === 'ptk_background2content_runtime' && message?.type === 'refresh_profile') {
             void requestRuntimeProfile('background_refresh');
         }
     });
 }
 
+installEarlySastScriptCapture();
 installSharedIastBridge();
 
 notifyZapCallbackPageIfPresent();

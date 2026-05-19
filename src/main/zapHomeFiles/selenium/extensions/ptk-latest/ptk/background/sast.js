@@ -35,6 +35,29 @@ import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js";
 
 const worker = self;
 
+function isZapCallbackPageUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    return /^\/zapCallBackUrl\/[^/?#]+/i.test(parsed.pathname);
+  } catch (_) {
+    return /\/zapCallBackUrl\//i.test(String(rawUrl || ""));
+  }
+}
+
+function sameDocumentUrlForSast(left, right) {
+  try {
+    const a = new URL(String(left || ""));
+    const b = new URL(String(right || ""));
+    return a.origin === b.origin &&
+      a.pathname === b.pathname &&
+      a.search === b.search &&
+      a.hash === b.hash;
+  } catch (_) {
+    return String(left || "") === String(right || "");
+  }
+}
+
 async function refreshFinishedDastAnalysisIfNeeded() {
   const dast = worker?.ptk_app?.dast || worker?.ptk_app?.rattacker;
   if (!dast || typeof dast !== "object") return;
@@ -482,7 +505,7 @@ export class ptk_sast {
         }
       }
       if (message.type == "spa_url_changed" && sender?.tab?.id) {
-        this.onSpaUrlChanged(message.url, sender.tab.id).catch(err => {
+        this.onSpaUrlChanged(message.url, sender.tab.id, message.sastPayload || null).catch(err => {
         });
         return Promise.resolve({ ok: true });
       }
@@ -554,8 +577,8 @@ export class ptk_sast {
     }
   }
 
-  async onSpaUrlChanged(rawUrl, tabId) {
-    return this.sessionCoordinator.onSpaUrlChanged(rawUrl, tabId, this.scanResult);
+  async onSpaUrlChanged(rawUrl, tabId, payload = null) {
+    return this.sessionCoordinator.onSpaUrlChanged(rawUrl, tabId, this.scanResult, payload);
   }
 
   updateScanResult() {
@@ -997,7 +1020,8 @@ export class ptk_sast {
         bytes: compressed.body,
         fileName: message?.fileName || "PTK_SAST_scan.json",
         contentType: compressed.contentType,
-        compression: compressed.compression
+        compression: compressed.compression,
+        owner: message?.owner || null
       });
       if (!descriptor) {
         return { success: false, error: "empty_export_payload" };
@@ -1014,7 +1038,7 @@ export class ptk_sast {
   }
 
   async msg_export_scan_chunk(message) {
-    const chunk = this.exportChunkStore.getChunk(message?.exportId, message?.index);
+    const chunk = this.exportChunkStore.getChunk(message?.exportId, message?.index, message?.owner || null);
     if (!chunk) {
       return { success: false, error: "export_not_found_or_expired" };
     }
@@ -1029,7 +1053,7 @@ export class ptk_sast {
   }
 
   async msg_release_export_scan(message) {
-    const released = this.exportChunkStore.release(message?.exportId);
+    const released = this.exportChunkStore.release(message?.exportId, message?.owner || null);
     return { success: released };
   }
 
@@ -1144,6 +1168,14 @@ export class ptk_sast {
       baseUrl = tab?.url || baseUrl;
     } catch { }
 
+    const zapTargetUrl = typeof opts?.zapTiming?.targetUrl === "string" && opts.zapTiming.targetUrl
+      ? opts.zapTiming.targetUrl
+      : null;
+    const deferZapCallbackCollection = opts?.zapManaged === true
+      && isZapCallbackPageUrl(baseUrl)
+      && zapTargetUrl
+      && !sameDocumentUrlForSast(baseUrl, zapTargetUrl);
+
     const pages = this.normalizeSpaPages(
       opts?.pages || scanStrategy?.pages || scanStrategy?.routes || [],
       baseUrl
@@ -1155,6 +1187,15 @@ export class ptk_sast {
       this.scanSpaPages(tabId, pages, opts).catch((err) => {
         console.error("[SAST] Multi-page SPA scan failed", err);
       });
+    } else if (deferZapCallbackCollection) {
+      this.sessionCoordinator.deferInitialCollection("zap_callback_wait_for_target_page", {
+        currentUrl: baseUrl,
+        targetUrl: zapTargetUrl
+      });
+      this._recordZapTiming("sast.collection.deferred_zap_callback", {
+        currentUrl: baseUrl,
+        targetUrl: zapTargetUrl
+      }, zapTiming, "sast.collection.deferred_zap_callback");
     } else {
       this.collectAndScanTab(tabId, {
         delayMs: opts?.spaDelayMs || 500,
@@ -1237,8 +1278,17 @@ export class ptk_sast {
       await this._flushPersistScanResult();
     }
     this.removeListeners();
-    await refreshFinishedDastAnalysisIfNeeded();
+    if (opts?.skipPostStopAnalysis !== true) {
+      await refreshFinishedDastAnalysisIfNeeded();
+    }
     return this.scanResult;
+  }
+
+  async waitForCollectionIdle(opts = {}) {
+    if (!this.sessionCoordinator || typeof this.sessionCoordinator.waitForCollectionIdle !== "function") {
+      return true;
+    }
+    return this.sessionCoordinator.waitForCollectionIdle(opts);
   }
 
   _addUnifiedFinding(finding, index = 0) {

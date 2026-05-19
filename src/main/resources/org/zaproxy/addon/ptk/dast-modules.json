@@ -1066,7 +1066,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script[^>]*>[\\s\\S]{0,500}alert\\(ptk_xss_jsstring_1\\)"
+              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,500}alert\\(ptk_xss_jsstring_1\\)"
             },
             "extensions": {}
           }
@@ -1140,7 +1140,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script[^>]*>[\\s\\S]{0,500}alert\\(ptk_xss_tpl_1\\)"
+              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,500}alert\\(ptk_xss_tpl_1\\)"
             },
             "extensions": {}
           }
@@ -1211,7 +1211,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script[^>]*>[\\s\\S]{0,800}alert\\(987201\\)"
+              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,800}alert\\(987201\\)"
             },
             "extensions": {}
           }
@@ -1282,7 +1282,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script[^>]*>[\\s\\S]{0,800}alert\\(987202\\)"
+              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,800}alert\\(987202\\)"
             },
             "extensions": {}
           }
@@ -1353,7 +1353,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script[^>]*>[\\s\\S]{0,800}alert\\(987203\\)"
+              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,800}alert\\(987203\\)"
             },
             "extensions": {}
           }
@@ -1424,7 +1424,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script[^>]*>[\\s\\S]{0,800}alert\\(987204\\)"
+              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,800}alert\\(987204\\)"
             },
             "extensions": {}
           }

@@ -125,6 +125,7 @@ export class ptk_rattacker {
             extraInfoSpec: ptk_utils.extraInfoSpec,
             getState: () => this.sessionCoordinator?.getState?.() || {}
         })
+        this.engine?.setCaptureProgressProvider?.(this.captureAdapter)
         this.sessionCoordinator = new DastSessionCoordinator({
             engine: this.engine,
             captureAdapter: this.captureAdapter,
@@ -1329,7 +1330,8 @@ export class ptk_rattacker {
             return await this.exportService.createChunkedExport(this.scanResult, {
                 target: message?.target || "download",
                 fileName: message?.fileName || "PTK_DAST_scan.json",
-                includeSecrets: message?.includeSecrets === true
+                includeSecrets: message?.includeSecrets === true,
+                owner: message?.owner || null
             })
         } catch (err) {
             console.error("[PTK DAST] Failed to export scan result", err)
@@ -1338,11 +1340,11 @@ export class ptk_rattacker {
     }
 
     async msg_export_scan_chunk(message) {
-        return this.exportService.getChunk(message?.exportId, message?.index)
+        return this.exportService.getChunk(message?.exportId, message?.index, message?.owner || null)
     }
 
     async msg_release_export_scan(message) {
-        return this.exportService.release(message?.exportId)
+        return this.exportService.release(message?.exportId, message?.owner || null)
     }
 
     async msg_get_projects(message) {
@@ -1586,7 +1588,7 @@ export class ptk_rattacker {
             this._setAuthoritativeScanResult(scanResult, {
                 markFinished: !!(scanResult?.finishedAt || scanResult?.finished)
             })
-            if (this.scanResult && (this.scanResult.finishedAt || this.scanResult.finished)) {
+            if (!options?.skipPostStopAnalysis && this.scanResult && (this.scanResult.finishedAt || this.scanResult.finished)) {
                 try {
                     await this.analysisService.hydratePersistedRelatedScans(this.scanResult)
                     this._applyAnalysis(this.scanResult, true)

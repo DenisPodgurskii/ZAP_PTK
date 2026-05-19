@@ -31,6 +31,9 @@ export class DastCaptureAdapter {
         this.onCompleted = this.onCompleted.bind(this)
         this.onResponseStarted = this.onResponseStarted.bind(this)
         this.onHeadersReceived = this.onHeadersReceived.bind(this)
+
+        this._captureGeneration = 0
+        this.resetCaptureStats()
     }
 
     get state() {
@@ -41,8 +44,89 @@ export class DastCaptureAdapter {
         return defaultSleep(ms)
     }
 
+    resetCaptureStats() {
+        this._captureGeneration += 1
+        this.pendingObservedRequests = 0
+        this.pendingObservedRequestsMax = 0
+        this.observedRequestsStarted = 0
+        this.observedRequestsQueued = 0
+        this.observedRequestsDropped = 0
+        this.observedRequestsErrored = 0
+        this.lastObservedRequestStartedAt = null
+        this.lastObservedRequestFinishedAt = null
+        this.lastObservedRequestQueuedAt = null
+        this.lastObservedRequestDroppedAt = null
+        this.lastObservedRequestErrorAt = null
+    }
+
+    getPendingObservedRequestCount() {
+        return Math.max(0, Number(this.pendingObservedRequests || 0))
+    }
+
+    getCaptureStats() {
+        return {
+            pendingObservedRequests: this.getPendingObservedRequestCount(),
+            pendingObservedRequestsMax: Math.max(0, Number(this.pendingObservedRequestsMax || 0)),
+            observedRequestsStarted: Math.max(0, Number(this.observedRequestsStarted || 0)),
+            observedRequestsQueued: Math.max(0, Number(this.observedRequestsQueued || 0)),
+            observedRequestsDropped: Math.max(0, Number(this.observedRequestsDropped || 0)),
+            observedRequestsErrored: Math.max(0, Number(this.observedRequestsErrored || 0)),
+            lastObservedRequestStartedAt: this.lastObservedRequestStartedAt || null,
+            lastObservedRequestFinishedAt: this.lastObservedRequestFinishedAt || null,
+            lastObservedRequestQueuedAt: this.lastObservedRequestQueuedAt || null,
+            lastObservedRequestDroppedAt: this.lastObservedRequestDroppedAt || null,
+            lastObservedRequestErrorAt: this.lastObservedRequestErrorAt || null
+        }
+    }
+
+    _markCaptureProgressChanged() {
+        try {
+            this.engine?.notifyCaptureProgressChanged?.()
+        } catch (_) { }
+    }
+
+    _trackObservedRequest(promise) {
+        const generation = this._captureGeneration
+        this.pendingObservedRequests += 1
+        this.pendingObservedRequestsMax = Math.max(
+            this.pendingObservedRequestsMax,
+            this.pendingObservedRequests
+        )
+        this.observedRequestsStarted += 1
+        this.lastObservedRequestStartedAt = new Date().toISOString()
+        this._markCaptureProgressChanged()
+        return Promise.resolve(promise)
+            .then((queued) => {
+                if (generation === this._captureGeneration) {
+                    if (queued === true) {
+                        this.observedRequestsQueued += 1
+                        this.lastObservedRequestQueuedAt = new Date().toISOString()
+                    } else {
+                        this.observedRequestsDropped += 1
+                        this.lastObservedRequestDroppedAt = new Date().toISOString()
+                    }
+                }
+                return queued
+            })
+            .catch((error) => {
+                if (generation === this._captureGeneration) {
+                    this.observedRequestsErrored += 1
+                    this.lastObservedRequestErrorAt = new Date().toISOString()
+                }
+                return false
+            })
+            .finally(() => {
+                if (generation === this._captureGeneration) {
+                    this.pendingObservedRequests = Math.max(0, this.pendingObservedRequests - 1)
+                    this.lastObservedRequestFinishedAt = new Date().toISOString()
+                    this._markCaptureProgressChanged()
+                }
+            })
+    }
+
     addListeners() {
         if (!this.browserApi) return
+        this.resetCaptureStats()
         this.browserApi.tabs?.onRemoved?.addListener?.(this.onRemoved)
         this.browserApi.webRequest?.onCompleted?.addListener?.(
             this.onCompleted,
@@ -555,13 +639,13 @@ export class DastCaptureAdapter {
 
     onResponseStarted(response) {
         if (!this._shouldCaptureResponse(response)) return
-        this.enqueueObservedRequest(response).catch(() => false)
+        this._trackObservedRequest(this.enqueueObservedRequest(response))
     }
 
     onHeadersReceived(response) {
         if (!this._shouldCaptureResponse(response, { allowHtmlDiscoveryBypass: true })) return
         try {
-            this.enqueueObservedRequest(response, 2).catch(() => false)
+            this._trackObservedRequest(this.enqueueObservedRequest(response, 2))
             if (this.state.enableSyntheticRedirectRequests) {
                 this._enqueueRedirect(response)
             }
@@ -570,7 +654,7 @@ export class DastCaptureAdapter {
 
     onCompleted(response) {
         if (!this._shouldCaptureResponse(response, { allowHtmlDiscoveryBypass: true })) return
-        this.enqueueObservedRequest(response, 2).catch(() => false)
+        this._trackObservedRequest(this.enqueueObservedRequest(response, 2))
     }
 }
 

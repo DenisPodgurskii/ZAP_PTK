@@ -74,6 +74,59 @@ function findRequestEntry(scanResult = {}, finding = {}) {
     return null
 }
 
+function toStatusCode(value) {
+    const num = Number(value)
+    if (!Number.isFinite(num)) return 200
+    return Math.max(100, Math.min(599, Math.round(num)))
+}
+
+function defaultReasonPhrase(statusCode) {
+    switch (statusCode) {
+    case 201:
+        return 'Created'
+    case 202:
+        return 'Accepted'
+    case 204:
+        return 'No Content'
+    case 301:
+        return 'Moved Permanently'
+    case 302:
+        return 'Found'
+    case 304:
+        return 'Not Modified'
+    case 400:
+        return 'Bad Request'
+    case 401:
+        return 'Unauthorized'
+    case 403:
+        return 'Forbidden'
+    case 404:
+        return 'Not Found'
+    case 500:
+        return 'Internal Server Error'
+    default:
+        return statusCode >= 400 ? 'Error' : 'OK'
+    }
+}
+
+function buildRawRequest({ method, url }) {
+    const requestMethod = toNonEmptyString(method) || 'GET'
+    const requestUrl = toNonEmptyString(url) || '/'
+    let host = ''
+    try {
+        host = new URL(requestUrl).host
+    } catch (_) {
+        host = ''
+    }
+    const headers = host ? `\r\nHost: ${host}` : ''
+    return `${requestMethod} ${requestUrl} HTTP/1.1${headers}\r\n\r\n`
+}
+
+function buildRawResponse({ statusCode }) {
+    const code = toStatusCode(statusCode)
+    return `HTTP/1.1 ${code} ${defaultReasonPhrase(code)}\r\n\r\n`
+}
+
 function buildLocation(finding = {}, { scanResult = null } = {}) {
     const location = toObject(finding.location) || {}
     const routing = toObject(finding?.evidence?.iast?.routing) || {}
@@ -187,6 +240,7 @@ export function toIastFinding(finding, { scanId, scanResult } = {}) {
     const location = buildLocation(finding, { scanResult })
     if (!moduleId || !ruleId || !location) return null
 
+    const requestEntry = findRequestEntry(scanResult, finding)
     const source = buildSource(finding)
     const sink = buildSink(finding)
     const context = buildContext(finding)
@@ -195,6 +249,9 @@ export function toIastFinding(finding, { scanId, scanResult } = {}) {
     const evidence = toObject(finding?.evidence?.iast) || {}
     const proof = buildProof(finding)
     const summary = buildRootSummary({ finding, proof, source, sink })
+
+    const method = location.method || toNonEmptyString(requestEntry?.method) || 'GET'
+    const statusCode = toStatusCode(requestEntry?.status || requestEntry?.statusCode)
 
     return {
         id: toNonEmptyString(finding.id) || fingerprint,
@@ -206,6 +263,15 @@ export function toIastFinding(finding, { scanId, scanResult } = {}) {
         summary,
         location,
         proof,
+        request: {
+            method,
+            url: location.url,
+            raw: buildRawRequest({ method, url: location.url })
+        },
+        response: {
+            statusCode,
+            raw: buildRawResponse({ statusCode })
+        },
         source,
         sink,
         trace: truncate(evidence.trace, 2048),

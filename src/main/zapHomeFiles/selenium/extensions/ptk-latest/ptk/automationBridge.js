@@ -12,6 +12,7 @@
     }
 
     const VERSION = document.currentScript?.dataset?.ptkVersion || 'unknown'
+    const EXTENSION_ORIGIN = document.currentScript?.dataset?.ptkExtensionOrigin || ''
     const BRIDGE_ID = 'ptk-automation-bridge'
     const bridgeGeneration = Number(window.__PTK_AUTOMATION_BRIDGE_GENERATION__ || 0) + 1
     window.__PTK_AUTOMATION_BRIDGE_GENERATION__ = bridgeGeneration
@@ -53,6 +54,14 @@
 
     function sessionIdForBridgeLookup(options = {}) {
         return options?.sessionId || (usesStrictCurrentTabScope(options) ? null : currentSessionId)
+    }
+
+    function isZapBrowserCloseOptions(options = {}) {
+        return options?.source === 'zap_browser_close'
+            && typeof options?.sessionId === 'string'
+            && options.sessionId.trim() !== ''
+            && typeof options?.zapid === 'string'
+            && options.zapid.trim() !== ''
     }
 
     function bridgeError(message, response = {}) {
@@ -203,6 +212,7 @@
                     ? Array.from(PTK_AUTOMATION_CAPABILITIES)
                     : [],
                 automationEnabled: enabled,
+                extensionOrigin: EXTENSION_ORIGIN || undefined,
                 error: enabled ? undefined : 'automation_disabled'
             }
         },
@@ -275,7 +285,8 @@
          * @returns {Promise<{ok: true, status?: string, stats?: Object, findings?: Array, truncated?: boolean} | {ok: false, error: string, stats: Object}>}
          */
         async endSession(options = {}) {
-            if (this._automationEnabled === false) {
+            const zapBrowserClose = isZapBrowserCloseOptions(options)
+            if (this._automationEnabled === false && !zapBrowserClose) {
                 return { ok: false, error: 'automation_disabled' }
             }
             // Background looks up session by tabId - no need to check locally
@@ -286,7 +297,8 @@
                         sessionId: options?.sessionId,
                         sessionScope: options?.sessionScope,
                         stopTimeoutMs: options?.stopTimeoutMs,
-                        source: options?.source
+                        source: options?.source,
+                        zapid: options?.zapid
                     },
                     wait: options?.wait !== false,  // default true
                     includeFindings: options?.includeFindings === true,
@@ -328,7 +340,8 @@
          * @returns {Promise<{ok: true, sessionId: string, status: string, engines: Object, summary: Object, warnings?: Array, finalSummary?: Object} | {ok: false, error: string}>}
          */
         async getSessionProgress(options = {}) {
-            if (this._automationEnabled === false) {
+            const zapBrowserClose = isZapBrowserCloseOptions(options)
+            if (this._automationEnabled === false && !zapBrowserClose) {
                 return { ok: false, error: 'automation_disabled' }
             }
 
@@ -436,9 +449,20 @@
             if (this._automationEnabled === false) {
                 return { ok: false, error: 'automation_disabled' }
             }
+            if (options?.includeSecrets === true || String(options?.exportMode || '').toLowerCase() === 'replayable') {
+                return { ok: false, error: 'replayable_export_requires_privileged_extension_export' }
+            }
 
             try {
-                const response = await sendMessage('export-scan', { options })
+                const response = await sendMessage('export-scan', {
+                    options: {
+                        ...options,
+                        sessionId: options?.sessionId || currentSessionId || undefined,
+                        sessionScope: PTK_AGENT_SESSION_SCOPE,
+                        exportMode: 'evidence',
+                        includeSecrets: false
+                    }
+                })
                 if (response.error) {
                     return {
                         ok: false,
@@ -470,9 +494,19 @@
             if (this._automationEnabled === false) {
                 return { ok: false, error: 'automation_disabled' }
             }
+            if (options?.includeSecrets === true || String(options?.exportMode || '').toLowerCase() === 'replayable') {
+                return { ok: false, error: 'replayable_export_requires_privileged_extension_export' }
+            }
 
             try {
-                const response = await sendMessage('export-scan-chunk', { options })
+                const response = await sendMessage('export-scan-chunk', {
+                    options: {
+                        ...options,
+                        sessionScope: PTK_AGENT_SESSION_SCOPE,
+                        exportMode: 'evidence',
+                        includeSecrets: false
+                    }
+                })
                 // Normalise low-level failure variants from the extension side into one bridge-level check
                 if (response.ok === false || response.success === false) {
                     return { ok: false, error: response.error || 'export_not_found_or_expired' }
@@ -508,9 +542,19 @@
             if (this._automationEnabled === false) {
                 return { ok: false, error: 'automation_disabled' }
             }
+            if (options?.includeSecrets === true || String(options?.exportMode || '').toLowerCase() === 'replayable') {
+                return { ok: false, error: 'replayable_export_requires_privileged_extension_export' }
+            }
 
             try {
-                const response = await sendMessage('release-export-scan', { options })
+                const response = await sendMessage('release-export-scan', {
+                    options: {
+                        ...options,
+                        sessionScope: PTK_AGENT_SESSION_SCOPE,
+                        exportMode: 'evidence',
+                        includeSecrets: false
+                    }
+                })
                 if (response.ok === false || response.success === false) {
                     return { ok: false, error: response.error || 'export_not_found_or_expired' }
                 }
