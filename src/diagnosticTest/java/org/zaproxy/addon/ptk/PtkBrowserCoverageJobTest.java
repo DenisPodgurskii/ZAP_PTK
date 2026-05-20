@@ -36,6 +36,29 @@ class PtkBrowserCoverageJobTest {
         assertTrue(progress.getErrors().get(0).contains("not_browser_loaded"));
     }
 
+    @Test
+    void browserCoverageWaitHonoursPageDwellBeforePtkSessionSatisfaction() {
+        long minDwellDeadlineMs = 10_000L;
+
+        assertEquals(5_000L, PtkBrowserCoverageTiming.pageDwellMs(5));
+        assertEquals(
+                false,
+                PtkBrowserCoverageTiming.coverageWaitComplete(
+                        9_999L, minDwellDeadlineMs, true, true));
+        assertEquals(
+                true,
+                PtkBrowserCoverageTiming.coverageWaitComplete(
+                        10_000L, minDwellDeadlineMs, true, true));
+        assertEquals(
+                false,
+                PtkBrowserCoverageTiming.coverageWaitComplete(
+                        10_000L, minDwellDeadlineMs, false, true));
+        assertEquals(
+                true,
+                PtkBrowserCoverageTiming.coverageWaitComplete(
+                        10_000L, minDwellDeadlineMs, false, false));
+    }
+
     private static ExtensionPtk newPtkForTest() {
         // ExtensionPtk is expected to stay side-effect free at construction time.
         return new ExtensionPtk();

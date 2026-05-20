@@ -260,29 +260,6 @@ class ExtensionPtkCloseContractTest {
     }
 
     @Test
-    void browserCoverageWaitHonoursPageDwellBeforePtkSessionSatisfaction() {
-        long minDwellDeadlineMs = 10_000L;
-
-        assertEquals(5_000L, PtkBrowserCoverageTiming.pageDwellMs(5));
-        assertEquals(
-                false,
-                PtkBrowserCoverageTiming.coverageWaitComplete(
-                        9_999L, minDwellDeadlineMs, true, true));
-        assertEquals(
-                true,
-                PtkBrowserCoverageTiming.coverageWaitComplete(
-                        10_000L, minDwellDeadlineMs, true, true));
-        assertEquals(
-                false,
-                PtkBrowserCoverageTiming.coverageWaitComplete(
-                        10_000L, minDwellDeadlineMs, false, true));
-        assertEquals(
-                true,
-                PtkBrowserCoverageTiming.coverageWaitComplete(
-                        10_000L, minDwellDeadlineMs, false, false));
-    }
-
-    @Test
     void browserCoverageDetectsFragmentTargetsForExactNavigation() {
         assertEquals(true, PtkUrlUtils.hasFragment("https://example.test/a#x"));
         assertEquals(true, PtkUrlUtils.hasFragment("https://example.test/a?q=1#x"));

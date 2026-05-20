@@ -3241,6 +3241,97 @@
           }
         }
       ]
+    },
+    "angularjs:$parse": {
+      "id": "angularjs:$parse",
+      "description": "AngularJS $parse(expression) evaluates an Angular expression string.",
+      "framework": "angularjs",
+      "api": "$parse(expression)",
+      "argIndex": 0,
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "identifier": "$parse"
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "calleeProp": "$parse",
+            "argIndex": 0
+          }
+        }
+      ]
+    },
+    "angularjs:$interpolate": {
+      "id": "angularjs:$interpolate",
+      "description": "AngularJS $interpolate(template) compiles interpolation expressions.",
+      "framework": "angularjs",
+      "api": "$interpolate(template)",
+      "argIndex": 0,
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "identifier": "$interpolate"
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "calleeProp": "$interpolate",
+            "argIndex": 0
+          }
+        }
+      ]
+    },
+    "angularjs:$compile": {
+      "id": "angularjs:$compile",
+      "description": "AngularJS $compile(template) compiles attacker-influenced markup and expressions.",
+      "framework": "angularjs",
+      "api": "$compile(template)",
+      "argIndex": 0,
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "identifier": "$compile"
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "calleeProp": "$compile",
+            "argIndex": 0
+          }
+        }
+      ]
+    },
+    "angularjs:template_interpolation_literal": {
+      "id": "angularjs:template_interpolation_literal",
+      "description": "AngularJS template text containing {{...}} or custom [[...]] interpolation delimiters.",
+      "framework": "angularjs",
+      "api": "AngularJS interpolation template",
+      "pattern": [
+        {
+          "literalRegex": "(?:\\{\\{|\\[\\[)[\\s\\S]{0,200}(?:\\}\\}|\\]\\])"
+        }
+      ]
+    },
+    "angularjs:ng_expression_attribute_literal": {
+      "id": "angularjs:ng_expression_attribute_literal",
+      "description": "AngularJS ng-* attributes that evaluate expression strings, such as ng-class or ng-submit.",
+      "framework": "angularjs",
+      "api": "ng-* expression attribute",
+      "pattern": [
+        {
+          "literalRegex": "ng-(?:class|style|if|init|click|submit|include|switch|repeat)\\s*="
+        }
+      ]
     }
   },
   "sources": {
@@ -4558,6 +4649,125 @@
           }
         }
       ]
+    },
+    "dom:location_search": {
+      "id": "dom:location_search",
+      "description": "URL query string via location.search / window.location.search.",
+      "pattern": [
+        {
+          "member": [
+            "location",
+            "search"
+          ]
+        },
+        {
+          "member": [
+            "window",
+            "location",
+            "search"
+          ]
+        },
+        {
+          "member": [
+            "document",
+            "location",
+            "search"
+          ]
+        }
+      ]
+    },
+    "dom:document_cookie_read": {
+      "id": "dom:document_cookie_read",
+      "description": "Read of document.cookie.",
+      "pattern": [
+        {
+          "member": [
+            "document",
+            "cookie"
+          ]
+        },
+        {
+          "member": [
+            "window",
+            "document",
+            "cookie"
+          ]
+        }
+      ]
+    },
+    "dom:localStorage_getItem": {
+      "id": "dom:localStorage_getItem",
+      "description": "Read from localStorage via getItem or property access.",
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "localStorage",
+                "getItem"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "window",
+                "localStorage",
+                "getItem"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "member": [
+            "localStorage",
+            "*"
+          ]
+        }
+      ]
+    },
+    "dom:postMessage_event_data": {
+      "id": "dom:postMessage_event_data",
+      "description": "message event data received through postMessage.",
+      "pattern": [
+        {
+          "member": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "member": [
+            "e",
+            "data"
+          ]
+        },
+        {
+          "member": [
+            "message",
+            "data"
+          ]
+        }
+      ]
+    },
+    "dom:form_input_value": {
+      "id": "dom:form_input_value",
+      "description": "Client-side form input values.",
+      "pattern": [
+        {
+          "memberProp": "value"
+        },
+        {
+          "call": {
+            "calleeProp": "val",
+            "argIndex": 0
+          }
+        }
+      ]
     }
   },
   "sanitizers": {
@@ -5080,6 +5290,11 @@
           "argIndex": 0
         }
       }
+    },
+    "angularjs:constant_expression_allowlist": {
+      "id": "angularjs:constant_expression_allowlist",
+      "description": "Project-specific allow-list proving the expression/template is not attacker-controlled. This is intentionally a placeholder; do not treat $sce.trustAs* as a sanitizer for expression injection.",
+      "pattern": []
     }
   },
   "propagators": {

@@ -8,10 +8,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.logging.log4j.LogManager;
@@ -28,7 +28,6 @@ import org.parosproxy.paros.extension.ExtensionAdaptor;
 import org.parosproxy.paros.extension.ExtensionHook;
 import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMessage;
-import org.zaproxy.addon.automation.ExtensionAutomation;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
 import org.zaproxy.addon.client.ClientCallBackUtils;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
@@ -247,25 +246,14 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private static final Logger LOGGER = LogManager.getLogger(ExtensionPtk.class);
     private static final String PREFIX = "ptk";
     private static final Gson GSON = new Gson();
-    private static final List<String> PTK_CHROMIUM_BACKGROUND_ARGS =
-            List.of(
-                    "--disable-component-update",
-                    "--disable-domain-reliability",
-                    "--disable-search-engine-choice-screen",
-                    "--no-default-browser-check",
-                    "--proxy-bypass-list=<-loopback>;*.delivery.mp.microsoft.com;edgeassetservice.azureedge.net;edge.microsoft.com",
-                    "--disable-features=AutofillServerCommunication,CertificateTransparencyComponentUpdater,EdgeShoppingAssistant,MediaRouter,OptimizationHints,msEdgeAssetDeliveryService,msEdgeHubApps");
 
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
-            List.of(
-                    ExtensionClientIntegration.class,
-                    ExtensionSelenium.class,
-                    ExtensionAutomation.class);
+            List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
 
     private ClientCallBackImplementor callBackImplementor;
-    private PtkBrowserCoverageJob browserCoverageJob;
     private PtkOptionsPanel optionsPanel;
     private PtkParam ptkParam;
+    private final List<PtkDiagnosticExtension> diagnosticExtensions = new ArrayList<>();
     private final Object configCacheLock = new Object();
     private volatile PtkResourcesLoader.LoadedPtkResources cachedResources;
     private volatile String cachedConfigKey;
@@ -312,18 +300,18 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 .getExtensionLoader()
                 .getExtension(ExtensionClientIntegration.class)
                 .registerClientCallBack(callBackImplementor);
-        ExtensionAutomation extensionAutomation =
-                Control.getSingleton().getExtensionLoader().getExtension(ExtensionAutomation.class);
-        if (extensionAutomation != null) {
-            browserCoverageJob = new PtkBrowserCoverageJob(this);
-            extensionAutomation.registerAutomationJob(browserCoverageJob);
-        }
         ensurePtkSeleniumExtensionsConfigured(
                 Control.getSingleton().getExtensionLoader().getExtension(ExtensionSelenium.class));
+        loadDiagnosticExtensions(extensionHook);
         extensionHook.addOptionsParamSet(getParam());
         if (hasView()) {
             extensionHook.getHookView().addOptionPanel(getOptionsPanel());
         }
+    }
+
+    @Override
+    public void postInit() {
+        super.postInit();
     }
 
     private PtkOptionsPanel getOptionsPanel() {
@@ -347,18 +335,47 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
 
     @Override
     public void unload() {
+        unloadDiagnosticExtensions();
         Control.getSingleton()
                 .getExtensionLoader()
                 .getExtension(ExtensionClientIntegration.class)
                 .unregisterClientCallBack(callBackImplementor);
-        ExtensionAutomation extensionAutomation =
-                Control.getSingleton().getExtensionLoader().getExtension(ExtensionAutomation.class);
-        if (extensionAutomation != null && browserCoverageJob != null) {
-            extensionAutomation.unregisterAutomationJob(browserCoverageJob);
-        }
         if (optionsPanel != null) {
             optionsPanel.unload();
         }
+    }
+
+    private void loadDiagnosticExtensions(ExtensionHook extensionHook) {
+        ServiceLoader<PtkDiagnosticExtension> loader =
+                ServiceLoader.load(PtkDiagnosticExtension.class, getClass().getClassLoader());
+        for (PtkDiagnosticExtension diagnosticExtension : loader) {
+            try {
+                diagnosticExtension.hook(this, extensionHook);
+                diagnosticExtensions.add(diagnosticExtension);
+                LOGGER.warn(
+                        "PTK diagnostic extension loaded: {}",
+                        diagnosticExtension.getClass().getName());
+            } catch (RuntimeException e) {
+                LOGGER.warn(
+                        "PTK diagnostic extension failed to load class={} reason={}",
+                        diagnosticExtension.getClass().getName(),
+                        e.getMessage());
+            }
+        }
+    }
+
+    private void unloadDiagnosticExtensions() {
+        for (PtkDiagnosticExtension diagnosticExtension : diagnosticExtensions) {
+            try {
+                diagnosticExtension.unload(this);
+            } catch (RuntimeException e) {
+                LOGGER.warn(
+                        "PTK diagnostic extension failed to unload class={} reason={}",
+                        diagnosticExtension.getClass().getName(),
+                        e.getMessage());
+            }
+        }
+        diagnosticExtensions.clear();
     }
 
     @Override
@@ -391,62 +408,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             if (changed) {
                 options.setBrowserExtensions(extensions);
             }
-            ensurePtkSeleniumBrowserArguments(options);
             logConfiguredPtkExtensions(extensions);
         } catch (Exception e) {
             LOGGER.warn("PTK Selenium extension config failed: {}", e.getMessage());
-        }
-    }
-
-    private static void ensurePtkSeleniumBrowserArguments(SeleniumOptions options) {
-        for (String browserId :
-                Arrays.asList("chrome", "chrome-headless", "edge", "edge-headless")) {
-            for (String argument : PTK_CHROMIUM_BACKGROUND_ARGS) {
-                ensurePtkSeleniumBrowserArgument(options, browserId, argument);
-            }
-        }
-    }
-
-    private static void ensurePtkSeleniumBrowserArgument(
-            SeleniumOptions options, String browserId, String argument) {
-        try {
-            Class<?> browserArgumentClass =
-                    Class.forName("org.zaproxy.zap.extension.selenium.internal.BrowserArgument");
-            Method getBrowserArguments =
-                    SeleniumOptions.class.getDeclaredMethod("getBrowserArguments", String.class);
-            Method addBrowserArgument =
-                    SeleniumOptions.class.getDeclaredMethod(
-                            "addBrowserArgument", String.class, browserArgumentClass);
-            getBrowserArguments.setAccessible(true);
-            addBrowserArgument.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            List<Object> existing = (List<Object>) getBrowserArguments.invoke(options, browserId);
-            if (existing != null) {
-                for (Object candidate : existing) {
-                    if (candidate == null) {
-                        continue;
-                    }
-                    Method getArgument = candidate.getClass().getMethod("getArgument");
-                    if (argument.equals(getArgument.invoke(candidate))) {
-                        return;
-                    }
-                }
-            }
-            Object browserArgument =
-                    browserArgumentClass
-                            .getConstructor(String.class, boolean.class)
-                            .newInstance(argument, true);
-            addBrowserArgument.invoke(options, browserId, browserArgument);
-            LOGGER.debug(
-                    "PTK Selenium browser argument registered browser={} arg={}",
-                    browserId,
-                    argument);
-        } catch (ReflectiveOperationException | RuntimeException e) {
-            LOGGER.warn(
-                    "PTK_REFLECTION_FALLBACK component=selenium-browser-argument browser={} arg={} reason={}",
-                    browserId,
-                    argument,
-                    e.getMessage());
         }
     }
 

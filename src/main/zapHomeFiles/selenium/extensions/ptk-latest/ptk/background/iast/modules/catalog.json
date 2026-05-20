@@ -827,6 +827,35 @@
             "title": "DOMPurify dangerous configuration",
             "category": "xss",
             "defaultSeverity": "medium"
+        },
+        "angularjs.parse.expression": {
+            "id": "angularjs.parse.expression",
+            "description": "AngularJS $parse(expression) / expression parser sink.",
+            "hook": {
+                "kind": "methodCall",
+                "objectPath": "angularjs",
+                "method": "parse",
+                "argIndex": 0
+            },
+            "hookGroups": [
+                "hook.code.exec"
+            ],
+            "category": "xss"
+        },
+        "angularjs.compile.template": {
+            "id": "angularjs.compile.template",
+            "description": "AngularJS $compile(template) or interpolation compile sink.",
+            "hook": {
+                "kind": "methodCall",
+                "objectPath": "angularjs",
+                "method": "compile",
+                "argIndex": 0
+            },
+            "hookGroups": [
+                "hook.dom.htmlAssignments",
+                "hook.code.exec"
+            ],
+            "category": "xss"
         }
     },
     "sources": {

@@ -2556,590 +2556,16 @@
                 ]
               },
               {
-                "or": [
+                "ptkExecutedDiffers": [
                   {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.0.metadata.id"
-                          },
-                          "jwt_probe_no_both"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.0.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.0.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.0.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
+                    "var": "module.executed"
                   },
+                  [
+                    "jwt_probe_no_cookie",
+                    "jwt_probe_no_both"
+                  ],
                   {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.1.metadata.id"
-                          },
-                          "jwt_probe_no_both"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.1.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.1.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.1.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.2.metadata.id"
-                          },
-                          "jwt_probe_no_both"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.2.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.2.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.2.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.3.metadata.id"
-                          },
-                          "jwt_probe_no_both"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.3.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.3.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.3.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.4.metadata.id"
-                          },
-                          "jwt_probe_no_both"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.4.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.4.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.4.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "or": [
-                  {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.0.metadata.id"
-                          },
-                          "jwt_probe_no_cookie"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.0.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.0.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.0.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.1.metadata.id"
-                          },
-                          "jwt_probe_no_cookie"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.1.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.1.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.1.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.2.metadata.id"
-                          },
-                          "jwt_probe_no_cookie"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.2.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.2.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.2.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.3.metadata.id"
-                          },
-                          "jwt_probe_no_cookie"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.3.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.3.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.3.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "and": [
-                      {
-                        "==": [
-                          {
-                            "var": "module.executed.4.metadata.id"
-                          },
-                          "jwt_probe_no_cookie"
-                        ]
-                      },
-                      {
-                        "or": [
-                          {
-                            "!": {
-                              "==": [
-                                {
-                                  "var": "module.executed.4.response.statusCode"
-                                },
-                                {
-                                  "var": "original.response.statusCode"
-                                }
-                              ]
-                            }
-                          },
-                          {
-                            ">": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.4.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              30
-                            ]
-                          },
-                          {
-                            "<": [
-                              {
-                                "-": [
-                                  {
-                                    "var": "module.executed.4.response.length"
-                                  },
-                                  {
-                                    "var": "original.response.length"
-                                  }
-                                ]
-                              },
-                              -30
-                            ]
-                          }
-                        ]
-                      }
-                    ]
+                    "var": "original.response"
                   }
                 ]
               }
@@ -4289,7 +3715,9 @@
                                 {
                                   "var": "module.executed.0.response.body"
                                 },
-                                "No Authorization header was found|credentials_required"
+                                {
+                                  "var": "attack.metadata.constants.authRequiredBodyRegex"
+                                }
                               ]
                             },
                             {
@@ -4298,7 +3726,9 @@
                                   {
                                     "var": "attack.response.body"
                                   },
-                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                  {
+                                    "var": "attack.metadata.constants.jwtAuthErrorBodyRegex"
+                                  }
                                 ]
                               }
                             },
@@ -4409,7 +3839,9 @@
                                 {
                                   "var": "module.executed.1.response.body"
                                 },
-                                "No Authorization header was found|credentials_required"
+                                {
+                                  "var": "attack.metadata.constants.authRequiredBodyRegex"
+                                }
                               ]
                             },
                             {
@@ -4418,7 +3850,9 @@
                                   {
                                     "var": "attack.response.body"
                                   },
-                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                  {
+                                    "var": "attack.metadata.constants.jwtAuthErrorBodyRegex"
+                                  }
                                 ]
                               }
                             },
@@ -4529,7 +3963,9 @@
                                 {
                                   "var": "module.executed.2.response.body"
                                 },
-                                "No Authorization header was found|credentials_required"
+                                {
+                                  "var": "attack.metadata.constants.authRequiredBodyRegex"
+                                }
                               ]
                             },
                             {
@@ -4538,7 +3974,9 @@
                                   {
                                     "var": "attack.response.body"
                                   },
-                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                  {
+                                    "var": "attack.metadata.constants.jwtAuthErrorBodyRegex"
+                                  }
                                 ]
                               }
                             },
@@ -4649,7 +4087,9 @@
                                 {
                                   "var": "module.executed.3.response.body"
                                 },
-                                "No Authorization header was found|credentials_required"
+                                {
+                                  "var": "attack.metadata.constants.authRequiredBodyRegex"
+                                }
                               ]
                             },
                             {
@@ -4658,7 +4098,9 @@
                                   {
                                     "var": "attack.response.body"
                                   },
-                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                  {
+                                    "var": "attack.metadata.constants.jwtAuthErrorBodyRegex"
+                                  }
                                 ]
                               }
                             },
@@ -4769,7 +4211,9 @@
                                 {
                                   "var": "module.executed.4.response.body"
                                 },
-                                "No Authorization header was found|credentials_required"
+                                {
+                                  "var": "attack.metadata.constants.authRequiredBodyRegex"
+                                }
                               ]
                             },
                             {
@@ -4778,7 +4222,9 @@
                                   {
                                     "var": "attack.response.body"
                                   },
-                                  "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+                                  {
+                                    "var": "attack.metadata.constants.jwtAuthErrorBodyRegex"
+                                  }
                                 ]
                               }
                             },
@@ -5187,7 +4633,10 @@
             "docs": {
               "description": "Replace JWT in Authorization: Bearer <token> header."
             },
-            "constants": {},
+            "constants": {
+              "authRequiredBodyRegex": "No Authorization header was found|credentials_required",
+              "jwtAuthErrorBodyRegex": "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+            },
             "extensions": {}
           }
         },

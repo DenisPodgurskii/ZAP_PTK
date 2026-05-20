@@ -433,7 +433,11 @@ export class SastSessionCoordinator {
         retryDelayMs
       });
       if (opts?.expectedUrl && payload?.file && !sameDocumentUrl(payload.file, opts.expectedUrl)) {
-        throw new Error(`sast_payload_url_mismatch:${payload.file}`);
+        this.recordTiming("sast.payload.stale", {
+          expectedUrl: opts.expectedUrl,
+          actualUrl: payload.file
+        }, null, "sast.payload.stale");
+        return [];
       }
       const scriptsCount = Array.isArray(payload?.scripts) ? payload.scripts.length : 0;
       const htmlChars = typeof payload?.html === "string"

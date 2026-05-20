@@ -605,14 +605,6 @@ export class ptk_automation {
             }
         }
 
-        if (isTopFrame && isZapActive && isHttpZapTargetUrl(safeUrl)) {
-            return {
-                mode: CONTENT_RUNTIME_MODE_AUTOMATION,
-                script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
-                reason: 'zap_active_target'
-            }
-        }
-
         return {
             mode: CONTENT_RUNTIME_MODE_MANUAL,
             script: CONTENT_RUNTIME_SCRIPT_MANUAL,

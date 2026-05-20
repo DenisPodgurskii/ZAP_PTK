@@ -64,6 +64,7 @@ export class ptk_module {
 
         jsonLogic.add_operation("regex", this.op_regex)
         jsonLogic.add_operation("proof", this.op_proof)
+        jsonLogic.add_operation("ptkExecutedDiffers", this.op_executedDiffers)
     }
 
     _moduleExecutionConfig() {
@@ -147,6 +148,32 @@ export class ptk_module {
                 proof = obj.match(pattern)[0]
         }
         return proof
+    }
+
+    op_executedDiffers(executed, expectedIds, baselineResponse) {
+        const entries = Array.isArray(executed) ? executed : []
+        const ids = new Set(
+            (Array.isArray(expectedIds) ? expectedIds : [expectedIds])
+                .map((value) => String(value || '').trim())
+                .filter(Boolean)
+        )
+        if (!entries.length || !ids.size) return false
+        const baselineStatus = baselineResponse?.statusCode
+        const baselineLength = Number(baselineResponse?.length)
+        for (const entry of entries) {
+            const entryId = String(entry?.metadata?.id || '').trim()
+            if (!ids.has(entryId)) continue
+            const response = entry?.response || {}
+            const status = response?.statusCode
+            if (baselineStatus != null && status != null && status !== baselineStatus) {
+                return true
+            }
+            const length = Number(response?.length)
+            if (Number.isFinite(length) && Number.isFinite(baselineLength) && Math.abs(length - baselineLength) > 30) {
+                return true
+            }
+        }
+        return false
     }
 
     /* ---------------- internal helpers ---------------- */
