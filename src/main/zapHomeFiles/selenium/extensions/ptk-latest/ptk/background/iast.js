@@ -776,6 +776,7 @@ export class ptk_iast {
         this._pageFindingIds = new Map()
         this._iastFindingAggregateIndex = new Map()
         this._runtimeEventIndex = new Map()
+        this.relatedScanTabs = new Map()
         this._missingPageCounter = 0
         this._persistTimer = null
         this._persistDebounceMs = 1000
@@ -920,6 +921,7 @@ export class ptk_iast {
         this.requestLookup = new Map()
         this._requestLookupByUrl = new Map()
         this._iastFindingAggregateIndex = new Map()
+        this.relatedScanTabs = new Map()
         this._resetRuntimeEventIndex()
         this._resetPageIndexes()
         if (this._persistTimer) {
@@ -1156,6 +1158,126 @@ export class ptk_iast {
         await ptk_storage.setItem(this.storageKey, {})
     }
 
+    _normalizeTabId(tabId) {
+        const numeric = Number(tabId)
+        return Number.isInteger(numeric) && numeric >= 0 ? numeric : null
+    }
+
+    _primaryScanTabId() {
+        return this._normalizeTabId(this.scanResult?.tabId)
+    }
+
+    isTrackedScanTab(tabId) {
+        const normalized = this._normalizeTabId(tabId)
+        if (!this.isScanRunning || normalized === null) return false
+        const primary = this._primaryScanTabId()
+        return normalized === primary || this.relatedScanTabs?.has?.(normalized) === true
+    }
+
+    _trackedScanTabIds() {
+        const ids = []
+        const primary = this._primaryScanTabId()
+        if (primary !== null) ids.push(primary)
+        for (const tabId of this.relatedScanTabs?.keys?.() || []) {
+            if (!ids.includes(tabId)) ids.push(tabId)
+        }
+        return ids
+    }
+
+    getRelatedScanTabMeta(tabId) {
+        const normalized = this._normalizeTabId(tabId)
+        if (normalized === null) return null
+        return this.relatedScanTabs?.get?.(normalized) || null
+    }
+
+    registerRelatedScanTab(tabId, meta = {}) {
+        const normalized = this._normalizeTabId(tabId)
+        const primary = this._primaryScanTabId()
+        if (!this.isScanRunning || normalized === null || primary === null || normalized === primary) {
+            return false
+        }
+        const parentTabId = this._normalizeTabId(meta?.parentTabId)
+        if (parentTabId !== null && parentTabId !== primary) {
+            return false
+        }
+        const now = Date.now()
+        const existing = this.relatedScanTabs.get(normalized) || {}
+        this.relatedScanTabs.set(normalized, Object.assign({}, existing, {
+            tabId: normalized,
+            parentTabId: primary,
+            role: String(meta?.role || existing.role || 'ptk_child_tab'),
+            sourceEngine: String(meta?.sourceEngine || existing.sourceEngine || 'DAST'),
+            url: typeof meta?.url === 'string' ? meta.url : (existing.url || null),
+            sessionId: meta?.sessionId || existing.sessionId || null,
+            createdAt: existing.createdAt || now,
+            updatedAt: now
+        }))
+        activeIastTabs.add(normalized)
+        return true
+    }
+
+    async enrollRelatedScanTab(tabId, meta = {}) {
+        if (!this.registerRelatedScanTab(tabId, meta)) return false
+        const normalized = this._normalizeTabId(tabId)
+        clearIastModuleSendTracking(normalized)
+        try {
+            await browser.tabs.sendMessage(normalized, {
+                channel: "ptk_background_iast2content",
+                type: "clean iast result"
+            }).catch(() => { })
+        } catch (_) { }
+        try {
+            await this.injectIastAgent(normalized, this.scanResult?.settings?.iastScanStrategy || 'SMART')
+        } catch (err) {
+            this.agentFailedTabs.set(normalized, err?.message || String(err))
+        }
+        const moduleSendResult = await sendIastModulesToContent(normalized, 1, this.currentRulepackLoadOptions || {})
+        this._recordIastModuleSendResult(moduleSendResult, {
+            scanStrategy: this.scanResult?.settings?.iastScanStrategy || 'SMART'
+        })
+        return true
+    }
+
+    releaseRelatedScanTab(tabId) {
+        const normalized = this._normalizeTabId(tabId)
+        if (normalized === null) return false
+        this.relatedScanTabs.delete(normalized)
+        activeIastTabs.delete(normalized)
+        this.agentReadyTabs.delete(normalized)
+        this.agentFailedTabs.delete(normalized)
+        clearIastModuleSendTracking(normalized)
+        return true
+    }
+
+    _applyRelatedTabEvidence(finding, tabId) {
+        const meta = this.getRelatedScanTabMeta(tabId)
+        if (!meta || !finding || typeof finding !== 'object') return finding
+        if (!finding.evidence || typeof finding.evidence !== 'object') finding.evidence = {}
+        if (!finding.evidence.iast || typeof finding.evidence.iast !== 'object') finding.evidence.iast = {}
+        finding.evidence.iast.automationTab = {
+            tabId: meta.tabId,
+            parentTabId: meta.parentTabId,
+            role: meta.role,
+            sourceEngine: meta.sourceEngine,
+            url: meta.url || null
+        }
+        return finding
+    }
+
+    _applyRelatedTabRuntimeSignal(signal, tabId) {
+        const meta = this.getRelatedScanTabMeta(tabId)
+        if (!meta || !signal || typeof signal !== 'object') return signal
+        return Object.assign({}, signal, {
+            automationTab: {
+                tabId: meta.tabId,
+                parentTabId: meta.parentTabId,
+                role: meta.role,
+                sourceEngine: meta.sourceEngine,
+                url: meta.url || null
+            }
+        })
+    }
+
     addMessageListeners() {
         this.onMessage = this.onMessage.bind(this)
         browser.runtime.onMessage.addListener(this.onMessage)
@@ -1190,6 +1312,10 @@ export class ptk_iast {
 
     onRemoved(tabId, info) {
         clearIastModuleSendTracking(tabId)
+        if (this.relatedScanTabs?.has?.(Number(tabId))) {
+            this.releaseRelatedScanTab(tabId)
+            return
+        }
         if (this.scanResult?.tabId == tabId) {
             this.scanResult.tabId = null
             this.isScanRunning = false
@@ -1199,7 +1325,7 @@ export class ptk_iast {
 
     onCompleted(response) {
         if (!this.isScanRunning) return
-        if (!this.scanResult?.tabId || response.tabId !== this.scanResult.tabId) return
+        if (!this.isTrackedScanTab(response.tabId)) return
 
         if (this.scanResult.host) {
             try {
@@ -1240,7 +1366,7 @@ export class ptk_iast {
 
             if (message.type == 'check') {
                 //console.log('check iast')
-                if (this.isScanRunning && this.scanResult.tabId == sender.tab.id)
+                if (this.isTrackedScanTab(sender?.tab?.id))
                     return Promise.resolve({ loadAgent: true })
                 else
                     return Promise.resolve({ loadAgent: false })
@@ -1251,7 +1377,7 @@ export class ptk_iast {
 
             if (message.type == 'finding_report') {
                 const senderTabId = sender?.tab?.id
-                if (this.isScanRunning && this.scanResult.tabId == sender.tab.id) {
+                if (this.isTrackedScanTab(senderTabId)) {
                     this._incrementIastAutomationTelemetry('findingReportsAccepted', {
                         lastSenderTabId: senderTabId
                     })
@@ -1259,8 +1385,9 @@ export class ptk_iast {
                         const finding = createFindingFromIAST(message.finding, {
                             scanId: this.scanResult.scanId,
                             host: this.scanResult.host,
-                            tabId: this.scanResult.tabId
+                            tabId: senderTabId
                         })
+                        this._applyRelatedTabEvidence(finding, senderTabId)
                         this.addOrUpdateFinding(finding)
                     } catch (e) {
                         console.warn('[PTK IAST][background] createFindingFromIAST failed', e)
@@ -1280,11 +1407,11 @@ export class ptk_iast {
 
             if (message.type === 'runtime_signal') {
                 const senderTabId = sender?.tab?.id
-                if (this.isScanRunning && this.scanResult.tabId == sender.tab.id) {
+                if (this.isTrackedScanTab(senderTabId)) {
                     this._incrementIastAutomationTelemetry('runtimeSignalsAccepted', {
                         lastSenderTabId: senderTabId
                     })
-                    this.addOrUpdateRuntimeSignal(message.signal)
+                    this.addOrUpdateRuntimeSignal(this._applyRelatedTabRuntimeSignal(message.signal, senderTabId))
                 } else {
                     const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
                     this._incrementIastAutomationTelemetry(
@@ -2070,20 +2197,24 @@ export class ptk_iast {
     }
 
     async stopBackgroundScan(options = {}) {
-        browser.tabs.sendMessage(this.scanResult.tabId, {
-            channel: "ptk_background_iast2content",
-            type: "clean iast result"
-        }).catch(() => { })
+        const trackedTabIds = this._trackedScanTabIds()
+        for (const tabId of trackedTabIds) {
+            browser.tabs.sendMessage(tabId, {
+                channel: "ptk_background_iast2content",
+                type: "clean iast result"
+            }).catch(() => { })
+        }
         this.isScanRunning = false
         this.currentRulepackOverride = null
         this.currentRulepackLoadOptions = null
-        activeIastTabs.delete(this.scanResult.tabId)
-        if (this.scanResult?.tabId != null) {
-            this.agentReadyTabs.delete(this.scanResult.tabId)
-            this.agentFailedTabs.delete(this.scanResult.tabId)
-            clearIastModuleSendTracking(this.scanResult.tabId)
+        for (const tabId of trackedTabIds) {
+            activeIastTabs.delete(tabId)
+            this.agentReadyTabs.delete(tabId)
+            this.agentFailedTabs.delete(tabId)
+            clearIastModuleSendTracking(tabId)
         }
         this.scanResult.tabId = null
+        this.relatedScanTabs = new Map()
         this.unregisterScript()
         this.removeListeners()
         this.detachDevtoolsDebugger()

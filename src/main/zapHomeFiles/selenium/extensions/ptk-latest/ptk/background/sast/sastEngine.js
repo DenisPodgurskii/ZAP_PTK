@@ -444,6 +444,25 @@ export class sastEngine {
     return snippets;
   }
 
+  extractInlineJavaScriptUrls(htmlText) {
+    if (typeof htmlText !== "string" || !htmlText) return [];
+    const snippets = [];
+    const seen = new Set();
+    const attrRe = /\b(?:href|xlink:href|action|formaction|src|data)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
+    let match;
+    while ((match = attrRe.exec(htmlText)) !== null) {
+      const rawValue = match[1] ?? match[2] ?? match[3] ?? "";
+      const decoded = decodeHtmlEntities(rawValue).trim();
+      if (!/^javascript\s*:/i.test(decoded)) continue;
+      const snippet = decoded.replace(/^javascript\s*:/i, "").trim();
+      const key = normalizeInlineHandlerSnippetKey(snippet);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      snippets.push(snippet);
+    }
+    return snippets;
+  }
+
   extractScriptsFromPageSource(html, pageUrl = "") {
     if (typeof html !== "string" || !html) return [];
     const pageOrigin = safeOrigin(pageUrl);
@@ -554,7 +573,7 @@ export class sastEngine {
 
       const pageSourceScripts = await this.collectPageSourceScripts(file);
       if (pageSourceScripts.length) {
-        const seen = new Set();
+        const indexByKey = new Map();
         const merged = [];
         const keyForScript = (script) => {
           if (script?.src) return `src:${script.src}`;
@@ -563,12 +582,22 @@ export class sastEngine {
         };
         const addScript = (script) => {
           const key = keyForScript(script);
-          if (!key || seen.has(key)) return;
-          seen.add(key);
+          if (!key) return;
+          if (indexByKey.has(key)) {
+            const index = indexByKey.get(key);
+            const existing = merged[index] || null;
+            const existingCode = typeof existing?.code === "string" ? existing.code : "";
+            const nextCode = typeof script?.code === "string" ? script.code : "";
+            if (!existingCode.trim() && nextCode.trim()) {
+              merged[index] = script;
+            }
+            return;
+          }
+          indexByKey.set(key, merged.length);
           merged.push(script);
         };
-        pageSourceScripts.forEach(addScript);
         (Array.isArray(scripts) ? scripts : []).forEach(addScript);
+        pageSourceScripts.forEach(addScript);
         scripts = merged;
       }
 
@@ -581,7 +610,22 @@ export class sastEngine {
 
       // Content-side collection can send inline handlers directly so we do not
       // have to serialize the full DOM HTML for SAST.
-      const inlineSnippets = this.normalizeInlineHandlersPayload(html);
+      const inlineHandlerSnippets = this.normalizeInlineHandlersPayload(html);
+      const inlineJavaScriptUrlSnippets = Array.isArray(html)
+        ? []
+        : this.extractInlineJavaScriptUrls(html || "");
+      const inlineSnippets = [
+        ...inlineHandlerSnippets.map((code, index) => ({
+          code,
+          label: `inline-onclick[#${index}]`,
+          parseLabel: "inline onclick snippet"
+        })),
+        ...inlineJavaScriptUrlSnippets.map((code, index) => ({
+          code,
+          label: `inline-js-url[#${index}]`,
+          parseLabel: "inline javascript URL snippet"
+        }))
+      ];
       const totalFiles = (Array.isArray(scripts) ? scripts.length : 0) + inlineSnippets.length;
       let collectionSummaryEmitted = false;
       const emptySastArtifacts = () => ({
@@ -757,9 +801,9 @@ export class sastEngine {
       if (inlineSnippets.length) {
         this.events.emit("progress", { message: "Parsing inline scripts", file });
         for (let i = 0; i < inlineSnippets.length; i++) {
-          const snippet = inlineSnippets[i];
+          const snippet = inlineSnippets[i].code;
           const normalizedSnippet = snippet.replace(/(https?:)\/\//g, "$1:\\/\\/");
-          const fileId = pageScopedInlineFileId(`inline-onclick[#${i}]`);
+          const fileId = pageScopedInlineFileId(inlineSnippets[i].label);
           this.events.emit("file:start", { scanId: this._scanId, collectionId, generation, file: fileId, index: seenFiles.length, totalFiles });
           pushFile(fileId);
           const comments = [];
@@ -787,7 +831,7 @@ ${normalizedSnippet}
                 }
               });
             } catch (e2) {
-              console.warn("Failed to parse inline onclick snippet:", snippet, e2);
+              console.warn(`Failed to parse ${inlineSnippets[i].parseLabel}:`, snippet, e2);
               parseFailures.push({
                 file: fileId,
                 error: e2?.message || String(e2)

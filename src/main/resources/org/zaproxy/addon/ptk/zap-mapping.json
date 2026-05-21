@@ -47,6 +47,37 @@
           }
         },
         {
+          "moduleId": "angularjs_client_template_injection",
+          "baseAlertId": 200021,
+          "rules": {
+            "angularjs_csti_reflected_1_0_1_to_1_1_5": 1,
+            "angularjs_csti_expression_1_0_1_to_1_1_5": 2,
+            "angularjs_csti_reflected_short_1_0_1_to_1_1_5": 3,
+            "angularjs_csti_reflected_1_2_0_to_1_2_1": 4,
+            "angularjs_csti_expression_1_2_0_to_1_2_18": 5,
+            "angularjs_csti_reflected_1_2_2_to_1_2_5": 6,
+            "angularjs_csti_reflected_1_2_6_to_1_2_18": 7,
+            "angularjs_csti_expression_1_2_6_to_1_2_18": 8,
+            "angularjs_csti_reflected_1_2_19_to_1_2_23": 9,
+            "angularjs_csti_expression_1_2_19_to_1_2_23": 10,
+            "angularjs_csti_reflected_1_2_24_to_1_2_29": 11,
+            "angularjs_csti_expression_1_2_24_to_1_2_26": 12,
+            "angularjs_csti_expression_breakout_1_2_27_to_1_3_20": 13,
+            "angularjs_csti_reflected_1_4_0_to_1_4_9": 14,
+            "angularjs_csti_expression_1_4_0_to_1_4_5": 15,
+            "angularjs_csti_reflected_1_5_0_to_1_5_8": 16,
+            "angularjs_csti_expression_1_4_2_to_1_5_8": 17,
+            "angularjs_csti_reflected_1_6_plus": 18,
+            "angularjs_csti_expression_1_6_plus": 19,
+            "angularjs_csti_expression_single_quote_1_2_19_to_1_2_23": 20,
+            "angularjs_csti_reflected_eval_1_4_0_to_1_4_9": 21,
+            "angularjs_csti_reflected_entity_default_1_4_0_to_1_4_9": 22,
+            "angularjs_csti_reflected_entity_alt_1_4_0_to_1_4_9": 23,
+            "angularjs_csti_expression_eval_1_4_0_to_1_4_9": 24,
+            "angularjs_csti_reflected_alt_1_6_plus": 25
+          }
+        },
+        {
           "moduleId": "jwt_injection",
           "baseAlertId": 200003,
           "rules": {
@@ -110,6 +141,30 @@
           "baseAlertId": 200007,
           "rules": {
             "spa_dom_xss_default": 1
+          }
+        },
+        {
+          "moduleId": "dom_xss_url_params",
+          "baseAlertId": 200022,
+          "rules": {
+            "dom_xss_url_params_html_img_onerror": 1,
+            "dom_xss_url_params_attr_breakout": 2,
+            "dom_xss_url_params_js_double_quote_breakout": 3,
+            "dom_xss_url_params_js_single_quote_breakout": 4,
+            "dom_xss_url_params_js_template_literal_breakout": 5,
+            "dom_xss_url_params_js_expression": 6,
+            "dom_xss_url_params_js_regex_breakout": 7,
+            "dom_xss_url_params_js_comment_breakout": 8,
+            "dom_xss_url_params_js_script_tag_breakout": 9,
+            "dom_xss_url_params_event_handler_value": 10,
+            "dom_xss_url_params_attribute_name_event": 11,
+            "dom_xss_url_params_attr_double_quote_event": 12,
+            "dom_xss_url_params_attr_double_quote_onerror": 13,
+            "dom_xss_url_params_attr_single_quote_event": 14,
+            "dom_xss_url_params_attr_unquoted_event": 15,
+            "dom_xss_url_params_tagname_svg_event": 16,
+            "dom_xss_url_params_href_javascript_url": 17,
+            "dom_xss_url_params_style_text_breakout": 18
           }
         },
         {
@@ -238,27 +293,19 @@
           }
         },
         {
-          "moduleId": "dom_xss_url_params",
-          "baseAlertId": 200020,
+          "moduleId": "jsonp_callback_injection",
+          "baseAlertId": 200024,
           "rules": {
-            "dom_xss_url_params_html_img_onerror": 1,
-            "dom_xss_url_params_attr_breakout": 2,
-            "dom_xss_url_params_js_double_quote_breakout": 3,
-            "dom_xss_url_params_js_single_quote_breakout": 4,
-            "dom_xss_url_params_js_template_literal_breakout": 5,
-            "dom_xss_url_params_js_expression": 6,
-            "dom_xss_url_params_js_regex_breakout": 7,
-            "dom_xss_url_params_js_comment_breakout": 8,
-            "dom_xss_url_params_event_handler_value": 9,
-            "dom_xss_url_params_attribute_name_event": 10,
-            "dom_xss_url_params_href_javascript_url": 11,
-            "dom_xss_url_params_style_text_breakout": 12,
-            "dom_xss_url_params_js_script_tag_breakout": 13,
-            "dom_xss_url_params_attr_double_quote_event": 14,
-            "dom_xss_url_params_attr_double_quote_onerror": 15,
-            "dom_xss_url_params_attr_single_quote_event": 16,
-            "dom_xss_url_params_attr_unquoted_event": 17,
-            "dom_xss_url_params_tagname_svg_event": 18
+            "jsonp_callback_1": 1
+          }
+        },
+        {
+          "moduleId": "open_redirect",
+          "baseAlertId": 200023,
+          "rules": {
+            "redir_1": 1,
+            "redir_2": 2,
+            "redir_3": 3
           }
         }
       ]
@@ -285,7 +332,18 @@
             "href_javascript_url_execution": 1,
             "location_href_javascript_url_execution": 2,
             "iframe_src_javascript_url_execution": 3,
-            "script_src_data_url_execution": 4
+            "script_src_data_url_execution": 4,
+            "href_data_url_execution": 5,
+            "src_javascript_url_execution": 6,
+            "src_data_url_execution": 7,
+            "location_href_data_url_execution": 8,
+            "location_assign_javascript_url_execution": 9,
+            "location_assign_data_url_execution": 10,
+            "location_replace_javascript_url_execution": 11,
+            "location_replace_data_url_execution": 12,
+            "window_open_javascript_url_execution": 13,
+            "window_open_data_url_execution": 14,
+            "iframe_src_data_url_execution": 15
           }
         },
         {
@@ -306,11 +364,104 @@
           }
         },
         {
+          "moduleId": "iast_angularjs_expression_injection",
+          "baseAlertId": 210009,
+          "rules": {
+            "angularjs_expression_function_constructor": 1,
+            "angularjs_parse_from_form": 2,
+            "angularjs_parse_from_cookie": 3,
+            "angularjs_parse_from_localstorage": 4,
+            "angularjs_parse_from_postmessage": 5
+          }
+        },
+        {
+          "moduleId": "iast_postmessage_misuse",
+          "baseAlertId": 210010,
+          "rules": {
+            "postmessage_star_origin_leak": 1,
+            "postmessage_cross_origin_leak": 2
+          }
+        },
+        {
+          "moduleId": "iast_timer_js_execution",
+          "baseAlertId": 210011,
+          "rules": {
+            "settimeout_string_execution": 1,
+            "setinterval_string_execution": 2
+          }
+        },
+        {
+          "moduleId": "iast_iframe_navigation",
+          "baseAlertId": 210012,
+          "rules": {
+            "iframe_src_redirect": 1,
+            "iframe_srcdoc_xss": 2
+          }
+        },
+        {
+          "moduleId": "iast_client_http_exfiltration",
+          "baseAlertId": 210013,
+          "rules": {
+            "fetch_url_exfiltration": 1,
+            "fetch_headers_exfiltration": 2,
+            "xhr_url_exfiltration": 3,
+            "xhr_body_exfiltration": 4,
+            "xhr_header_exfiltration": 5,
+            "sendbeacon_exfiltration": 6,
+            "image_src_exfiltration": 7
+          }
+        },
+        {
+          "moduleId": "iast_dom_link_manipulation",
+          "baseAlertId": 210014,
+          "rules": {
+            "dom_attr_href_navigation": 1,
+            "dom_attr_src_navigation": 2,
+            "dom_attr_action_navigation": 3,
+            "dom_attr_formaction_navigation": 4
+          }
+        },
+        {
+          "moduleId": "iast_dom_url_navigation",
+          "baseAlertId": 210015,
+          "rules": {
+            "location_href_redirect": 1,
+            "location_assign_redirect": 2,
+            "location_replace_redirect": 3,
+            "history_pushstate_open_redirect": 4,
+            "history_replacestate_route_change": 5
+          }
+        },
+        {
+          "moduleId": "iast_dom_parser_xss",
+          "baseAlertId": 210016,
+          "rules": {
+            "domparser_parsefromstring_html_xss": 1,
+            "range_contextual_fragment_xss": 2,
+            "element_sethtmlunsafe_xss": 3,
+            "shadowroot_sethtmlunsafe_xss": 4
+          }
+        },
+        {
+          "moduleId": "iast_dom_xss_secondary_sources",
+          "baseAlertId": 210017,
+          "rules": {
+            "dom_innerhtml_xss_secondary_sources": 1,
+            "dom_outerhtml_xss_secondary_sources": 2,
+            "dom_insertadjacenthtml_xss_secondary_sources": 3,
+            "document_write_xss_secondary_sources": 4,
+            "dom_inline_event_xss_secondary_sources": 5,
+            "dom_mutation_xss_secondary_sources": 6,
+            "iframe_srcdoc_xss_secondary_sources": 7
+          }
+        },
+        {
           "moduleId": "iast_route_controlled_navigation",
           "baseAlertId": 210004,
           "rules": {
             "route_replacestate_navigation": 1,
-            "route_navigation_api_navigation": 2
+            "route_navigation_api_navigation": 2,
+            "route_pushstate_navigation": 3
           }
         },
         {
@@ -326,7 +477,9 @@
           "baseAlertId": 210006,
           "rules": {
             "form_action_javascript_url_execution": 1,
-            "form_formaction_javascript_url_execution": 2
+            "form_formaction_javascript_url_execution": 2,
+            "form_action_data_url_execution": 3,
+            "form_formaction_data_url_execution": 4
           }
         },
         {
@@ -334,14 +487,46 @@
           "baseAlertId": 210007,
           "rules": {
             "response_dom_innerhtml_reachability": 1,
-            "response_dom_document_write_reachability": 2
+            "response_dom_document_write_reachability": 2,
+            "response_dom_outerhtml_reachability": 3,
+            "response_dom_insertadjacenthtml_reachability": 4,
+            "response_dom_mutation_reachability": 5,
+            "response_dom_parser_reachability": 6,
+            "response_dom_contextual_fragment_reachability": 7,
+            "response_dom_sethtmlunsafe_reachability": 8,
+            "response_dom_shadow_sethtmlunsafe_reachability": 9
           }
         },
         {
           "moduleId": "iast_prototype_pollution_impact",
           "baseAlertId": 210008,
           "rules": {
-            "prototype_pollution_fetch_init": 1
+            "prototype_pollution_fetch_init": 1,
+            "prototype_pollution_write": 2
+          }
+        },
+        {
+          "moduleId": "iast_storage_taint_to_exec",
+          "baseAlertId": 210018,
+          "rules": {
+            "eval_storage_taint_execution": 1,
+            "function_constructor_storage_taint_execution": 2,
+            "function_apply_storage_taint_execution": 3,
+            "settimeout_storage_taint_execution": 4,
+            "setinterval_storage_taint_execution": 5
+          }
+        },
+        {
+          "moduleId": "iast_source_scoped_open_redirect",
+          "baseAlertId": 210019,
+          "rules": {
+            "location_href_redirect_sources": 1,
+            "location_assign_redirect_sources": 2,
+            "location_replace_redirect_sources": 3,
+            "window_open_redirect_sources": 4,
+            "navigation_api_redirect_sources": 5,
+            "dom_attr_href_redirect_sources": 6,
+            "dom_attr_action_redirect_sources": 7
           }
         }
       ]
@@ -390,6 +575,87 @@
             "no-eval-strings": 3,
             "no-function-ctor-strings": 4,
             "javascript-injection-taint": 5
+          }
+        },
+        {
+          "moduleId": "angularjs-expression-injection",
+          "baseAlertId": 220004,
+          "rules": {
+            "angularjs-tainted-dollar-parse": 1,
+            "angularjs-tainted-template-compile": 2,
+            "angularjs-dollar-parse-dynamic-argument": 3,
+            "angularjs-template-compiler-dynamic-argument": 4,
+            "angularjs-interpolation-template-literal": 5,
+            "angularjs-ng-expression-attribute-literal": 6
+          }
+        },
+        {
+          "moduleId": "client-template-injection",
+          "baseAlertId": 220005,
+          "rules": {
+            "dynamic-template-compilation": 1,
+            "template-output-dom-injection": 2,
+            "vue-v-html-template-review": 3,
+            "client-template-injection-taint": 4,
+            "react-dangerouslysetinnerhtml-taint": 5,
+            "lit-unsafehtml-taint": 6
+          }
+        },
+        {
+          "moduleId": "network-destination-poisoning",
+          "baseAlertId": 220006,
+          "rules": {
+            "sendbeacon-review": 1,
+            "sendbeacon-body-review": 2,
+            "eventsource-constructor-review": 3,
+            "axios-direct-request-review": 4,
+            "network-destination-url-taint": 5
+          }
+        },
+        {
+          "moduleId": "client-script-loader-poisoning",
+          "baseAlertId": 220007,
+          "rules": {
+            "jquery-getscript-review": 1,
+            "systemjs-import-review": 2,
+            "dynamic-import-review": 3,
+            "worker-constructor-review": 4,
+            "sharedworker-constructor-review": 5,
+            "serviceworker-register-review": 6,
+            "importscripts-review": 7,
+            "script-loader-url-taint": 8
+          }
+        },
+        {
+          "moduleId": "web-message",
+          "baseAlertId": 220008,
+          "rules": {
+            "postmessage-wildcard-target": 1,
+            "postmessage-missing-target": 2,
+            "weak-message-origin-check": 3,
+            "weak-message-origin-regex-check": 4,
+            "message-origin-check-without-scheme": 5,
+            "message-listener-review": 6,
+            "message-handler-missing-origin-check": 7,
+            "message-handler-wildcard-reply": 8,
+            "web-message-taint": 9
+          }
+        },
+        {
+          "moduleId": "link-manipulation",
+          "baseAlertId": 220009,
+          "rules": {
+            "link-attribute-assignment": 1,
+            "link-manipulation-taint": 2
+          }
+        },
+        {
+          "moduleId": "dom-data-manipulation",
+          "baseAlertId": 220010,
+          "rules": {
+            "dom-data-nav-taint": 1,
+            "dom-data-htmldoc-taint": 2,
+            "dom-data-ui-taint": 3
           }
         }
       ]

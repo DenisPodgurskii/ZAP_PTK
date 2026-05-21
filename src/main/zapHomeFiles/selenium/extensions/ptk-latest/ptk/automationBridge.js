@@ -569,13 +569,17 @@
         _automationEnabled: initialAutomationEnabled
     }
 
-    // Load the PTK_AGENT workflow layer as a sibling script.
-    try {
-        const bridgeSrc = document.currentScript?.src
-        if (bridgeSrc) {
-            const script = document.createElement('script')
-            script.src = new URL('ptkAgentAutomation.js', bridgeSrc).href
-            ;(document.head || document.documentElement).appendChild(script)
-        }
-    } catch (_) { }
+    // Load the PTK_AGENT workflow layer only for automation-enabled pages.
+    // Disabled manual bridges are installed on ordinary pages for status/close
+    // compatibility and must not add extra page-world script injection.
+    if (initialAutomationEnabled === true) {
+        try {
+            const bridgeSrc = document.currentScript?.src
+            if (bridgeSrc) {
+                const script = document.createElement('script')
+                script.src = new URL('ptkAgentAutomation.js', bridgeSrc).href
+                ;(document.head || document.documentElement).appendChild(script)
+            }
+        } catch (_) { }
+    }
 })()

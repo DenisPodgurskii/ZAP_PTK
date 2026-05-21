@@ -46,6 +46,14 @@ const DAST_BROWSER_NAV_DEFAULT_SETTLE_MS = 900
 const DAST_BROWSER_NAV_SUPPORTED_CHECKS = new Set([
     "dom_xss"
 ])
+const DAST_BROWSER_NAV_SOURCE_DRIVERS = new Set([
+    "cookie",
+    "localStorage",
+    "sessionStorage",
+    "form",
+    "postMessage"
+])
+const DAST_BROWSER_NAV_SOURCE_KEY_LIMIT = 12
 const DAST_BROWSER_WORKFLOW_HARNESS_SCRIPT_ID = "ptk-dast-browser-workflow-harness"
 const DAST_BROWSER_WORKFLOW_TAB_MARKER = "ptk_browser_workflow_attack_tab"
 const DAST_BROWSER_WORKFLOW_DEFAULT_SETTLE_MS = 400
@@ -374,6 +382,8 @@ export class dastEngine {
         this._browserNavHarnessRegistered = false
         this._browserWorkflowHarnessRegistered = false
         this._fingerprintMeta = new Map()
+        this._recordedRequestDedupeKeys = new Set()
+        this._requestRecordByDedupeKey = new Map()
         this._htmlDiscoverySeededUrls = new Set()
         this._pendingHtmlDiscoveryUrls = []
         this._pendingHtmlDiscoverySet = new Set()
@@ -760,9 +770,25 @@ export class dastEngine {
         if (!Array.isArray(this._pendingHtmlDiscoveryUrls) || !this._pendingHtmlDiscoveryUrls.length) return 0
         const pressure = this._evaluateHtmlDiscoveryBackpressure()
         if (pressure.throttled) return 0
+        const remainingBudget = this._remainingHtmlLinkDiscoveryBudget()
+        if (remainingBudget <= 0) {
+            const dropped = this._pendingHtmlDiscoveryUrls.length
+            this._pendingHtmlDiscoveryUrls = []
+            this._pendingHtmlDiscoverySet?.clear?.()
+            if (dropped > 0) {
+                this._appendRuntimeEvent({
+                    type: 'dast_html_links_dropped',
+                    phase: 'html_discovery',
+                    reason: 'html_link_discovery_budget_exhausted',
+                    droppedCount: dropped,
+                    budget: this._normalizeHtmlLinkDiscoveryBudget(this.settings?.htmlLinkDiscoveryBudget)
+                })
+            }
+            return 0
+        }
 
         const maxSeed = Math.min(
-            this._remainingHtmlLinkDiscoveryBudget(),
+            remainingBudget,
             this._resolveHtmlDiscoverySeedBatchSize(),
             this._pendingHtmlDiscoveryUrls.length
         )
@@ -1117,6 +1143,9 @@ export class dastEngine {
             'jwt_injection'
         ])
         if (topTierModules.has(moduleId)) priority += 800
+        if (moduleId === 'jwt_injection') {
+            priority += 1400
+        }
 
         const isXssTask = (
             moduleId === 'xss'
@@ -1126,6 +1155,17 @@ export class dastEngine {
         )
         if (isXssTask) {
             priority += this.settings?.zapManaged === true ? 5000 : 700
+        }
+        if (
+            this.settings?.zapManaged === true
+            && moduleId === 'xss'
+            && runtimeMode !== 'browser_nav'
+            && runtimeMode !== 'browser_workflow'
+        ) {
+            // ZAP browser jobs have a fixed close budget. Run cheap reflected-XSS
+            // request/response validation before slower browser-driven probes so
+            // confirmed server-side findings are not starved by tab-based work.
+            priority += 2200
         }
 
         const midTierModules = new Set([
@@ -1140,8 +1180,21 @@ export class dastEngine {
             priority += 150
         }
 
+        const taskUrlText = [
+            task?.payload?.request?.url,
+            task?.payload?.request?.path,
+            task?.payload?.request?.target,
+            task?.target?.name,
+            task?.target?.location
+        ]
+            .filter(value => value != null)
+            .map(value => String(value).toLowerCase())
+            .join(" ")
         const isSqlHeavy = /\b(sql|sqli|bsql|union)\b/.test(moduleId) || /\b(sql|sqli|bsql|union)\b/.test(vulnId)
         if (isSqlHeavy) priority -= 400
+        if (isSqlHeavy && /\b(?:login|signin|sign-in|auth|authenticate|session|token)\b/.test(taskUrlText)) {
+            priority += 1800
+        }
 
         if (task?.moduleAsync === false) {
             priority += 25
@@ -1469,6 +1522,18 @@ export class dastEngine {
         return cached
     }
 
+    _moduleSupportsBrowserSourceDrivers(module) {
+        const attacks = Array.isArray(module?.attacks) ? module.attacks : []
+        return attacks.some((attack) => {
+            const cfg = attack?.runtime?.config?.browserNav
+                || attack?.runtime?.browserNav
+                || {}
+            const values = cfg.sourceDrivers || cfg.sources || []
+            return (Array.isArray(values) ? values : [values])
+                .some((value) => DAST_BROWSER_NAV_SOURCE_DRIVERS.has(String(value || '').trim()))
+        })
+    }
+
     _shouldPlanModuleForRequest(module, schema, _original = null) {
         if (!module || typeof module !== "object") return { allowed: false, reason: "invalid_module" }
         const moduleRunStatus = this._getModuleRunStatus(module)
@@ -1492,6 +1557,7 @@ export class dastEngine {
         }
         const summary = this._requestPlanningSummary(schema)
         const hints = this._modulePlanningHints(module)
+        const supportsBrowserSources = this._moduleSupportsBrowserSourceDrivers(module)
         const methods = this._normalizePlanningMethods(hints.prefilters?.methods)
         if (methods.length && !methods.includes(summary.method)) {
             this._recordModulePlanningSkip(module, "prefilter_methods")
@@ -1524,10 +1590,12 @@ export class dastEngine {
             return decision
         }
         if (hints.prefilters?.requiresQueryOrBodyParams && !(summary.hasQueryParams || summary.hasBodyParams || summary.hasJsonBody || summary.hasXmlBody)) {
-            this._recordModulePlanningSkip(module, "prefilter_query_or_body_params")
-            const decision = { allowed: false, reason: "prefilter_query_or_body_params" }
-            this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
-            return decision
+            if (!supportsBrowserSources) {
+                this._recordModulePlanningSkip(module, "prefilter_query_or_body_params")
+                const decision = { allowed: false, reason: "prefilter_query_or_body_params" }
+                this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
+                return decision
+            }
         }
         if (hints.prefilters?.requiresCookies && !summary.hasCookies) {
             this._recordModulePlanningSkip(module, "prefilter_cookies")
@@ -1546,7 +1614,7 @@ export class dastEngine {
             if (hints.surfaces.has("params") && summary.hasAnyParamSurface) hasRelevantSurface = true
             if (hints.surfaces.has("cookies") && summary.hasCookies) hasRelevantSurface = true
             if (hints.surfaces.has("headers") && summary.hasNonCookieHeaders) hasRelevantSurface = true
-            if (!hasRelevantSurface) {
+            if (!hasRelevantSurface && !supportsBrowserSources) {
                 this._recordModulePlanningSkip(module, "prefilter_inferred_surfaces")
                 const decision = { allowed: false, reason: "prefilter_inferred_surfaces" }
                 this._boundedMapSet(this._planningDecisionCache, cacheKey, decision, 4096)
@@ -1831,6 +1899,101 @@ export class dastEngine {
         return score
     }
 
+    _requestRawBodyText(raw = '') {
+        if (typeof raw !== 'string' || !raw.length) return ''
+        const splitCrlf = raw.indexOf('\r\n\r\n')
+        if (splitCrlf >= 0) return raw.slice(splitCrlf + 4)
+        const splitLf = raw.indexOf('\n\n')
+        if (splitLf >= 0) return raw.slice(splitLf + 2)
+        return ''
+    }
+
+    _requestRawHeaderValue(raw = '', name = '') {
+        if (typeof raw !== 'string' || !raw.length || !name) return ''
+        const target = String(name || '').trim().toLowerCase()
+        const lines = raw.split(/\r?\n/)
+        for (let i = 1; i < lines.length; i++) {
+            const line = lines[i]
+            if (!line || !line.trim()) break
+            const sep = line.indexOf(':')
+            if (sep <= 0) continue
+            const headerName = line.slice(0, sep).trim().toLowerCase()
+            if (headerName === target) return line.slice(sep + 1).trim()
+        }
+        return ''
+    }
+
+    _capturedRequestBodyText(rawRequest = null) {
+        const raw = typeof rawRequest === 'object' ? String(rawRequest?.raw || '') : String(rawRequest || '')
+        const rawBody = this._requestRawBodyText(raw)
+        if (rawBody) return rawBody
+        const requestBody = rawRequest && typeof rawRequest === 'object'
+            ? rawRequest?.capturedRequest?.requestBody
+            : null
+        if (!requestBody || typeof requestBody !== 'object') return ''
+        if (typeof requestBody.raw === 'string') return requestBody.raw
+        if (requestBody.formData && typeof requestBody.formData === 'object') {
+            try {
+                return JSON.stringify(requestBody.formData)
+            } catch (_) {
+                return String(requestBody.formData || '')
+            }
+        }
+        return ''
+    }
+
+    _requestBodyRichnessScore(rawRequest = null) {
+        const raw = typeof rawRequest === 'object' ? String(rawRequest?.raw || '') : String(rawRequest || '')
+        const bodyText = this._capturedRequestBodyText(rawRequest)
+        const trimmed = String(bodyText || '').trim()
+        const contentLength = Number(this._requestRawHeaderValue(raw, 'content-length'))
+        const contentType = this._requestRawHeaderValue(raw, 'content-type').toLowerCase()
+        let score = 0
+
+        if (contentType.includes('json')) score += 24
+        else if (contentType.includes('x-www-form-urlencoded') || contentType.includes('multipart/form-data')) score += 20
+        else if (contentType) score += 8
+
+        if (!trimmed) {
+            if (Number.isFinite(contentLength) && contentLength > 0) score -= 120
+            return score
+        }
+
+        score += Math.min(trimmed.length, 4096) / 32
+        if (trimmed.length >= 3) score += 50
+        if (/[=&]/.test(trimmed)) score += 25
+        if (/[{[]/.test(trimmed) && /[:\]}]/.test(trimmed)) {
+            try {
+                const parsed = JSON.parse(trimmed)
+                if (parsed && typeof parsed === 'object') score += 110
+            } catch (_) {
+                score += 20
+            }
+        }
+        if (/(?:comment|message|text|name|title|query|search|url|rating|captcha|email|username|password)\s*[:=]/i.test(trimmed)) {
+            score += 35
+        }
+        return score
+    }
+
+    _requestBaselineQualityScore(rawRequest, response = null) {
+        const raw = typeof rawRequest === 'object' ? String(rawRequest?.raw || '') : String(rawRequest || '')
+        const firstLine = raw.split(/\r?\n/)[0] || ''
+        const method = String((typeof rawRequest === 'object' ? rawRequest?.method : '') || firstLine.split(/\s+/)[0] || 'GET').toUpperCase()
+        const statusCode = Number(response?.statusCode ?? response?.status ?? rawRequest?.capturedResponse?.statusCode ?? 0)
+        let score = this._requestHeaderRichnessScore(rawRequest) + this._requestBodyRichnessScore(rawRequest)
+
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) score += 30
+        if (Number.isFinite(statusCode) && statusCode > 0) {
+            if (statusCode >= 200 && statusCode < 300) score += 130
+            else if (statusCode >= 300 && statusCode < 400) score += 55
+            else if (statusCode === 401 || statusCode === 403) score -= 90
+            else if (statusCode >= 500) score -= 180
+            else if (statusCode >= 400) score -= 60
+        }
+        return score
+    }
+
     _normalizeCapturedResponse(response) {
         if (!response || typeof response !== 'object') return null
         const headers = this._normalizeHttpHeaders(response.headers || response.responseHeaders)
@@ -2017,11 +2180,7 @@ export class dastEngine {
 
     _requestRawHasBody(raw = '') {
         if (typeof raw !== 'string' || !raw.length) return false
-        const splitCrlf = raw.indexOf('\r\n\r\n')
-        if (splitCrlf >= 0) return raw.slice(splitCrlf + 4).length > 0
-        const splitLf = raw.indexOf('\n\n')
-        if (splitLf >= 0) return raw.slice(splitLf + 2).length > 0
-        return false
+        return this._requestRawBodyText(raw).length > 0
     }
 
     _applyCapturedRequestBodyFallback(request = null, rawMeta = {}) {
@@ -2187,6 +2346,72 @@ export class dastEngine {
         return false
     }
 
+    _markRecordedRequestDedupeKey(dedupeKey, record = null) {
+        const key = String(dedupeKey || '').trim()
+        if (!key) return
+        if (!(this._recordedRequestDedupeKeys instanceof Set)) {
+            this._recordedRequestDedupeKeys = new Set()
+        }
+        if (!(this._requestRecordByDedupeKey instanceof Map)) {
+            this._requestRecordByDedupeKey = new Map()
+        }
+        this._recordedRequestDedupeKeys.add(key)
+        if (record) this._requestRecordByDedupeKey.set(key, record)
+    }
+
+    _requestDedupeKeyFromOriginal(original) {
+        if (!original || typeof original !== 'object') return null
+        const request = this._extractRequestShape(original)
+        const response = this._extractResponseShape(original)
+        return this._simpleFingerprint(request, response)
+            || this._fingerprintFromRequest(request)
+            || null
+    }
+
+    _isRecordedRequestDedupeKey(dedupeKey) {
+        const key = String(dedupeKey || '').trim()
+        return !!key && this._recordedRequestDedupeKeys instanceof Set && this._recordedRequestDedupeKeys.has(key)
+    }
+
+    _recordedRequestLooksWeak(record = null) {
+        if (!record || typeof record !== 'object') return false
+        const request = record?.original?.request || record?.request || {}
+        const response = record?.original?.response || record?.response || {}
+        const method = String(request?.method || '').toUpperCase()
+        const statusCode = Number(response?.statusCode ?? response?.status)
+        if (Number.isFinite(statusCode) && statusCode >= 500) return true
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+            const bodyText = typeof request?.body?.text === 'string'
+                ? request.body.text
+                : this._requestRawBodyText(String(request?.raw || ''))
+            if (!String(bodyText || '').trim()) return true
+        }
+        return false
+    }
+
+    _shouldUpgradeRecordedRequest(dedupeKey, record = null, existing = null, quality = 0) {
+        if (!dedupeKey || !record || !this._recordedRequestLooksWeak(record)) return false
+        const previousQuality = Number(existing?.quality ?? 0)
+        const upgradedAfterRecord = Number(existing?.upgradedAfterRecord || 0)
+        if (upgradedAfterRecord >= 2) return false
+        return quality > previousQuality + 80
+    }
+
+    _recordDroppedDuplicateRequest(dedupeKey, existing = null, quality = 0) {
+        if (!dedupeKey) return
+        const meta = existing || this._fingerprintMeta?.get(dedupeKey) || {
+            quality,
+            count: 0,
+            upgraded: 0
+        }
+        meta.count = (meta.count || 0) + 1
+        meta.droppedAfterRecord = (meta.droppedAfterRecord || 0) + 1
+        if (quality > Number(meta.quality || 0)) {
+            meta.quality = quality
+        }
+        this._fingerprintMeta?.set?.(dedupeKey, meta)
+    }
+
     enqueue(rawRequest, response) {
         if (!this.isAllowed(response)) return
 
@@ -2199,10 +2424,27 @@ export class dastEngine {
 
         if (!dedupeKey) return
         if (!this._fingerprintMeta) this._fingerprintMeta = new Map()
-        const quality = this._requestHeaderRichnessScore(rawRequest)
+        const quality = this._requestBaselineQualityScore(rawRequest, response)
         const existing = this._fingerprintMeta.get(dedupeKey)
         const qualityDelta = 8
         const payload = this._normalizeQueuedRequestPayload(rawRequest, dedupeKey, response)
+        if (this._isRecordedRequestDedupeKey(dedupeKey)) {
+            const record = this._requestRecordByDedupeKey instanceof Map
+                ? this._requestRecordByDedupeKey.get(dedupeKey)
+                : null
+            if (this._shouldUpgradeRecordedRequest(dedupeKey, record, existing, quality)) {
+                payload.__upgradeRecordedRequest = true
+                const nextExisting = existing || { count: 0, upgraded: 0 }
+                nextExisting.quality = quality
+                nextExisting.count = (nextExisting.count || 0) + 1
+                nextExisting.upgradedAfterRecord = (nextExisting.upgradedAfterRecord || 0) + 1
+                this._fingerprintMeta.set(dedupeKey, nextExisting)
+                this._enqueueRequestPayload(payload, response)
+                return
+            }
+            this._recordDroppedDuplicateRequest(dedupeKey, existing, quality)
+            return
+        }
         if (!existing) {
             this._fingerprintMeta.set(dedupeKey, {
                 quality,
@@ -2755,9 +2997,27 @@ export class dastEngine {
         return this.taskPlanner.createTaskContext(original, options)
     }
 
-    _createRequestRecord(original, persist = true) {
+    _createRequestRecord(original, persist = true, options = {}) {
         const requests = Array.isArray(this.scanResult.requests) ? this.scanResult.requests : []
         if (!this.scanResult.requests) this.scanResult.requests = requests
+        const dedupeKey = options?.dedupeKey || this._requestDedupeKeyFromOriginal(original)
+        if (persist && dedupeKey && this._requestRecordByDedupeKey instanceof Map) {
+            const existingRecord = this._requestRecordByDedupeKey.get(dedupeKey)
+            if (existingRecord) {
+                if (options?.allowRecordedUpgrade === true && this._recordedRequestLooksWeak(existingRecord)) {
+                    existingRecord.original = this._compactOriginalRecord(original)
+                    existingRecord.upgradedOriginal = true
+                    this._appendRuntimeEvent({
+                        type: 'dast_request_record_upgraded',
+                        phase: 'plan_enqueue',
+                        requestId: existingRecord.id || null,
+                        method: existingRecord?.original?.request?.method || original?.request?.method || null,
+                        url: existingRecord?.original?.request?.url || original?.request?.url || null
+                    })
+                }
+                return existingRecord
+            }
+        }
         this._requestSeq = (this._requestSeq || 0) + 1
         const requestId = `req-${this._requestSeq}`
         const record = {
@@ -2767,6 +3027,7 @@ export class dastEngine {
         }
         if (persist) {
             requests.push(record)
+            this._markRecordedRequestDedupeKey(dedupeKey, record)
         }
         return record
     }
@@ -3175,8 +3436,11 @@ export class dastEngine {
     }
 
     _filterActiveValidationResult(task, validationResult, executed, context = null) {
-        if (!validationResult?.success) return validationResult
         const moduleId = String(task?.moduleId || task?.module?.id || '').trim().toLowerCase()
+        if (!validationResult?.success) {
+            const jwtRecovered = this._recoverJwtValidationFromProbeContrast(task, validationResult, executed, context)
+            return jwtRecovered || validationResult
+        }
         if (moduleId !== 'xss') return validationResult
         const body = executed?.response?.body || ''
         const snippets = [
@@ -3192,6 +3456,65 @@ export class dastEngine {
             reason: 'xss_match_inside_html_comment'
         })
         return null
+    }
+
+    _responseDiffersEnough(left = null, right = null) {
+        const leftStatus = Number(left?.statusCode ?? left?.status)
+        const rightStatus = Number(right?.statusCode ?? right?.status)
+        if (Number.isFinite(leftStatus) && Number.isFinite(rightStatus) && leftStatus !== rightStatus) {
+            return true
+        }
+        const leftLength = Number(left?.length ?? (typeof left?.body === 'string' ? left.body.length : NaN))
+        const rightLength = Number(right?.length ?? (typeof right?.body === 'string' ? right.body.length : NaN))
+        return Number.isFinite(leftLength) && Number.isFinite(rightLength) && Math.abs(leftLength - rightLength) > 30
+    }
+
+    _requestEvidenceContainsJwtNone(request = null, surface = 'any') {
+        const text = JSON.stringify(request || '')
+        if (!/eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0\./.test(text)) return false
+        if (surface === 'cookie') return /cookie/i.test(text)
+        if (surface === 'authorization') return /authorization/i.test(text)
+        return true
+    }
+
+    _recoverJwtValidationFromProbeContrast(task, validationResult, executed, context = null) {
+        const moduleId = String(task?.moduleId || task?.module?.id || '').trim().toLowerCase()
+        if (moduleId !== 'jwt_injection') return null
+        const attackId = String(task?.attack?.id || '').trim()
+        const attackResponse = executed?.response || null
+        const attackStatus = Number(attackResponse?.statusCode ?? attackResponse?.status)
+        if (!Number.isFinite(attackStatus) || attackStatus >= 500) return null
+
+        const expectedProbeIds = attackId === 'jwt_1'
+            ? new Set(['jwt_probe_no_cookie', 'jwt_probe_no_both'])
+            : attackId === 'jwt_3'
+                ? new Set(['jwt_probe_no_authz', 'jwt_probe_no_both'])
+                : null
+        if (!expectedProbeIds) return null
+
+        const surface = attackId === 'jwt_1' ? 'cookie' : 'authorization'
+        if (!this._requestEvidenceContainsJwtNone(executed?.request, surface)) return null
+
+        const history = Array.isArray(task?.module?.executed) ? task.module.executed : []
+        const contrastingProbe = history.find((entry) => {
+            const entryId = String(entry?.metadata?.id || '').trim()
+            if (!expectedProbeIds.has(entryId)) return false
+            return this._responseDiffersEnough(entry?.response, attackResponse)
+        })
+        if (!contrastingProbe) return null
+
+        this._appendTaskRuntimeEvent(task, context, {
+            type: 'dast_validation_recovered',
+            phase: 'validation',
+            reason: 'jwt_probe_contrast',
+            probeId: contrastingProbe?.metadata?.id || null,
+            attackStatus,
+            probeStatus: contrastingProbe?.response?.statusCode ?? contrastingProbe?.response?.status ?? null
+        })
+        return Object.assign({}, validationResult || {}, {
+            success: true,
+            proof: validationResult?.proof || `JWT none accepted while ${contrastingProbe?.metadata?.id || 'JWT removal probe'} differed`
+        })
     }
 
     _evaluateGenericConfirmBorderline(result, original) {
@@ -3595,13 +3918,14 @@ export class dastEngine {
         const taskQueue = this._taskQueueCount()
         const requestQueue = this._requestQueue?.size ? this._requestQueue.size() : 0
         const pendingPlans = this._activePlans?.size || 0
+        const pendingHtmlDiscovery = this._pendingHtmlLinkDiscoveryCount()
         const captureStats = this._captureProgressSnapshot()
         const pendingCaptures = Math.max(0, Number(captureStats?.pendingObservedRequests || 0))
         const nonExecuted = Math.max(planned - executed, 0)
         const planning = this.inProgress ? 1 : 0
-        const pipelineRemaining = Math.max(taskQueue + activeTasks + requestQueue + pendingPlans + planning + pendingCaptures, 0)
+        const pipelineRemaining = Math.max(taskQueue + activeTasks + requestQueue + pendingPlans + planning + pendingCaptures + pendingHtmlDiscovery, 0)
         const remaining = pipelineRemaining
-        const isIdle = Boolean(this.isRunning && requestQueue === 0 && taskQueue === 0 && pendingPlans === 0 && activeTasks === 0 && planning === 0 && pendingCaptures === 0)
+        const isIdle = Boolean(this.isRunning && requestQueue === 0 && taskQueue === 0 && pendingPlans === 0 && activeTasks === 0 && planning === 0 && pendingCaptures === 0 && pendingHtmlDiscovery === 0)
         return {
             planned,
             executed,
@@ -3614,6 +3938,7 @@ export class dastEngine {
             pendingPlans,
             planning,
             pendingCaptures,
+            pendingHtmlDiscovery,
             captureStats,
             isRunning: !!this.isRunning,
             isIdle,
@@ -3645,6 +3970,7 @@ export class dastEngine {
             progress.pendingPlans,
             progress.planning || 0,
             progress.pendingCaptures || 0,
+            progress.pendingHtmlDiscovery || 0,
             progress.isRunning ? 1 : 0,
             progress.isIdle ? 1 : 0
         ].join('|')
@@ -4212,7 +4538,10 @@ export class dastEngine {
             // Preserve real user requests even when stop is triggered mid-planning.
             // We intentionally persist the original request record with zero attacks
             // instead of dropping it from scan history/export.
-            const requestRecord = this._createRequestRecord(plan.original)
+            const requestRecord = this._createRequestRecord(plan.original, true, {
+                dedupeKey: plan?.raw?.__dedupeKey || plan?.fingerprint || null,
+                allowRecordedUpgrade: plan?.raw?.__upgradeRecordedRequest === true
+            })
             this._appendRuntimeEvent({
                 type: 'dast_request_recorded',
                 phase: 'plan_enqueue',
@@ -4232,7 +4561,10 @@ export class dastEngine {
         }
         plan.pending = plan.tasks?.length || 0
         plan.attacks = []
-        plan.requestRecord = this._createRequestRecord(plan.original)
+        plan.requestRecord = this._createRequestRecord(plan.original, true, {
+            dedupeKey: plan?.raw?.__dedupeKey || plan?.fingerprint || null,
+            allowRecordedUpgrade: plan?.raw?.__upgradeRecordedRequest === true
+        })
         this._appendRuntimeEvent({
             type: 'dast_request_recorded',
             phase: 'plan_enqueue',
@@ -5447,6 +5779,446 @@ export class dastEngine {
         return normalized.length ? normalized : ['dom_xss']
     }
 
+    _normalizeBrowserNavSourceDrivers(values = []) {
+        return Array.from(new Set(
+            (Array.isArray(values) ? values : [values])
+                .map((value) => String(value || '').trim())
+                .filter(Boolean)
+                .filter((value) => DAST_BROWSER_NAV_SOURCE_DRIVERS.has(value))
+        ))
+    }
+
+    _effectiveBrowserNavSourceDriversForTask(task, sourceDrivers = []) {
+        const drivers = this._normalizeBrowserNavSourceDrivers(sourceDrivers)
+        const attackId = String(task?.attack?.id || '')
+        const context = String(task?.attack?.metadata?.constants?.context || '')
+        if (attackId.startsWith('angularjs_csti_') && context === 'template_interpolation') {
+            return drivers.filter((driver) => driver === 'form')
+        }
+        return drivers
+    }
+
+    _browserNavSourceKeyHintsForDriver(payload = null, driver = '') {
+        const hints = payload?.metadata?.browserSource?.keyHints
+        const values = hints && typeof hints === 'object' ? hints[driver] : null
+        return Array.from(new Set(
+            (Array.isArray(values) ? values : [])
+                .map((value) => String(value || '').trim())
+                .filter(Boolean)
+        ))
+    }
+
+    _browserNavSourceKeyModeForDriver(payload = null, driver = '') {
+        const keyMode = payload?.metadata?.browserSource?.keyMode
+        if (typeof keyMode === 'string') return keyMode.trim()
+        if (!keyMode || typeof keyMode !== 'object') return ''
+        return String(keyMode[driver] || '').trim()
+    }
+
+    _browserNavSourceValueLooksSensitive(value = '') {
+        const raw = String(value == null ? '' : value)
+        if (!raw) return false
+        if (/^Bearer\s+[A-Za-z0-9._~+/=-]{16,}$/i.test(raw)) return true
+        if (/^[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}$/.test(raw)) return true
+        if (/token|session|csrf|xsrf|password|passwd|secret|credential|api[_-]?key/i.test(raw) && raw.length >= 12) return true
+        return false
+    }
+
+    _browserNavSourceKeyIsSensitive(driver, key, value = '') {
+        const sourceDriver = String(driver || '').trim()
+        const sourceKey = String(key || '').trim()
+        if (!sourceKey) return true
+        const normalized = sourceKey.toLowerCase()
+        if (sourceDriver === 'cookie') {
+            const hardDeny = new RegExp(DEFAULT_HARD_DENY_COOKIE_REGEX, 'i')
+            if (hardDeny.test(sourceKey)) return true
+        }
+        if (/^(?:authorization|cookie|set-cookie)$/i.test(sourceKey)) return true
+        if (/^(?:__host-|__secure-)/i.test(sourceKey)) return true
+        if (/(session|sessionid|sess|sid|auth|authorization|bearer|token|access[_-]?token|refresh[_-]?token|id[_-]?token|jwt|csrf|xsrf|password|passwd|pwd|secret|credential|api[_-]?key|apikey)/i.test(normalized)) return true
+        if (/(?:awsalb|awselb|connect\.sid|phpsessid|jsessionid)/i.test(normalized)) return true
+        return this._browserNavSourceValueLooksSensitive(value)
+    }
+
+    _filterBrowserNavSourceKeys(driver, keys = [], values = {}, task = null, taskContext = null) {
+        const safeKeys = []
+        const skippedKeys = []
+        const sourceValues = values && typeof values === 'object' ? values : {}
+        for (const rawKey of Array.isArray(keys) ? keys : []) {
+            const key = String(rawKey || '').trim()
+            if (!key) continue
+            const value = Object.prototype.hasOwnProperty.call(sourceValues, key)
+                ? sourceValues[key]
+                : ''
+            if (this._browserNavSourceKeyIsSensitive(driver, key, value)) {
+                skippedKeys.push(key)
+                continue
+            }
+            safeKeys.push(key)
+        }
+        if (skippedKeys.length) {
+            this._appendTaskRuntimeEvent(task, taskContext, {
+                type: 'dast_browser_nav_source_key_skipped',
+                phase: 'attack_eval',
+                reason: 'sensitive_source_key',
+                sourceDriver: driver,
+                skippedCount: skippedKeys.length,
+                sampledKeys: skippedKeys.slice(0, 5)
+            })
+        }
+        return safeKeys
+    }
+
+    _browserNavPayloadValue(task, payload) {
+        const metadataPayload = payload?.metadata?.payload
+        if (metadataPayload != null) return String(metadataPayload)
+        const params = Array.isArray(task?.attack?.action?.params) ? task.attack.action.params : []
+        const firstValue = params.find((param) => param && param.value != null)?.value
+        if (firstValue != null) return String(firstValue)
+        const constantsPayload = task?.attack?.metadata?.constants?.payload
+        if (constantsPayload != null) return String(constantsPayload)
+        return ''
+    }
+
+    _browserNavSourceBaseUrl(payload, context, fallbackUrl = null) {
+        const candidates = [
+            context?.original?.request?.ui_url,
+            context?.original?.request?.uiUrl,
+            context?.original?.request?.url,
+            payload?.request?.ui_url,
+            payload?.request?.uiUrl,
+            payload?.request?.url,
+            payload?.ui_url,
+            payload?.uiUrl,
+            payload?.url,
+            fallbackUrl
+        ]
+        for (const candidate of candidates) {
+            const value = String(candidate || '').trim()
+            if (value) return value
+        }
+        return null
+    }
+
+    async _sendBrowserNavHarnessMessage(tabId, message, task, taskContext) {
+        const ready = await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
+        if (!ready) {
+            return { error: 'harness_not_ready' }
+        }
+        try {
+            return await browser.tabs.sendMessage(tabId, message)
+        } catch (err) {
+            const injected = await this._injectBrowserNavHarness(tabId, task, taskContext, 'send_failed')
+            if (!injected) throw err
+            return browser.tabs.sendMessage(tabId, message)
+        }
+    }
+
+    async _probeBrowserNavMainWorldWindowName(tabId, markerToken) {
+        const markerId = String(markerToken || '').trim()
+        if (!tabId || !markerId || !browser?.scripting?.executeScript) return false
+        try {
+            const results = await browser.scripting.executeScript({
+                target: { tabId },
+                world: 'MAIN',
+                func: (marker) => {
+                    try {
+                        const token = `ptk-xss:${String(marker || '').trim()}`
+                        return !!token && String(window.name || '').includes(token)
+                    } catch (_) {
+                        return false
+                    }
+                },
+                args: [markerId]
+            })
+            return Array.isArray(results) && results.some((entry) => entry?.result === true)
+        } catch (_) {
+            return false
+        }
+    }
+
+    async _runBrowserNavChecksInTab(tabId, task, taskContext, markerToken, checks, settleMs) {
+        const result = await this._sendBrowserNavHarnessMessage(tabId, {
+            type: 'browserNavRun',
+            markerToken,
+            checks,
+            settleMs
+        }, task, taskContext)
+        if (
+            this._normalizeBrowserNavChecks(checks).includes('dom_xss')
+            && !result?.dom_xss?.vulnerable
+            && await this._probeBrowserNavMainWorldWindowName(tabId, markerToken)
+        ) {
+            return Object.assign({}, result, {
+                dom_xss: {
+                    vulnerable: true,
+                    executed: true,
+                    reflected: false,
+                    sinkKey: null,
+                    context: {
+                        type: 'window_name_marker',
+                        sourceDriver: null,
+                        sourceKey: null,
+                        tag: null,
+                        attr: 'window.name',
+                        cssPath: null,
+                        outerHTML: null,
+                        snippet: `ptk-xss:${String(markerToken || '').trim()}`
+                    }
+                }
+            })
+        }
+        return result
+    }
+
+    async _reloadBrowserNavAttackTab(tabId, task, taskContext) {
+        const ready = this._waitForTabReady(tabId)
+        try {
+            if (browser?.tabs?.reload) {
+                await browser.tabs.reload(tabId)
+            } else {
+                const tab = browser?.tabs?.get ? await browser.tabs.get(tabId) : null
+                const url = tab?.url || tab?.pendingUrl || null
+                if (url && browser?.tabs?.update) {
+                    await browser.tabs.update(tabId, { url })
+                }
+            }
+        } catch (_) { }
+        await ready
+        await this._markSpaAttackTab(tabId, {
+            marker: DAST_BROWSER_NAV_TAB_MARKER,
+            domOnly: true
+        })
+        await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
+    }
+
+    async _waitForBrowserNavAttackTabNavigation(tabId, task, taskContext, timeoutMs = 4500) {
+        await this._waitForTabReady(tabId, timeoutMs)
+        await this._markSpaAttackTab(tabId, {
+            marker: DAST_BROWSER_NAV_TAB_MARKER,
+            domOnly: true
+        })
+        await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
+    }
+
+    _buildBrowserNavAttackResult(task, payload, uiUrl, attacked, checks, markerToken, domXss, runtimeMode, sourceInfo = null) {
+        const sinkKey = domXss.sinkKey ? `${uiUrl}|${domXss.sinkKey}` : null
+        if (sinkKey && this._browserNavSeenSinks?.has(sinkKey)) {
+            return { duplicate: true, sinkKey }
+        }
+        if (sinkKey && this._browserNavSeenSinks) {
+            this._browserNavSeenSinks.add(sinkKey)
+        }
+
+        const metadata = Object.assign(
+            {},
+            this._attackMetadataView(task?.module, task?.attack),
+            payload?.metadata || {},
+            {
+                attacked,
+                checks,
+                markerToken,
+                executed: !!domXss.executed,
+                reflected: !!domXss.reflected,
+                context: domXss.context || null,
+                sinkKey: sinkKey || null,
+                runtimeMode
+            },
+            sourceInfo ? { browserSource: sourceInfo } : {}
+        )
+        const proof = JSON.stringify({
+            executed: !!domXss.executed,
+            reflected: !!domXss.reflected,
+            sinkKey: sinkKey || null,
+            context: domXss.context || null,
+            source: sourceInfo || null
+        })
+
+        return {
+            success: true,
+            metadata,
+            request: {
+                url: uiUrl,
+                ui_url: uiUrl,
+                method: 'GET'
+            },
+            response: {},
+            proof
+        }
+    }
+
+    async _runBrowserNavSourceDrivers(task, taskContext, payload, options = {}) {
+        const drivers = this._normalizeBrowserNavSourceDrivers(options.sourceDrivers || [])
+        if (!drivers.length) return null
+        const payloadValue = this._browserNavPayloadValue(task, payload)
+        if (!payloadValue) {
+            this._appendTaskRuntimeEvent(task, taskContext, {
+                type: 'dast_browser_nav_filtered',
+                phase: 'attack_eval',
+                reason: 'missing_browser_source_payload'
+            })
+            return null
+        }
+        const uiUrl = this._browserNavSourceBaseUrl(payload, taskContext, options.uiUrl)
+        if (!uiUrl) return null
+
+        for (const driver of drivers) {
+            const result = await this._withBrowserNavAttackTab(uiUrl, async (tabId) => {
+                if (driver === 'postMessage') {
+                    const res = await this._sendBrowserNavHarnessMessage(tabId, {
+                        type: 'browserNavSourcePostMessage',
+                        markerToken: options.markerToken,
+                        checks: options.checks,
+                        settleMs: options.settleMs,
+                        payload: payloadValue
+                    }, task, taskContext)
+                    return {
+                        res,
+                        sourceInfo: {
+                            driver,
+                            key: 'window'
+                        }
+                    }
+                }
+                if (driver === 'form') {
+                    const submitted = await this._sendBrowserNavHarnessMessage(tabId, {
+                        type: 'browserNavSourceForm',
+                        markerToken: options.markerToken,
+                        checks: options.checks,
+                        settleMs: options.settleMs,
+                        payload: payloadValue
+                    }, task, taskContext)
+                    if (submitted?.dom_xss?.vulnerable) {
+                        return {
+                            res: submitted,
+                            sourceInfo: submitted.sourceContext || {
+                                driver,
+                                key: 'form'
+                            }
+                        }
+                    }
+                    if (submitted?.mayNavigate) {
+                        await this._waitForBrowserNavAttackTabNavigation(tabId, task, taskContext)
+                        const res = await this._runBrowserNavChecksInTab(
+                            tabId,
+                            task,
+                            taskContext,
+                            options.markerToken,
+                            options.checks,
+                            options.settleMs
+                        )
+                        return {
+                            res,
+                            sourceInfo: submitted.sourceContext || {
+                                driver,
+                                key: 'form'
+                            }
+                        }
+                    }
+                    return {
+                        res: submitted,
+                        reason: submitted?.reason || submitted?.error || 'no_source_candidates',
+                        sourceInfo: submitted?.sourceContext || { driver }
+                    }
+                }
+
+                const snapshot = await this._sendBrowserNavHarnessMessage(tabId, {
+                    type: 'browserNavSourceSnapshot',
+                    drivers: [driver]
+                }, task, taskContext)
+                const sourceValues = snapshot?.sources?.[driver]?.values && typeof snapshot.sources[driver].values === 'object'
+                    ? snapshot.sources[driver].values
+                    : {}
+                const rawKeys = Array.isArray(snapshot?.sources?.[driver]?.keys)
+                    ? snapshot.sources[driver].keys
+                        .map((key) => String(key || '').trim())
+                        .filter(Boolean)
+                    : []
+                const hintedKeys = this._browserNavSourceKeyHintsForDriver(payload, driver)
+                const keyMode = this._browserNavSourceKeyModeForDriver(payload, driver)
+                const candidateKeys = keyMode === 'hint-only'
+                    ? hintedKeys
+                    : rawKeys.concat(hintedKeys)
+                const keys = this._filterBrowserNavSourceKeys(
+                    driver,
+                    candidateKeys,
+                    sourceValues,
+                    task,
+                    taskContext
+                )
+                    .slice(0, DAST_BROWSER_NAV_SOURCE_KEY_LIMIT)
+                if (!keys.length) {
+                    return {
+                        skipped: true,
+                        reason: 'no_source_candidates',
+                        sourceInfo: { driver }
+                    }
+                }
+                for (const key of keys) {
+                    const applied = await this._sendBrowserNavHarnessMessage(tabId, {
+                        type: 'browserNavSourceApply',
+                        driver,
+                        key,
+                        value: payloadValue,
+                        cookieEncoding: options.cookieEncoding || null
+                    }, task, taskContext)
+                    if (applied?.error) continue
+                    let res = null
+                    const hadOriginal = Object.prototype.hasOwnProperty.call(sourceValues, key)
+                    const originalValue = hadOriginal ? sourceValues[key] : null
+                    try {
+                        await this._reloadBrowserNavAttackTab(tabId, task, taskContext)
+                        res = await this._runBrowserNavChecksInTab(
+                            tabId,
+                            task,
+                            taskContext,
+                            options.markerToken,
+                            options.checks,
+                            options.settleMs
+                        )
+                    } finally {
+                        await this._sendBrowserNavHarnessMessage(tabId, {
+                            type: 'browserNavSourceRestore',
+                            driver,
+                            key,
+                            hadOriginal,
+                            originalValue
+                        }, task, taskContext).catch(() => null)
+                    }
+                    if (res?.dom_xss?.vulnerable) {
+                        return {
+                            res,
+                            sourceInfo: {
+                                driver,
+                                key
+                            }
+                        }
+                    }
+                }
+                return {
+                    res: null,
+                    sourceInfo: { driver }
+                }
+            })
+
+            const domXss = result?.res?.dom_xss
+            if (domXss?.vulnerable) {
+                return {
+                    uiUrl,
+                    domXss,
+                    sourceInfo: result.sourceInfo || { driver }
+                }
+            }
+            this._appendTaskRuntimeEvent(task, taskContext, {
+                type: 'dast_browser_nav_filtered',
+                phase: 'attack_eval',
+                reason: result?.reason || 'browser_source_no_vulnerability_match',
+                sourceDriver: driver
+            })
+        }
+        return null
+    }
+
     async _runBrowserNavAttack(task, context, preparedPayload) {
         const payload = preparedPayload || task?.payload || {}
         const request = payload?.request || {}
@@ -5474,7 +6246,16 @@ export class dastEngine {
             })
             return null
         }
-        if (String(attacked?.location || '').toLowerCase() !== 'query') {
+        const browserNavCfg = this._taskAttackRuntimeConfig(task, 'browserNav') || {}
+        const payloadBrowserSourceDrivers = Array.isArray(payload?.metadata?.browserSource?.sourceDrivers)
+            ? payload.metadata.browserSource.sourceDrivers
+            : null
+        const sourceDrivers = this._effectiveBrowserNavSourceDriversForTask(
+            task,
+            payloadBrowserSourceDrivers || browserNavCfg.sourceDrivers || browserNavCfg.sources || []
+        )
+        const attackedLocation = String(attacked?.location || '').toLowerCase()
+        if (attackedLocation !== 'query' && !(attackedLocation === 'browser_source' && sourceDrivers.length)) {
             this._appendTaskRuntimeEvent(task, taskContext, {
                 type: 'dast_browser_nav_filtered',
                 phase: 'attack_eval',
@@ -5484,7 +6265,6 @@ export class dastEngine {
             return null
         }
 
-        const browserNavCfg = this._taskAttackRuntimeConfig(task, 'browserNav') || {}
         const checks = this._normalizeBrowserNavChecks(browserNavCfg.checks || [])
         const markerToken = String(browserNavCfg.markerToken || '').trim()
         const settleMsRaw = Number(browserNavCfg.settleMs)
@@ -5501,97 +6281,95 @@ export class dastEngine {
             return null
         }
 
-        const runChecks = async () => this._withBrowserNavAttackTab(uiUrl, async (tabId) => {
-            const message = {
-                type: 'browserNavRun',
-                markerToken,
-                checks,
-                settleMs
-            }
-            const sendChecks = () => browser.tabs.sendMessage(tabId, message)
-            const ready = await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
-            if (!ready) {
-                return { error: 'harness_not_ready' }
-            }
-            try {
-                return await sendChecks()
-            } catch (err) {
-                const injected = await this._injectBrowserNavHarness(tabId, task, taskContext, 'send_failed')
-                if (!injected) throw err
-                return sendChecks()
-            }
-        })
-
         try {
-            const res = await runChecks()
-            if (this._spaResponseMissingChecks(res, checks)) {
-                this._appendTaskRuntimeEvent(task, taskContext, {
-                    type: 'dast_browser_nav_filtered',
-                    phase: 'attack_eval',
-                    reason: 'harness_not_ready',
-                    missingChecks: checks.filter((checkName) => !Object.prototype.hasOwnProperty.call(res || {}, checkName))
-                })
-                return null
+            let domXss = null
+            if (attackedLocation === 'query') {
+                const res = await this._withBrowserNavAttackTab(uiUrl, (tabId) => (
+                    this._runBrowserNavChecksInTab(tabId, task, taskContext, markerToken, checks, settleMs)
+                ))
+                if (this._spaResponseMissingChecks(res, checks)) {
+                    this._appendTaskRuntimeEvent(task, taskContext, {
+                        type: 'dast_browser_nav_filtered',
+                        phase: 'attack_eval',
+                        reason: 'harness_not_ready',
+                        missingChecks: checks.filter((checkName) => !Object.prototype.hasOwnProperty.call(res || {}, checkName))
+                    })
+                    return null
+                }
+                domXss = res?.dom_xss || null
             }
 
-            const domXss = res?.dom_xss
-            if (!domXss || !domXss.vulnerable) {
-                this._appendTaskRuntimeEvent(task, taskContext, {
-                    type: 'dast_browser_nav_filtered',
-                    phase: 'attack_eval',
-                    reason: 'no_vulnerability_match',
-                    checks: { dom_xss: !!domXss?.vulnerable }
-                })
-                return null
-            }
-
-            const sinkKey = domXss.sinkKey ? `${uiUrl}|${domXss.sinkKey}` : null
-            if (sinkKey && this._browserNavSeenSinks?.has(sinkKey)) {
-                this._appendTaskRuntimeEvent(task, taskContext, {
-                    type: 'dast_browser_nav_filtered',
-                    phase: 'attack_eval',
-                    reason: 'duplicate_sink',
-                    sinkKey
-                })
-                return null
-            }
-            if (sinkKey && this._browserNavSeenSinks) {
-                this._browserNavSeenSinks.add(sinkKey)
-            }
-
-            const metadata = Object.assign(
-                {},
-                this._attackMetadataView(task?.module, task?.attack),
-                payload?.metadata || {},
-                {
+            if (domXss?.vulnerable) {
+                const built = this._buildBrowserNavAttackResult(
+                    task,
+                    payload,
+                    uiUrl,
                     attacked,
                     checks,
                     markerToken,
-                    executed: !!domXss.executed,
-                    reflected: !!domXss.reflected,
-                    context: domXss.context || null,
-                    sinkKey: sinkKey || null,
-                    runtimeMode: 'browser_nav'
+                    domXss,
+                    'browser_nav'
+                )
+                if (built?.duplicate) {
+                    this._appendTaskRuntimeEvent(task, taskContext, {
+                        type: 'dast_browser_nav_filtered',
+                        phase: 'attack_eval',
+                        reason: 'duplicate_sink',
+                        sinkKey: built.sinkKey
+                    })
+                    return null
                 }
-            )
-            const proof = JSON.stringify({
-                executed: !!domXss.executed,
-                reflected: !!domXss.reflected,
-                sinkKey: sinkKey || null,
-                context: domXss.context || null
-            })
-
-            return {
-                success: true,
-                metadata,
-                request: {
-                    url: uiUrl,
-                    ui_url: uiUrl,
-                    method: 'GET'
-                },
-                response: {},
-                proof
+                return built
             }
+
+            const sourceResult = await this._runBrowserNavSourceDrivers(task, taskContext, payload, {
+                uiUrl,
+                sourceDrivers,
+                markerToken,
+                checks,
+                settleMs,
+                cookieEncoding: typeof payload?.metadata?.browserSource === 'object'
+                    ? payload.metadata.browserSource.cookieEncoding
+                    : browserNavCfg.cookieEncoding
+            })
+            if (sourceResult?.domXss?.vulnerable) {
+                const sourceAttacked = Object.assign({}, attacked || {}, {
+                    location: 'browser_source',
+                    name: sourceResult.sourceInfo?.key || sourceResult.sourceInfo?.driver || 'browser_source',
+                    sourceDriver: sourceResult.sourceInfo?.driver || null,
+                    sourceKey: sourceResult.sourceInfo?.key || null
+                })
+                const built = this._buildBrowserNavAttackResult(
+                    task,
+                    payload,
+                    sourceResult.uiUrl,
+                    sourceAttacked,
+                    checks,
+                    markerToken,
+                    sourceResult.domXss,
+                    'browser_source',
+                    sourceResult.sourceInfo
+                )
+                if (built?.duplicate) {
+                    this._appendTaskRuntimeEvent(task, taskContext, {
+                        type: 'dast_browser_nav_filtered',
+                        phase: 'attack_eval',
+                        reason: 'duplicate_sink',
+                        sinkKey: built.sinkKey
+                    })
+                    return null
+                }
+                return built
+            }
+
+            this._appendTaskRuntimeEvent(task, taskContext, {
+                type: 'dast_browser_nav_filtered',
+                phase: 'attack_eval',
+                reason: 'no_vulnerability_match',
+                checks: { dom_xss: !!domXss?.vulnerable },
+                sourceDrivers
+            })
+            return null
         } catch (err) {
             this._appendTaskRuntimeEvent(task, taskContext, {
                 type: 'dast_browser_nav_filtered',
@@ -6241,6 +7019,7 @@ export class dastEngine {
 
     async _withSpaAttackTab(url, fn) {
         let tabId = null
+        let childTabMeta = null
         try {
             const isFirefox = typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo
             const markedUrl = this._addSpaDialogMarker(url)
@@ -6257,10 +7036,27 @@ export class dastEngine {
             // harness so recovery logic also
             // keeps this internal DAST tab alive while the attack runs.
             await this._markSpaAttackTab(tabId)
+            childTabMeta = {
+                tabId,
+                url,
+                parentTabId: this.tabId,
+                role: 'dast_spa_attack_tab',
+                marker: 'ptk_spa_attack_tab',
+                sourceEngine: 'DAST'
+            }
+            await this._automationPtkTabOpened(childTabMeta)
             const res = await fn(tabId, url)
             return res
         } finally {
             if (tabId !== null) {
+                await this._automationPtkTabClosing(childTabMeta || {
+                    tabId,
+                    url,
+                    parentTabId: this.tabId,
+                    role: 'dast_spa_attack_tab',
+                    marker: 'ptk_spa_attack_tab',
+                    sourceEngine: 'DAST'
+                })
                 await this._detachDialogAutoDismiss(tabId)
                 try { await browser.tabs.remove(tabId) } catch (_) { }
             }
@@ -6269,6 +7065,7 @@ export class dastEngine {
 
     async _withBrowserNavAttackTab(url, fn) {
         let tabId = null
+        let childTabMeta = null
         try {
             await this._ensureBrowserNavHarnessScript().catch(() => false)
             const tab = await browser.tabs.create({ url: 'about:blank', active: false })
@@ -6283,11 +7080,29 @@ export class dastEngine {
             // Re-apply it on the real target page before the harness ping so the content
             // script can identify the page as a browser-nav attack tab.
             await this._markSpaAttackTab(tabId, {
-                marker: DAST_BROWSER_NAV_TAB_MARKER
+                marker: DAST_BROWSER_NAV_TAB_MARKER,
+                domOnly: true
             })
+            childTabMeta = {
+                tabId,
+                url,
+                parentTabId: this.tabId,
+                role: 'dast_browser_nav_attack_tab',
+                marker: DAST_BROWSER_NAV_TAB_MARKER,
+                sourceEngine: 'DAST'
+            }
+            await this._automationPtkTabOpened(childTabMeta)
             return await fn(tabId, url)
         } finally {
             if (tabId !== null) {
+                await this._automationPtkTabClosing(childTabMeta || {
+                    tabId,
+                    url,
+                    parentTabId: this.tabId,
+                    role: 'dast_browser_nav_attack_tab',
+                    marker: DAST_BROWSER_NAV_TAB_MARKER,
+                    sourceEngine: 'DAST'
+                })
                 try { await browser.tabs.remove(tabId) } catch (_) { }
             }
         }
@@ -6402,6 +7217,7 @@ export class dastEngine {
 
     async _withBrowserWorkflowAttackTab(url, fn) {
         let tabId = null
+        let childTabMeta = null
         try {
             await this._ensureBrowserWorkflowHarnessScript().catch(() => false)
             const tab = await browser.tabs.create({ url: 'about:blank', active: false })
@@ -6415,9 +7231,26 @@ export class dastEngine {
             await this._markSpaAttackTab(tabId, {
                 marker: DAST_BROWSER_WORKFLOW_TAB_MARKER
             })
+            childTabMeta = {
+                tabId,
+                url,
+                parentTabId: this.tabId,
+                role: 'dast_browser_workflow_attack_tab',
+                marker: DAST_BROWSER_WORKFLOW_TAB_MARKER,
+                sourceEngine: 'DAST'
+            }
+            await this._automationPtkTabOpened(childTabMeta)
             return await fn(tabId, url)
         } finally {
             if (tabId !== null) {
+                await this._automationPtkTabClosing(childTabMeta || {
+                    tabId,
+                    url,
+                    parentTabId: this.tabId,
+                    role: 'dast_browser_workflow_attack_tab',
+                    marker: DAST_BROWSER_WORKFLOW_TAB_MARKER,
+                    sourceEngine: 'DAST'
+                })
                 try { await browser.tabs.remove(tabId) } catch (_) { }
             }
         }
@@ -6480,8 +7313,17 @@ export class dastEngine {
         if (!tabId) return
         const marker = opts.marker || 'ptk_spa_attack_tab'
         const runAt = opts.runAt || "document_start"
-        const code = (name) => {
+        const domOnly = opts.domOnly === true
+        const code = (name, markDomOnly) => {
             try {
+                const attrName = name === 'ptk_browser_nav_attack_tab'
+                    ? 'data-ptk-browser-nav-attack-tab'
+                    : 'data-ptk-spa-attack-tab'
+                const root = document.documentElement || document.body
+                if (root && typeof root.setAttribute === 'function') {
+                    root.setAttribute(attrName, '1')
+                }
+                if (markDomOnly) return
                 if (!window.name || !window.name.includes(name)) {
                     window.name = (window.name ? window.name + " " : "") + name
                 }
@@ -6492,7 +7334,7 @@ export class dastEngine {
                 await browser.scripting.executeScript({
                     target: { tabId, allFrames: true },
                     func: code,
-                    args: [marker]
+                    args: [marker, domOnly]
                 })
                 return
             } catch (_) { }
@@ -6500,7 +7342,7 @@ export class dastEngine {
         if (browser?.tabs?.executeScript) {
             try {
                 await browser.tabs.executeScript(tabId, {
-                    code: `try{var n=${JSON.stringify(marker)};if(!window.name||window.name.indexOf(n)===-1){window.name=(window.name?window.name+' ':'')+n;}}catch(_){}`,
+                    code: `try{var n=${JSON.stringify(marker)};var d=${JSON.stringify(domOnly)};var a=n==='ptk_browser_nav_attack_tab'?'data-ptk-browser-nav-attack-tab':'data-ptk-spa-attack-tab';var r=document.documentElement||document.body;if(r&&r.setAttribute){r.setAttribute(a,'1')}if(!d){if(!window.name||window.name.indexOf(n)===-1){window.name=(window.name?window.name+' ':'')+n;}}}catch(_){}`,
                     allFrames: true,
                     runAt
                 })
@@ -6532,12 +7374,19 @@ export class dastEngine {
     }
 
     async _drainRequestQueue() {
-        while (this.isRunning && this._requestQueue.size()) {
+        while (this.isRunning && (this._requestQueue.size() || this._pendingHtmlLinkDiscoveryCount())) {
+            if (!this._requestQueue.size()) {
+                if (!this._drainPendingHtmlDiscoveryQueue()) break
+                continue
+            }
             const raw = this._requestQueue.dequeue()
             try {
                 const plan = await this.buildAttackPlan(raw)
                 if (plan) {
                     this._enqueuePlan(plan)
+                }
+                if (!this._requestQueue.size()) {
+                    this._drainPendingHtmlDiscoveryQueue()
                 }
                 if (!this.isRunning) break
             } catch (err) {
@@ -8685,7 +9534,9 @@ export class dastEngine {
             this.automationHooks = {
                 sessionId: hooks.sessionId,
                 onTaskStarted: hooks.onTaskStarted,
-                onTaskFinished: hooks.onTaskFinished
+                onTaskFinished: hooks.onTaskFinished,
+                onPtkTabOpened: hooks.onPtkTabOpened,
+                onPtkTabClosing: hooks.onPtkTabClosing
             }
         } else {
             this.automationHooks = null
@@ -8758,6 +9609,44 @@ export class dastEngine {
                 taskError: error?.message || error || null,
                 error: err?.message || String(err)
             })
+        }
+    }
+
+    async _automationPtkTabOpened(details = {}) {
+        const hooks = this.automationHooks
+        if (!hooks || typeof hooks.onPtkTabOpened !== 'function') return null
+        try {
+            return await hooks.onPtkTabOpened(Object.assign({
+                sessionId: hooks.sessionId || null,
+                parentTabId: this.tabId || null
+            }, details || {}))
+        } catch (err) {
+            console.warn('[PTK DAST] automation onPtkTabOpened hook failed', {
+                sessionId: hooks.sessionId || null,
+                tabId: details?.tabId || null,
+                role: details?.role || null,
+                error: err?.message || String(err)
+            })
+            return null
+        }
+    }
+
+    async _automationPtkTabClosing(details = {}) {
+        const hooks = this.automationHooks
+        if (!hooks || typeof hooks.onPtkTabClosing !== 'function') return null
+        try {
+            return await hooks.onPtkTabClosing(Object.assign({
+                sessionId: hooks.sessionId || null,
+                parentTabId: this.tabId || null
+            }, details || {}))
+        } catch (err) {
+            console.warn('[PTK DAST] automation onPtkTabClosing hook failed', {
+                sessionId: hooks.sessionId || null,
+                tabId: details?.tabId || null,
+                role: details?.role || null,
+                error: err?.message || String(err)
+            })
+            return null
         }
     }
 
@@ -8995,13 +9884,18 @@ export class dastEngine {
     }
 
     _isIdle() {
-        const queueEmpty = !this._requestQueue?.size || this._requestQueue.size() === 0
+        let queueEmpty = !this._requestQueue?.size || this._requestQueue.size() === 0
         const noTaskQueue = this._taskQueueCount() === 0
         const noPlans = !this._activePlans?.size
         const noActiveTasks = (this.activeCount || 0) === 0
         const notBuilding = this.inProgress === false
         const noPendingCaptures = Math.max(0, Number(this._captureProgressSnapshot()?.pendingObservedRequests || 0)) === 0
-        return queueEmpty && noTaskQueue && noPlans && noActiveTasks && notBuilding && noPendingCaptures && this.isRunning
+        if (this.isRunning && queueEmpty && noTaskQueue && noPlans && noActiveTasks && notBuilding && noPendingCaptures && this._pendingHtmlLinkDiscoveryCount() > 0) {
+            this._drainPendingHtmlDiscoveryQueue()
+            queueEmpty = !this._requestQueue?.size || this._requestQueue.size() === 0
+        }
+        const noPendingHtmlDiscovery = this._pendingHtmlLinkDiscoveryCount() === 0
+        return queueEmpty && noTaskQueue && noPlans && noActiveTasks && notBuilding && noPendingCaptures && noPendingHtmlDiscovery && this.isRunning
     }
 
     _notifyIdleResolvers() {

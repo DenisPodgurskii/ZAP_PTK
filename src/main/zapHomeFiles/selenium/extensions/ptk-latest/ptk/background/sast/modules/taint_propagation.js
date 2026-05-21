@@ -80,6 +80,15 @@ function markFunctionParamsAsMessage(fnNode) {
   }
 }
 
+function markFunctionParamsAsDomEvent(fnNode) {
+  if (!fnNode || !Array.isArray(fnNode.params)) return;
+  for (const param of fnNode.params) {
+    if (param && param.type === "Identifier") {
+      param._ptkIsDomEventParam = true;
+    }
+  }
+}
+
 function literalStringValue(node) {
   if (!node) return null;
   if (node.type === "Literal" && typeof node.value === "string") return node.value;
@@ -203,21 +212,33 @@ function normalizeUrlSourceHint(expr) {
     const parts = memberChainParts(expr);
     if (!parts) return null;
     const lowered = parts.map((p) => String(p).toLowerCase());
+    const whole = lowered.join(".");
+    if (whole === "location" || whole === "window.location" || whole === "document.location") return "location.href";
     const tail = lowered.slice(-2).join(".");
     if (tail === "location.hash") return "location.hash";
     if (tail === "location.search") return "location.search";
     if (tail === "location.href") return "location.href";
+    if (tail === "location.pathname") return "location.pathname";
     if (tail === "document.url") return "document.URL";
+    if (tail === "document.urlunencoded") return "document.URL";
+    if (tail === "document.documenturi") return "document.documentURI";
+    if (tail === "document.baseuri") return "document.baseURI";
+    if (tail === "document.referrer") return "document.referrer";
+    if (tail === "window.name") return "window.name";
     const tail3 = lowered.slice(-3).join(".");
+    if (tail3 === "document.location.hash") return "location.hash";
+    if (tail3 === "document.location.search") return "location.search";
     if (tail3 === "document.location.href") return "location.href";
+    if (tail3 === "document.location.pathname") return "location.pathname";
     if (tail3 === "window.location.href") return "location.href";
     if (tail3 === "window.location.hash") return "location.hash";
     if (tail3 === "window.location.search") return "location.search";
+    if (tail3 === "window.location.pathname") return "location.pathname";
   }
   if (expr.type === "CallExpression" && expr.callee?.type === "MemberExpression") {
     const prop = memberPropName(expr.callee);
     const name = prop ? prop.toLowerCase() : "";
-    if (["slice", "substring", "trim", "tostring", "concat"].includes(name)) {
+    if (["slice", "substr", "substring", "trim", "trimstart", "trimend", "tostring", "concat"].includes(name)) {
       return normalizeUrlSourceHint(expr.callee.object);
     }
   }
@@ -236,6 +257,31 @@ function normalizeUrlSourceHint(expr) {
     }
   }
   return null;
+}
+
+function sourceIdForUrlSourceHint(hint) {
+  switch (hint) {
+    case "location.hash": return "location:hash";
+    case "location.search": return "location:search";
+    case "location.href": return "location:href";
+    case "location.pathname": return "location:pathname";
+    case "document.URL": return "document:url";
+    case "document.documentURI": return "document:documentURI";
+    case "document.baseURI": return "document:baseURI";
+    case "document.referrer": return "document:referrer";
+    case "window.name": return "window:name";
+    default: return null;
+  }
+}
+
+function stableMemberStoreKey(node) {
+  if (!node || node.type !== "MemberExpression") return null;
+  const parts = memberChainParts(node);
+  if (!parts || parts.length < 2) return null;
+  const normalized = parts.map((part) => String(part || ""));
+  const first = normalized[0].toLowerCase();
+  if (GLOBAL_ASSIGNED_FN_BASES.has(first)) normalized[0] = "window";
+  return normalized.join(".");
 }
 
 function maybeMarkScriptFromCall(callNode, callName) {
@@ -406,6 +452,15 @@ function buildCallbackAdapterConfig(catalog) {
   const propagators = catalog?.propagators || {};
   for (const entry of Object.values(propagators)) {
     if (!entry || entry.kind !== "callback_adapter") continue;
+    const callbackParamSource = entry.callbackParamSource && typeof entry.callbackParamSource === "object"
+      ? {
+          id: entry.callbackParamSource.id || entry.id || "callback:value",
+          originKind: entry.callbackParamSource.originKind || entry.callbackParamSource.origin_kind || "generic",
+          taintKinds: Array.isArray(entry.callbackParamSource.taintKinds)
+            ? entry.callbackParamSource.taintKinds.filter((kind) => typeof kind === "string" && kind.trim())
+            : null
+        }
+      : null;
     const patterns = Array.isArray(entry.patterns)
       ? entry.patterns
       : (entry.pattern ? [entry.pattern] : []);
@@ -417,7 +472,7 @@ function buildCallbackAdapterConfig(catalog) {
         const fn = compilePattern(pat);
         if (typeof fn === "function") {
           const wantsReturn = typeof entry.id === "string" && entry.id.includes("array_map");
-          config.push({ match: fn, argIndex, wantsReturn });
+          config.push({ match: fn, argIndex, wantsReturn, callbackParamSource });
         }
       } catch {
         /* ignore invalid pattern */
@@ -730,6 +785,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
   const returnPassthroughEnabled = hasReturnPassthrough(options.catalog || {});
   const sourceTaintKindMap = buildSourceTaintKindMap(options.modules || []);
   const fnIndex = buildFunctionIndex(ast);
+  const propertyStores = new Map();
 
   const fileCache = { map: new Map(), list: [] };
   const rootScope = { parent: null, bindings: new Map(), isFunctionScope: true };
@@ -769,6 +825,31 @@ export function buildGlobalTaintContext(ast, options = {}) {
     return null;
   }
 
+  function addMessageDataOriginsInFunction(fnNode) {
+    if (!fnNode || !Array.isArray(fnNode.params) || !fnNode.body) return;
+    const paramNames = new Set(
+      fnNode.params
+        .filter(param => param?.type === "Identifier" && param._ptkIsMessageParam)
+        .map(param => param.name)
+    );
+    if (!paramNames.size) return;
+    ancestor(fnNode.body, {
+      MemberExpression(node) {
+        if (memberPropName(node) !== "data") return;
+        const objIdent = node.object?.type === "Identifier" ? node.object : null;
+        if (!objIdent || !paramNames.has(objIdent.name)) return;
+        addOriginForNode(
+          node,
+          { originKind: "webmsg", id: "webmsg:data", taintKinds: ["web-message-taint"] },
+          graph,
+          originTable,
+          fileCache,
+          sourceTaintKindMap
+        );
+      }
+    });
+  }
+
   function markMessageHandlerArg(handlerNode, scope) {
     if (!handlerNode) return;
     if (handlerNode.type === "FunctionExpression" || handlerNode.type === "ArrowFunctionExpression") {
@@ -778,7 +859,63 @@ export function buildGlobalTaintContext(ast, options = {}) {
     if (handlerNode.type === "Identifier") {
       const binding = lookup(scope, handlerNode.name);
       const fn = resolveFnFromBinding(binding);
-      if (fn) markFunctionParamsAsMessage(fn);
+      if (fn) {
+        markFunctionParamsAsMessage(fn);
+        addMessageDataOriginsInFunction(fn);
+      }
+    }
+  }
+
+  function isDomEventTargetValueRead(node) {
+    if (memberPropName(node) !== "value") return false;
+    const targetMember = node.object;
+    if (!targetMember || targetMember.type !== "MemberExpression") return false;
+    if (memberPropName(targetMember) !== "target") return false;
+    const eventParam = targetMember.object;
+    return !!(eventParam?.type === "Identifier" && eventParam._ptkIsDomEventParam);
+  }
+
+  function addDomEventValueOriginsInFunction(fnNode) {
+    if (!fnNode || !Array.isArray(fnNode.params) || !fnNode.body) return;
+    const paramNames = new Set(
+      fnNode.params
+        .filter(param => param?.type === "Identifier" && param._ptkIsDomEventParam)
+        .map(param => param.name)
+    );
+    if (!paramNames.size) return;
+    ancestor(fnNode.body, {
+      MemberExpression(node) {
+        if (memberPropName(node) !== "value") return;
+        const targetMember = node.object;
+        if (!targetMember || targetMember.type !== "MemberExpression") return;
+        if (memberPropName(targetMember) !== "target") return;
+        const eventParam = targetMember.object;
+        if (!eventParam || eventParam.type !== "Identifier" || !paramNames.has(eventParam.name)) return;
+        addOriginForNode(
+          node,
+          { originKind: "dom-input", id: "dom:event_target_value" },
+          graph,
+          originTable,
+          fileCache,
+          sourceTaintKindMap
+        );
+      }
+    });
+  }
+
+  function markDomEventHandlerArg(handlerNode, scope) {
+    if (!handlerNode) return;
+    if (handlerNode.type === "FunctionExpression" || handlerNode.type === "ArrowFunctionExpression") {
+      markFunctionParamsAsDomEvent(handlerNode);
+      return;
+    }
+    if (handlerNode.type === "Identifier") {
+      const binding = lookup(scope, handlerNode.name);
+      const fn = resolveFnFromBinding(binding);
+      if (fn) {
+        markFunctionParamsAsDomEvent(fn);
+        addDomEventValueOriginsInFunction(fn);
+      }
     }
   }
 
@@ -788,6 +925,16 @@ export function buildGlobalTaintContext(ast, options = {}) {
       if (!fnNode || !Array.isArray(fnNode.params)) return;
       for (const param of fnNode.params) {
         if (param && param.type === "Identifier") {
+          if (opts.callbackParamSource) {
+            addOriginForNode(
+              param,
+              opts.callbackParamSource,
+              graph,
+              originTable,
+              fileCache,
+              sourceTaintKindMap
+            );
+          }
           graph.addEdge(sourceNode, param, opts.edgeKind || "callback_param");
         }
       }
@@ -938,6 +1085,11 @@ export function buildGlobalTaintContext(ast, options = {}) {
         visit(node.right, scope, nextParents, activeFnStack);
         visit(node.left, scope, nextParents, activeFnStack);
         graph.addEdge(node.right, node.left, "assign");
+        const storeKey = stableMemberStoreKey(node.left);
+        if (storeKey) {
+          if (!propertyStores.has(storeKey)) propertyStores.set(storeKey, []);
+          propertyStores.get(storeKey).push(node.right);
+        }
         if (node.left.type === "Identifier") {
           bind(scope, node.left.name, node.left);
           if (node.right && (node.right.type === "FunctionExpression" || node.right.type === "ArrowFunctionExpression")) {
@@ -969,6 +1121,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
       }
 
       case "MemberExpression": {
+        const isAssignmentTarget = parents[parents.length - 2]?.type === "AssignmentExpression" && parents[parents.length - 2].left === node;
         if (node.object?._ptkIsScript) node._ptkIsScript = true;
         if (node.object?._ptkIsURLInstance) node._ptkIsURLInstance = true;
         if (node.object?._ptkIsURLSearchParams) node._ptkIsURLSearchParams = true;
@@ -977,6 +1130,13 @@ export function buildGlobalTaintContext(ast, options = {}) {
         if (node.property) visit(node.property, scope, nextParents, activeFnStack);
         if (node.object) graph.addEdge(node.object, node, "member");
         if (node.computed && node.property) graph.addEdge(node.property, node, "member");
+        if (!isAssignmentTarget) {
+          const storeKey = stableMemberStoreKey(node);
+          const stores = storeKey ? propertyStores.get(storeKey) : null;
+          if (stores && stores.length) {
+            stores.forEach((storedNode) => storedNode && graph.addEdge(storedNode, node, "property_store"));
+          }
+        }
         shouldWalkChildren = false;
         // Heuristic: message data origins (event.data / e.data / etc.)
         const propName = (!node.computed && node.property && node.property.type === "Identifier")
@@ -994,6 +1154,16 @@ export function buildGlobalTaintContext(ast, options = {}) {
               sourceTaintKindMap
             );
           }
+        }
+        if (isDomEventTargetValueRead(node)) {
+          addOriginForNode(
+            node,
+            { originKind: "dom-input", id: "dom:event_target_value" },
+            graph,
+            originTable,
+            fileCache,
+            sourceTaintKindMap
+          );
         }
         if (propName === "searchParams" && node.object?._ptkIsURLInstance) {
           markUrlParamsNode(node);
@@ -1027,9 +1197,11 @@ export function buildGlobalTaintContext(ast, options = {}) {
         if (node.type === "CallExpression" && lowerName.endsWith("addeventlistener")) {
           const evtArg = node.arguments?.[0];
           const evtName = literalStringValue(evtArg)?.toLowerCase();
+          const handlerArg = node.arguments?.[1];
           if (evtName === "message") {
-            const handlerArg = node.arguments?.[1];
             markMessageHandlerArg(handlerArg, scope);
+          } else if (handlerArg) {
+            markDomEventHandlerArg(handlerArg, scope);
           }
         }
         if (node.callee) visit(node.callee, scope, nextParents, activeFnStack);
@@ -1077,7 +1249,8 @@ export function buildGlobalTaintContext(ast, options = {}) {
               if (receiver && handlerArg) {
                 attachCallbackParams(handlerArg, scope, receiver, {
                   edgeKind: "callback_adapter",
-                  returnToCall: adapter.wantsReturn ? node : null
+                  returnToCall: adapter.wantsReturn ? node : null,
+                  callbackParamSource: adapter.callbackParamSource || null
                 });
               }
             }
@@ -1186,6 +1359,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
             graph.addEdge(binding, node, "alias");
             if (binding._ptkIsScript) node._ptkIsScript = true;
             if (binding._ptkIsMessageParam) node._ptkIsMessageParam = true;
+            if (binding._ptkIsDomEventParam) node._ptkIsDomEventParam = true;
             if (binding._ptkIsURLSearchParams) node._ptkIsURLSearchParams = true;
             if (binding._ptkIsURLInstance) node._ptkIsURLInstance = true;
             if (binding._ptkUrlSourceHint) node._ptkUrlSourceHint = binding._ptkUrlSourceHint;
@@ -1256,6 +1430,19 @@ export function buildGlobalTaintContext(ast, options = {}) {
           /* ignore matcher errors */
         }
       }
+    }
+
+    const urlSourceHint = node.type === "MemberExpression" ? normalizeUrlSourceHint(node) : null;
+    const urlSourceId = sourceIdForUrlSourceHint(urlSourceHint);
+    if (urlSourceId) {
+      addOriginForNode(
+        node,
+        { originKind: "url", id: urlSourceId },
+        graph,
+        originTable,
+        fileCache,
+        sourceTaintKindMap
+      );
     }
   }
 

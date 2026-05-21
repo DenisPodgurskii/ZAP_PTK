@@ -277,6 +277,192 @@ export class DastCaptureAdapter {
         return /(?:ptk_xss_|PTK_SPA_DOM_XSS_|source%3A%27ptk-xss%27|source:'ptk-xss')/i.test(markerSource)
     }
 
+    _isPtkGeneratedCapturedRequest(capturedRequest = {}) {
+        const headers = Array.isArray(capturedRequest?.requestHeaders) ? capturedRequest.requestHeaders : []
+        return headers.some((header) => {
+            const name = String(header?.name || "").trim().toLowerCase()
+            const value = String(header?.value || "").trim().toLowerCase()
+            return name === "x-ptk-source" || (name === "x-requested-by" && value === "ptk")
+        })
+    }
+
+    _hasHeader(headers = [], name = "") {
+        const target = String(name || "").trim().toLowerCase()
+        if (!target || !Array.isArray(headers)) return false
+        return headers.some((header) => String(header?.name || "").trim().toLowerCase() === target)
+    }
+
+    _rawHasHeader(rawRequest = "", name = "") {
+        const target = String(name || "").trim().toLowerCase()
+        if (!target) return false
+        const lines = String(rawRequest || "").split(/\r?\n/)
+        for (let i = 1; i < lines.length; i += 1) {
+            const line = lines[i]
+            if (!line || !line.trim()) break
+            const sep = line.indexOf(":")
+            if (sep <= 0) continue
+            if (line.slice(0, sep).trim().toLowerCase() === target) return true
+        }
+        return false
+    }
+
+    _rawRequestHeaderValue(rawRequest = "", name = "") {
+        const target = String(name || "").trim().toLowerCase()
+        if (!target) return ""
+        const lines = String(rawRequest || "").split(/\r?\n/)
+        for (let i = 1; i < lines.length; i += 1) {
+            const line = lines[i]
+            if (!line || !line.trim()) break
+            const sep = line.indexOf(":")
+            if (sep <= 0) continue
+            if (line.slice(0, sep).trim().toLowerCase() === target) {
+                return line.slice(sep + 1).trim()
+            }
+        }
+        return ""
+    }
+
+    _capturedRequestHeaderValue(capturedRequest = {}, name = "") {
+        const target = String(name || "").trim().toLowerCase()
+        if (!target) return ""
+        const headers = Array.isArray(capturedRequest?.requestHeaders) ? capturedRequest.requestHeaders : []
+        const match = headers.find((header) => String(header?.name || "").trim().toLowerCase() === target)
+        return String(match?.value || "").trim()
+    }
+
+    _rawRequestBodyText(rawRequest = "") {
+        const raw = String(rawRequest || "")
+        const separator = raw.includes("\r\n\r\n") ? "\r\n\r\n" : (raw.includes("\n\n") ? "\n\n" : null)
+        if (!separator) return ""
+        return raw.slice(raw.indexOf(separator) + separator.length)
+    }
+
+    _capturedRequestBodyText(capturedRequest = {}) {
+        const body = capturedRequest?.requestBody
+        if (!body) return ""
+        if (typeof body === "string") return body
+        if (typeof body?.text === "string") return body.text
+        if (typeof body?.raw === "string") return body.raw
+        if (typeof body?.bytes === "string") return body.bytes
+        if (Array.isArray(body?.formData)) return body.formData.map((entry) => `${entry?.name || ""}=${entry?.value || ""}`).join("&")
+        if (body?.formData && typeof body.formData === "object") {
+            return Object.entries(body.formData)
+                .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(",") : String(value ?? "")}`)
+                .join("&")
+        }
+        return ""
+    }
+
+    _hasMeaningfulRequestBody(rawRequest = "", capturedRequest = {}) {
+        const rawBody = this._rawRequestBodyText(rawRequest)
+        const capturedBody = this._capturedRequestBodyText(capturedRequest)
+        return Boolean(String(rawBody || "").trim() || String(capturedBody || "").trim())
+    }
+
+    _stateChangingBodyReadiness(rawRequest = "", capturedRequest = {}, response = {}) {
+        if (!this._isStateChangingRequest(response)) return { ready: true, reason: "not_state_changing", dropIfFinal: false }
+        if (this._hasMeaningfulRequestBody(rawRequest, capturedRequest)) {
+            return { ready: true, reason: "body_present", dropIfFinal: false }
+        }
+        const rawLength = this._rawRequestHeaderValue(rawRequest, "content-length")
+        const capturedLength = this._capturedRequestHeaderValue(capturedRequest, "content-length")
+        const length = Number(rawLength || capturedLength || 0)
+        const contentType = [
+            this._rawRequestHeaderValue(rawRequest, "content-type"),
+            this._capturedRequestHeaderValue(capturedRequest, "content-type")
+        ].join(" ").toLowerCase()
+        const hasStructuredBodyType = /application\/json|application\/x-www-form-urlencoded|multipart\/form-data|text\/plain/.test(contentType)
+        const requestBodyObjectPresent = capturedRequest?.requestBody && typeof capturedRequest.requestBody === "object"
+        const expectsBody = (Number.isFinite(length) && length > 0) || hasStructuredBodyType || requestBodyObjectPresent
+        if (!expectsBody) return { ready: true, reason: "body_not_expected", dropIfFinal: false }
+        const status = Number(response?.statusCode || response?.status || 0)
+        return {
+            ready: false,
+            reason: status >= 500 ? "state_changing_error_without_body" : "state_changing_body_pending",
+            dropIfFinal: status >= 500
+        }
+    }
+
+    _recordCaptureDiagnostic(event) {
+        try {
+            if (typeof this.engine?._appendRuntimeEvent === "function") {
+                this.engine._appendRuntimeEvent(Object.assign({ ts: new Date().toISOString(), source: "dast_capture" }, event || {}))
+            }
+        } catch (_) { }
+    }
+
+    _isSameHostAsScan(url = "") {
+        const scanHost = String(this.engine?.host || "").trim()
+        if (!scanHost) return false
+        try {
+            const parsed = new URL(url)
+            const scanUrl = new URL(/^https?:\/\//i.test(scanHost) ? scanHost : `http://${scanHost}`)
+            return String(parsed.host || "").toLowerCase() === String(scanUrl.host || "").toLowerCase()
+        } catch (_) {
+            return false
+        }
+    }
+
+    _isJwtLikeCookie(cookie = {}) {
+        const name = String(cookie?.name || "").trim()
+        const value = String(cookie?.value || "")
+        return /^(?:token|id_token|access_token|refresh_token|jwt)$/i.test(name)
+            || /(?:^|[=\s])(ey[A-Za-z0-9_=-]+)\.([A-Za-z0-9_=-]+)\.([A-Za-z0-9_-]{2,})(?:$|[;\s])/i.test(value)
+    }
+
+    _sanitizeCookiePair(cookie = {}) {
+        const name = String(cookie?.name || "").trim()
+        const value = String(cookie?.value || "")
+        if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) return null
+        if (!value || /[\x00-\x20\x7f;]/.test(value)) return null
+        return `${name}=${value}`
+    }
+
+    _appendRawHeader(rawRequest = "", name = "", value = "") {
+        const raw = String(rawRequest || "")
+        if (!raw.trim() || !name) return raw
+        const headerLine = `${name}: ${value}`
+        const separator = raw.includes("\r\n\r\n") ? "\r\n\r\n" : (raw.includes("\n\n") ? "\n\n" : null)
+        if (!separator) return `${raw.replace(/\s+$/, "")}\r\n${headerLine}\r\n\r\n`
+        const index = raw.indexOf(separator)
+        const lineEnding = separator.startsWith("\r\n") ? "\r\n" : "\n"
+        return `${raw.slice(0, index)}${lineEnding}${headerLine}${raw.slice(index)}`
+    }
+
+    async _backfillJwtCookieHeader(rawRequest = "", capturedRequest = {}) {
+        const requestHeaders = Array.isArray(capturedRequest?.requestHeaders)
+            ? capturedRequest.requestHeaders.map((header) => ({ name: header?.name, value: header?.value }))
+            : []
+        if (this._rawHasHeader(rawRequest, "cookie") || this._hasHeader(requestHeaders, "cookie")) {
+            return { rawRequest, capturedRequest: Object.assign({}, capturedRequest, { requestHeaders }) }
+        }
+        const url = String(capturedRequest?.url || "").trim()
+        if (!/^https?:\/\//i.test(url) || !this._isSameHostAsScan(url)) {
+            return { rawRequest, capturedRequest: Object.assign({}, capturedRequest, { requestHeaders }) }
+        }
+        let cookies = []
+        try {
+            const result = this.browserApi?.cookies?.getAll?.({ url })
+            cookies = typeof result?.then === "function" ? await result : (Array.isArray(result) ? result : [])
+        } catch (_) {
+            cookies = []
+        }
+        const jwtCookies = (Array.isArray(cookies) ? cookies : [])
+            .filter((cookie) => cookie?.name && this._isJwtLikeCookie(cookie))
+        const cookiePairs = jwtCookies
+            .map((cookie) => this._sanitizeCookiePair(cookie))
+            .filter(Boolean)
+        if (!cookiePairs.length) {
+            return { rawRequest, capturedRequest: Object.assign({}, capturedRequest, { requestHeaders }) }
+        }
+        const cookieHeader = cookiePairs.join("; ")
+        const nextHeaders = requestHeaders.concat([{ name: "Cookie", value: cookieHeader }])
+        return {
+            rawRequest: this._appendRawHeader(rawRequest, "Cookie", cookieHeader),
+            capturedRequest: Object.assign({}, capturedRequest, { requestHeaders: nextHeaders })
+        }
+    }
+
     _normalizeRawRequestLine(rawRequest, response = null) {
         const raw = String(rawRequest || "")
         if (!raw.trim()) return ""
@@ -375,6 +561,15 @@ export class DastCaptureAdapter {
                 if (!isStateChanging && !hasPerRequestHeaders && !hasBody && richness < 20) return
                 rawRequest = this._normalizeRawRequestLine(rawRequest, envelope)
                 if (!rawRequest) return
+                if (this._isPtkGeneratedRequest(rawRequest, details?.url || envelope.url)) return
+                const capturedRequest = cloneCapturedRequest({
+                    url: details?.url || envelope.url,
+                    ui_url: details?.ui_url || envelope.ui_url || envelope.url,
+                    method: details?.method || method,
+                    requestHeaders: details?.requestHeaders || [],
+                    requestBody: details?.requestBody || null
+                })
+                if (this._isPtkGeneratedCapturedRequest(capturedRequest)) return
                 const uiUrl = this._extractUiUrlFromRaw(rawRequest, envelope.ui_url || envelope.url)
                 this.engine?.enqueue?.({
                     raw: rawRequest,
@@ -382,13 +577,7 @@ export class DastCaptureAdapter {
                     method,
                     ui_url: uiUrl || envelope.ui_url || envelope.url,
                     responseType: envelope.type,
-                    capturedRequest: cloneCapturedRequest({
-                        url: details?.url || envelope.url,
-                        ui_url: details?.ui_url || envelope.ui_url || envelope.url,
-                        method: details?.method || method,
-                        requestHeaders: details?.requestHeaders || [],
-                        requestBody: details?.requestBody || null
-                    })
+                    capturedRequest
                 }, Object.assign({}, envelope, {
                     ui_url: uiUrl || envelope.ui_url || envelope.url
                 }))
@@ -534,7 +723,8 @@ export class DastCaptureAdapter {
     }
 
     async enqueueObservedRequest(response, maxAttempts = 6) {
-        const attempts = Math.max(1, Number(maxAttempts) || 1)
+        const requestedAttempts = Math.max(1, Number(maxAttempts) || 1)
+        const attempts = this._isStateChangingRequest(response) ? Math.max(requestedAttempts, 6) : requestedAttempts
         for (let attempt = 0; attempt < attempts; attempt++) {
             try {
                 const tab = this.worker?.ptk_app?.proxy?.getTab?.(response.tabId)
@@ -560,8 +750,36 @@ export class DastCaptureAdapter {
                 if (this._isPtkGeneratedRequest(rawRequest, response?.url || response?.ui_url || "")) {
                     return false
                 }
+                const capturedRequest = {
+                    url: details?.url || response.url,
+                    ui_url: details?.ui_url || response.ui_url || response.url,
+                    method: details?.method || response.method,
+                    requestHeaders: details?.requestHeaders || [],
+                    requestBody: details?.requestBody || null
+                }
+                if (this._isPtkGeneratedCapturedRequest(capturedRequest)) {
+                    return false
+                }
+                const withCookieBackfill = await this._backfillJwtCookieHeader(rawRequest, capturedRequest)
+                rawRequest = withCookieBackfill.rawRequest
+                const effectiveCapturedRequest = withCookieBackfill.capturedRequest
                 const hasPerRequestHeaders = !!rawBundle?.meta?.hasPerRequestHeaders
                 const richness = this._rawRequestHeaderRichness(rawRequest)
+                const bodyReadiness = this._stateChangingBodyReadiness(rawRequest, effectiveCapturedRequest, response)
+                if (!bodyReadiness.ready) {
+                    if (attempt < attempts - 1) {
+                        await this.sleep(75 * (attempt + 1))
+                        continue
+                    }
+                    this._recordCaptureDiagnostic({
+                        type: "state_changing_request_body_unavailable",
+                        reason: bodyReadiness.reason,
+                        url: response?.url || null,
+                        method: response?.method || null,
+                        statusCode: response?.statusCode || null
+                    })
+                    if (bodyReadiness.dropIfFinal) return false
+                }
                 if ((!hasPerRequestHeaders || richness < 60) && attempt < attempts - 1) {
                     await this.sleep(75 * (attempt + 1))
                     continue
@@ -576,13 +794,7 @@ export class DastCaptureAdapter {
                     method: response.method,
                     ui_url: uiUrl || response.ui_url || response.url,
                     responseType: response.type,
-                    capturedRequest: cloneCapturedRequest({
-                        url: details?.url || response.url,
-                        ui_url: details?.ui_url || response.ui_url || response.url,
-                        method: details?.method || response.method,
-                        requestHeaders: details?.requestHeaders || [],
-                        requestBody: details?.requestBody || null
-                    })
+                    capturedRequest: cloneCapturedRequest(effectiveCapturedRequest)
                 }, Object.assign({}, response, {
                     ui_url: uiUrl || response.ui_url || response.url
                 }))

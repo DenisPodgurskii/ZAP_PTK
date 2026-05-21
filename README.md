@@ -21,7 +21,9 @@ For more information about OWASP PTK, visit [https://pentestkit.co.uk/](https://
 
 ## Automation Documentation
 
-For PTK/ZAP automation plan structure, close-contract behavior, browser evidence logs, and diagnostic jobs such as `ptkBrowserCoverage`, see [docs/ptk-zap-automation.md](docs/ptk-zap-automation.md).
+For production PTK/ZAP automation plan structure, close-contract behavior, and browser evidence logs, see [docs/ptk-zap-automation.md](docs/ptk-zap-automation.md).
+
+Internal browser-coverage diagnostics such as `ptkBrowserCoverage` are excluded from the production add-on build. To build and use the diagnostic artifact, see [docs/diagnostics/ptk-browser-coverage.md](docs/diagnostics/ptk-browser-coverage.md).
 
 ## Development Notes
 

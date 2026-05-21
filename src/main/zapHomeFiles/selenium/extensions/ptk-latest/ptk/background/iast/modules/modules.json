@@ -319,6 +319,91 @@
           }
         },
         {
+          "id": "href_data_url_execution",
+          "name": "data: URL assigned to href",
+          "sinkId": "dom.attr.href.dataUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL assigned to href."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "src_javascript_url_execution",
+          "name": "javascript: URL assigned to src",
+          "sinkId": "dom.attr.src.javascriptUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL assigned to a generic src attribute and interpreted as executable content.",
+            "confidenceDefault": 72
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "src_data_url_execution",
+          "name": "data: URL assigned to src",
+          "sinkId": "dom.attr.src.dataUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL assigned to a generic src attribute."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
           "id": "location_href_javascript_url_execution",
           "name": "javascript: URL navigated via location.href",
           "sinkId": "nav.location.href.javascriptUrl",
@@ -348,6 +433,202 @@
           }
         },
         {
+          "id": "location_href_data_url_execution",
+          "name": "data: URL navigated via location.href",
+          "sinkId": "nav.location.href.dataUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL assigned to location.href."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "location_assign_javascript_url_execution",
+          "name": "javascript: URL navigated via location.assign",
+          "sinkId": "nav.location.assign.javascriptUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL passed to location.assign."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "location_assign_data_url_execution",
+          "name": "data: URL navigated via location.assign",
+          "sinkId": "nav.location.assign.dataUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL passed to location.assign."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "location_replace_javascript_url_execution",
+          "name": "javascript: URL navigated via location.replace",
+          "sinkId": "nav.location.replace.javascriptUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL passed to location.replace."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "location_replace_data_url_execution",
+          "name": "data: URL navigated via location.replace",
+          "sinkId": "nav.location.replace.dataUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL passed to location.replace."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "window_open_javascript_url_execution",
+          "name": "javascript: URL opened via window.open",
+          "sinkId": "nav.window.open.javascriptUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted javascript: URL passed to window.open."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "window_open_data_url_execution",
+          "name": "data: URL opened via window.open",
+          "sinkId": "nav.window.open.dataUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL passed to window.open."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
           "id": "iframe_src_javascript_url_execution",
           "name": "javascript: URL assigned to iframe.src",
           "sinkId": "nav.iframe.src.javascriptUrl",
@@ -370,6 +651,34 @@
           ],
           "metadata": {
             "description": "Tainted javascript: URL assigned to iframe.src."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "iframe_src_data_url_execution",
+          "name": "data: URL assigned to iframe.src",
+          "sinkId": "nav.iframe.src.dataUrl",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL assigned to iframe.src."
           },
           "conditions": {
             "requiresTaint": true
@@ -443,6 +752,25 @@
           "name": "Dynamic code execution via eval",
           "sinkId": "code.eval",
           "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "apiResponseField",
+            "graphqlResponseField",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
           "metadata": {
             "description": "Tainted string executed via eval()."
           },
@@ -461,6 +789,25 @@
           "name": "Dynamic code execution via Function constructor",
           "sinkId": "code.function.constructor",
           "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "apiResponseField",
+            "graphqlResponseField",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
           "metadata": {
             "description": "Tainted string executed via Function constructor."
           },
@@ -558,6 +905,1230 @@
       ]
     },
     {
+      "id": "iast_angularjs_expression_injection",
+      "type": "runtime",
+      "async": true,
+      "name": "AngularJS expression / client-template injection",
+      "metadata": {
+        "description": "Runtime detection for AngularJS expression injection paths: interpolation templates, ng-* expression attributes and $parse inputs from query, form, cookie, storage and postMessage sources.",
+        "recommendation": "<ul><li>Do not evaluate user-controlled AngularJS expressions.</li><li>Do not render untrusted input inside AngularJS interpolation or ng-* expression attributes.</li><li>Do not pass cookie, storage, message, URL or form values to $parse/$compile/$interpolate without strict allow-listing.</li><li>Migrate away from unsupported AngularJS versions.</li></ul>",
+        "category": "xss",
+        "links": {
+          "PortSwigger AngularJS sandbox contexts": "https://portswigger.net/web-security/cross-site-scripting/contexts/angularjs-sandbox",
+          "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-79",
+          "CWE-94"
+        ],
+        "tags": [
+          "iast",
+          "angularjs",
+          "xss",
+          "client-template-injection"
+        ],
+        "severity": "high",
+        "vulnId": "angularjs_client_template_injection",
+        "presentation": {
+          "aggregate": "route-source-sink-callsite"
+        }
+      },
+      "rules": [
+        {
+          "id": "angularjs_expression_function_constructor",
+          "name": "AngularJS expression executed through Function constructor",
+          "sinkId": "code.function.constructor",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [],
+          "metadata": {
+            "description": "Tainted data reached dynamic code execution while AngularJS expression parsing/compilation was active. This covers interpolation and $parse-style AngularJS expression injection cases.",
+            "confidence": 85,
+            "tags": [
+              "angularjs",
+              "client-template-injection",
+              "function-constructor"
+            ]
+          },
+          "hook": {
+            "kind": "constructor",
+            "objectPath": "Function"
+          },
+          "conditions": {
+            "requiresTaint": true
+          },
+          "limits": {
+            "maxReports": 50
+          }
+        },
+        {
+          "id": "angularjs_parse_from_form",
+          "name": "AngularJS $parse expression from form input",
+          "sinkId": "angularjs.parse.expression",
+          "severity": "high",
+          "sources": [
+            "bodyParam",
+            "formDataField",
+            "inline"
+          ],
+          "sanitizersAllowed": [],
+          "metadata": {
+            "description": "Form-controlled expression value reaches AngularJS $parse.",
+            "confidence": 90,
+            "tags": [
+              "angularjs",
+              "$parse"
+            ]
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "angularjs",
+            "method": "parse",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          },
+          "limits": {
+            "maxReports": 25
+          }
+        },
+        {
+          "id": "angularjs_parse_from_cookie",
+          "name": "AngularJS $parse expression from cookie",
+          "sinkId": "angularjs.parse.expression",
+          "severity": "high",
+          "sources": [
+            "cookie"
+          ],
+          "sanitizersAllowed": [],
+          "metadata": {
+            "description": "Cookie-controlled expression value reaches AngularJS $parse.",
+            "confidence": 90,
+            "tags": [
+              "angularjs",
+              "$parse"
+            ]
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "angularjs",
+            "method": "parse",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          },
+          "limits": {
+            "maxReports": 25
+          }
+        },
+        {
+          "id": "angularjs_parse_from_localstorage",
+          "name": "AngularJS $parse expression from localStorage",
+          "sinkId": "angularjs.parse.expression",
+          "severity": "high",
+          "sources": [
+            "localStorage",
+            "sessionStorage"
+          ],
+          "sanitizersAllowed": [],
+          "metadata": {
+            "description": "Storage-controlled expression value reaches AngularJS $parse.",
+            "confidence": 90,
+            "tags": [
+              "angularjs",
+              "$parse"
+            ]
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "angularjs",
+            "method": "parse",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          },
+          "limits": {
+            "maxReports": 25
+          }
+        },
+        {
+          "id": "angularjs_parse_from_postmessage",
+          "name": "AngularJS $parse expression from postMessage",
+          "sinkId": "angularjs.parse.expression",
+          "severity": "high",
+          "sources": [
+            "postMessage"
+          ],
+          "sanitizersAllowed": [],
+          "metadata": {
+            "description": "postMessage-controlled expression value reaches AngularJS $parse.",
+            "confidence": 90,
+            "tags": [
+              "angularjs",
+              "$parse"
+            ]
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "angularjs",
+            "method": "parse",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          },
+          "limits": {
+            "maxReports": 25
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_postmessage_misuse",
+      "type": "runtime",
+      "async": true,
+      "name": "window.postMessage misuse",
+      "metadata": {
+        "description": "Detect tainted data sent via window.postMessage to untrusted or wildcard origins.",
+        "recommendation": "<ul><li>Use a strict targetOrigin and validate event.origin.</li><li>Validate and sanitize event.data before use.</li></ul>",
+        "category": "client_side",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Clickjacking",
+          "CWE": "https://cwe.mitre.org/data/definitions/345.html"
+        },
+        "owasp": [
+          "A01:2025 - Broken Access Control",
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-345"
+        ],
+        "tags": [
+          "iast",
+          "postmessage"
+        ],
+        "severity": "medium",
+        "vulnId": "postmessage_misuse"
+      },
+      "rules": [
+        {
+          "id": "postmessage_star_origin_leak",
+          "name": "postMessage to wildcard origin with tainted payload",
+          "sinkId": "postmessage.anyOrigin",
+          "severity": "medium",
+          "metadata": {
+            "description": "Tainted data sent via window.postMessage to wildcard '*' targetOrigin."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window",
+            "method": "postMessage",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "postmessage_cross_origin_leak",
+          "name": "postMessage to cross-origin target with tainted payload",
+          "sinkId": "postmessage.crossOrigin",
+          "severity": "medium",
+          "metadata": {
+            "description": "Tainted data sent via window.postMessage to a different origin."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window",
+            "method": "postMessage",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_timer_js_execution",
+      "type": "runtime",
+      "async": true,
+      "name": "Timer-based JS execution sinks",
+      "metadata": {
+        "description": "Detect tainted string payloads executed via setTimeout/setInterval.",
+        "recommendation": "<ul><li>Do not pass strings to setTimeout/setInterval.</li><li>Pass functions directly and validate inputs.</li></ul>",
+        "category": "injection",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/95.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-95"
+        ],
+        "tags": [
+          "iast",
+          "timer",
+          "code"
+        ],
+        "severity": "high",
+        "vulnId": "code_injection",
+        "presentation": {
+          "aggregate": "source-sink-callsite"
+        }
+      },
+      "rules": [
+        {
+          "id": "settimeout_string_execution",
+          "name": "Tainted string executed via setTimeout",
+          "sinkId": "code.setTimeout",
+          "severity": "high",
+          "metadata": {
+            "description": "Tainted string passed as the first argument to setTimeout(), leading to code execution."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window",
+            "method": "setTimeout",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "setinterval_string_execution",
+          "name": "Tainted string executed via setInterval",
+          "sinkId": "code.setInterval",
+          "severity": "high",
+          "metadata": {
+            "description": "Tainted string passed as the first argument to setInterval(), leading to repeated code execution."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window",
+            "method": "setInterval",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_iframe_navigation",
+      "type": "runtime",
+      "async": true,
+      "name": "IFrame navigation and content sinks",
+      "metadata": {
+        "description": "Detect tainted data flowing into iframe navigation sinks (src, srcdoc).",
+        "recommendation": "<ul><li>Allow-list iframe targets and avoid writing untrusted URLs to iframe.src/srcdoc.</li><li>Use sandbox attributes where possible.</li></ul>",
+        "category": "access_control",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Clickjacking",
+          "CWE": "https://cwe.mitre.org/data/definitions/451.html"
+        },
+        "owasp": [
+          "A01:2025 - Broken Access Control",
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-451"
+        ],
+        "tags": [
+          "iast",
+          "iframe",
+          "navigation"
+        ],
+        "severity": "medium",
+        "vulnId": "open_redirect"
+      },
+      "rules": [
+        {
+          "id": "iframe_src_redirect",
+          "name": "IFrame navigation via src",
+          "sinkId": "nav.iframe.src",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "cwe": [
+              "CWE-601"
+            ],
+            "description": "Tainted URL assigned to iframe.src, causing navigation to untrusted content."
+          },
+          "hook": {
+            "kind": "propertySetter",
+            "objectType": "HTMLIFrameElement",
+            "property": "src"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "iframe_srcdoc_xss",
+          "name": "IFrame content injection via srcdoc",
+          "sinkId": "nav.iframe.srcdoc",
+          "severity": "medium",
+          "metadata": {
+            "category": "xss",
+            "vulnId": "dom_xss",
+            "cwe": [
+              "CWE-79"
+            ],
+            "owasp": [
+              "A05:2025 - Injection",
+              "A03:2021 - Injection"
+            ],
+            "description": "Tainted HTML assigned to iframe.srcdoc, enabling DOM-based XSS inside the frame."
+          },
+          "hook": {
+            "kind": "propertySetter",
+            "objectType": "HTMLIFrameElement",
+            "property": "srcdoc"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_client_http_exfiltration",
+      "type": "runtime",
+      "async": true,
+      "name": "Client-side HTTP exfiltration sinks",
+      "metadata": {
+        "description": "Detect tainted data exfiltrated via common HTTP APIs (fetch, XHR, sendBeacon, image beacons).",
+        "recommendation": "<ul><li>Do not send secrets or tokens to untrusted endpoints.</li><li>Validate destination URLs and strip sensitive headers/body fields.</li><li>Apply client-side DLP checks for outbound requests.</li></ul>",
+        "category": "sensitive_data",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+          "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+        },
+        "owasp": [
+          "A04:2025 - Cryptographic Failures",
+          "A02:2021 - Cryptographic Failures"
+        ],
+        "cwe": [
+          "CWE-200"
+        ],
+        "tags": [
+          "iast",
+          "http",
+          "exfiltration"
+        ],
+        "severity": "high",
+        "vulnId": "data_exfiltration"
+      },
+      "rules": [
+        {
+          "id": "fetch_url_exfiltration",
+          "name": "Exfiltration via fetch URL",
+          "sinkId": "http.fetch.url",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "apiResponseField",
+            "graphqlResponseField",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data used in fetch() URL, potentially exfiltrating sensitive information."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window",
+            "method": "fetch",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "fetch_headers_exfiltration",
+          "name": "Exfiltration via fetch headers",
+          "sinkId": "http.fetch.headers",
+          "severity": "high",
+          "metadata": {
+            "cwe": [
+              "CWE-359"
+            ],
+            "description": "Tainted data sent in fetch() headers (e.g. Authorization, custom tokens)."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window",
+            "method": "fetch",
+            "argIndex": 1
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "xhr_url_exfiltration",
+          "name": "Exfiltration via XMLHttpRequest URL",
+          "sinkId": "http.xhr.open",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "apiResponseField",
+            "graphqlResponseField",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data used in XMLHttpRequest.open() URL."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "XMLHttpRequest.prototype",
+            "method": "open",
+            "argIndex": 1
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "xhr_body_exfiltration",
+          "name": "Exfiltration via XMLHttpRequest body",
+          "sinkId": "http.xhr.send",
+          "severity": "high",
+          "metadata": {
+            "cwe": [
+              "CWE-201"
+            ],
+            "description": "Tainted data sent in XMLHttpRequest.send() body."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "XMLHttpRequest.prototype",
+            "method": "send",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "xhr_header_exfiltration",
+          "name": "Exfiltration via XMLHttpRequest headers",
+          "sinkId": "http.xhr.setRequestHeader",
+          "severity": "high",
+          "metadata": {
+            "description": "Tainted data sent in XMLHttpRequest.setRequestHeader() values."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "XMLHttpRequest.prototype",
+            "method": "setRequestHeader",
+            "argIndex": 1
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "sendbeacon_exfiltration",
+          "name": "Exfiltration via navigator.sendBeacon",
+          "sinkId": "http.navigator.sendBeacon",
+          "severity": "high",
+          "metadata": {
+            "cwe": [
+              "CWE-359"
+            ],
+            "description": "Tainted data sent via navigator.sendBeacon()."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "navigator",
+            "method": "sendBeacon",
+            "argIndex": 1
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "image_src_exfiltration",
+          "name": "Exfiltration via image.src beacon",
+          "sinkId": "http.image.src",
+          "severity": "medium",
+          "metadata": {
+            "cwe": [
+              "CWE-359"
+            ],
+            "description": "Tainted data embedded into image src URL for beacon-style exfiltration."
+          },
+          "hook": {
+            "kind": "propertySetter",
+            "objectType": "HTMLImageElement",
+            "property": "src"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_dom_link_manipulation",
+      "type": "runtime",
+      "async": true,
+      "name": "DOM link and attribute navigation sinks",
+      "metadata": {
+        "description": "Detect tainted URLs assigned to link/navigation-related attributes (href, src, action, formaction).",
+        "recommendation": "<ul><li>Validate and normalize URLs before assigning to link or navigation attributes.</li><li>Prefer allow-listed destinations and internal routes.</li></ul>",
+        "category": "access_control",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+          "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+        },
+        "owasp": [
+          "A01:2025 - Broken Access Control",
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-601"
+        ],
+        "tags": [
+          "iast",
+          "link",
+          "dom"
+        ],
+        "severity": "low",
+        "vulnId": "open_redirect"
+      },
+      "rules": [
+        {
+          "id": "dom_attr_href_navigation",
+          "name": "Tainted URL assigned to element.href",
+          "sinkId": "dom.attr.href",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted URL assigned to an element href attribute."
+          },
+          "hook": {
+            "kind": "attribute",
+            "objectType": "Element",
+            "attribute": "href"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_attr_src_navigation",
+          "name": "Tainted URL assigned to element.src",
+          "sinkId": "dom.attr.src",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted URL assigned to a non-script/iframe/src element src attribute."
+          },
+          "hook": {
+            "kind": "attribute",
+            "objectType": "Element",
+            "attribute": "src"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_attr_action_navigation",
+          "name": "Tainted URL assigned to form action",
+          "sinkId": "dom.attr.action",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted URL assigned to a form action attribute."
+          },
+          "hook": {
+            "kind": "attribute",
+            "objectType": "HTMLFormElement",
+            "attribute": "action"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_attr_formaction_navigation",
+          "name": "Tainted URL assigned to formAction",
+          "sinkId": "dom.attr.formaction",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted URL assigned to a formAction attribute."
+          },
+          "hook": {
+            "kind": "attribute",
+            "objectType": "HTMLElement",
+            "attribute": "formaction"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_dom_url_navigation",
+      "type": "runtime",
+      "async": true,
+      "name": "DOM URL-based navigation sinks",
+      "metadata": {
+        "description": "Detect tainted data flowing into URL-based navigation APIs such as location and history.",
+        "recommendation": "<ul><li>Allow-list navigation targets and normalize paths before use.</li><li>Avoid assigning untrusted URLs to location APIs.</li></ul>",
+        "category": "access_control",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+          "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+        },
+        "owasp": [
+          "A01:2025 - Broken Access Control",
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-601"
+        ],
+        "tags": [
+          "iast",
+          "redirect",
+          "dom"
+        ],
+        "severity": "low",
+        "vulnId": "open_redirect"
+      },
+      "rules": [
+        {
+          "id": "location_href_redirect",
+          "name": "Client-side redirect via location.href",
+          "sinkId": "nav.location.href",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted data assigned to location.href, causing a client-side redirect."
+          },
+          "hook": {
+            "kind": "propertySetter",
+            "objectType": "Location",
+            "property": "href"
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "location_assign_redirect",
+          "name": "Client-side redirect via location.assign",
+          "sinkId": "nav.location.assign",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted destination URL passed to location.assign."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window.location",
+            "method": "assign",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "location_replace_redirect",
+          "name": "Client-side redirect via location.replace",
+          "sinkId": "nav.location.replace",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted destination URL passed to location.replace."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "window.location",
+            "method": "replace",
+            "argIndex": 0
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "history_pushstate_open_redirect",
+          "name": "Client-side redirect via history.pushState",
+          "sinkId": "nav.history.pushState",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted URL passed to history.pushState, altering client-side navigation."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "history",
+            "method": "pushState",
+            "argIndex": 2
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "history_replacestate_route_change",
+          "name": "Client-side route change via history.replaceState",
+          "sinkId": "nav.history.replaceState",
+          "severity": "low",
+          "metadata": {
+            "description": "Tainted URL passed to history.replaceState, altering client-side navigation state."
+          },
+          "hook": {
+            "kind": "methodCall",
+            "objectPath": "history",
+            "method": "replaceState",
+            "argIndex": 2
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_dom_parser_xss",
+      "type": "runtime",
+      "async": true,
+      "name": "DOM parser and unsafe HTML sinks",
+      "metadata": {
+        "description": "Detect tainted HTML flowing into DOM parser and unsafe HTML APIs that frequently precede exploitable client-side execution.",
+        "recommendation": "<ul><li>Avoid parsing or inserting untrusted HTML fragments.</li><li>Prefer inert parsing only for trusted templates and sanitize before later insertion.</li><li>Do not use setHTMLUnsafe with untrusted values.</li></ul>",
+        "category": "xss",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-79"
+        ],
+        "tags": [
+          "iast",
+          "dom",
+          "xss",
+          "parser",
+          "advanced"
+        ],
+        "severity": "high",
+        "vulnId": "dom_xss",
+        "presentation": {
+          "aggregate": "route-source-sink-callsite"
+        }
+      },
+      "rules": [
+        {
+          "id": "domparser_parsefromstring_html_xss",
+          "name": "DOM XSS via DOMParser.parseFromString",
+          "sinkId": "dom.domParser.parseFromString",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted HTML parsed through DOMParser.parseFromString with an HTML-like MIME type.",
+            "confidenceDefault": 58
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "range_contextual_fragment_xss",
+          "name": "DOM XSS via Range.createContextualFragment",
+          "sinkId": "dom.range.createContextualFragment",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted HTML passed to Range.createContextualFragment."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "element_sethtmlunsafe_xss",
+          "name": "DOM XSS via Element.setHTMLUnsafe",
+          "sinkId": "dom.element.setHTMLUnsafe",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted HTML passed to Element.setHTMLUnsafe."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "shadowroot_sethtmlunsafe_xss",
+          "name": "DOM XSS via ShadowRoot.setHTMLUnsafe",
+          "sinkId": "dom.shadowRoot.setHTMLUnsafe",
+          "severity": "high",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Tainted HTML passed to ShadowRoot.setHTMLUnsafe."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_dom_xss_secondary_sources",
+      "type": "runtime",
+      "async": true,
+      "name": "DOM XSS from secondary client-side sources",
+      "metadata": {
+        "description": "Detect DOM XSS sinks fed by cookies, storage, hash route, referrer, and window.name.",
+        "recommendation": "<ul><li>Do not trust client-side persisted values (cookies/localStorage/sessionStorage/window.name/referrer).</li><li>Encode before HTML insertion and avoid inline handlers.</li><li>Apply strict sink-specific validation for route/referrer-driven rendering.</li></ul>",
+        "category": "xss",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-79"
+        ],
+        "tags": [
+          "iast",
+          "dom",
+          "xss",
+          "storage",
+          "cookie",
+          "hash"
+        ],
+        "severity": "high",
+        "vulnId": "dom_xss",
+        "presentation": {
+          "aggregate": "route-source-sink-callsite"
+        }
+      },
+      "rules": [
+        {
+          "id": "dom_innerhtml_xss_secondary_sources",
+          "name": "DOM XSS via innerHTML (secondary sources)",
+          "sinkId": "dom.innerHTML",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Persisted/reflected client-side values reached innerHTML."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_outerhtml_xss_secondary_sources",
+          "name": "DOM XSS via outerHTML (secondary sources)",
+          "sinkId": "dom.outerHTML",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Persisted/reflected client-side values reached outerHTML."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_insertadjacenthtml_xss_secondary_sources",
+          "name": "DOM XSS via insertAdjacentHTML (secondary sources)",
+          "sinkId": "dom.insertAdjacentHTML",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Persisted/reflected client-side values reached insertAdjacentHTML."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "document_write_xss_secondary_sources",
+          "name": "DOM XSS via document.write (secondary sources)",
+          "sinkId": "document.write",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Persisted/reflected client-side values reached document.write."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_inline_event_xss_secondary_sources",
+          "name": "DOM XSS via inline handlers (secondary sources)",
+          "sinkId": "dom.inline_event",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Persisted/reflected client-side values reached inline event handlers."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "dom_mutation_xss_secondary_sources",
+          "name": "DOM XSS via DOM mutation (secondary sources)",
+          "sinkId": "dom.mutation",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Persisted/reflected client-side values reached mutation sinks."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "iframe_srcdoc_xss_secondary_sources",
+          "name": "DOM XSS via iframe.srcdoc (secondary sources)",
+          "sinkId": "nav.iframe.srcdoc",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Persisted/reflected client-side values reached iframe.srcdoc."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
       "id": "iast_route_controlled_navigation",
       "type": "runtime",
       "async": true,
@@ -590,6 +2161,27 @@
         }
       },
       "rules": [
+        {
+          "id": "route_pushstate_navigation",
+          "name": "Route-controlled history.pushState",
+          "sinkId": "nav.history.pushState",
+          "severity": "medium",
+          "sources": [
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "hashRoute",
+            "hashQuery",
+            "postMessage"
+          ],
+          "metadata": {
+            "description": "Client route state influenced history.pushState."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
         {
           "id": "route_replacestate_navigation",
           "name": "Route-controlled history.replaceState",
@@ -782,6 +2374,35 @@
           }
         },
         {
+          "id": "form_action_data_url_execution",
+          "name": "data: URL assigned to form action",
+          "sinkId": "dom.attr.action.dataUrl",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL assigned to form action."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
           "id": "form_formaction_javascript_url_execution",
           "name": "javascript: URL assigned to formAction",
           "sinkId": "dom.attr.formaction.javascriptUrl",
@@ -805,6 +2426,35 @@
           ],
           "metadata": {
             "description": "Tainted javascript: URL assigned to formAction."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "form_formaction_data_url_execution",
+          "name": "data: URL assigned to formAction",
+          "sinkId": "dom.attr.formaction.dataUrl",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "postMessage",
+            "inline",
+            "windowName",
+            "referrer"
+          ],
+          "metadata": {
+            "description": "Tainted data: URL assigned to formAction."
           },
           "conditions": {
             "requiresTaint": true
@@ -866,6 +2516,46 @@
           }
         },
         {
+          "id": "response_dom_outerhtml_reachability",
+          "name": "Response field rendered via outerHTML",
+          "sinkId": "dom.outerHTML",
+          "severity": "high",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived data reached outerHTML."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "response_dom_insertadjacenthtml_reachability",
+          "name": "Response field rendered via insertAdjacentHTML",
+          "sinkId": "dom.insertAdjacentHTML",
+          "severity": "high",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived HTML reached insertAdjacentHTML."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
           "id": "response_dom_document_write_reachability",
           "name": "Response field rendered via document.write",
           "sinkId": "document.write",
@@ -880,6 +2570,106 @@
           "onSanitized": "lower_confidence",
           "metadata": {
             "description": "Response-derived data reached document.write."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "response_dom_mutation_reachability",
+          "name": "Response field rendered via DOM mutation",
+          "sinkId": "dom.mutation",
+          "severity": "medium",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived data reached DOM mutation sinks."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "response_dom_parser_reachability",
+          "name": "Response field parsed via DOMParser",
+          "sinkId": "dom.domParser.parseFromString",
+          "severity": "medium",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived HTML parsed via DOMParser.parseFromString."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "response_dom_contextual_fragment_reachability",
+          "name": "Response field parsed via createContextualFragment",
+          "sinkId": "dom.range.createContextualFragment",
+          "severity": "medium",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived HTML parsed via Range.createContextualFragment."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "response_dom_sethtmlunsafe_reachability",
+          "name": "Response field rendered via setHTMLUnsafe",
+          "sinkId": "dom.element.setHTMLUnsafe",
+          "severity": "high",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived HTML reached Element.setHTMLUnsafe."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "response_dom_shadow_sethtmlunsafe_reachability",
+          "name": "Response field rendered via ShadowRoot.setHTMLUnsafe",
+          "sinkId": "dom.shadowRoot.setHTMLUnsafe",
+          "severity": "high",
+          "sources": [
+            "apiResponseField",
+            "graphqlResponseField"
+          ],
+          "sanitizersAllowed": [
+            "san.domPurify"
+          ],
+          "onSanitized": "lower_confidence",
+          "metadata": {
+            "description": "Response-derived HTML reached ShadowRoot.setHTMLUnsafe."
           },
           "conditions": {
             "requiresTaint": true
@@ -918,6 +2708,35 @@
       },
       "rules": [
         {
+          "id": "prototype_pollution_write",
+          "name": "Tainted dangerous key used in prototype write",
+          "sinkId": "runtime.prototype.pollution.write",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "pathname",
+            "pathSegment",
+            "clientRoute",
+            "historyState",
+            "bodyParam",
+            "jsonBodyField",
+            "formDataField",
+            "graphqlVariable",
+            "apiResponseField",
+            "graphqlResponseField",
+            "postMessage",
+            "inline"
+          ],
+          "metadata": {
+            "description": "Tainted data reached a dangerous prototype key write."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
           "id": "prototype_pollution_fetch_init",
           "name": "Prototype pollution influenced fetch() init",
           "sinkId": "runtime.prototype.pollution.fetchInit",
@@ -944,6 +2763,326 @@
           },
           "conditions": {
             "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_storage_taint_to_exec",
+      "type": "runtime",
+      "async": true,
+      "name": "Storage/referrer taint to execution sinks",
+      "metadata": {
+        "description": "Detect execution sinks when payloads originate from cookies/storage/window.name/referrer.",
+        "recommendation": "<ul><li>Do not execute values loaded from client storage or window.name.</li><li>Normalize and strictly validate route/referrer-based script parameters.</li><li>Avoid dynamic code execution APIs.</li></ul>",
+        "category": "injection",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/xss/",
+          "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+        },
+        "owasp": [
+          "A05:2025 - Injection",
+          "A03:2021 - Injection"
+        ],
+        "cwe": [
+          "CWE-94",
+          "CWE-95"
+        ],
+        "tags": [
+          "iast",
+          "injection",
+          "storage",
+          "code_exec"
+        ],
+        "severity": "high",
+        "vulnId": "code_injection",
+        "presentation": {
+          "aggregate": "source-sink-callsite"
+        }
+      },
+      "rules": [
+        {
+          "id": "eval_storage_taint_execution",
+          "name": "eval() from storage/referrer taint",
+          "sinkId": "code.eval",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute",
+            "postMessage"
+          ],
+          "metadata": {
+            "description": "Storage/referrer taint reached eval()."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "function_constructor_storage_taint_execution",
+          "name": "Function() from storage/referrer taint",
+          "sinkId": "code.function.constructor",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute",
+            "postMessage"
+          ],
+          "metadata": {
+            "description": "Storage/referrer taint reached Function constructor."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "function_apply_storage_taint_execution",
+          "name": "Function.apply() from storage/referrer taint",
+          "sinkId": "code.function.apply",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute",
+            "postMessage"
+          ],
+          "metadata": {
+            "description": "Storage/referrer taint reached Function.apply()."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "settimeout_storage_taint_execution",
+          "name": "setTimeout(string) from storage/referrer taint",
+          "sinkId": "code.setTimeout",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute",
+            "postMessage"
+          ],
+          "metadata": {
+            "description": "Storage/referrer taint reached setTimeout(string)."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        },
+        {
+          "id": "setinterval_storage_taint_execution",
+          "name": "setInterval(string) from storage/referrer taint",
+          "sinkId": "code.setInterval",
+          "severity": "high",
+          "sources": [
+            "cookie",
+            "localStorage",
+            "sessionStorage",
+            "windowName",
+            "referrer",
+            "hashRoute",
+            "postMessage"
+          ],
+          "metadata": {
+            "description": "Storage/referrer taint reached setInterval(string)."
+          },
+          "conditions": {
+            "requiresTaint": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "iast_source_scoped_open_redirect",
+      "type": "runtime",
+      "async": true,
+      "name": "Open redirect from client-side taint sources",
+      "metadata": {
+        "description": "Detect client-side redirect sinks fed by common taint sources.",
+        "recommendation": "<ul><li>Disallow absolute external URLs from untrusted sources.</li><li>Resolve destinations against strict allow-lists.</li><li>Treat hash route and referrer data as untrusted input.</li></ul>",
+        "category": "access_control",
+        "links": {
+          "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html",
+          "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+        },
+        "owasp": [
+          "A01:2021 - Broken Access Control"
+        ],
+        "cwe": [
+          "CWE-601"
+        ],
+        "tags": [
+          "iast",
+          "redirect",
+          "dom",
+          "hash",
+          "postMessage"
+        ],
+        "severity": "medium",
+        "vulnId": "open_redirect"
+      },
+      "rules": [
+        {
+          "id": "location_href_redirect_sources",
+          "name": "location.href redirect from tainted source",
+          "sinkId": "nav.location.href",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "postMessage",
+            "referrer",
+            "windowName"
+          ],
+          "metadata": {
+            "description": "Tainted value navigated location.href."
+          },
+          "conditions": {
+            "requiresTaint": true,
+            "requiresCrossOrigin": true
+          }
+        },
+        {
+          "id": "location_assign_redirect_sources",
+          "name": "location.assign redirect from tainted source",
+          "sinkId": "nav.location.assign",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "postMessage",
+            "referrer",
+            "windowName"
+          ],
+          "metadata": {
+            "description": "Tainted value passed to location.assign."
+          },
+          "conditions": {
+            "requiresTaint": true,
+            "requiresCrossOrigin": true
+          }
+        },
+        {
+          "id": "location_replace_redirect_sources",
+          "name": "location.replace redirect from tainted source",
+          "sinkId": "nav.location.replace",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "postMessage",
+            "referrer",
+            "windowName"
+          ],
+          "metadata": {
+            "description": "Tainted value passed to location.replace."
+          },
+          "conditions": {
+            "requiresTaint": true,
+            "requiresCrossOrigin": true
+          }
+        },
+        {
+          "id": "window_open_redirect_sources",
+          "name": "window.open redirect from tainted source",
+          "sinkId": "nav.window.open",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "postMessage",
+            "referrer",
+            "windowName"
+          ],
+          "metadata": {
+            "description": "Tainted value passed to window.open."
+          },
+          "conditions": {
+            "requiresTaint": true,
+            "requiresCrossOrigin": true
+          }
+        },
+        {
+          "id": "navigation_api_redirect_sources",
+          "name": "navigation.navigate redirect from tainted source",
+          "sinkId": "nav.navigation.navigate",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "postMessage",
+            "referrer",
+            "windowName"
+          ],
+          "metadata": {
+            "description": "Tainted value passed to navigation.navigate."
+          },
+          "conditions": {
+            "requiresTaint": true,
+            "requiresCrossOrigin": true
+          }
+        },
+        {
+          "id": "dom_attr_href_redirect_sources",
+          "name": "Anchor href manipulated from tainted source",
+          "sinkId": "dom.attr.href",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "postMessage",
+            "referrer",
+            "windowName"
+          ],
+          "metadata": {
+            "description": "Tainted value assigned to href attribute."
+          },
+          "conditions": {
+            "requiresTaint": true,
+            "requiresCrossOrigin": true
+          }
+        },
+        {
+          "id": "dom_attr_action_redirect_sources",
+          "name": "Form action manipulated from tainted source",
+          "sinkId": "dom.attr.action",
+          "severity": "medium",
+          "sources": [
+            "query",
+            "hashQuery",
+            "hashRoute",
+            "postMessage",
+            "referrer",
+            "windowName"
+          ],
+          "metadata": {
+            "description": "Tainted value assigned to form action."
+          },
+          "conditions": {
+            "requiresTaint": true,
+            "requiresCrossOrigin": true
           }
         }
       ]

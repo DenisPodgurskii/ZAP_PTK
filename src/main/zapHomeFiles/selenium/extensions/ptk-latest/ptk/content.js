@@ -231,12 +231,18 @@ function normalizeSastInlineHandlerKey(value) {
     return String(value || '').trim().replace(/\s+/g, ' ').replace(/;+\s*$/g, '');
 }
 
+const SAST_JAVASCRIPT_URL_ATTRIBUTES = Object.freeze(['href', 'xlink:href', 'action', 'formaction', 'src', 'data']);
+const SAST_JAVASCRIPT_URL_ATTRIBUTE_SET = new Set(SAST_JAVASCRIPT_URL_ATTRIBUTES);
+const SAST_EXTERNAL_SCRIPT_MAX_COUNT = 24;
+const SAST_EXTERNAL_SCRIPT_MAX_BYTES = 1024 * 1024;
+
 function collectSastInlineHandlers() {
     if (typeof document?.querySelectorAll !== 'function') return [];
 
     let elements = [];
     try {
-        elements = Array.from(document.querySelectorAll(SAST_INLINE_HANDLER_SELECTOR));
+        const urlSelectors = ['[href]', '[xlink\\:href]', '[action]', '[formaction]', '[src]', '[data]'];
+        elements = Array.from(document.querySelectorAll([SAST_INLINE_HANDLER_SELECTOR, ...urlSelectors].filter(Boolean).join(',')));
     } catch (_) {
         return [];
     }
@@ -258,6 +264,19 @@ function collectSastInlineHandlers() {
             if (!key || seen.has(key)) continue;
             seen.add(key);
             snippets.push(value);
+        }
+        for (const rawName of attrNames) {
+            const attrName = String(rawName || '').trim().toLowerCase();
+            if (!SAST_JAVASCRIPT_URL_ATTRIBUTE_SET.has(attrName)) continue;
+            const value = typeof element?.getAttribute === 'function'
+                ? element.getAttribute(attrName)
+                : null;
+            if (typeof value !== 'string' || !/^\s*javascript\s*:/i.test(value)) continue;
+            const snippet = value.replace(/^\s*javascript\s*:/i, '').trim();
+            const key = normalizeSastInlineHandlerKey(snippet);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            snippets.push(snippet);
         }
     }
     return snippets;
@@ -283,7 +302,36 @@ function isSameOriginSastScriptUrl(src) {
     }
 }
 
-function collectSastPayload() {
+async function hydrateSameOriginSastScripts(scripts) {
+    if (!Array.isArray(scripts) || typeof fetch !== 'function') return scripts;
+    let fetched = 0;
+    const hydrated = [];
+    for (const script of scripts) {
+        if (
+            script?.src &&
+            !String(script.code || '').trim() &&
+            fetched < SAST_EXTERNAL_SCRIPT_MAX_COUNT &&
+            isSameOriginSastScriptUrl(script.src)
+        ) {
+            fetched += 1;
+            try {
+                const response = await fetch(script.src, { credentials: 'include', cache: 'force-cache' });
+                if (response?.ok) {
+                    let text = await response.text();
+                    if (text.length > SAST_EXTERNAL_SCRIPT_MAX_BYTES) {
+                        text = text.slice(0, SAST_EXTERNAL_SCRIPT_MAX_BYTES);
+                    }
+                    hydrated.push({ ...script, code: normalizeSastScriptCode(text) });
+                    continue;
+                }
+            } catch (_) { }
+        }
+        hydrated.push(script);
+    }
+    return hydrated;
+}
+
+async function collectSastPayload() {
     scanCurrentDocumentScriptsForSast('collect');
 
     const currentScripts = Array.from(document.scripts || [])
@@ -298,9 +346,13 @@ function collectSastPayload() {
     const seen = new Set();
     const addScript = (script) => {
         if (!script || (script.src && !isSameOriginSastScriptUrl(script.src))) return;
+        const src = normalizeSastScriptSrc(script.src || null);
+        const code = src && typeof script.code === 'string'
+            ? normalizeSastScriptCode(script.code)
+            : (src ? null : normalizeSastScriptCode(script.code || ''));
         const normalized = {
-            src: normalizeSastScriptSrc(script.src || null),
-            code: script.src ? null : normalizeSastScriptCode(script.code || '')
+            src,
+            code
         };
         if (!normalized.src && !String(normalized.code || '').trim()) return;
         const key = makeSastScriptKey(normalized);
@@ -313,7 +365,7 @@ function collectSastPayload() {
     getPtkEarlySastScriptRegistry().forEach(addScript);
 
     return {
-        scripts,
+        scripts: await hydrateSameOriginSastScripts(scripts),
         html: collectSastInlineHandlers(),
         file: document.URL
     };
@@ -503,12 +555,13 @@ if (runtime?.onMessage) {
     runtime.onMessage.addListener((message) => {
         if (message?.channel === 'ptk_background2content_sast') {
             if (message.type === 'collect_scripts') {
-                const payload = collectSastPayload();
-                sendRuntimeMessage({
-                    channel: 'ptk_content_sast2background_sast',
-                    type: 'scripts_collected',
-                    requestId: message.requestId || null,
-                    ...payload
+                collectSastPayload().then((payload) => {
+                    sendRuntimeMessage({
+                        channel: 'ptk_content_sast2background_sast',
+                        type: 'scripts_collected',
+                        requestId: message.requestId || null,
+                        ...payload
+                    }).catch(() => { });
                 }).catch(() => { });
                 return Promise.resolve({ ok: true });
             }

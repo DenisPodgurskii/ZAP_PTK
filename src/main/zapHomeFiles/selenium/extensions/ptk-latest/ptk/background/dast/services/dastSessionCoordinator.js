@@ -354,6 +354,7 @@ export class DastSessionCoordinator {
         }
         const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
         const normalizedTimeoutMs = toPositiveNumber(timeoutMs, 180000)
+        const seedWaitMs = this._resolveAutomationSeedStopWaitMs(normalizedTimeoutMs, { zapCloseRequest })
         let drainResult = {
             mode: zapCloseRequest ? 'zap_close' : 'normal',
             drained: true,
@@ -362,10 +363,10 @@ export class DastSessionCoordinator {
             after: null
         }
 
+        await this._waitForAutomationSeedBeforeStop(seedWaitMs, {
+            clearPendingOnTimeout: !zapCloseRequest
+        })
         this.state.acceptIncomingRequests = false
-        await this._waitForAutomationSeedBeforeStop(zapCloseRequest
-            ? Math.min(normalizedTimeoutMs, 1500)
-            : normalizedTimeoutMs)
         if (zapCloseRequest) {
             drainResult = await this._drainBeforeZapClose(normalizedTimeoutMs, options)
         } else {
@@ -413,13 +414,21 @@ export class DastSessionCoordinator {
         }
     }
 
-    async _waitForAutomationSeedBeforeStop(timeoutMs = 180000) {
+    _resolveAutomationSeedStopWaitMs(timeoutMs = 180000, options = {}) {
+        const budget = toPositiveNumber(timeoutMs, 180000)
+        if (options?.zapCloseRequest === true) {
+            return Math.max(500, Math.min(budget, 8000, Math.floor(budget * 0.35)))
+        }
+        return budget
+    }
+
+    async _waitForAutomationSeedBeforeStop(timeoutMs = 180000, options = {}) {
         const seedPromise = this.state.lastAutomationSeedPromise
         if (!seedPromise || typeof seedPromise.then !== "function") {
             return
         }
 
-        const waitMs = Math.max(0, Math.min(Number(timeoutMs) || 0, 5000))
+        const waitMs = Math.max(0, Math.min(Number(timeoutMs) || 0, 10000))
         if (!waitMs) {
             return
         }
@@ -436,7 +445,9 @@ export class DastSessionCoordinator {
         ])
 
         if (timedOut) {
-            this.state.pendingAutomationSeeds = 0
+            if (options?.clearPendingOnTimeout !== false) {
+                this.state.pendingAutomationSeeds = 0
+            }
             this.state.lastAutomationSeedResult = Object.assign({}, this.state.lastAutomationSeedResult || {}, {
                 timedOutBeforeStop: true
             })

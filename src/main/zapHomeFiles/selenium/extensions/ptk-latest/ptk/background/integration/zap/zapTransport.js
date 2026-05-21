@@ -13,8 +13,12 @@ const RETRY_DELAYS_MS = [250, 1000, 4000]
 const TARGET_PARAM_KEYS = ['url', 'target', 'targetUrl', 'scanUrl', 'startUrl', 'site']
 const DETECTION_DEDUPE_WINDOW_MS = 3000
 const CONFIG_INITIAL_FETCH_DELAY_MS = 0
-const CONFIG_DIRECT_FETCH_RETRY_DELAYS_MS = [0, 250]
-const CONFIG_DIRECT_FETCH_TIMEOUT_MS = 900
+// ZAP Client Spider can launch many browser sessions at once. During that burst the
+// callback page may be visible and progress POSTs may work before the config
+// endpoint responds quickly enough, so keep config fetch retrying for a bounded
+// startup window instead of silently falling back to manual mode.
+const CONFIG_DIRECT_FETCH_RETRY_DELAYS_MS = [0, 250, 1000, 2500, 5000]
+const CONFIG_DIRECT_FETCH_TIMEOUT_MS = 2500
 const QUICKSTART_URL_REGEX = /^https?:\/\/zap\/OTHER\/quickstartlaunch\/other\/startPage\//i
 const QUICKSTART_PROBE_COOLDOWN_MS = 5000
 const QUICKSTART_SCRIPT_FETCH_LIMIT = 8
@@ -840,16 +844,22 @@ class ZapTransport {
             }
 
             try {
+                const requestBody = {
+                    zapid: this.zapid,
+                    browserid: this.browserid
+                }
+                const targetUrl = toNonEmptyString(options?.targetUrl)
+                if (targetUrl) {
+                    requestBody.targetUrl = targetUrl
+                }
+
                 const response = await fetchWithTimeout(this.configUrl, {
                     method: 'POST',
                     headers: {
                         'Accept': 'application/json',
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        zapid: this.zapid,
-                        browserid: this.browserid
-                    }),
+                    body: JSON.stringify(requestBody),
                     cache: 'no-store',
                     credentials: 'include'
                 }, CONFIG_DIRECT_FETCH_TIMEOUT_MS)

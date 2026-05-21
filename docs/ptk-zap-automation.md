@@ -1,6 +1,6 @@
 # PTK ZAP Automation Runbook
 
-This document describes how PTK is expected to work inside ZAP automation plans, how to validate results, and which diagnostic jobs can be added when a run is unstable.
+This document describes how PTK is expected to work inside production ZAP automation plans and how to validate results.
 
 The important rule is simple: do not hide instability by changing scan strategy, rulepacks, seed URLs, or `spiderClient` behavior. First prove where the loss happens.
 
@@ -16,7 +16,7 @@ A normal PTK/ZAP browser automation run should keep the ZAP exploration path int
 
 The canonical Firing Range release-style plans are the project-level `plan_range_edge.yaml` and `plan_range_ff.yaml`. They are the templates for release validation. Local runs may override browser id, browser count, or headed/headless mode for capacity testing, but that must be reported as a different test case.
 
-Do not compare a diagnostic plan with fewer browsers, extra coverage jobs, or explicit URL lists as if it were the same release plan.
+Do not compare a diagnostic plan with fewer browsers, diagnostic-only jobs, or explicit URL lists as if it were the same release plan.
 
 ## Required ZAP Configuration
 
@@ -84,59 +84,22 @@ When debugging a missing finding, track these four truths separately:
 
 A finding pass does not prove browser/session health. A browser/session pass does not prove finding coverage.
 
-## ptkBrowserCoverage Diagnostic Job
+## Diagnostic Browser Coverage Builds
 
-`ptkBrowserCoverage` is a diagnostic and retry job. It is not a replacement for `spiderClient`.
+The production add-on does not package the `ptkBrowserCoverage` Automation Framework job. That job depends on Automation add-on classes and diagnostic browser-control fallbacks that are useful for instability analysis but should not be part of the production release artifact.
 
-Use it when you need to answer:
+Use the diagnostic artifact only when investigating browser coverage or PTK session-start instability:
 
-- Did each expected URL get loaded by a browser?
-- Did PTK establish a session for that URL?
-- Did a failure come from browser loading, PTK startup, WebDriver, forced close, or missing findings?
-
-Place it after `spiderClient` when diagnosing coverage:
-
-```yaml
-- type: ptkBrowserCoverage
-  parameters:
-    source: historyUrls
-    browserId: edge-headless
-    numberOfBrowsers: 5
-    retryNumberOfBrowsers: 2
-    pageLoadTime: 5
-    attemptTimeout: 45
-    evidenceGraceMs: 2500
-    launchStaggerMs: 250
-    maxRetriesPerUrl: 1
-    scopeCheck: STRICT
-    requirePtkSession: true
-    failOnMissingBrowserLoad: false
+```text
+./gradlew jarZapAddOnDiagnostic
+./gradlew testDiagnostic
 ```
 
-Supported parameters:
+The diagnostic build appends `-diagnostic` to the add-on version and registers `ptkBrowserCoverage` through a service-loaded diagnostic extension. See [diagnostics/ptk-browser-coverage.md](diagnostics/ptk-browser-coverage.md) for the job parameters and usage rules.
 
-| Parameter | Purpose |
-|---|---|
-| `context` | Optional ZAP context name. Defaults to the automation environment default context. |
-| `source` | URL source: `contextUrls`, `historyUrls`, or `contextAndHistoryUrls`. |
-| `url` | One explicit URL. |
-| `urls` | Additional explicit URLs. |
-| `browserId` | Selenium browser id, for example `edge`, `edge-headless`, `firefox`, `firefox-headless`. |
-| `numberOfBrowsers` | Browser concurrency for initial diagnostic attempts. |
-| `retryNumberOfBrowsers` | Lower retry concurrency for URLs that failed the first attempt. |
-| `initialLoadTime` | Browser initial-load delay in seconds. |
-| `pageLoadTime` | Page dwell/load time in seconds. |
-| `shutdownTime` | Browser shutdown wait in seconds. |
-| `attemptTimeout` | Max per-URL attempt time in seconds. |
-| `evidenceGraceMs` | Extra wait after browser attempts for evidence callbacks to arrive. |
-| `launchStaggerMs` | Delay between launching browsers in a batch. |
-| `maxRetriesPerUrl` | Retry count for URLs missing required browser/PTK evidence. |
-| `scopeCheck` | Client spider scope mode, normally `STRICT`. |
-| `requirePtkSession` | If true, URL is satisfied only when PTK session evidence exists. |
-| `failOnMissingBrowserLoad` | If true, the job can fail the automation plan on missing browser load/session evidence. |
-| `logoutAvoidance` | Pass-through logout avoidance option for direct browser attempts. |
+Diagnostic plans must not be reported as production release plans. They are for answering whether URLs were loaded in browsers, whether PTK sessions were established, and whether close-contract failures happened before findings could be imported.
 
-The job also reports close-contract state through `PTK_TIMING` and `PTK_CLOSE_CONTRACT` log lines. Important close states are:
+Important close states are:
 
 | State | Meaning |
 |---|---|
@@ -181,7 +144,7 @@ Do not make these changes to make a test pass:
 - Lower browser count without calling it a separate capacity test.
 - Add broad/comprehensive DAST strategy only for Firing Range.
 - Add benchmark-specific seed URLs to claim product stability.
-- Treat `ptkBrowserCoverage` retry success as proof that original `spiderClient` execution was stable.
+- Treat diagnostic retry success as proof that original `spiderClient` execution was stable.
 - Treat old matrices as source truth when current browser artifacts contradict them.
 
 ## Debugging Missing Findings
@@ -236,7 +199,7 @@ When reporting a PTK/ZAP automation matrix, include:
 | Browser and headed/headless mode | Browser behavior differs. |
 | Browser count | Local capacity affects stability. |
 | Plan file | Canonical vs diagnostic plans are not equivalent. |
-| Whether `ptkBrowserCoverage` was enabled | Distinguishes stock `spiderClient` from retry diagnostics. |
+| Artifact type | Production and diagnostic add-ons are not equivalent. |
 | Browser loaded count | Proves WebDriver reached target pages. |
 | PTK session count | Proves PTK started in the browser. |
 | Forced close / invalid session counts | Shows lifecycle health. |

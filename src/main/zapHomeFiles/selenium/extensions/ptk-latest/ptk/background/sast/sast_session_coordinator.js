@@ -433,7 +433,12 @@ export class SastSessionCoordinator {
         retryDelayMs
       });
       if (opts?.expectedUrl && payload?.file && !sameDocumentUrl(payload.file, opts.expectedUrl)) {
-        throw new Error(`sast_payload_url_mismatch:${payload.file}`);
+        this.recordTiming("sast.payload.stale", {
+          expectedUrl: opts.expectedUrl,
+          actualUrl: payload.file
+        }, null, "sast.payload.stale");
+        console.warn("[SAST] Dropping stale collected payload; expectedUrl=", opts.expectedUrl, "actualUrl=", payload.file);
+        return [];
       }
       const scriptsCount = Array.isArray(payload?.scripts) ? payload.scripts.length : 0;
       const htmlChars = typeof payload?.html === "string"
@@ -497,6 +502,11 @@ export class SastSessionCoordinator {
     if (this.activeTabId !== tabId) return [];
     if (!this.isCollectedPayloadUsable(payload)) return [];
     if (opts?.expectedUrl && payload?.file && !sameDocumentUrl(payload.file, opts.expectedUrl)) {
+      this.recordTiming("sast.payload.stale", {
+        expectedUrl: opts.expectedUrl,
+        actualUrl: payload.file
+      }, null, "sast.payload.stale");
+      console.warn("[SAST] Dropping stale collected payload; expectedUrl=", opts.expectedUrl, "actualUrl=", payload.file);
       return [];
     }
 

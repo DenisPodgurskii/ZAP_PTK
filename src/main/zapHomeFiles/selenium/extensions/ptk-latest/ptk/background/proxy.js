@@ -451,6 +451,50 @@ export class ptk_proxy {
         return score
     }
 
+    _requestBodyHasContent(requestBody = null) {
+        if (!requestBody || typeof requestBody !== 'object') return false
+        if (typeof requestBody.raw === 'string' && requestBody.raw.length > 0) return true
+        if (Array.isArray(requestBody.raw) && requestBody.raw.length > 0) return true
+        if (typeof requestBody.postData === 'string' && requestBody.postData.length > 0) return true
+        if (requestBody.formData && typeof requestBody.formData === 'object' && Object.keys(requestBody.formData).length > 0) return true
+        return false
+    }
+
+    _mergeRequestEntryDetails(best = null, pool = []) {
+        if (!best || typeof best !== 'object') return best
+        const merged = Object.assign({}, best)
+        if (!this._requestBodyHasContent(merged.requestBody)) {
+            const bodyCandidate = pool.find((entry) => this._requestBodyHasContent(entry?.requestBody))
+            if (bodyCandidate?.requestBody) {
+                merged.requestBody = bodyCandidate.requestBody
+            }
+        }
+        if (!Array.isArray(merged.requestHeaders) || merged.requestHeaders.length === 0) {
+            const headerCandidate = pool.find((entry) => Array.isArray(entry?.requestHeaders) && entry.requestHeaders.length > 0)
+            if (headerCandidate?.requestHeaders) {
+                merged.requestHeaders = headerCandidate.requestHeaders
+            }
+        } else {
+            const headerCandidates = pool
+                .filter((entry) => Array.isArray(entry?.requestHeaders) && entry.requestHeaders.length > merged.requestHeaders.length)
+                .sort((left, right) => right.requestHeaders.length - left.requestHeaders.length)
+            for (const candidate of headerCandidates) {
+                const seen = new Set(merged.requestHeaders
+                    .map((header) => String(header?.name || '').trim().toLowerCase())
+                    .filter(Boolean))
+                for (const header of candidate.requestHeaders) {
+                    const name = String(header?.name || '').trim()
+                    if (!name) continue
+                    const lname = name.toLowerCase()
+                    if (seen.has(lname)) continue
+                    merged.requestHeaders.push({ name: header.name, value: header.value })
+                    seen.add(lname)
+                }
+            }
+        }
+        return merged
+    }
+
     _normalizeComparableUrl(rawUrl) {
         if (!rawUrl) return ''
         try {
@@ -500,7 +544,7 @@ export class ptk_proxy {
                 }
             }
         }
-        return best
+        return this._mergeRequestEntryDetails(best, pool)
     }
 
     getRequestDetails(tab, frameId, requestId, options = {}) {

@@ -1,22 +1,22 @@
 {
   "schemaVersion": "ptk-extension-provenance-v1",
   "packageName": "ZAP_PTK",
-  "extensionVersion": "9.9.1",
+  "extensionVersion": "9.9.5",
   "manifestVersion": 3,
-  "createdAt": "2026-05-18T20:34:45.732Z",
+  "createdAt": "2026-05-21T13:04:56.676Z",
   "source": {
     "crx": "ptk-latest.crx",
     "xpi": "ptk-latest.xpi"
   },
   "hashes": {
-    "crxSha256": "e83a77a055020e125c3b23ba1b7f27caa599643327e527eb2eee5a4926a0d5e3",
-    "xpiSha256": "0c17a69e1a23d9a8287f5c0b1583ac1a8592d494d4dfd6123cf63f2037bccc02",
-    "manifestSha256": "e932d6953f74e0e6f42ff17e25a0ac106d43ef774287dbfca04524890465bee9",
-    "unpackedTreeSha256": "28d82f7b61113aad3d106c6796099ee5ddb0f328ed4ec147bf31be683518843f"
+    "crxSha256": "dbb66cc0119411828b35e038ab5ea1912aa4cf845301bb26941b8bdbfae1c064",
+    "xpiSha256": "bc1f2d781c868b6a1b28ebadd5ba058deaf6d72a790515844d205514ce74759c",
+    "manifestSha256": "a0d7f931763dfe38e00662fdf5186f6c31d31c5e558d06b2ac7bbcbb378c7c24",
+    "unpackedTreeSha256": "afd6f41ba6af2d8f957bb397485cbf91077b86dbd2bf6867c6267ac125f80ba9"
   },
   "sizes": {
-    "crxBytes": 9457559,
-    "xpiBytes": 9413692
+    "crxBytes": 9509796,
+    "xpiBytes": 9465909
   },
   "paths": {
     "chromiumUnpacked": "selenium/extensions/ptk-latest",

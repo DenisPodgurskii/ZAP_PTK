@@ -387,6 +387,7 @@
             "sources": [
               "dom:getElementById_value",
               "dom:qs_value",
+              "dom:event_target_value",
               "location:search",
               "location:hash",
               "location:self",
@@ -435,12 +436,19 @@
             ],
             "sanitizers": [
               "san:dompurify_sanitize",
+              "sanitize-html:sanitize",
+              "xss:filterXSS",
+              "lodash:escape",
+              "underscore:escape",
+              "he:encode",
+              "validator:escape",
               "san:encodeURIComponent",
               "san:css_escape"
             ],
             "propagators": [
               "prop:assignment:local",
               "prop:passthrough:identity_strings",
+              "prop:decode_uri",
               "prop:url_ctor",
               "prop:urlsearchparams_ctor",
               "prop:urlsearchparams_get",
@@ -449,6 +457,7 @@
               "prop:return:param_to_ret",
               "prop:write:param_to_property",
               "prop:promise:then",
+              "prop:callback:rxjs_subscribe",
               "prop:callback:array_map",
               "prop:callback:array_forEach"
             ],
@@ -482,6 +491,7 @@
             "sources": [
               "dom:getElementById_value",
               "dom:qs_value",
+              "dom:event_target_value",
               "location:search",
               "location:hash",
               "location:self",
@@ -512,12 +522,19 @@
             ],
             "sanitizers": [
               "san:dompurify_sanitize",
+              "sanitize-html:sanitize",
+              "xss:filterXSS",
+              "lodash:escape",
+              "underscore:escape",
+              "he:encode",
+              "validator:escape",
               "san:encodeURIComponent",
               "san:css_escape"
             ],
             "propagators": [
               "prop:assignment:local",
               "prop:passthrough:identity_strings",
+              "prop:decode_uri",
               "prop:url_ctor",
               "prop:urlsearchparams_ctor",
               "prop:urlsearchparams_get",
@@ -526,6 +543,7 @@
               "prop:return:param_to_ret",
               "prop:write:param_to_property",
               "prop:promise:then",
+              "prop:callback:rxjs_subscribe",
               "prop:callback:array_map",
               "prop:callback:array_forEach"
             ],
@@ -659,6 +677,7 @@
             "sources": [
               "dom:getElementById_value",
               "dom:qs_value",
+              "dom:event_target_value",
               "location:search",
               "location:hash",
               "location:self",
@@ -1071,6 +1090,7 @@
             "sources": [
               "dom:getElementById_value",
               "dom:qs_value",
+              "dom:event_target_value",
               "location:search",
               "location:hash",
               "location:self",
@@ -1100,11 +1120,13 @@
             "sanitizers": [
               "san:encodeURIComponent",
               "san:encodeURI",
-              "san:css_escape"
+              "san:css_escape",
+              "san:origin_allowlist_call"
             ],
             "propagators": [
               "prop:assignment:local",
               "prop:passthrough:identity_strings",
+              "prop:decode_uri",
               "prop:url_ctor",
               "prop:urlsearchparams_ctor",
               "prop:urlsearchparams_get",
@@ -1113,9 +1135,11 @@
               "prop:return:param_to_ret",
               "prop:write:param_to_property",
               "prop:promise:then",
+              "prop:callback:rxjs_subscribe",
               "prop:callback:array_map",
               "prop:callback:array_forEach",
-              "prop:callback:addEventListener"
+              "prop:callback:addEventListener",
+              "prop:xhr:open_url"
             ],
             "taintKinds": [
               "open-redirection-taint"
@@ -1467,8 +1491,10 @@
             "sources": [
               "dom:getElementById_value",
               "dom:qs_value",
+              "dom:event_target_value",
               "location:search",
               "location:hash",
+              "location:self",
               "location:href",
               "location:pathname",
               "document:url",
@@ -1496,6 +1522,2476 @@
               "crypto:generateCRMFRequest",
               "js:script_text"
             ],
+            "sanitizers": [
+              "san:message_payload_validator"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:decode_uri",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:callback:rxjs_subscribe",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get"
+            ],
+            "taintKinds": [
+              "javascript-injection-taint"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "angularjs-expression-injection",
+      "name": "AngularJS client-side template / expression injection",
+      "type": "static",
+      "async": false,
+      "metadata": {
+        "taxonomy": {
+          "severity": "high",
+          "category": "xss",
+          "vulnId": "angularjs_client_template_injection",
+          "owasp": [
+            "A05:2025 - Injection",
+            "A03:2021 - Injection"
+          ],
+          "cwe": [
+            "CWE-79",
+            "CWE-94"
+          ],
+          "tags": [
+            "sast",
+            "angularjs",
+            "xss",
+            "client-template-injection"
+          ]
+        },
+        "docs": {
+          "description": "Finds AngularJS code patterns where untrusted data is compiled or parsed as AngularJS expressions/templates, including $parse, $interpolate, $compile, interpolation delimiters and ng-* expression attributes.",
+          "recommendation": "<p>Avoid passing user-controlled strings to AngularJS expression or template compilation APIs. Do not server-render user input inside {{...}}, [[...]], ng-* expression attributes, or $parse/$compile/$interpolate inputs. Use text-only rendering, strict allow-lists for expression names, and migrate from legacy AngularJS.</p>",
+          "links": {
+            "PortSwigger AngularJS sandbox contexts": "https://portswigger.net/web-security/cross-site-scripting/contexts/angularjs-sandbox",
+            "CWE-79": "https://cwe.mitre.org/data/definitions/79.html"
+          }
+        },
+        "execution": {
+          "findingKind": "finding",
+          "maxFindings": 100,
+          "confidenceDefault": 85
+        },
+        "constants": {},
+        "extensions": {}
+      },
+      "rules": [
+        {
+          "id": "angularjs-tainted-dollar-parse",
+          "name": "Tainted data passed to AngularJS $parse",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Untrusted data can reach AngularJS $parse(expression), enabling expression injection."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 100,
+              "originLimit": 8,
+              "depthLimit": 12,
+              "confidenceDefault": 88
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:location_search",
+              "dom:form_input_value",
+              "dom:document_cookie_read",
+              "dom:localStorage_getItem",
+              "dom:postMessage_event_data"
+            ],
+            "sinks": [
+              "angularjs:$parse"
+            ],
+            "sanitizers": [
+              "angularjs:constant_expression_allowlist"
+            ],
+            "propagators": [],
+            "taintKinds": [
+              "xss",
+              "angularjs-expression"
+            ]
+          }
+        },
+        {
+          "id": "angularjs-tainted-template-compile",
+          "name": "Tainted data compiled as AngularJS template",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Untrusted data can reach $compile or $interpolate, enabling AngularJS template injection."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 100,
+              "originLimit": 8,
+              "depthLimit": 12,
+              "confidenceDefault": 88
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:location_search",
+              "dom:form_input_value",
+              "dom:document_cookie_read",
+              "dom:localStorage_getItem",
+              "dom:postMessage_event_data"
+            ],
+            "sinks": [
+              "angularjs:$compile",
+              "angularjs:$interpolate",
+              "angularjs:template_interpolation_literal",
+              "angularjs:ng_expression_attribute_literal"
+            ],
+            "sanitizers": [
+              "angularjs:constant_expression_allowlist"
+            ],
+            "propagators": [],
+            "taintKinds": [
+              "xss",
+              "angularjs-template"
+            ]
+          }
+        },
+        {
+          "id": "angularjs-dollar-parse-dynamic-argument",
+          "name": "Dynamic AngularJS $parse expression",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "$parse is called with a non-literal or dynamic expression. Review whether the expression can be influenced by the user."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": 80
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "identifier": "$parse"
+                  },
+                  "argIndex": 0,
+                  "args": [
+                    {
+                      "index": 0,
+                      "disallowTypes": [
+                        "Literal"
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "call": {
+                  "calleeProp": "$parse",
+                  "argIndex": 0,
+                  "args": [
+                    {
+                      "index": 0,
+                      "disallowTypes": [
+                        "Literal"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "angularjs-template-compiler-dynamic-argument",
+          "name": "Dynamic AngularJS $compile/$interpolate template",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "$compile or $interpolate is called with dynamic template content."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": 80
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "identifierRegex": "^\\$(?:compile|interpolate)$"
+                  },
+                  "argIndex": 0,
+                  "args": [
+                    {
+                      "index": 0,
+                      "disallowTypes": [
+                        "Literal"
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "call": {
+                  "calleePropRegex": "^\\$(?:compile|interpolate)$",
+                  "argIndex": 0,
+                  "args": [
+                    {
+                      "index": 0,
+                      "disallowTypes": [
+                        "Literal"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "angularjs-interpolation-template-literal",
+          "name": "AngularJS interpolation delimiters in template string",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Template content contains AngularJS interpolation delimiters. Verify no attacker-controlled value is placed inside the delimiters."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": 80
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "literalRegex": "(?:\\{\\{|\\[\\[)[\\s\\S]{0,200}(?:constructor\\.constructor|\\$eval|\\$parse|[^}\\]]{1,80})(?:\\}\\}|\\]\\])"
+              }
+            ]
+          }
+        },
+        {
+          "id": "angularjs-ng-expression-attribute-literal",
+          "name": "AngularJS ng-* expression attribute",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Template content contains ng-* expression attributes. Server-side insertion into these attributes is expression injection."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": 80
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "literalRegex": "ng-(?:class|style|if|init|click|submit|include|switch|repeat)\\s*=\\s*[\\\"']"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "client-template-injection",
+      "name": "Client-side Template Injection",
+      "type": "static",
+      "async": false,
+      "metadata": {
+        "taxonomy": {
+          "severity": "high",
+          "category": "injection",
+          "vulnId": "code_injection",
+          "owasp": [
+            "A05:2025 - Injection",
+            "A03:2021 - Injection"
+          ],
+          "cwe": [
+            "CWE-94"
+          ],
+          "tags": [
+            "sast",
+            "template",
+            "injection"
+          ]
+        },
+        "docs": {
+          "description": "Detects dynamic client-side template compilation/rendering where attacker-controlled templates or outputs are injected into the DOM.",
+          "recommendation": "<ul><li>Avoid compiling templates from untrusted strings; use precompiled templates.</li><li>Sanitize render output before inserting into the DOM.</li></ul>",
+          "links": {
+            "OWASP": "https://owasp.org/www-community/attacks/Template_Injection",
+            "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+          }
+        },
+        "execution": {
+          "findingKind": "finding",
+          "maxFindings": 100,
+          "confidenceDefault": null
+        },
+        "constants": {},
+        "extensions": {}
+      },
+      "rules": [
+        {
+          "id": "dynamic-template-compilation",
+          "name": "Dynamic template compilation",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Templates compiled from dynamic strings (underscore/Handlebars/Mustache/Vue) can execute attacker-supplied code."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "member": [
+                      "_",
+                      "template"
+                    ]
+                  },
+                  "args": [
+                    {
+                      "index": 0,
+                      "disallowTypes": [
+                        "Literal"
+                      ]
+                    }
+                  ],
+                  "argIndex": 0
+                }
+              },
+              {
+                "call": {
+                  "callee": {
+                    "member": [
+                      "Handlebars",
+                      "compile"
+                    ]
+                  },
+                  "args": [
+                    {
+                      "index": 0,
+                      "disallowTypes": [
+                        "Literal"
+                      ]
+                    }
+                  ],
+                  "argIndex": 0
+                }
+              },
+              {
+                "call": {
+                  "callee": {
+                    "member": [
+                      "Mustache",
+                      "render"
+                    ]
+                  },
+                  "args": [
+                    {
+                      "index": 0,
+                      "disallowTypes": [
+                        "Literal"
+                      ]
+                    }
+                  ],
+                  "argIndex": 0
+                }
+              },
+              {
+                "call": {
+                  "callee": {
+                    "member": [
+                      "Vue",
+                      "compile"
+                    ]
+                  },
+                  "args": [
+                    {
+                      "index": 0,
+                      "disallowTypes": [
+                        "Literal"
+                      ]
+                    }
+                  ],
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "template-output-dom-injection",
+          "name": "Template output injected into DOM",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Rendered template output written into innerHTML/$.html can enable DOM XSS when templates or data are attacker-controlled."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "custom": "template_output_dom_injection"
+              }
+            ]
+          }
+        },
+        {
+          "id": "vue-v-html-template-review",
+          "name": "Review Vue v-html template usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Vue templates using <code>v-html</code> render raw HTML and should be reviewed as a framework-specific DOM sink."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "custom": "vue_v_html_template"
+              }
+            ]
+          }
+        },
+        {
+          "id": "client-template-injection-taint",
+          "name": "Template injection (taint flow)",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Tainted data flows into client-side template sources or rendered HTML sinks."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "document:cookie",
+              "window:name",
+              "storage:local_getItem",
+              "storage:session_getItem"
+            ],
+            "sinks": [
+              "template:underscore_source",
+              "template:handlebars_source",
+              "template:mustache_source",
+              "template:vue_source",
+              "template:render_output_to_dom"
+            ],
+            "sanitizers": [
+              "san:dompurify_sanitize",
+              "sanitize-html:sanitize",
+              "xss:filterXSS",
+              "lodash:escape",
+              "underscore:escape",
+              "he:encode",
+              "validator:escape"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:decode_uri",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:callback:rxjs_subscribe",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get"
+            ],
+            "taintKinds": [
+              "client-template-injection-taint"
+            ]
+          }
+        },
+        {
+          "id": "react-dangerouslysetinnerhtml-taint",
+          "name": "React dangerouslySetInnerHTML taint flow",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Tainted data reaches React <code>dangerouslySetInnerHTML.__html</code>, enabling framework-mediated DOM XSS."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "document:cookie",
+              "window:name",
+              "storage:local_getItem",
+              "storage:session_getItem"
+            ],
+            "sinks": [
+              "react:dangerously_set_inner_html"
+            ],
+            "sanitizers": [
+              "san:dompurify_sanitize",
+              "sanitize-html:sanitize",
+              "xss:filterXSS",
+              "lodash:escape",
+              "underscore:escape",
+              "he:encode",
+              "validator:escape"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:decode_uri",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:callback:rxjs_subscribe",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get"
+            ],
+            "taintKinds": [
+              "react-dangerouslysetinnerhtml-taint"
+            ]
+          }
+        },
+        {
+          "id": "lit-unsafehtml-taint",
+          "name": "Lit unsafeHTML taint flow",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Tainted markup passed into <code>unsafeHTML</code>/<code>unsafeSvg</code> reaches framework rendering without sanitization."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "document:cookie",
+              "window:name",
+              "storage:local_getItem",
+              "storage:session_getItem"
+            ],
+            "sinks": [
+              "lit:unsafe_html"
+            ],
+            "sanitizers": [
+              "san:dompurify_sanitize",
+              "sanitize-html:sanitize",
+              "xss:filterXSS",
+              "lodash:escape",
+              "underscore:escape",
+              "he:encode",
+              "validator:escape"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:decode_uri",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:callback:rxjs_subscribe",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get"
+            ],
+            "taintKinds": [
+              "lit-unsafehtml-taint"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "network-destination-poisoning",
+      "name": "Network Destination Poisoning",
+      "type": "static",
+      "async": false,
+      "metadata": {
+        "taxonomy": {
+          "severity": "medium",
+          "category": "client_side",
+          "vulnId": "ssrf",
+          "owasp": [
+            "A05:2025 - Security Misconfiguration",
+            "A04:2021 - Insecure Design"
+          ],
+          "cwe": [
+            "CWE-20"
+          ],
+          "tags": [
+            "sast",
+            "network",
+            "beacon",
+            "eventsource",
+            "axios"
+          ]
+        },
+        "docs": {
+          "description": "Detects client-side request destinations for beacon, EventSource, and Axios that can be influenced by attacker-controlled input.",
+          "recommendation": "<ul><li>Build beacon, EventSource, and API client destinations from fixed configuration, not user-controlled strings.</li><li>Apply strict allow-lists for scheme, host, and path before constructing network destinations.</li><li>Reject attacker-controlled cross-origin URLs even when requests are “read-only” or telemetry-oriented.</li></ul>",
+          "links": {
+            "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+            "CWE": "https://cwe.mitre.org/data/definitions/20.html"
+          }
+        },
+        "execution": {
+          "findingKind": "finding",
+          "maxFindings": 100,
+          "confidenceDefault": null
+        },
+        "constants": {},
+        "extensions": {}
+      },
+      "rules": [
+        {
+          "id": "sendbeacon-review",
+          "name": "Review sendBeacon destination",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>navigator.sendBeacon(...)</code> should send to a fixed and trusted endpoint."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "navigator",
+                          "sendBeacon"
+                        ],
+                        [
+                          "window",
+                          "navigator",
+                          "sendBeacon"
+                        ],
+                        [
+                          "self",
+                          "navigator",
+                          "sendBeacon"
+                        ],
+                        [
+                          "globalThis",
+                          "navigator",
+                          "sendBeacon"
+                        ]
+                      ]
+                    }
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "sendbeacon-body-review",
+          "name": "Review sendBeacon body content",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>navigator.sendBeacon(..., body)</code> should avoid sending secrets, tokens, or unexpected client state."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "navigator",
+                          "sendBeacon"
+                        ],
+                        [
+                          "window",
+                          "navigator",
+                          "sendBeacon"
+                        ],
+                        [
+                          "self",
+                          "navigator",
+                          "sendBeacon"
+                        ],
+                        [
+                          "globalThis",
+                          "navigator",
+                          "sendBeacon"
+                        ]
+                      ]
+                    }
+                  },
+                  "args": [
+                    {
+                      "index": 1,
+                      "required": true
+                    }
+                  ],
+                  "argIndex": 1
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "eventsource-constructor-review",
+          "name": "Review EventSource constructor usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>new EventSource(...)</code> should use a fixed, trusted stream endpoint."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "new": {
+                  "callee": {
+                    "identifier": "EventSource"
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "axios-direct-request-review",
+          "name": "Review direct Axios destination usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "Direct <code>axios.get/post/put/patch/delete</code> URL arguments should be fixed and trusted."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "axios",
+                          "get"
+                        ],
+                        [
+                          "axios",
+                          "post"
+                        ],
+                        [
+                          "axios",
+                          "put"
+                        ],
+                        [
+                          "axios",
+                          "patch"
+                        ],
+                        [
+                          "axios",
+                          "delete"
+                        ],
+                        [
+                          "axios",
+                          "head"
+                        ],
+                        [
+                          "axios",
+                          "options"
+                        ],
+                        [
+                          "window",
+                          "axios",
+                          "get"
+                        ],
+                        [
+                          "window",
+                          "axios",
+                          "post"
+                        ],
+                        [
+                          "window",
+                          "axios",
+                          "put"
+                        ],
+                        [
+                          "window",
+                          "axios",
+                          "patch"
+                        ],
+                        [
+                          "window",
+                          "axios",
+                          "delete"
+                        ],
+                        [
+                          "window",
+                          "axios",
+                          "head"
+                        ],
+                        [
+                          "window",
+                          "axios",
+                          "options"
+                        ],
+                        [
+                          "globalThis",
+                          "axios",
+                          "get"
+                        ],
+                        [
+                          "globalThis",
+                          "axios",
+                          "post"
+                        ],
+                        [
+                          "globalThis",
+                          "axios",
+                          "put"
+                        ],
+                        [
+                          "globalThis",
+                          "axios",
+                          "patch"
+                        ],
+                        [
+                          "globalThis",
+                          "axios",
+                          "delete"
+                        ],
+                        [
+                          "globalThis",
+                          "axios",
+                          "head"
+                        ],
+                        [
+                          "globalThis",
+                          "axios",
+                          "options"
+                        ]
+                      ]
+                    }
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "network-destination-url-taint",
+          "name": "Tainted network destination URL",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Untrusted client-side data controls beacon, EventSource, or direct Axios request destinations."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "url:searchparams_get",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "document:cookie",
+              "window:name",
+              "storage:local_getItem",
+              "storage:session_getItem",
+              "webmsg:handler_param_data",
+              "webmsg:onmessage_param_data",
+              "webmsg:messageport_param_data",
+              "webmsg:broadcast_param_data",
+              "webmsg:worker_param_data"
+            ],
+            "sinks": [
+              "net:sendBeacon_url",
+              "net:eventsource_url",
+              "ajax:axios_url",
+              "ajax:xhr_open_url"
+            ],
+            "sanitizers": [
+              "san:origin_allowlist_call"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:url_ctor",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener"
+            ],
+            "taintKinds": [
+              "network-destination-url-taint"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "client-script-loader-poisoning",
+      "name": "Client Script Loader Poisoning",
+      "type": "static",
+      "async": false,
+      "metadata": {
+        "taxonomy": {
+          "severity": "medium",
+          "category": "security_misconfiguration",
+          "vulnId": "integrity_failure",
+          "owasp": [
+            "A05:2025 - Security Misconfiguration",
+            "A08:2021 - Software and Data Integrity Failures"
+          ],
+          "cwe": [
+            "CWE-829"
+          ],
+          "tags": [
+            "sast",
+            "script_loader",
+            "worker",
+            "service_worker"
+          ]
+        },
+        "docs": {
+          "description": "Detects dynamic script, worker, and service-worker loader endpoints that can be influenced by attacker-controlled client-side data.",
+          "recommendation": "<ul><li>Load workers, service workers, and helper scripts from fixed, trusted URLs only.</li><li>Do not derive script loader destinations from URL parameters, storage, messages, or DOM input.</li><li>Apply strict allow-lists for scheme, host, and path before invoking worker or script loader APIs.</li></ul>",
+          "links": {
+            "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+            "CWE": "https://cwe.mitre.org/data/definitions/829.html"
+          }
+        },
+        "execution": {
+          "findingKind": "finding",
+          "maxFindings": 100,
+          "confidenceDefault": null
+        },
+        "constants": {},
+        "extensions": {}
+      },
+      "rules": [
+        {
+          "id": "jquery-getscript-review",
+          "name": "Review jQuery getScript usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>$.getScript()</code> dynamically loads and executes remote JavaScript. Confirm the URL is fixed and trusted."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "$",
+                          "getScript"
+                        ],
+                        [
+                          "jQuery",
+                          "getScript"
+                        ]
+                      ]
+                    }
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "systemjs-import-review",
+          "name": "Review System.import usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>System.import()</code> loads code dynamically. Confirm module specifiers are fixed and trusted."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "System",
+                          "import"
+                        ],
+                        [
+                          "SystemJS",
+                          "import"
+                        ]
+                      ]
+                    }
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "dynamic-import-review",
+          "name": "Review dynamic import usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>import(specifier)</code> dynamically loads code and should use a fixed trusted specifier."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "import": {
+                  "source": {
+                    "disallowTypes": [
+                      "Literal"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "worker-constructor-review",
+          "name": "Review Worker constructor usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>new Worker(...)</code> should load a fixed worker script from a trusted location."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "new": {
+                  "callee": {
+                    "identifier": "Worker"
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "sharedworker-constructor-review",
+          "name": "Review SharedWorker constructor usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>new SharedWorker(...)</code> should load a fixed script from a trusted location."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "new": {
+                  "callee": {
+                    "identifier": "SharedWorker"
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "serviceworker-register-review",
+          "name": "Review serviceWorker.register usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>serviceWorker.register(...)</code> should use a fixed script path and controlled scope."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "navigator",
+                          "serviceWorker",
+                          "register"
+                        ],
+                        [
+                          "window",
+                          "navigator",
+                          "serviceWorker",
+                          "register"
+                        ],
+                        [
+                          "self",
+                          "navigator",
+                          "serviceWorker",
+                          "register"
+                        ],
+                        [
+                          "globalThis",
+                          "navigator",
+                          "serviceWorker",
+                          "register"
+                        ],
+                        [
+                          "*",
+                          "serviceWorker",
+                          "register"
+                        ]
+                      ]
+                    }
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "importscripts-review",
+          "name": "Review importScripts usage",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "<code>importScripts(...)</code> dynamically loads worker scripts. Confirm sources are fixed and trusted."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "identifier": "importScripts"
+                  },
+                  "argIndex": 0
+                }
+              },
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "self",
+                          "importScripts"
+                        ],
+                        [
+                          "window",
+                          "importScripts"
+                        ],
+                        [
+                          "globalThis",
+                          "importScripts"
+                        ]
+                      ]
+                    }
+                  },
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "script-loader-url-taint",
+          "name": "Tainted worker or script loader URL",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Untrusted client-side data controls worker, service-worker, or worker script loader URLs."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "url:searchparams_get",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "document:cookie",
+              "window:name",
+              "storage:local_getItem",
+              "storage:session_getItem",
+              "webmsg:handler_param_data",
+              "webmsg:onmessage_param_data",
+              "webmsg:messageport_param_data",
+              "webmsg:broadcast_param_data",
+              "webmsg:worker_param_data"
+            ],
+            "sinks": [
+              "js:dynamicImport_url",
+              "worker:constructor_url",
+              "serviceworker:register_url",
+              "js:importScripts_url"
+            ],
+            "sanitizers": [
+              "san:origin_allowlist_call"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:decode_uri",
+              "prop:url_ctor",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:blob_ctor",
+              "prop:url_createObjectURL",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener"
+            ],
+            "taintKinds": [
+              "script-loader-url-taint"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "web-message",
+      "name": "Web Message Handling",
+      "type": "static",
+      "async": false,
+      "metadata": {
+        "taxonomy": {
+          "severity": "medium",
+          "category": "client_side",
+          "vulnId": "postmessage_misuse",
+          "owasp": [
+            "A02:2025 - Security Misconfiguration",
+            "A05:2021 - Security Misconfiguration"
+          ],
+          "cwe": [
+            "CWE-346"
+          ],
+          "tags": [
+            "sast",
+            "postmessage"
+          ]
+        },
+        "docs": {
+          "description": "Detects unsafe postMessage usage and message event handling issues (missing origin validation, wildcard targetOrigin, tainted data flowing into DOM/code sinks).",
+          "recommendation": "<ul><li>Always specify an exact targetOrigin and validate <code>event.origin</code> against a strict allow-list (exact match) before trusting <code>event.data</code>.</li><li>Sanitize or validate structured payloads before invoking DOM APIs or dynamic execution sinks.</li><li>Avoid propagating messages into navigation, cookie, or script sinks without proper verification.</li></ul>",
+          "links": {
+            "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/11-Testing_Web_Messaging",
+            "CWE": "https://cwe.mitre.org/data/definitions/346.html"
+          }
+        },
+        "execution": {
+          "findingKind": "finding",
+          "maxFindings": 100,
+          "confidenceDefault": null
+        },
+        "constants": {},
+        "extensions": {}
+      },
+      "rules": [
+        {
+          "id": "postmessage-wildcard-target",
+          "name": "Avoid postMessage with wildcard targetOrigin",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "<code>postMessage</code> invoked with <code>'*'</code> targetOrigin allows attackers to receive sensitive data or trigger privileged flows from any origin."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "postMessage"
+                        ],
+                        [
+                          "window",
+                          "postMessage"
+                        ],
+                        [
+                          "self",
+                          "postMessage"
+                        ],
+                        [
+                          "*",
+                          "postMessage"
+                        ]
+                      ]
+                    }
+                  },
+                  "args": [
+                    {
+                      "index": 1,
+                      "equals": "*"
+                    }
+                  ],
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "postmessage-missing-target",
+          "name": "Specify postMessage targetOrigin",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "<code>postMessage</code> without a <code>targetOrigin</code> argument allows the message to be delivered to any listening context."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "postMessage"
+                        ],
+                        [
+                          "window",
+                          "postMessage"
+                        ],
+                        [
+                          "self",
+                          "postMessage"
+                        ],
+                        [
+                          "*",
+                          "postMessage"
+                        ]
+                      ]
+                    }
+                  },
+                  "maxArgs": 1,
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "weak-message-origin-check",
+          "name": "Avoid weak origin substring checks",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "Origin validation using substring checks (e.g., <code>indexOf</code>, <code>includes</code>, <code>startsWith</code>, <code>endsWith</code>) can be bypassed with crafted attacker origins."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "*",
+                          "origin",
+                          "indexOf"
+                        ],
+                        [
+                          "*",
+                          "origin",
+                          "includes"
+                        ],
+                        [
+                          "*",
+                          "origin",
+                          "startsWith"
+                        ],
+                        [
+                          "*",
+                          "origin",
+                          "endsWith"
+                        ]
+                      ]
+                    }
+                  },
+                  "calleePropRegex": "^(?:indexOf|includes|startsWith|endsWith)$",
+                  "calleePropCaseInsensitive": true,
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "weak-message-origin-regex-check",
+          "name": "Avoid permissive regex origin checks",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Origin validation using <code>match</code>/<code>search</code> without strict anchoring can be bypassed with crafted attacker origins."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "*",
+                          "origin",
+                          "match"
+                        ],
+                        [
+                          "*",
+                          "origin",
+                          "search"
+                        ]
+                      ]
+                    }
+                  },
+                  "calleePropRegex": "^(?:match|search)$",
+                  "calleePropCaseInsensitive": true,
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "message-origin-check-without-scheme",
+          "name": "Origin check uses host fragment only",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Origin checks against host fragments (for example <code>trusted.com</code> without scheme/port) are bypass-prone."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "*",
+                          "origin",
+                          "indexOf"
+                        ],
+                        [
+                          "*",
+                          "origin",
+                          "includes"
+                        ],
+                        [
+                          "*",
+                          "origin",
+                          "startsWith"
+                        ],
+                        [
+                          "*",
+                          "origin",
+                          "endsWith"
+                        ]
+                      ]
+                    }
+                  },
+                  "args": [
+                    {
+                      "index": 0,
+                      "regex": "^[A-Za-z0-9._*-]+(?:\\.[A-Za-z0-9._*-]+)+$",
+                      "flags": "i"
+                    }
+                  ],
+                  "calleePropRegex": "^(?:indexOf|includes|startsWith|endsWith)$",
+                  "calleePropCaseInsensitive": true,
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "message-listener-review",
+          "name": "Review message event listeners",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "Message listeners should validate <code>event.origin</code> and sanitize <code>event.data</code> before use."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "addEventListener"
+                        ],
+                        [
+                          "window",
+                          "addEventListener"
+                        ],
+                        [
+                          "self",
+                          "addEventListener"
+                        ],
+                        [
+                          "*",
+                          "addEventListener"
+                        ]
+                      ]
+                    }
+                  },
+                  "args": [
+                    {
+                      "index": 0,
+                      "equals": "message",
+                      "ci": true
+                    }
+                  ],
+                  "argIndex": 1
+                }
+              },
+              {
+                "assignment": {
+                  "left": {
+                    "memberPropRegex": "^onmessage$",
+                    "caseInsensitive": true
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "message-handler-missing-origin-check",
+          "name": "Message handler without origin validation",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Message event listeners should enforce strict origin checks. Inline handlers without explicit validation risk trusting attacker-controlled messages."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "addEventListener"
+                        ],
+                        [
+                          "window",
+                          "addEventListener"
+                        ],
+                        [
+                          "self",
+                          "addEventListener"
+                        ],
+                        [
+                          "globalThis",
+                          "addEventListener"
+                        ]
+                      ]
+                    }
+                  },
+                  "args": [
+                    {
+                      "index": 0,
+                      "equals": "message",
+                      "ci": true
+                    },
+                    {
+                      "index": 1,
+                      "disallowTypes": [
+                        "Identifier"
+                      ]
+                    }
+                  ],
+                  "argIndex": 1
+                }
+              },
+              {
+                "assignment": {
+                  "left": {
+                    "member": [
+                      "window",
+                      "onmessage"
+                    ]
+                  }
+                }
+              },
+              {
+                "assignment": {
+                  "left": {
+                    "member": [
+                      "self",
+                      "onmessage"
+                    ]
+                  }
+                }
+              },
+              {
+                "assignment": {
+                  "left": {
+                    "member": [
+                      "globalThis",
+                      "onmessage"
+                    ]
+                  }
+                }
+              },
+              {
+                "assignment": {
+                  "left": {
+                    "member": [
+                      "parent",
+                      "onmessage"
+                    ]
+                  }
+                }
+              },
+              {
+                "assignment": {
+                  "left": {
+                    "member": [
+                      "top",
+                      "onmessage"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "message-handler-wildcard-reply",
+          "name": "Wildcard reply from message handler",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "medium"
+            },
+            "docs": {
+              "description": "Responding to messages with <code>postMessage(..., '*')</code> from <code>event.source</code> can leak data to untrusted origins."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "call": {
+                  "callee": {
+                    "memberAny": {
+                      "of": [
+                        [
+                          "*",
+                          "source",
+                          "postMessage"
+                        ],
+                        [
+                          "source",
+                          "postMessage"
+                        ]
+                      ]
+                    }
+                  },
+                  "args": [
+                    {
+                      "index": 1,
+                      "equals": "*"
+                    }
+                  ],
+                  "argIndex": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "web-message-taint",
+          "name": "Web Message Injection (taint flow)",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Untrusted event.data from message listeners flows into DOM/code/navigation/ajax/JSON/XPath/SQL sinks without strict origin or payload validation."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "webmsg:handler_param_data",
+              "webmsg:onmessage_param_data",
+              "webmsg:messageport_param_data",
+              "webmsg:broadcast_param_data",
+              "webmsg:worker_param_data"
+            ],
+            "sinks": [
+              "ajax:jquery_globalEval",
+              "ajax:xhr_open",
+              "ajax:xhr_send",
+              "ajax:xhr_set_header",
+              "client:jquery_parsejson",
+              "client:json_parse",
+              "client:sql_execute",
+              "client:xpath_evaluate",
+              "cookie:wrapper_setter",
+              "crypto:generateCRMFRequest",
+              "dom:appendChild",
+              "dom:createContextualFragment",
+              "dom:document_cookie_write",
+              "dom:document_write",
+              "dom:document_writeln",
+              "dom:event_handler_assign",
+              "dom:execCommand",
+              "dom:insertAdjacentHTML",
+              "dom:innerHTML",
+              "dom:location_assign",
+              "dom:location_host",
+              "dom:location_hostname",
+              "dom:outerHTML",
+              "dom:replaceChild",
+              "dom:script_text",
+              "dom:setAttribute_on",
+              "dom:setAttribute_srcdoc",
+              "dom:srcdoc",
+              "eval:constructor",
+              "form:action_assign",
+              "form:setattribute_action",
+              "jquery:append",
+              "jquery:attr_href_set",
+              "jquery:before_after",
+              "jquery:globalEval_getScript",
+              "jquery:html",
+              "jquery:insert_ops",
+              "jquery:prepend",
+              "jquery:prop_href_set",
+              "jquery:wrap",
+              "js:execScript",
+              "js:script_text",
+              "link:anchor_href_assign",
+              "link:setattribute_href",
+              "nav:anchor_href",
+              "nav:document_location_self",
+              "nav:form_action",
+              "nav:location_methods",
+              "nav:parent_location_self",
+              "nav:top_location_self",
+              "nav:window_document_location_self",
+              "nav:window_location_assign",
+              "selector:document_query",
+              "selector:document_query_all",
+              "selector:document_getElementById",
+              "selector:document_getElementsByClassName",
+              "selector:document_getElementsByTagName",
+              "selector:prop_query",
+              "selector:prop_query_all",
+              "selector:jquery_root",
+              "selector:jquery_find",
+              "dom:Element_matches_selector",
+              "dom:Element_closest_selector",
+              "window:open",
+              "form:formAction_assign",
+              "dom:element_target_assign",
+              "form:method_assign",
+              "dom:element_value_assign",
+              "dom:element_placeholder_assign",
+              "dom:setAttribute_placeholder",
+              "dom:style_cssText_assign",
+              "dom:style_url_assign",
+              "dom:setAttribute_formaction",
+              "dom:setAttribute_style",
+              "dom:document_title_assign",
+              "history:pushState_state",
+              "history:pushState_title",
+              "history:pushState_url",
+              "history:replaceState_state",
+              "history:replaceState_title",
+              "history:replaceState_url",
+              "dom:createHTMLDocument",
+              "dom:clobbering_name",
+              "js:proto_assign",
+              "js:Object_setPrototypeOf",
+              "js:Object_assign_prototype",
+              "storage:local_setItem",
+              "storage:session_setItem",
+              "storage:indexeddb_put",
+              "ajax:xhr_open_url",
+              "ajax:fetch_url",
+              "ajax:request_header",
+              "template:underscore_source",
+              "template:handlebars_source",
+              "template:mustache_source",
+              "template:vue_source"
+            ],
+            "sanitizers": [
+              "san:origin_allowlist_call",
+              "san:message_payload_validator",
+              "san:message_sanitizer_library",
+              "san:dompurify_sanitize"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:return:taint",
+              "prop:json_parse",
+              "prop:string_replace",
+              "prop:array_join",
+              "prop:appendChild_passthrough",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener"
+            ],
+            "taintKinds": [
+              "web-message-taint"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-manipulation",
+      "name": "DOM-based Link Manipulation",
+      "type": "static",
+      "async": false,
+      "metadata": {
+        "taxonomy": {
+          "severity": "medium",
+          "category": "access_control",
+          "vulnId": "open_redirect",
+          "owasp": [
+            "A02:2025 - Security Misconfiguration",
+            "A05:2021 - Security Misconfiguration"
+          ],
+          "cwe": [
+            "CWE-451"
+          ],
+          "tags": [
+            "sast",
+            "dom",
+            "links"
+          ]
+        },
+        "docs": {
+          "description": "Detects DOM code that rewrites link destinations (href attributes) with attacker-controlled data. Manipulated links can mislead users into visiting malicious targets even if navigation is not forced automatically.",
+          "recommendation": "<ul><li>Allow-list link destinations or map tokens to server-side known URLs; do not reflect arbitrary strings into href attributes.</li><li>Ensure displayed link text matches the trusted destination so users cannot be tricked into clicking a mismatched URL.</li><li>Sanitise or normalise protocol and hostname components (e.g., enforce https, same-origin).</li></ul>",
+          "links": {
+            "OWASP": "https://owasp.org/www-community/attacks/Content_Spoofing",
+            "CWE": "https://cwe.mitre.org/data/definitions/451.html"
+          }
+        },
+        "execution": {
+          "findingKind": "finding",
+          "maxFindings": 100,
+          "confidenceDefault": null
+        },
+        "constants": {},
+        "extensions": {}
+      },
+      "rules": [
+        {
+          "id": "link-attribute-assignment",
+          "name": "Review assignments to href/src/action",
+          "mode": "pattern",
+          "metadata": {
+            "taxonomy": {
+              "severity": "low"
+            },
+            "docs": {
+              "description": "Assignments that modify link-related attributes (href/src/action). When the value stems from untrusted input, attackers can surface misleading destinations in the UI."
+            },
+            "execution": {
+              "findingKind": "hint",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "matches": [
+              {
+                "assignment": {
+                  "left": {
+                    "memberPropRegex": "^(href|src|action)$",
+                    "caseInsensitive": true
+                  }
+                }
+              },
+              {
+                "call": {
+                  "callee": {
+                    "member": [
+                      "*",
+                      "setAttribute"
+                    ]
+                  },
+                  "args": [
+                    {
+                      "index": 0,
+                      "regex": "^(?:href|src|action)$",
+                      "flags": "i"
+                    }
+                  ],
+                  "argIndex": 1
+                }
+              },
+              {
+                "call": {
+                  "calleeProp": "attr",
+                  "args": [
+                    {
+                      "index": 0,
+                      "equals": "href",
+                      "ci": true
+                    }
+                  ],
+                  "argIndex": 1
+                }
+              },
+              {
+                "call": {
+                  "calleeProp": "prop",
+                  "args": [
+                    {
+                      "index": 0,
+                      "equals": "href",
+                      "ci": true
+                    }
+                  ],
+                  "argIndex": 1
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "link-manipulation-taint",
+          "name": "DOM-based Link Manipulation (taint flow)",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high"
+            },
+            "docs": {
+              "description": "Untrusted DOM data flows into link href attributes without recognised sanitisation. Attackers can surface malicious destinations in displayed links, aiding phishing or click-jacking scenarios."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 50,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "window:name",
+              "document:cookie",
+              "storage:local_getItem",
+              "storage:session_getItem",
+              "jquery:val_get",
+              "jquery:attr_get"
+            ],
+            "sinks": [
+              "link:anchor_href_assign",
+              "link:setattribute_href",
+              "jquery:attr_href_set",
+              "jquery:prop_href_set",
+              "form:action_assign",
+              "form:setattribute_action"
+            ],
             "sanitizers": [],
             "propagators": [
               "prop:assignment:local",
@@ -1512,7 +4008,291 @@
               "prop:urlsearchparams_get"
             ],
             "taintKinds": [
-              "javascript-injection-taint"
+              "link-manipulation-taint"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "dom-data-manipulation",
+      "name": "DOM Data Manipulation",
+      "type": "static",
+      "async": false,
+      "metadata": {
+        "taxonomy": {
+          "severity": "medium",
+          "category": "supply_chain",
+          "vulnId": "integrity_failure",
+          "owasp": [
+            "A02:2025 - Security Misconfiguration",
+            "A05:2021 - Security Misconfiguration"
+          ],
+          "cwe": [
+            "CWE-451"
+          ],
+          "tags": [
+            "sast",
+            "dom",
+            "manipulation"
+          ]
+        },
+        "docs": {
+          "description": "Detects untrusted DOM data being written into form metadata (formAction/target/method/value/placeholder), inline style surfaces (style/cssText/background*), document.title, history state, or createHTMLDocument — mutations that influence UI/navigation state without covering classic href/src/action sinks already handled elsewhere.",
+          "recommendation": "<ul><li>Validate or allow-list values before assigning them to form metadata, placeholders, or styles. Prefer safe DOM APIs (textContent, dataset) when representing user data.</li><li>Keep document.title and history.pushState/replaceState inputs confined to trusted sources; normalise or encode untrusted data first.</li><li>When creating HTML documents dynamically, ensure the template string is static or sanitised with vetted libraries such as DOMPurify.</li></ul>",
+          "links": {
+            "OWASP": "https://owasp.org/www-community/attacks/Content_Spoofing",
+            "CWE": "https://cwe.mitre.org/data/definitions/451.html"
+          }
+        },
+        "execution": {
+          "findingKind": "finding",
+          "maxFindings": 150,
+          "confidenceDefault": null
+        },
+        "constants": {},
+        "extensions": {}
+      },
+      "rules": [
+        {
+          "id": "dom-data-nav-taint",
+          "name": "Untrusted DOM data into navigation-adjacent sinks",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high",
+              "category": "client_side",
+              "vulnId": "open_redirect"
+            },
+            "docs": {
+              "description": "Untrusted data from DOM/location/storage/message sources flows into navigation-adjacent sinks (formAction/target/method/value/placeholder, history push/replace URL) without validation."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 75,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "dom:qs_textContent",
+              "dom:qs_innerText",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "document:cookie",
+              "window:name",
+              "history:state",
+              "storage:local_getItem",
+              "storage:session_getItem",
+              "jquery:val_get",
+              "jquery:attr_get"
+            ],
+            "sinks": [
+              "form:formAction_assign",
+              "dom:element_target_assign",
+              "form:method_assign",
+              "dom:element_value_assign",
+              "dom:element_placeholder_assign",
+              "dom:setAttribute_placeholder",
+              "dom:setAttribute_formaction",
+              "history:pushState_url",
+              "history:replaceState_url"
+            ],
+            "sanitizers": [
+              "san:dompurify_sanitize",
+              "san:encodeURIComponent",
+              "san:encodeURI",
+              "san:css_escape"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:decode_uri",
+              "prop:url_ctor",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:callback:rxjs_subscribe",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener",
+              "prop:xhr:open_url"
+            ],
+            "taintKinds": [
+              "dom-data-nav-taint"
+            ]
+          }
+        },
+        {
+          "id": "dom-data-htmldoc-taint",
+          "name": "Untrusted DOM data into createHTMLDocument",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high",
+              "category": "xss",
+              "vulnId": "dom_xss"
+            },
+            "docs": {
+              "description": "Untrusted data reaches document.createHTMLDocument, enabling DOM-based injection."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 75,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "dom:qs_textContent",
+              "dom:qs_innerText",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "document:cookie",
+              "window:name",
+              "history:state",
+              "storage:local_getItem",
+              "storage:session_getItem",
+              "jquery:val_get",
+              "jquery:attr_get"
+            ],
+            "sinks": [
+              "dom:createHTMLDocument"
+            ],
+            "sanitizers": [
+              "san:dompurify_sanitize",
+              "san:encodeURIComponent",
+              "san:encodeURI",
+              "san:css_escape"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:decode_uri",
+              "prop:url_ctor",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:blob_ctor",
+              "prop:url_createObjectURL",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener"
+            ],
+            "taintKinds": [
+              "dom-data-htmldoc-taint"
+            ]
+          }
+        },
+        {
+          "id": "dom-data-ui-taint",
+          "name": "Untrusted DOM data into UI mutation sinks",
+          "mode": "taint",
+          "metadata": {
+            "taxonomy": {
+              "severity": "high",
+              "category": "client_side",
+              "vulnId": "integrity_failure"
+            },
+            "docs": {
+              "description": "Untrusted data flows into UI mutation sinks (style/cssText/background* and document.title) without sanitization."
+            },
+            "execution": {
+              "findingKind": "finding",
+              "maxFindings": 75,
+              "originLimit": null,
+              "depthLimit": null,
+              "confidenceDefault": null
+            },
+            "constants": {},
+            "extensions": {}
+          },
+          "detector": {
+            "sources": [
+              "dom:getElementById_value",
+              "dom:qs_value",
+              "dom:event_target_value",
+              "dom:qs_textContent",
+              "dom:qs_innerText",
+              "location:search",
+              "location:hash",
+              "location:href",
+              "location:pathname",
+              "document:url",
+              "document:documentURI",
+              "document:baseURI",
+              "document:referrer",
+              "document:cookie",
+              "window:name",
+              "history:state",
+              "storage:local_getItem",
+              "storage:session_getItem",
+              "jquery:val_get",
+              "jquery:attr_get"
+            ],
+            "sinks": [
+              "dom:style_cssText_assign",
+              "dom:style_url_assign",
+              "dom:setAttribute_style",
+              "dom:document_title_assign"
+            ],
+            "sanitizers": [
+              "san:dompurify_sanitize",
+              "san:encodeURIComponent",
+              "san:encodeURI",
+              "san:css_escape"
+            ],
+            "propagators": [
+              "prop:assignment:local",
+              "prop:passthrough:identity_strings",
+              "prop:url_ctor",
+              "prop:urlsearchparams_ctor",
+              "prop:urlsearchparams_get",
+              "prop:return:taint",
+              "prop:call:arg_to_param",
+              "prop:return:param_to_ret",
+              "prop:write:param_to_property",
+              "prop:promise:then",
+              "prop:callback:array_map",
+              "prop:callback:array_forEach",
+              "prop:callback:addEventListener"
+            ],
+            "taintKinds": [
+              "dom-data-ui-taint"
             ]
           }
         }

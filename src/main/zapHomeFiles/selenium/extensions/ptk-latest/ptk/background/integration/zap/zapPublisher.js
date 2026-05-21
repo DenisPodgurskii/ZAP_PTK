@@ -61,6 +61,51 @@ function toSourceFindingKey(finding) {
     ].join('|')
 }
 
+function toDastMergeKey(finding) {
+    if (!finding || typeof finding !== 'object') return ''
+    const evidence = finding?.evidence?.dast && typeof finding.evidence.dast === 'object'
+        ? finding.evidence.dast
+        : {}
+    const location = finding?.location && typeof finding.location === 'object'
+        ? finding.location
+        : {}
+    const attackId = String(evidence.attackId || evidence.attack?.id || finding.attackId || '')
+    const requestId = String(evidence.requestId || evidence.attack?.requestId || finding.requestId || '')
+    const moduleId = String(finding.moduleId || '')
+    const ruleId = String(finding.ruleId || '')
+    const payload = evidence.payload === undefined || evidence.payload === null
+        ? ''
+        : String(evidence.payload)
+    const proof = evidence.proof === undefined || evidence.proof === null
+        ? ''
+        : String(evidence.proof)
+
+    if (requestId || attackId) {
+        return [
+            'dast',
+            moduleId,
+            ruleId,
+            requestId,
+            attackId,
+            String(location.url || ''),
+            String(location.method || ''),
+            String(location.param || '')
+        ].join('|')
+    }
+
+    return [
+        'dast',
+        moduleId,
+        ruleId,
+        String(finding.outputKind || ''),
+        String(location.url || ''),
+        String(location.method || ''),
+        String(location.param || ''),
+        payload,
+        proof
+    ].join('|')
+}
+
 function isReportableDastAttack(attack) {
     if (!attack || typeof attack !== 'object') return false
     if (!attack.success) return false
@@ -390,14 +435,12 @@ export default class ZapPublisher {
     _collectDastSourceFindings(scanResult) {
         const rawFindings = Array.isArray(scanResult?.findings) ? scanResult.findings : []
         const reconFindings = Array.isArray(scanResult?.recon) ? scanResult.recon : []
-        const synthesizedFindings = rawFindings.length === 0
-            ? this._synthesizeDastFindingsFromRequests(scanResult)
-            : []
+        const synthesizedFindings = this._synthesizeDastFindingsFromRequests(scanResult)
         const merged = []
         const seen = new Set()
-        for (const finding of [...(rawFindings.length ? rawFindings : synthesizedFindings), ...reconFindings]) {
+        for (const finding of [...rawFindings, ...synthesizedFindings, ...reconFindings]) {
             if (!finding || typeof finding !== 'object') continue
-            const key = toSourceFindingKey(finding)
+            const key = toDastMergeKey(finding) || toSourceFindingKey(finding)
             if (key && seen.has(key)) continue
             if (key) seen.add(key)
             merged.push(finding)

@@ -1,4 +1,5 @@
 const FREE_SAFE_HOOK_GROUPS = Object.freeze([
+  'hook.angularjs',
   'hook.code.exec',
   'hook.dom.documentWrite',
   'hook.dom.formAttributes',
@@ -94,6 +95,9 @@ export function getHookGroupsForSink(sinkId) {
   }
   if (sinkId.startsWith('code.')) {
     groups.add('hook.code.exec')
+  }
+  if (sinkId.startsWith('angularjs.')) {
+    groups.add('hook.angularjs')
   }
   if (sinkId.startsWith('nav.location.') || sinkId.startsWith('nav.window.open') || sinkId.startsWith('nav.history.') || sinkId === 'nav.navigation.navigate') {
     groups.add('hook.nav.redirects')

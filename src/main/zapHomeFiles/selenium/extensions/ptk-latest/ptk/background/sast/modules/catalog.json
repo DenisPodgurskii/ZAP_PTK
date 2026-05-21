@@ -166,11 +166,11 @@
     },
     "link:anchor_href_assign": {
       "id": "link:anchor_href_assign",
-      "description": "Assignment to link-related attributes (href/src/action).",
+      "description": "Assignment to URL-bearing DOM attributes/properties (href/src/action/data).",
       "pattern": {
         "assignment": {
           "left": {
-            "memberPropRegex": "^(href|src|action)$",
+            "memberPropRegex": "^(href|src|action|data)$",
             "caseInsensitive": true
           }
         }
@@ -178,25 +178,45 @@
     },
     "link:setattribute_href": {
       "id": "link:setattribute_href",
-      "description": "setAttribute('href'|'src'|'action', value) style link manipulation.",
-      "pattern": {
-        "call": {
-          "callee": {
-            "member": [
-              "*",
-              "setAttribute"
-            ]
-          },
-          "args": [
-            {
-              "index": 0,
-              "regex": "^(?:href|src|action)$",
-              "flags": "i"
-            }
-          ],
-          "argIndex": 1
+      "description": "setAttribute/setAttributeNS URL-bearing attributes.",
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "*",
+                "setAttribute"
+              ]
+            },
+            "args": [
+              {
+                "index": 0,
+                "regex": "^(?:href|src|action|data)$",
+                "flags": "i"
+              }
+            ],
+            "argIndex": 1
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "*",
+                "setAttributeNS"
+              ]
+            },
+            "args": [
+              {
+                "index": 1,
+                "regex": "^(?:href|xlink:href|src|action|data)$",
+                "flags": "i"
+              }
+            ],
+            "argIndex": 2
+          }
         }
-      }
+      ]
     },
     "selector:document_query": {
       "id": "selector:document_query",
@@ -1099,6 +1119,54 @@
               "member": [
                 "location",
                 "assign"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "window",
+                "location",
+                "assign"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "window",
+                "location",
+                "replace"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "document",
+                "location",
+                "assign"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "document",
+                "location",
+                "replace"
               ]
             },
             "argIndex": 0
@@ -3241,6 +3309,97 @@
           }
         }
       ]
+    },
+    "angularjs:$parse": {
+      "id": "angularjs:$parse",
+      "description": "AngularJS $parse(expression) evaluates an Angular expression string.",
+      "framework": "angularjs",
+      "api": "$parse(expression)",
+      "argIndex": 0,
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "identifier": "$parse"
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "calleeProp": "$parse",
+            "argIndex": 0
+          }
+        }
+      ]
+    },
+    "angularjs:$interpolate": {
+      "id": "angularjs:$interpolate",
+      "description": "AngularJS $interpolate(template) compiles interpolation expressions.",
+      "framework": "angularjs",
+      "api": "$interpolate(template)",
+      "argIndex": 0,
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "identifier": "$interpolate"
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "calleeProp": "$interpolate",
+            "argIndex": 0
+          }
+        }
+      ]
+    },
+    "angularjs:$compile": {
+      "id": "angularjs:$compile",
+      "description": "AngularJS $compile(template) compiles attacker-influenced markup and expressions.",
+      "framework": "angularjs",
+      "api": "$compile(template)",
+      "argIndex": 0,
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "identifier": "$compile"
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "calleeProp": "$compile",
+            "argIndex": 0
+          }
+        }
+      ]
+    },
+    "angularjs:template_interpolation_literal": {
+      "id": "angularjs:template_interpolation_literal",
+      "description": "AngularJS template text containing {{...}} or custom [[...]] interpolation delimiters.",
+      "framework": "angularjs",
+      "api": "AngularJS interpolation template",
+      "pattern": [
+        {
+          "literalRegex": "(?:\\{\\{|\\[\\[)[\\s\\S]{0,200}(?:\\}\\}|\\]\\])"
+        }
+      ]
+    },
+    "angularjs:ng_expression_attribute_literal": {
+      "id": "angularjs:ng_expression_attribute_literal",
+      "description": "AngularJS ng-* attributes that evaluate expression strings, such as ng-class or ng-submit.",
+      "framework": "angularjs",
+      "api": "ng-* expression attribute",
+      "pattern": [
+        {
+          "literalRegex": "ng-(?:class|style|if|init|click|submit|include|switch|repeat)\\s*="
+        }
+      ]
     }
   },
   "sources": {
@@ -3568,6 +3727,14 @@
         },
         {
           "member": [
+            "document",
+            "location",
+            "hash"
+          ],
+          "caseInsensitive": false
+        },
+        {
+          "member": [
             "globalThis",
             "location",
             "hash"
@@ -3615,6 +3782,14 @@
         {
           "member": [
             "window",
+            "location",
+            "search"
+          ],
+          "caseInsensitive": false
+        },
+        {
+          "member": [
+            "document",
             "location",
             "search"
           ],
@@ -3722,6 +3897,14 @@
         },
         {
           "member": [
+            "document",
+            "location",
+            "href"
+          ],
+          "caseInsensitive": false
+        },
+        {
+          "member": [
             "globalThis",
             "location",
             "href"
@@ -3769,6 +3952,14 @@
         {
           "member": [
             "window",
+            "location",
+            "pathname"
+          ],
+          "caseInsensitive": false
+        },
+        {
+          "member": [
+            "document",
             "location",
             "pathname"
           ],
@@ -4027,6 +4218,33 @@
               ]
             }
           }
+        },
+        {
+          "member": [
+            "localStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "window",
+            "localStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "globalThis",
+            "localStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "self",
+            "localStorage",
+            "*"
+          ]
         }
       ]
     },
@@ -4077,8 +4295,41 @@
               ]
             }
           }
+        },
+        {
+          "member": [
+            "sessionStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "window",
+            "sessionStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "globalThis",
+            "sessionStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "self",
+            "sessionStorage",
+            "*"
+          ]
         }
       ]
+    },
+    "dom:event_target_value": {
+      "id": "dom:event_target_value",
+      "kind": "engine_builtin",
+      "origin_kind": "dom-input",
+      "description": "Event handler parameter target.value for input/change/keyboard-driven DOM input."
     },
     "document:referrer": {
       "id": "document:referrer",
@@ -4554,6 +4805,125 @@
             "callee": {
               "identifier": "renderMarkdown"
             },
+            "argIndex": 0
+          }
+        }
+      ]
+    },
+    "dom:location_search": {
+      "id": "dom:location_search",
+      "description": "URL query string via location.search / window.location.search.",
+      "pattern": [
+        {
+          "member": [
+            "location",
+            "search"
+          ]
+        },
+        {
+          "member": [
+            "window",
+            "location",
+            "search"
+          ]
+        },
+        {
+          "member": [
+            "document",
+            "location",
+            "search"
+          ]
+        }
+      ]
+    },
+    "dom:document_cookie_read": {
+      "id": "dom:document_cookie_read",
+      "description": "Read of document.cookie.",
+      "pattern": [
+        {
+          "member": [
+            "document",
+            "cookie"
+          ]
+        },
+        {
+          "member": [
+            "window",
+            "document",
+            "cookie"
+          ]
+        }
+      ]
+    },
+    "dom:localStorage_getItem": {
+      "id": "dom:localStorage_getItem",
+      "description": "Read from localStorage via getItem or property access.",
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "localStorage",
+                "getItem"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "window",
+                "localStorage",
+                "getItem"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "member": [
+            "localStorage",
+            "*"
+          ]
+        }
+      ]
+    },
+    "dom:postMessage_event_data": {
+      "id": "dom:postMessage_event_data",
+      "description": "message event data received through postMessage.",
+      "pattern": [
+        {
+          "member": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "member": [
+            "e",
+            "data"
+          ]
+        },
+        {
+          "member": [
+            "message",
+            "data"
+          ]
+        }
+      ]
+    },
+    "dom:form_input_value": {
+      "id": "dom:form_input_value",
+      "description": "Client-side form input values.",
+      "pattern": [
+        {
+          "memberProp": "value"
+        },
+        {
+          "call": {
+            "calleeProp": "val",
             "argIndex": 0
           }
         }
@@ -5080,6 +5450,11 @@
           "argIndex": 0
         }
       }
+    },
+    "angularjs:constant_expression_allowlist": {
+      "id": "angularjs:constant_expression_allowlist",
+      "description": "Project-specific allow-list proving the expression/template is not attacker-controlled. This is intentionally a placeholder; do not treat $sce.trustAs* as a sanitizer for expression injection.",
+      "pattern": []
     }
   },
   "propagators": {
@@ -5271,6 +5646,13 @@
       "id": "prop:callback:rxjs_subscribe",
       "kind": "callback_adapter",
       "description": "Observable.subscribe(cb): stream values flow into cb param.",
+      "callbackParamSource": {
+        "id": "rxjs:subscribe_value",
+        "originKind": "network",
+        "taintKinds": [
+          "dom-xss"
+        ]
+      },
       "patterns": [
         {
           "call": {

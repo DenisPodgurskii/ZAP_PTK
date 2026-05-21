@@ -544,6 +544,19 @@ export const DAST_RULEPACK_SCHEMA_V1 = {
                 "settleMs": {
                     "type": "integer",
                     "minimum": 0
+                },
+                "sourceDrivers": {
+                    "type": "array",
+                    "items": {
+                        "enum": [
+                            "cookie",
+                            "localStorage",
+                            "sessionStorage",
+                            "form",
+                            "postMessage"
+                        ]
+                    },
+                    "uniqueItems": true
                 }
             }
         },
