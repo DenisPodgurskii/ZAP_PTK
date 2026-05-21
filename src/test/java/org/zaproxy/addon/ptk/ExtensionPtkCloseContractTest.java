@@ -280,4 +280,29 @@ class ExtensionPtkCloseContractTest {
                 PtkUrlUtils.normalizeBrowserCoverageUrl("https://example.test/address/?q=a"));
         assertNull(PtkUrlUtils.normalizeBrowserCoverageUrl("https://zap/zapCallBackUrl/1"));
     }
+
+    @Test
+    void zapHistorySeedScopeStaysOnSameOriginAndDirectory() {
+        String target = "https://example.test/dom/index.html";
+
+        assertEquals("/dom/", PtkUrlUtils.deriveSameDirectoryPathScope(target));
+        assertEquals(
+                true,
+                PtkUrlUtils.isSameOriginAndPathScoped(
+                        target,
+                        "https://example.test/dom/toxicdom/external/localStorage/array/eval"));
+        assertEquals(
+                "https://example.test/dom/toxicdom/external/localStorage/array/eval?q=1",
+                PtkUrlUtils.normalizeHttpUrlWithoutFragment(
+                        "https://example.test/dom/toxicdom/external/localStorage/array/eval?q=1#x"));
+        assertEquals(
+                false,
+                PtkUrlUtils.isSameOriginAndPathScoped(
+                        target, "https://example.test/angular/index.html"));
+        assertEquals(
+                false,
+                PtkUrlUtils.isSameOriginAndPathScoped(
+                        target, "https://other.example.test/dom/index.html"));
+        assertNull(PtkUrlUtils.normalizeHttpUrlWithoutFragment("https://zap/zapCallBackUrl/1"));
+    }
 }

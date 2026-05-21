@@ -36,6 +36,7 @@ if (globalThis.__PTK_IAST_AGENT_LOADED__) {
 globalThis.__PTK_IAST_AGENT_LOADED__ = true;
 
 const FREE_SAFE_HOOK_GROUPS = Object.freeze([
+    'hook.angularjs',
     'hook.code.exec',
     'hook.dom.documentWrite',
     'hook.dom.formAttributes',
@@ -131,6 +132,9 @@ function getHookGroupsForSink(sinkId) {
     }
     if (sinkId.startsWith('code.')) {
         groups.add('hook.code.exec');
+    }
+    if (sinkId.startsWith('angularjs.')) {
+        groups.add('hook.angularjs');
     }
     if (sinkId.startsWith('nav.location.') || sinkId.startsWith('nav.window.open') || sinkId.startsWith('nav.history.') || sinkId === 'nav.navigation.navigate') {
         groups.add('hook.nav.redirects');
@@ -2069,11 +2073,9 @@ function collectTaintedSources() {
     const add = (key, valRaw, metaOverride = null) => {
         if (!valRaw) return;
         let val = String(valRaw).trim().replace(/^#/, '');
+        if (!isTrackableDynamicSourceValue(val)) return;
         const hasAlnum = /[A-Za-z0-9]/.test(val);
         if (!hasAlnum && val !== '/') return;
-        if ((key.startsWith('cookie:') || key.startsWith('localStorage:')) && !isTokenLikeValue(val)) {
-            return;
-        }
         const meta = Object.assign({}, metaOverride || describeSourceKey(key, val));
         const storedMeta = updateTaintMetaEntry(key, { taintKind: meta.taintKind, sourceKind: meta.sourceKind });
         const taint = createSource(val, meta.sourceKind || meta.type || 'unknown', Object.assign({}, meta, { sourceId: storedMeta?.sourceId || null }));
@@ -2082,6 +2084,18 @@ function collectTaintedSources() {
         registerTaintSource(key, val, Object.assign({}, meta, { sourceId: taint.sourceId }), { trackActivity: false });
     };
     for (const [k, v] of new URLSearchParams(location.search)) add(`query:${k}`, v);
+    const rawSearch = safeDecodeComponent(String(location.search || '').replace(/^\?/, '')).trim();
+    if (rawSearch && !rawSearch.includes('=')) {
+        add('query:raw', rawSearch, {
+            type: 'query',
+            label: 'Raw query string',
+            detail: 'raw',
+            taintKind: 'user_input',
+            sourceKind: 'query',
+            location: window.location.href,
+            value: rawSearch
+        });
+    }
     purgeHashTaintEntries();
     collectHashSources().forEach(src => add(src.key, src.value, src.meta));
     purgeRouteTaintEntries();
@@ -3160,6 +3174,17 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                 trackActivity: !isSmartMode()
             });
         }
+        const rawSearch = safeDecodeComponent(String(location.search || '').replace(/^\?/, '')).trim();
+        if (rawSearch && !rawSearch.includes('=')) {
+            record('query:raw', rawSearch, {
+                type: 'query',
+                label: 'Raw query string',
+                detail: 'raw',
+                sourceKind: 'query',
+                taintKind: 'user_input',
+                trackActivity: !isSmartMode()
+            });
+        }
         scheduleExecutableBootstrapSweep('query_refresh');
     };
     const refreshRouteSources = () => {
@@ -3226,34 +3251,43 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                 if (isInternalStorageKey(k)) {
                     return orig.apply(this, arguments);
                 }
-                if (!isTokenLikeValue(v)) {
+                const value = v == null ? '' : String(v);
+                const trackable = isTrackableDynamicSourceValue(value);
+                const tokenLike = isTokenLikeValue(value);
+                const elMeta = trackable || tokenLike ? captureElementMeta(document?.activeElement || null) : {};
+                const match = trackable || tokenLike ? matchesTaint(value) : null;
+                if (trackable) {
+                    record(`${area}:${k}`, value, {
+                        label: `${area}:${k}`,
+                        type: area,
+                        sourceKind: area,
+                        taintKind: tokenLike ? 'secret' : 'user_input',
+                        op: `${area}.setItem`,
+                        storageArea: area,
+                        storageKey: k,
+                        domPath: elMeta.domPath,
+                        elementId: elMeta.elementId,
+                        parentsMatch: match
+                    });
+                }
+                if (!tokenLike) {
                     return orig.apply(this, arguments);
                 }
                 const storageHooksEnabled = isHookGroupEnabled('hook.storage');
-                const match = matchesTaint(v);
-                const elMeta = captureElementMeta(document?.activeElement || null);
                 const sinkId = area === 'localStorage' ? 'storage.localStorage.setItem' : 'storage.sessionStorage.setItem';
                 const ruleId = area === 'localStorage' ? 'localstorage_token_persist' : 'sessionstorage_token_persist';
                 const binding = buildRuleBinding({ sinkId, ruleId, fallbackType: 'storage-token-leak' });
-                const dataKind = getTokenDataKind(v);
-                const origin = getTokenOrigin(v);
-                record(`${area}:${k}`, v, {
-                    label: `${area}:${k}`,
-                    type: area,
-                    op: `${area}.setItem`,
-                    domPath: elMeta.domPath,
-                    elementId: elMeta.elementId,
-                    parentsMatch: match
-                });
+                const dataKind = getTokenDataKind(value);
+                const origin = getTokenOrigin(value);
                 if (!storageHooksEnabled) {
-                    emitStorageObservationSignal({ area, key: k, value: v, elMeta });
+                    emitStorageObservationSignal({ area, key: k, value, elMeta });
                     return orig.apply(this, arguments);
                 }
                 const reportObservation = (originValue) => {
-                    maybeReportTaintedValue(v, binding, Object.assign({
+                    maybeReportTaintedValue(value, binding, Object.assign({
                         storageKey: k,
                         storageArea: area,
-                        value: v,
+                        value,
                         primaryClass: 'observation',
                         sourceRole: 'observed',
                         origin: originValue,
@@ -3263,8 +3297,8 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                             confidence: 80,
                             details: {
                                 matchedBy: dataKind === 'jwt' ? 'jwt_structure' : 'token_heuristic',
-                                valuePreview: buildSourcePreview(v),
-                                length: String(v || '').length
+                                valuePreview: buildSourcePreview(value),
+                                length: String(value || '').length
                             }
                         },
                         observedAt: { kind: area === 'localStorage' ? 'storage.localStorage' : 'storage.sessionStorage', key: k },
@@ -3275,7 +3309,7 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                     reportObservation(origin);
                 } else {
                     setTimeout(() => {
-                        reportObservation(getTokenOrigin(v));
+                        reportObservation(getTokenOrigin(value));
                     }, IAST_ORIGIN_WAIT_MS);
                 }
             }
@@ -3310,26 +3344,30 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                 } catch (_) {
                     decoded = rawVal || '';
                 }
-                if (!isTokenLikeValue(decoded)) {
+                const trackable = isTrackableDynamicSourceValue(decoded);
+                const tokenLike = isTokenLikeValue(decoded);
+                const match = trackable || tokenLike ? matchesTaint(decoded) : null;
+                const elMeta = trackable || tokenLike ? captureElementMeta(document?.activeElement || null) : {};
+                if (trackable) {
+                    record(`cookie:${k}`, decoded, Object.assign(
+                        createCookieSourceMeta(k, decoded, { value: decoded }),
+                        {
+                            domPath: elMeta.domPath,
+                            elementId: elMeta.elementId,
+                            parentsMatch: match
+                        }
+                    ));
+                }
+                if (!tokenLike) {
                     return res;
                 }
                 const storageHooksEnabled = isHookGroupEnabled('hook.storage');
-                const match = matchesTaint(decoded);
-                const elMeta = captureElementMeta(document?.activeElement || null);
                 const binding = buildRuleBinding({
                     sinkId: 'storage.document.cookie',
                     fallbackType: 'storage-token-leak'
                 });
                 const dataKind = getTokenDataKind(decoded);
                 const origin = getTokenOrigin(decoded);
-                record(`cookie:${k}`, decoded, Object.assign(
-                    createCookieSourceMeta(k, decoded, { value: decoded }),
-                    {
-                        domPath: elMeta.domPath,
-                        elementId: elMeta.elementId,
-                        parentsMatch: match
-                    }
-                ));
                 if (!storageHooksEnabled) {
                     emitStorageObservationSignal({ area: 'cookie', key: k, value: decoded, rawCookie: v, elMeta });
                     return res;
@@ -6328,6 +6366,16 @@ if (!isTrustedTypesHtmlRestricted()) {
         const tag = el?.tagName ? el.tagName.toLowerCase() : '';
         if (name.startsWith('on')) return 'dom.inline_event';
         if (name === 'srcdoc') return 'nav.iframe.srcdoc';
+        if (name === 'data' && tag === 'object') {
+            return resolveDangerousUrlSinkId('dom.attr.src', value) || 'dom.attr.src';
+        }
+        if (name === 'value' && tag === 'param') {
+            const paramName = String(el?.getAttribute?.('name') || el?.name || '').trim().toLowerCase();
+            if (/^(?:code|movie|src|url|data)$/.test(paramName)) {
+                return resolveDangerousUrlSinkId('dom.attr.src', value) || 'dom.attr.src';
+            }
+            return null;
+        }
         if (name === 'href') {
             return resolveDangerousUrlSinkId('dom.attr.href', value) || 'dom.attr.href';
         }
@@ -6338,7 +6386,7 @@ if (!isTrustedTypesHtmlRestricted()) {
             if (tag === 'script') {
                 return resolveDangerousUrlSinkId('script.element.src', value) || 'script.element.src';
             }
-            if (tag === 'iframe') {
+            if (tag === 'iframe' || tag === 'frame') {
                 return resolveDangerousUrlSinkId('nav.iframe.src', value) || 'nav.iframe.src';
             }
             return resolveDangerousUrlSinkId('dom.attr.src', value) || 'dom.attr.src';
@@ -6369,33 +6417,14 @@ if (!isTrustedTypesHtmlRestricted()) {
             };
             return;
         }
-        if (!hasRecentTaintActivity()) {
-            window.__PTK_IAST_LAST_ATTR_DEBUG__ = {
-                attrName,
-                sinkId,
-                hookGroup: attrHookGroup,
-                reason: 'no_recent_taint',
-                value: safeSerializeValue(value)
-            };
-            return;
-        }
-        if (!allowHeavyHook()) {
-            window.__PTK_IAST_LAST_ATTR_DEBUG__ = {
-                attrName,
-                sinkId,
-                hookGroup: attrHookGroup,
-                reason: 'heavy_hook_denied',
-                value: safeSerializeValue(value)
-            };
-            return;
-        }
         const m = matchesTaint(value);
         if (!m) {
+            const reason = hasRecentTaintActivity() ? 'no_taint_match' : 'no_recent_taint';
             window.__PTK_IAST_LAST_ATTR_DEBUG__ = {
                 attrName,
                 sinkId,
                 hookGroup: attrHookGroup,
-                reason: 'no_taint_match',
+                reason,
                 value: safeSerializeValue(value)
             };
             return;
@@ -6445,13 +6474,31 @@ if (!isTrustedTypesHtmlRestricted()) {
         return res;
     };
 
+    if (Element.prototype.setAttributeNS) {
+        const origSetAttributeNS = Element.prototype.setAttributeNS;
+        Element.prototype.setAttributeNS = function (namespace, name, value) {
+            const res = origSetAttributeNS.apply(this, arguments);
+            const normalizedName = String(name || '').toLowerCase();
+            const attrName = normalizedName === 'xlink:href' || normalizedName === 'href' ? 'href' : name;
+            runIastHookGuard(getDomAttributeHookGroupForSink(resolveAttrSinkId(this, attrName, value)), 'Element.setAttributeNS.post', () => {
+                reportAttrSink(this, attrName, value);
+            });
+            return res;
+        };
+    }
+
     wrapPropertySetter(HTMLAnchorElement?.prototype, 'href');
     wrapPropertySetter(HTMLAreaElement?.prototype, 'href');
+    wrapPropertySetter(typeof HTMLBaseElement !== 'undefined' ? HTMLBaseElement.prototype : null, 'href');
     wrapPropertySetter(HTMLLinkElement?.prototype, 'href');
     wrapPropertySetter(HTMLImageElement?.prototype, 'src');
     wrapPropertySetter(HTMLScriptElement?.prototype, 'src');
     wrapPropertySetter(HTMLIFrameElement?.prototype, 'src');
     wrapPropertySetter(HTMLIFrameElement?.prototype, 'srcdoc');
+    wrapPropertySetter(typeof HTMLFrameElement !== 'undefined' ? HTMLFrameElement.prototype : null, 'src');
+    wrapPropertySetter(typeof HTMLEmbedElement !== 'undefined' ? HTMLEmbedElement.prototype : null, 'src');
+    wrapPropertySetter(typeof HTMLObjectElement !== 'undefined' ? HTMLObjectElement.prototype : null, 'data');
+    wrapPropertySetter(typeof HTMLParamElement !== 'undefined' ? HTMLParamElement.prototype : null, 'value');
     wrapPropertySetter(HTMLFormElement?.prototype, 'action');
     wrapPropertySetter(HTMLButtonElement?.prototype, 'formAction');
     wrapPropertySetter(HTMLInputElement?.prototype, 'formAction');
@@ -6961,8 +7008,8 @@ if (!isTrustedTypesHtmlRestricted()) {
                         if (!isHookGroupEnabled('hook.nav.redirects')) {
                             return invokeNative();
                         }
-                        const url = args[0];
-                        if (typeof url === 'string' && shouldReportNavigationSink(url)) {
+                        const url = safeSerializeValue(args[0]);
+                        if (url && shouldReportNavigationSink(url)) {
                             const resolvedSinkId = resolveDangerousUrlSinkId(sinkId, url) || sinkId;
                             const elMeta = captureElementMeta(document?.activeElement || null);
                             const observedBinding = buildObservedRuleBinding({
@@ -6996,8 +7043,8 @@ if (!isTrustedTypesHtmlRestricted()) {
                         if (!isHookGroupEnabled('hook.nav.redirects')) {
                             return invokeNative();
                         }
-                        const url = args[0];
-                        if (typeof url === 'string' && shouldReportNavigationSink(url)) {
+                        const url = safeSerializeValue(args[0]);
+                        if (url && shouldReportNavigationSink(url)) {
                             const resolvedSinkId = resolveDangerousUrlSinkId(sinkId, url) || sinkId;
                             const elMeta = captureElementMeta(document?.activeElement || null);
                             const observedBinding = buildObservedRuleBinding({
@@ -8555,6 +8602,199 @@ if (!isTrustedTypesHtmlRestricted()) {
             }
         });
     }
+})();
+
+// AngularJS expression/template sinks
+; (function () {
+    const GROUP_ID = 'hook.angularjs';
+    const WRAPPED_MARK = '__ptk_iast_angular_wrapped__';
+    const DECORATED_MARK = '__ptk_iast_angular_decorated__';
+    const serviceSinks = {
+        '$parse': {
+            sinkId: 'angularjs.parse.expression',
+            type: 'angularjs-expression',
+            sink: 'AngularJS $parse'
+        },
+        '$compile': {
+            sinkId: 'angularjs.compile.template',
+            type: 'angularjs-template-compile',
+            sink: 'AngularJS $compile'
+        },
+        '$interpolate': {
+            sinkId: 'angularjs.compile.template',
+            type: 'angularjs-template-interpolate',
+            sink: 'AngularJS $interpolate'
+        }
+    };
+    const wrappedServices = new WeakMap();
+    const patchedInjectors = new WeakSet();
+
+    function reportAngularSink(value, serviceName, serviceMeta) {
+        if (!isHookGroupEnabled(GROUP_ID)) return;
+        const payload = safeSerializeValue(value);
+        if (!payload) return;
+        const binding = buildRuleBinding({
+            sinkId: serviceMeta.sinkId,
+            fallbackType: serviceMeta.type
+        });
+        maybeReportTaintedValue(payload, Object.assign({
+            type: serviceMeta.type,
+            sink: serviceMeta.sink,
+            framework: 'AngularJS',
+            service: serviceName
+        }, binding), {
+            value: payload,
+            framework: 'AngularJS',
+            angularService: serviceName
+        });
+    }
+
+    function wrapAngularService(serviceName, service) {
+        const serviceMeta = serviceSinks[serviceName];
+        if (!serviceMeta || typeof service !== 'function') return service;
+        if (service[WRAPPED_MARK]) return service;
+        let byService = wrappedServices.get(service);
+        if (byService?.[serviceName]) return byService[serviceName];
+        const wrapped = function (...args) {
+            runIastHookGuard(GROUP_ID, `AngularJS.${serviceName}.pre`, () => {
+                reportAngularSink(args[0], serviceName, serviceMeta);
+            });
+            return service.apply(this, args);
+        };
+        try {
+            Object.defineProperty(wrapped, WRAPPED_MARK, {
+                value: true,
+                configurable: false,
+                enumerable: false
+            });
+        } catch (_) { }
+        if (!byService) {
+            byService = Object.create(null);
+            wrappedServices.set(service, byService);
+        }
+        byService[serviceName] = wrapped;
+        return wrapped;
+    }
+
+    function installAngularDecorators(moduleRef) {
+        if (!moduleRef || typeof moduleRef.config !== 'function' || moduleRef[DECORATED_MARK]) return;
+        try {
+            Object.defineProperty(moduleRef, DECORATED_MARK, {
+                value: true,
+                configurable: false,
+                enumerable: false
+            });
+        } catch (_) {
+            try { moduleRef[DECORATED_MARK] = true; } catch (_) { }
+        }
+        try {
+            moduleRef.config(['$provide', function ($provide) {
+                if (!$provide || typeof $provide.decorator !== 'function') return;
+                Object.keys(serviceSinks).forEach((serviceName) => {
+                    try {
+                        $provide.decorator(serviceName, ['$delegate', function ($delegate) {
+                            return wrapAngularService(serviceName, $delegate);
+                        }]);
+                    } catch (_) { }
+                });
+            }]);
+        } catch (_) { }
+    }
+
+    function patchAngularInjector(injector) {
+        if (!injector || patchedInjectors.has(injector) || typeof injector.get !== 'function') return false;
+        patchedInjectors.add(injector);
+        const originalGet = injector.get;
+        injector.get = function (name, ...rest) {
+            const service = originalGet.call(this, name, ...rest);
+            return wrapAngularService(name, service);
+        };
+        Object.keys(serviceSinks).forEach((serviceName) => {
+            try {
+                wrapAngularService(serviceName, originalGet.call(injector, serviceName));
+            } catch (_) { }
+        });
+        return true;
+    }
+
+    function patchAngularElementInjector(angularRef) {
+        if (!angularRef || typeof angularRef.element !== 'function') return false;
+        let patched = false;
+        try {
+            const candidates = [document.documentElement, document.body].filter(Boolean);
+            candidates.forEach((node) => {
+                try {
+                    const elementRef = angularRef.element(node);
+                    if (elementRef && typeof elementRef.injector === 'function') {
+                        patched = patchAngularInjector(elementRef.injector()) || patched;
+                    }
+                } catch (_) { }
+            });
+        } catch (_) { }
+        return patched;
+    }
+
+    function patchAngular(angularRef) {
+        if (!angularRef || typeof angularRef !== 'object') return false;
+        let patched = false;
+        if (typeof angularRef.module === 'function' && !angularRef.module[WRAPPED_MARK]) {
+            const originalModule = angularRef.module;
+            angularRef.module = function (...args) {
+                const moduleRef = originalModule.apply(this, args);
+                installAngularDecorators(moduleRef);
+                return moduleRef;
+            };
+            try {
+                Object.defineProperty(angularRef.module, WRAPPED_MARK, {
+                    value: true,
+                    configurable: false,
+                    enumerable: false
+                });
+            } catch (_) { }
+            patched = true;
+        }
+        if (typeof angularRef.injector === 'function' && !angularRef.injector[WRAPPED_MARK]) {
+            const originalInjector = angularRef.injector;
+            angularRef.injector = function (...args) {
+                const injector = originalInjector.apply(this, args);
+                patchAngularInjector(injector);
+                return injector;
+            };
+            try {
+                Object.defineProperty(angularRef.injector, WRAPPED_MARK, {
+                    value: true,
+                    configurable: false,
+                    enumerable: false
+                });
+            } catch (_) { }
+            patched = true;
+        }
+        try {
+            ['ng'].forEach((moduleName) => {
+                try {
+                    installAngularDecorators(angularRef.module(moduleName));
+                    patched = true;
+                } catch (_) { }
+            });
+        } catch (_) { }
+        patched = patchAngularElementInjector(angularRef) || patched;
+        return patched;
+    }
+
+    function tryPatchAngular() {
+        if (!isHookGroupEnabled(GROUP_ID)) return false;
+        return runIastHookGuard(GROUP_ID, 'AngularJS.patch', () => patchAngular(window.angular), false);
+    }
+
+    if (tryPatchAngular()) return;
+    let attempts = 0;
+    const timer = setInterval(() => {
+        attempts += 1;
+        const patched = tryPatchAngular();
+        if (patched || attempts > 80) {
+            clearInterval(timer);
+        }
+    }, 250);
 })();
 
 // Timer-based execution sinks

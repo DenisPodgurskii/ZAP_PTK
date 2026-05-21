@@ -33,7 +33,236 @@ import {
 } from "./sast/sast_progress.js";
 import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js";
 
-const worker = self;
+const worker = typeof self !== "undefined" ? self : globalThis;
+
+const SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_PAGES = 100;
+const SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+
+function decodeSastHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => {
+      const code = parseInt(hex, 16);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+    })
+    .replace(/&#([0-9]+);/g, (match, raw) => {
+      const code = parseInt(raw, 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+    });
+}
+
+function canonicalSastPageUrl(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ""));
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    url.hash = "";
+    return url.href;
+  } catch (_) {
+    return "";
+  }
+}
+
+export function deriveSastPageSourceScope(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ""));
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    const path = url.pathname || "/";
+    let prefix = path;
+    if (!prefix.endsWith("/")) {
+      const slash = prefix.lastIndexOf("/");
+      prefix = slash >= 0 ? prefix.slice(0, slash + 1) : "/";
+    }
+    if (/\/index\.html?$/i.test(path)) {
+      prefix = path.replace(/index\.html?$/i, "");
+    }
+    return {
+      origin: url.origin,
+      prefix: prefix || "/"
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+export function extractSastPageLinksForScope(html, baseUrl, options = {}) {
+  if (typeof html !== "string" || !html || !baseUrl) return [];
+  const scope = options?.scope || deriveSastPageSourceScope(baseUrl);
+  if (!scope?.origin || !scope?.prefix) return [];
+  const maxLinks = Number.isFinite(Number(options?.maxLinks))
+    ? Math.max(0, Number(options.maxLinks))
+    : SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_PAGES;
+  const links = [];
+  const seen = new Set();
+  const add = (candidate) => {
+    const canonical = canonicalSastPageUrl(candidate);
+    if (!canonical || seen.has(canonical)) return;
+    try {
+      const url = new URL(canonical);
+      if (url.origin !== scope.origin) return;
+      if (!url.pathname.startsWith(scope.prefix)) return;
+      seen.add(canonical);
+      links.push(canonical);
+    } catch (_) { }
+  };
+
+  add(baseUrl);
+  const anchorRe = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
+  let match;
+  while ((match = anchorRe.exec(html)) !== null && links.length < maxLinks) {
+    const rawHref = decodeSastHtmlEntities(match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (!rawHref || /^(?:javascript|mailto|tel|data):/i.test(rawHref)) continue;
+    try {
+      add(new URL(rawHref, baseUrl).href);
+    } catch (_) { }
+  }
+  return links.slice(0, maxLinks);
+}
+
+export function normalizeSastPageSourceUrls(urls, startUrl = "", options = {}) {
+  const maxUrls = Number.isFinite(Number(options?.maxUrls))
+    ? Math.max(0, Number(options.maxUrls))
+    : SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_PAGES;
+  if (!maxUrls) return [];
+
+  const seed = canonicalSastPageUrl(startUrl);
+  const scope = options?.scope || deriveSastPageSourceScope(seed || startUrl);
+  if (!scope?.origin || !scope?.prefix) return [];
+
+  const normalized = [];
+  const seen = new Set();
+  const add = (rawUrl) => {
+    const canonical = canonicalSastPageUrl(rawUrl);
+    if (!canonical || seen.has(canonical)) return;
+    if (isZapCallbackPageUrl(canonical)) return;
+    try {
+      const url = new URL(canonical);
+      if (url.origin !== scope.origin) return;
+      if (!url.pathname.startsWith(scope.prefix)) return;
+      seen.add(canonical);
+      normalized.push(canonical);
+    } catch (_) { }
+  };
+
+  if (seed) add(seed);
+  for (const rawUrl of Array.isArray(urls) ? urls : []) {
+    if (normalized.length >= maxUrls) break;
+    add(rawUrl);
+  }
+  return normalized.slice(0, maxUrls);
+}
+
+export function isSastJavaScriptResource(url, contentType = "") {
+  const normalizedType = String(contentType || "").toLowerCase();
+  if (/(?:^|[\/+.-])(?:javascript|ecmascript|jscript)(?:$|[;+\s-])/.test(normalizedType)) {
+    return true;
+  }
+  try {
+    const parsed = new URL(String(url || ""));
+    return /\.(?:mjs|cjs|js)$/i.test(parsed.pathname || "");
+  } catch (_) {
+    return /\.(?:mjs|cjs|js)(?:[?#]|$)/i.test(String(url || ""));
+  }
+}
+
+function isSastExecutableScriptType(type = "") {
+  const normalized = String(type || "").trim().toLowerCase();
+  if (!normalized) return true;
+  return /^(?:text|application)\/(?:javascript|ecmascript|x-javascript)(?:\s*;|$)/i.test(normalized)
+    || /^(?:module|importmap|speculationrules)$/i.test(normalized);
+}
+
+function looksLikeSastJavaScriptText(text = "") {
+  const sample = String(text || "").slice(0, 4096);
+  if (!sample.trim()) return false;
+  return /\b(?:var|let|const|function|class|import|export)\b/.test(sample)
+    || /\b(?:document|window|localStorage|sessionStorage|eval|setTimeout|addEventListener)\s*(?:\.|\(|=)/.test(sample);
+}
+
+function extractSastExternalScriptUrls(html, pageUrl, { maxScripts = 48 } = {}) {
+  if (typeof html !== "string" || !html || !pageUrl) return [];
+  let pageOrigin = "";
+  try {
+    pageOrigin = new URL(pageUrl).origin;
+  } catch (_) {
+    return [];
+  }
+  const scripts = [];
+  const seen = new Set();
+  const scriptRe = /<script\b([^>]*)>(?:[\s\S]*?)<\/script\s*>/gi;
+  const attrRe = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  const parseAttrs = (rawAttrs = "") => {
+    const attrs = Object.create(null);
+    let match;
+    while ((match = attrRe.exec(rawAttrs)) !== null) {
+      const name = String(match[1] || "").trim().toLowerCase();
+      if (!name) continue;
+      attrs[name] = decodeSastHtmlEntities(match[2] ?? match[3] ?? match[4] ?? "");
+    }
+    return attrs;
+  };
+
+  let match;
+  while ((match = scriptRe.exec(html)) !== null && scripts.length < maxScripts) {
+    const attrs = parseAttrs(match[1] || "");
+    if (!attrs.src || !isSastExecutableScriptType(attrs.type || "")) continue;
+    try {
+      const resolved = new URL(attrs.src, pageUrl);
+      if (resolved.protocol !== "http:" && resolved.protocol !== "https:") continue;
+      if (resolved.origin !== pageOrigin) continue;
+      resolved.hash = "";
+      const href = resolved.href;
+      if (seen.has(href)) continue;
+      seen.add(href);
+      scripts.push(href);
+    } catch (_) { }
+  }
+  return scripts;
+}
+
+async function fetchSastExternalScriptsForPage(html, pageUrl, { maxBytes = SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_BYTES } = {}) {
+  const scriptUrls = extractSastExternalScriptUrls(html, pageUrl);
+  const scripts = [];
+  for (const scriptUrl of scriptUrls) {
+    const resource = await fetchSastPageResource(scriptUrl, { maxBytes });
+    if (!resource.text) continue;
+    if (!isSastJavaScriptResource(scriptUrl, resource.contentType) && !looksLikeSastJavaScriptText(resource.text)) {
+      continue;
+    }
+    scripts.push({
+      src: scriptUrl,
+      code: resource.text
+    });
+  }
+  return scripts;
+}
+
+async function fetchSastPageResource(url, { maxBytes = SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_BYTES } = {}) {
+  const canonical = canonicalSastPageUrl(url);
+  if (!canonical || typeof fetch !== "function") return { url: canonical || "", text: "", contentType: "" };
+  try {
+    const response = await fetch(canonical, { credentials: "include" });
+    if (!response?.ok) return { url: canonical, text: "", contentType: "" };
+    const text = await response.text();
+    const limit = Number.isFinite(Number(maxBytes)) ? Math.max(0, Number(maxBytes)) : 0;
+    return {
+      url: canonical,
+      text: limit > 0 && text.length > limit ? text.slice(0, limit) : text,
+      contentType: typeof response.headers?.get === "function" ? String(response.headers.get("content-type") || "") : ""
+    };
+  } catch (_) {
+    return { url: canonical, text: "", contentType: "" };
+  }
+}
+
+async function fetchSastPageText(url, { maxBytes = SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_BYTES } = {}) {
+  const resource = await fetchSastPageResource(url, { maxBytes });
+  return resource.text || "";
+}
 
 function isZapCallbackPageUrl(rawUrl) {
   if (typeof rawUrl !== "string" || !rawUrl) return false;
@@ -731,6 +960,100 @@ export class ptk_sast {
     return this.sessionCoordinator.scanSpaPages(tabId, pages, opts);
   }
 
+  scanZapManagedPageSources(urls, opts = {}) {
+    return this.sessionCoordinator.enqueueCollectionTask(() => this._scanZapManagedPageSourcesNow(urls, opts));
+  }
+
+  async _scanZapManagedPageSourcesNow(urls, opts = {}) {
+    if (!this.isScanRunning) return [];
+    if (!this.sastEngine && !this.scanResult?.scanId) return [];
+
+    const maxPages = Number.isFinite(Number(opts?.sastPageSourceMaxPages ?? opts?.maxPageSourcePages))
+      ? Math.max(1, Number(opts?.sastPageSourceMaxPages ?? opts?.maxPageSourcePages))
+      : SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_PAGES;
+    const startUrl = opts?.startUrl || opts?.targetUrl || opts?.zapTiming?.targetUrl || urls?.[0] || "";
+    let pageUrls = normalizeSastPageSourceUrls(urls, startUrl, { maxUrls: maxPages });
+
+    if (opts?.enableSastPageSourceLinkDiscovery === true && pageUrls[0]) {
+      const html = await fetchSastPageText(pageUrls[0], {
+        maxBytes: opts?.sastPageSourceMaxBytes || SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_BYTES
+      });
+      const discovered = extractSastPageLinksForScope(html, pageUrls[0], { maxLinks: maxPages });
+      pageUrls = normalizeSastPageSourceUrls([...pageUrls, ...discovered], pageUrls[0], { maxUrls: maxPages });
+    }
+
+    if (!pageUrls.length) return [];
+
+    this.scanningRequest = true;
+    this.sessionCoordinator.activeCollectionCount += 1;
+    const collection = this.sessionCoordinator.beginCollection();
+    if (!this.sessionCoordinator.firstCollectionStarted) {
+      this.sessionCoordinator.firstCollectionStarted = true;
+    }
+
+    try {
+      this.sessionCoordinator.markPayloadReceived(collection.generation, {
+        file: pageUrls[0],
+        scriptsCount: pageUrls.length,
+        htmlChars: 0
+      });
+      this._recordZapTiming("sast.page_source_seed.received", {
+        source: opts?.source || "zap_history_seed",
+        pageCount: pageUrls.length,
+        firstUrl: pageUrls[0]
+      }, null, "sast.page_source_seed.received");
+      this.sessionCoordinator.markCollectionAnalysis(collection.generation);
+
+      const findings = [];
+      for (const pageUrl of pageUrls) {
+        if (!this.isScanRunning) break;
+        const resource = await fetchSastPageResource(pageUrl, {
+          maxBytes: opts?.sastPageSourceMaxBytes || SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_BYTES
+        });
+        const isJavaScript = isSastJavaScriptResource(pageUrl, resource.contentType);
+        const html = isJavaScript ? "" : (resource.text || "");
+        const scripts = isJavaScript && resource.text
+          ? [{ src: pageUrl, code: resource.text }]
+          : await fetchSastExternalScriptsForPage(html, pageUrl, {
+            maxBytes: opts?.sastPageSourceMaxBytes || SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_BYTES
+          });
+        const pageFindings = await this.scanCode(
+          scripts,
+          html,
+          pageUrl,
+          {
+            generation: collection.generation,
+            collectionId: collection.collectionId,
+            source: opts?.source || "zap_history_seed"
+          }
+        );
+        if (Array.isArray(pageFindings) && pageFindings.length) {
+          findings.push(...pageFindings);
+        }
+      }
+
+      this.sessionCoordinator.completeCollection(collection.generation, {
+        file: pageUrls[0],
+        scriptsCount: pageUrls.length,
+        htmlChars: 0,
+        findingsCount: findings.length
+      });
+      return findings;
+    } catch (err) {
+      this.sessionCoordinator.failCollection(collection.generation, err?.message || String(err));
+      throw err;
+    } finally {
+      this.scanningRequest = false;
+      this.sessionCoordinator.activeCollectionCount = Math.max(0, this.sessionCoordinator.activeCollectionCount - 1);
+      if (this.sessionCoordinator.firstCollectionStarted && this.sessionCoordinator.activeCollectionCount === 0) {
+        this.sessionCoordinator.firstCollectionSettled = true;
+        if (this.sessionCoordinator.lastCollectionState !== "collection_failed" && this.sessionCoordinator.collectionState !== "waiting_for_page_activity") {
+          this.sessionCoordinator.completeCollection(collection.generation);
+        }
+      }
+    }
+  }
+
   async msg_init(message) {
     await this.init();
     const scanResult = this._cloneScanResultForUi();
@@ -1206,6 +1529,28 @@ export class ptk_sast {
         .catch((err) => {
           console.error("[SAST] Initial script collection failed", err);
         });
+    }
+
+    if (opts?.zapManaged === true && opts?.sastPageSourceCrawl !== false) {
+      const seedUrls = Array.isArray(opts?.zapPageSourceUrls)
+        ? opts.zapPageSourceUrls
+        : (Array.isArray(opts?.zapHistorySeedUrls) ? opts.zapHistorySeedUrls : []);
+      const startUrl = zapTargetUrl || baseUrl;
+      const pageSourceUrls = normalizeSastPageSourceUrls(seedUrls, startUrl, {
+        maxUrls: opts?.sastPageSourceMaxPages || SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_PAGES
+      });
+      if (pageSourceUrls.length) {
+        this.scanZapManagedPageSources(pageSourceUrls, {
+          startUrl,
+          zapTiming,
+          source: "zap_history_seed",
+          sastPageSourceMaxPages: opts?.sastPageSourceMaxPages,
+          sastPageSourceMaxBytes: opts?.sastPageSourceMaxBytes,
+          enableSastPageSourceLinkDiscovery: opts?.enableSastPageSourceLinkDiscovery === true
+        }).catch((err) => {
+          console.warn("[SAST] ZAP page-source seed collection failed", err?.message || String(err));
+        });
+      }
     }
   }
 

@@ -158,6 +158,19 @@ function toHttpUrl(value) {
     return null
 }
 
+function normalizeHttpUrlList(values = []) {
+    if (!Array.isArray(values)) return []
+    const urls = []
+    const seen = new Set()
+    for (const value of values) {
+        const url = toHttpUrl(value)
+        if (!url || seen.has(url)) continue
+        urls.push(url)
+        seen.add(url)
+    }
+    return urls
+}
+
 function toHostKeyFromUrl(value) {
     const url = toHttpUrl(value)
     if (!url) return null
@@ -1893,7 +1906,9 @@ class ZapBridge {
                 tabId: Number.isInteger(payload?.tabId) ? payload.tabId : null,
                 targetUrl: payload?.targetUrl || null
             })
-            const rawConfig = await this.confirmAndGetConfig()
+            const rawConfig = await this.confirmAndGetConfig({
+                targetUrl: payload?.targetUrl || null
+            })
             this.recordTiming({
                 phase: 'config.fetch.end',
                 zapid,
@@ -2194,7 +2209,7 @@ class ZapBridge {
             ? Number(detectedPayload.detectedAt)
             : null
         let effectiveEngineConfigs = engineConfigs
-        if (safeEngines.includes('DAST')) {
+        if (safeEngines.includes('DAST') || safeEngines.includes('SAST')) {
             let historySeedMetadata = {
                 urls: [],
                 totalAvailable: 0,
@@ -2209,33 +2224,55 @@ class ZapBridge {
                 })
             }
             const rawHistorySeedUrls = Array.isArray(historySeedMetadata?.urls) ? historySeedMetadata.urls : []
+            const configuredSeedUrls = normalizeHttpUrlList([
+                ...(Array.isArray(engineConfigs?.DAST?.zapHistorySeedUrls) ? engineConfigs.DAST.zapHistorySeedUrls : []),
+                ...(Array.isArray(engineConfigs?.SAST?.zapHistorySeedUrls) ? engineConfigs.SAST.zapHistorySeedUrls : []),
+                ...(Array.isArray(engineConfigs?.SAST?.zapPageSourceUrls) ? engineConfigs.SAST.zapPageSourceUrls : [])
+            ])
             const seedUrls = []
             const seenSeedUrls = new Set()
-            const currentTargetSeedUrl = toHttpUrl(targetUrl)
-            if (currentTargetSeedUrl) {
-                seedUrls.push(currentTargetSeedUrl)
-                seenSeedUrls.add(currentTargetSeedUrl)
-            }
-            for (const rawSeedUrl of rawHistorySeedUrls) {
+            const appendSeedUrl = (rawSeedUrl) => {
                 const seedUrl = toHttpUrl(rawSeedUrl)
-                if (!seedUrl || seenSeedUrls.has(seedUrl)) continue
-                if (seedUrls.length >= DAST_HISTORY_SEED_MAX_RESULTS) break
+                if (!seedUrl || seenSeedUrls.has(seedUrl)) return
+                if (seedUrls.length >= DAST_HISTORY_SEED_MAX_RESULTS) return
                 seedUrls.push(seedUrl)
                 seenSeedUrls.add(seedUrl)
             }
+            const currentTargetSeedUrl = toHttpUrl(targetUrl)
+            appendSeedUrl(currentTargetSeedUrl)
+            for (const rawSeedUrl of configuredSeedUrls) {
+                appendSeedUrl(rawSeedUrl)
+                if (seedUrls.length >= DAST_HISTORY_SEED_MAX_RESULTS) break
+            }
+            for (const rawSeedUrl of rawHistorySeedUrls) {
+                appendSeedUrl(rawSeedUrl)
+                if (seedUrls.length >= DAST_HISTORY_SEED_MAX_RESULTS) break
+            }
             const historySeedTotalAvailable = Number(historySeedMetadata?.totalAvailable || 0)
             const targetSeedAdded = currentTargetSeedUrl && !rawHistorySeedUrls.includes(currentTargetSeedUrl)
+                && !configuredSeedUrls.includes(currentTargetSeedUrl)
+            const configuredSeedDroppedByCap = Math.max(0, configuredSeedUrls.length - configuredSeedUrls.filter(seedUrl => seenSeedUrls.has(seedUrl)).length)
             const historySeedDroppedByCap = Number(historySeedMetadata?.droppedByCap || 0)
+                + configuredSeedDroppedByCap
                 + Math.max(0, rawHistorySeedUrls.length + (targetSeedAdded ? 1 : 0) - seedUrls.length)
             effectiveEngineConfigs = Object.assign({}, engineConfigs || {})
-            effectiveEngineConfigs.DAST = Object.assign({}, effectiveEngineConfigs.DAST || {}, {
+            const seedConfig = {
                 zapCallbackDetectedAt: callbackDetectedAt,
                 zapHistorySeedUrls: seedUrls,
                 zapHistorySeedCount: seedUrls.length,
-                zapHistorySeedTotalAvailable: historySeedTotalAvailable + (targetSeedAdded ? 1 : 0),
+                zapHistorySeedTotalAvailable: historySeedTotalAvailable + configuredSeedUrls.length + (targetSeedAdded ? 1 : 0),
                 zapHistorySeedDroppedByCap: historySeedDroppedByCap,
                 zapCurrentTargetSeeded: Boolean(currentTargetSeedUrl)
-            })
+            }
+            if (safeEngines.includes('DAST')) {
+                effectiveEngineConfigs.DAST = Object.assign({}, effectiveEngineConfigs.DAST || {}, seedConfig)
+            }
+            if (safeEngines.includes('SAST')) {
+                effectiveEngineConfigs.SAST = Object.assign({}, effectiveEngineConfigs.SAST || {}, seedConfig, {
+                    zapPageSourceUrls: seedUrls,
+                    sastPageSourceMaxPages: seedUrls.length
+                })
+            }
         }
         const startKeyBase = `${effectiveSessionKey || baseUrl || ''}|${safeTabId}`
         const startKey = `${startKeyBase}|${targetUrl}|${safeEngines.join(',')}`
@@ -2348,6 +2385,24 @@ class ZapBridge {
             }
         }
 
+        const zapHistorySeedUrls = normalizeHttpUrlList(config.zapHistorySeedUrls)
+        if (zapHistorySeedUrls.length) {
+            const seedConfig = {
+                zapHistorySeedUrls,
+                zapHistorySeedCount: Number.isFinite(Number(config.zapHistorySeedCount))
+                    ? Number(config.zapHistorySeedCount)
+                    : zapHistorySeedUrls.length,
+                zapHistorySeedScope: typeof config.zapHistorySeedScope === 'string'
+                    ? config.zapHistorySeedScope
+                    : null
+            }
+            for (const engine of ['DAST', 'SAST']) {
+                result.engineConfigs[engine] = Object.assign({}, result.engineConfigs[engine] || {}, seedConfig)
+            }
+            result.engineConfigs.SAST.zapPageSourceUrls = zapHistorySeedUrls
+            result.engineConfigs.SAST.sastPageSourceMaxPages = zapHistorySeedUrls.length
+        }
+
         return result
     }
 
@@ -2411,10 +2466,11 @@ class ZapBridge {
         const fromLatestDetection = resolveFromLatestDetection()
         if (fromLatestDetection) return fromLatestDetection
 
+        const historyResolved = await this._resolveTargetUrlFromPostCallbackHistory(payload)
+        if (historyResolved) return historyResolved
+
         const tabId = Number.isInteger(payload.tabId) ? payload.tabId : null
         if (tabId == null || !browser?.tabs?.get) {
-            const historyOnly = await this._resolveTargetUrlFromPostCallbackHistory(payload)
-            if (historyOnly) return historyOnly
             return null
         }
 
@@ -2430,14 +2486,11 @@ class ZapBridge {
             return null
         }
 
-        const immediate = await resolveFromTab()
-        if (immediate) return immediate
-
         const observed = this._getFreshObservedTargetForPending({ tabId })
         if (observed?.targetUrl) return observed.targetUrl
 
-        const historyResolved = await this._resolveTargetUrlFromPostCallbackHistory(payload)
-        if (historyResolved) return historyResolved
+        const immediate = await resolveFromTab()
+        if (immediate) return immediate
 
         if (waitMs <= 0) return null
 
@@ -2446,10 +2499,12 @@ class ZapBridge {
             await sleep(500)
             const nextFromLatestDetection = resolveFromLatestDetection()
             if (nextFromLatestDetection) return nextFromLatestDetection
-            const resolved = await resolveFromTab()
-            if (resolved) return resolved
+            const nextHistoryResolved = await this._resolveTargetUrlFromPostCallbackHistory(payload)
+            if (nextHistoryResolved) return nextHistoryResolved
             const nextObserved = this._getFreshObservedTargetForPending({ tabId })
             if (nextObserved?.targetUrl) return nextObserved.targetUrl
+            const resolved = await resolveFromTab()
+            if (resolved) return resolved
         }
 
         return null
@@ -2463,7 +2518,7 @@ class ZapBridge {
             baseUrl: payload?.baseUrl || this.transport.getBaseUrl?.() || null,
             maxResults: POST_CALLBACK_CANDIDATE_MAX_RESULTS
         })
-        const targetUrl = candidates.map(toHttpUrl).find(Boolean) || null
+        const targetUrl = this._selectPostCallbackTargetUrl(candidates)
         if (targetUrl) {
             this._debugLog('[PTK ZAP] Resolved target URL from post-callback history:', {
                 targetUrl,
@@ -2471,6 +2526,71 @@ class ZapBridge {
             })
         }
         return targetUrl
+    }
+
+    _selectPostCallbackTargetUrl(candidates = []) {
+        if (!Array.isArray(candidates) || !candidates.length) return null
+        const parsed = []
+        for (let index = 0; index < candidates.length; index += 1) {
+            const url = toHttpUrl(candidates[index])
+            if (!url) continue
+            try {
+                const parsedUrl = new URL(url)
+                parsed.push({
+                    url,
+                    index,
+                    origin: parsedUrl.origin,
+                    pathname: parsedUrl.pathname || '/',
+                    search: parsedUrl.search || ''
+                })
+            } catch (_) {
+                // Ignore malformed history records.
+            }
+        }
+        if (!parsed.length) return null
+
+        const originCounts = new Map()
+        for (const entry of parsed) {
+            originCounts.set(entry.origin, (originCounts.get(entry.origin) || 0) + 1)
+        }
+
+        let dominantOrigin = parsed[0].origin
+        let dominantCount = 0
+        for (const [origin, count] of originCounts.entries()) {
+            if (count > dominantCount) {
+                dominantOrigin = origin
+                dominantCount = count
+            }
+        }
+
+        const sameOrigin = parsed.filter((entry) => entry.origin === dominantOrigin)
+        if (sameOrigin.length <= 1) {
+            return parsed[0].url
+        }
+
+        const score = (entry) => {
+            const path = entry.pathname || '/'
+            const segmentCount = path.split('/').filter(Boolean).length
+            const hasQuery = entry.search ? 1 : 0
+            const indexLike = /(?:^|\/)(?:index\.[a-z0-9]+)?$/i.test(path) ? 0 : 1
+            return [
+                indexLike,
+                segmentCount,
+                hasQuery,
+                path.length + entry.search.length,
+                entry.index
+            ]
+        }
+        return sameOrigin
+            .slice()
+            .sort((left, right) => {
+                const leftScore = score(left)
+                const rightScore = score(right)
+                for (let i = 0; i < leftScore.length; i += 1) {
+                    if (leftScore[i] !== rightScore[i]) return leftScore[i] - rightScore[i]
+                }
+                return 0
+            })[0]?.url || parsed[0].url
     }
 
     _isTopLevelTargetObservation(payload = {}) {

@@ -166,11 +166,11 @@
     },
     "link:anchor_href_assign": {
       "id": "link:anchor_href_assign",
-      "description": "Assignment to link-related attributes (href/src/action).",
+      "description": "Assignment to URL-bearing DOM attributes/properties (href/src/action/data).",
       "pattern": {
         "assignment": {
           "left": {
-            "memberPropRegex": "^(href|src|action)$",
+            "memberPropRegex": "^(href|src|action|data)$",
             "caseInsensitive": true
           }
         }
@@ -178,25 +178,45 @@
     },
     "link:setattribute_href": {
       "id": "link:setattribute_href",
-      "description": "setAttribute('href'|'src'|'action', value) style link manipulation.",
-      "pattern": {
-        "call": {
-          "callee": {
-            "member": [
-              "*",
-              "setAttribute"
-            ]
-          },
-          "args": [
-            {
-              "index": 0,
-              "regex": "^(?:href|src|action)$",
-              "flags": "i"
-            }
-          ],
-          "argIndex": 1
+      "description": "setAttribute/setAttributeNS URL-bearing attributes.",
+      "pattern": [
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "*",
+                "setAttribute"
+              ]
+            },
+            "args": [
+              {
+                "index": 0,
+                "regex": "^(?:href|src|action|data)$",
+                "flags": "i"
+              }
+            ],
+            "argIndex": 1
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "*",
+                "setAttributeNS"
+              ]
+            },
+            "args": [
+              {
+                "index": 1,
+                "regex": "^(?:href|xlink:href|src|action|data)$",
+                "flags": "i"
+              }
+            ],
+            "argIndex": 2
+          }
         }
-      }
+      ]
     },
     "selector:document_query": {
       "id": "selector:document_query",
@@ -1099,6 +1119,54 @@
               "member": [
                 "location",
                 "assign"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "window",
+                "location",
+                "assign"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "window",
+                "location",
+                "replace"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "document",
+                "location",
+                "assign"
+              ]
+            },
+            "argIndex": 0
+          }
+        },
+        {
+          "call": {
+            "callee": {
+              "member": [
+                "document",
+                "location",
+                "replace"
               ]
             },
             "argIndex": 0
@@ -3659,6 +3727,14 @@
         },
         {
           "member": [
+            "document",
+            "location",
+            "hash"
+          ],
+          "caseInsensitive": false
+        },
+        {
+          "member": [
             "globalThis",
             "location",
             "hash"
@@ -3706,6 +3782,14 @@
         {
           "member": [
             "window",
+            "location",
+            "search"
+          ],
+          "caseInsensitive": false
+        },
+        {
+          "member": [
+            "document",
             "location",
             "search"
           ],
@@ -3813,6 +3897,14 @@
         },
         {
           "member": [
+            "document",
+            "location",
+            "href"
+          ],
+          "caseInsensitive": false
+        },
+        {
+          "member": [
             "globalThis",
             "location",
             "href"
@@ -3860,6 +3952,14 @@
         {
           "member": [
             "window",
+            "location",
+            "pathname"
+          ],
+          "caseInsensitive": false
+        },
+        {
+          "member": [
+            "document",
             "location",
             "pathname"
           ],
@@ -4118,6 +4218,33 @@
               ]
             }
           }
+        },
+        {
+          "member": [
+            "localStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "window",
+            "localStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "globalThis",
+            "localStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "self",
+            "localStorage",
+            "*"
+          ]
         }
       ]
     },
@@ -4168,8 +4295,41 @@
               ]
             }
           }
+        },
+        {
+          "member": [
+            "sessionStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "window",
+            "sessionStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "globalThis",
+            "sessionStorage",
+            "*"
+          ]
+        },
+        {
+          "member": [
+            "self",
+            "sessionStorage",
+            "*"
+          ]
         }
       ]
+    },
+    "dom:event_target_value": {
+      "id": "dom:event_target_value",
+      "kind": "engine_builtin",
+      "origin_kind": "dom-input",
+      "description": "Event handler parameter target.value for input/change/keyboard-driven DOM input."
     },
     "document:referrer": {
       "id": "document:referrer",
@@ -5486,6 +5646,13 @@
       "id": "prop:callback:rxjs_subscribe",
       "kind": "callback_adapter",
       "description": "Observable.subscribe(cb): stream values flow into cb param.",
+      "callbackParamSource": {
+        "id": "rxjs:subscribe_value",
+        "originKind": "network",
+        "taintKinds": [
+          "dom-xss"
+        ]
+      },
       "patterns": [
         {
           "call": {

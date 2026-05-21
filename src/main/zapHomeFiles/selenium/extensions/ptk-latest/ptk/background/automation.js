@@ -11,6 +11,9 @@ import { sastCollectionLooksComplete } from './sast/sast_progress.js'
 // for current engine work, not permission to start new work during close.
 const ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS = 25000
 const ZAP_CLOSE_TERMINAL_FALLBACK_POLL_MS = 100
+const PTK_CHILD_TAB_ENGINE_WAIT_MS = 750
+const PTK_CHILD_TAB_IAST_DRAIN_MS = 250
+const PTK_CHILD_TAB_SAST_COLLECTION_TIMEOUT_MS = 2500
 const STRICT_CURRENT_TAB_SESSION_SCOPE = 'current-tab'
 const PAGE_EXPORT_OWNER = 'page-automation-export'
 const PAGE_EXPORT_MODE = 'evidence'
@@ -274,7 +277,9 @@ class EngineAdapter {
                 policyCode: options?.policyCode,
                 hooks: {
                     onTaskStarted: () => {},
-                    onTaskFinished: () => {}
+                    onTaskFinished: () => {},
+                    onPtkTabOpened: (details) => this.automationModule?._handleDastPtkTabOpened?.(sessionId, details),
+                    onPtkTabClosing: (details) => this.automationModule?._handleDastPtkTabClosing?.(sessionId, details)
                 }
             })
         },
@@ -391,6 +396,22 @@ class EngineAdapter {
             }
             if (options?.zapTiming && typeof options.zapTiming === 'object') {
                 sastOpts.zapTiming = options.zapTiming
+            }
+            const passthroughSastOptions = [
+                'zapHistorySeedUrls',
+                'zapPageSourceUrls',
+                'zapHistorySeedCount',
+                'zapHistorySeedTotalAvailable',
+                'zapHistorySeedDroppedByCap',
+                'sastPageSourceCrawl',
+                'sastPageSourceMaxPages',
+                'sastPageSourceMaxBytes',
+                'enableSastPageSourceLinkDiscovery'
+            ]
+            for (const key of passthroughSastOptions) {
+                if (Object.prototype.hasOwnProperty.call(options || {}, key)) {
+                    sastOpts[key] = options[key]
+                }
             }
             await sast.runBackgroundScan(tabId, host, { policyCode: options?.policyCode || 'SMART' }, sastOpts)
         },
@@ -516,6 +537,7 @@ export class ptk_automation {
         this.lastCompletedSessionGlobal = null       // fallback for any-tab export
         this.evictedSessions = new Map()             // bounded diagnostics for missing-session failures
         this.replayableExportLeases = new Map()      // leaseId -> privileged replayable export metadata
+        this.ptkChildTabRecords = new Map()          // sessionId:tabId -> PTK-created child tab engine work
         this.MAX_COMPLETED_SESSIONS = 20
         this.SESSION_TTL_MS = 24 * 60 * 60 * 1000
         this.app = null
@@ -540,6 +562,116 @@ export class ptk_automation {
         }
     }
 
+    _ptkChildTabKey(sessionId, tabId) {
+        return `${String(sessionId || '')}:${Number(tabId)}`
+    }
+
+    _sessionHasEngine(session, engineName) {
+        const needle = String(engineName || '').trim().toUpperCase()
+        return !!needle && Array.isArray(session?.engines)
+            && session.engines.some(engine => String(engine || '').trim().toUpperCase() === needle)
+    }
+
+    async _waitForEngineReady(checkFn, timeoutMs = PTK_CHILD_TAB_ENGINE_WAIT_MS) {
+        const started = Date.now()
+        while (Date.now() - started <= timeoutMs) {
+            try {
+                if (checkFn()) return true
+            } catch (_) { }
+            await sleep(75)
+        }
+        return false
+    }
+
+    async _handleDastPtkTabOpened(sessionId, details = {}) {
+        const session = this.sessions.get(sessionId)
+        const tabId = Number(details?.tabId)
+        const parentTabId = Number(details?.parentTabId)
+        if (!session || !Number.isInteger(tabId) || !Number.isInteger(parentTabId)) return { ok: false, reason: 'invalid_ptk_child_tab' }
+        if (Number(session.tabId) !== parentTabId) return { ok: false, reason: 'parent_tab_mismatch' }
+        const record = {
+            sessionId,
+            tabId,
+            parentTabId,
+            role: String(details?.role || 'ptk_child_tab'),
+            url: typeof details?.url === 'string' ? details.url : null,
+            sourceEngine: String(details?.sourceEngine || 'DAST'),
+            createdAt: Date.now(),
+            sastPromise: null
+        }
+        this.ptkChildTabRecords.set(this._ptkChildTabKey(sessionId, tabId), record)
+
+        if (this._sessionHasEngine(session, 'IAST')) {
+            const iast = this.app?.iast || null
+            const iastReady = await this._waitForEngineReady(() => iast?.isScanRunning === true && typeof iast.enrollRelatedScanTab === 'function')
+            if (iastReady) {
+                await iast.enrollRelatedScanTab(tabId, {
+                    parentTabId,
+                    role: record.role,
+                    url: record.url,
+                    sourceEngine: record.sourceEngine,
+                    sessionId
+                }).catch((err) => {
+                    console.warn('[PTK Automation] Failed to enroll PTK child tab for IAST', {
+                        sessionId,
+                        tabId,
+                        role: record.role,
+                        error: err?.message || String(err)
+                    })
+                    return false
+                })
+            }
+        }
+
+        if (this._sessionHasEngine(session, 'SAST')) {
+            const sast = this.app?.sast || null
+            record.sastPromise = Promise.resolve()
+                .then(async () => {
+                    const sastReady = await this._waitForEngineReady(() => sast?.isScanRunning === true && typeof sast.collectAndScanTab === 'function')
+                    if (!sastReady) return null
+                    return sast.collectAndScanTab(tabId, {
+                        delayMs: 100,
+                        attempts: 1,
+                        timeoutMs: PTK_CHILD_TAB_SAST_COLLECTION_TIMEOUT_MS,
+                        retryDelayMs: 100,
+                        expectedUrl: record.url || undefined,
+                        source: 'ptk_child_tab',
+                        childTabRole: record.role
+                    })
+                })
+                .catch((err) => {
+                    console.warn('[PTK Automation] Failed to collect SAST for PTK child tab', {
+                        sessionId,
+                        tabId,
+                        role: record.role,
+                        error: err?.message || String(err)
+                    })
+                    return null
+                })
+        }
+
+        return { ok: true }
+    }
+
+    async _handleDastPtkTabClosing(sessionId, details = {}) {
+        const tabId = Number(details?.tabId)
+        if (!Number.isInteger(tabId)) return { ok: false, reason: 'invalid_ptk_child_tab' }
+        const key = this._ptkChildTabKey(sessionId, tabId)
+        const record = this.ptkChildTabRecords.get(key) || null
+        if (record?.sastPromise) {
+            await Promise.race([
+                record.sastPromise,
+                sleep(PTK_CHILD_TAB_SAST_COLLECTION_TIMEOUT_MS).then(() => null)
+            ]).catch(() => null)
+        }
+        if (this.app?.iast?.releaseRelatedScanTab) {
+            await sleep(PTK_CHILD_TAB_IAST_DRAIN_MS)
+            this.app.iast.releaseRelatedScanTab(tabId)
+        }
+        this.ptkChildTabRecords.delete(key)
+        return { ok: true }
+    }
+
     _getSessionForTab(tabId) {
         if (!Number.isInteger(tabId)) return null
         const sessionId = this.activeSessionByTabId.get(tabId)
@@ -553,7 +685,7 @@ export class ptk_automation {
         return this._isActiveSessionStatus(session.status)
     }
 
-    _getContentRuntimeProfile({ tabId = null, frameId = 0, url = '' } = {}) {
+    _getContentRuntimeProfile({ tabId = null, frameId = 0, url = '', zapTargetObserved = false } = {}) {
         const safeUrl = typeof url === 'string' ? url : ''
         const isTopFrame = frameId === 0
         const transport = this.zap?.transport || null
@@ -586,6 +718,14 @@ export class ptk_automation {
                 mode: CONTENT_RUNTIME_MODE_AUTOMATION,
                 script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
                 reason: 'zap_active'
+            }
+        }
+
+        if (isZapActive && isTopFrame && zapTargetObserved) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_AUTOMATION,
+                script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
+                reason: 'zap_active_target'
             }
         }
 
@@ -688,13 +828,14 @@ export class ptk_automation {
                 })
             }
         }
+        let zapTargetObserved = false
         if (frameId === 0 && isHttpZapTargetUrl(url)) {
             try {
-                this.zap?.transport?.processContentObservedTargetUrl?.({
+                zapTargetObserved = this.zap?.transport?.processContentObservedTargetUrl?.({
                     tabId,
                     frameId,
                     url
-                })
+                }) === true
             } catch (error) {
                 console.warn('[PTK Automation] Failed to process target URL for ZAP detection', {
                     tabId,
@@ -704,7 +845,7 @@ export class ptk_automation {
                 })
             }
         }
-        const profile = this._getContentRuntimeProfile({ tabId, frameId, url })
+        const profile = this._getContentRuntimeProfile({ tabId, frameId, url, zapTargetObserved })
         const files = CONTENT_RUNTIME_FILES[profile.script] || []
         const useStaticFirefoxManualRuntime = profile.script === CONTENT_RUNTIME_SCRIPT_MANUAL && this._isFirefoxRuntime()
 

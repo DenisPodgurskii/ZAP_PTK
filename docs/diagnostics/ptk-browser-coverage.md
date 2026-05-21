@@ -29,6 +29,8 @@ The diagnostic build:
 
 The production `check` task verifies that diagnostic browser coverage classes are not packaged into the production `.zap`.
 
+`jarZapAddOnDiagnostic` intentionally starts a nested Gradle invocation with `-PptkDiagnostic=true`. That keeps the production build graph clean, but the task is investigation-only and should not be treated as an incremental or configuration-cache-friendly release task.
+
 ## Why It Is Isolated
 
 `ptkBrowserCoverage` exists to diagnose browser execution truth:

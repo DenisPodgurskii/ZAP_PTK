@@ -325,18 +325,16 @@ setInterval(function () {
         }).catch(e => {
             //try { console.warn('[PTK][SPA][content] failed to send spa_url_changed', e) } catch (_) { }
         })
-        let sastPayload = null
-        try {
-            sastPayload = collectSastPayload()
-        } catch (_) { }
-        sendRuntimeMessage({
-            channel: "ptk_content_sast2background_sast",
-            type: "spa_url_changed",
-            url: href,
-            sastPayload
-        }).catch(e => {
-            // try { console.warn('[PTK][SPA][content] failed to send spa_url_changed to SAST', e) } catch (_) { }
-        })
+        collectSastPayload().then((sastPayload) => {
+            sendRuntimeMessage({
+                channel: "ptk_content_sast2background_sast",
+                type: "spa_url_changed",
+                url: href,
+                sastPayload
+            }).catch(e => {
+                // try { console.warn('[PTK][SPA][content] failed to send spa_url_changed to SAST', e) } catch (_) { }
+            })
+        }).catch(() => { })
     }
 
     const wrapHistory = (fn) => function () {
@@ -356,11 +354,11 @@ setInterval(function () {
     // poll as a safety net in case events are missed
     setInterval(notify, 500)
 
-    notify()
+    setTimeout(notify, 0)
 })();
 
 
-function collectSastPayload() {
+async function collectSastPayload() {
     const currentScripts = Array.from(document.scripts)
         .filter(isExecutableSastScriptElement)
         .map(s => ({
@@ -376,9 +374,13 @@ function collectSastPayload() {
     const seen = new Set();
     const addScript = (script) => {
         if (!script || (script.src && !isSameOriginSastScriptUrl(script.src))) return;
+        const src = normalizeSastScriptSrc(script.src || null);
+        const code = src && typeof script.code === 'string'
+            ? normalizeSastScriptCode(script.code)
+            : (src ? null : normalizeSastScriptCode(script.code || ''));
         const normalized = {
-            src: normalizeSastScriptSrc(script.src || null),
-            code: script.src ? null : normalizeSastScriptCode(script.code || '')
+            src,
+            code
         };
         if (!normalized.src && !String(normalized.code || '').trim()) return;
         const key = makeSastScriptKey(normalized);
@@ -391,7 +393,7 @@ function collectSastPayload() {
     getPtkEarlySastScriptRegistry().forEach(addScript);
 
     return {
-        scripts: scripts,
+        scripts: await hydrateSameOriginSastScripts(scripts),
         html: collectSastInlineHandlers(),
         file: document.URL
     };
@@ -407,6 +409,10 @@ const SAST_INLINE_HANDLER_ATTRIBUTES = Object.freeze([
 
 const SAST_INLINE_HANDLER_ATTRIBUTE_SET = new Set(SAST_INLINE_HANDLER_ATTRIBUTES);
 const SAST_INLINE_HANDLER_SELECTOR = SAST_INLINE_HANDLER_ATTRIBUTES.map((attr) => `[${attr}]`).join(',');
+const SAST_JAVASCRIPT_URL_ATTRIBUTES = Object.freeze(['href', 'xlink:href', 'action', 'formaction', 'src', 'data']);
+const SAST_JAVASCRIPT_URL_ATTRIBUTE_SET = new Set(SAST_JAVASCRIPT_URL_ATTRIBUTES);
+const SAST_EXTERNAL_SCRIPT_MAX_COUNT = 24;
+const SAST_EXTERNAL_SCRIPT_MAX_BYTES = 1024 * 1024;
 
 function normalizeSastInlineHandlerKey(value) {
     return String(value || '').trim().replace(/\s+/g, ' ').replace(/;+\s*$/g, '');
@@ -417,7 +423,8 @@ function collectSastInlineHandlers() {
 
     let elements = [];
     try {
-        elements = Array.from(document.querySelectorAll(SAST_INLINE_HANDLER_SELECTOR));
+        const urlSelectors = ['[href]', '[xlink\\:href]', '[action]', '[formaction]', '[src]', '[data]'];
+        elements = Array.from(document.querySelectorAll([SAST_INLINE_HANDLER_SELECTOR, ...urlSelectors].filter(Boolean).join(',')));
     } catch (_) {
         return [];
     }
@@ -440,6 +447,19 @@ function collectSastInlineHandlers() {
             if (!key || seen.has(key)) continue;
             seen.add(key);
             snippets.push(value);
+        }
+        for (const rawName of attrNames) {
+            const attrName = String(rawName || '').trim().toLowerCase();
+            if (!SAST_JAVASCRIPT_URL_ATTRIBUTE_SET.has(attrName)) continue;
+            const value = typeof element?.getAttribute === 'function'
+                ? element.getAttribute(attrName)
+                : null;
+            if (typeof value !== 'string' || !/^\s*javascript\s*:/i.test(value)) continue;
+            const snippet = value.replace(/^\s*javascript\s*:/i, '').trim();
+            const key = normalizeSastInlineHandlerKey(snippet);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            snippets.push(snippet);
         }
     }
 
@@ -487,6 +507,35 @@ function makeSastScriptKey(script) {
     if (src) return `src:${src}`;
     const code = normalizeSastScriptCode(script?.code || '');
     return code ? `inline:${code}` : '';
+}
+
+async function hydrateSameOriginSastScripts(scripts) {
+    if (!Array.isArray(scripts) || typeof fetch !== 'function') return scripts;
+    let fetched = 0;
+    const hydrated = [];
+    for (const script of scripts) {
+        if (
+            script?.src &&
+            !String(script.code || '').trim() &&
+            fetched < SAST_EXTERNAL_SCRIPT_MAX_COUNT &&
+            isSameOriginSastScriptUrl(script.src)
+        ) {
+            fetched += 1;
+            try {
+                const response = await fetch(script.src, { credentials: 'include', cache: 'force-cache' });
+                if (response?.ok) {
+                    let text = await response.text();
+                    if (text.length > SAST_EXTERNAL_SCRIPT_MAX_BYTES) {
+                        text = text.slice(0, SAST_EXTERNAL_SCRIPT_MAX_BYTES);
+                    }
+                    hydrated.push({ ...script, code: normalizeSastScriptCode(text) });
+                    continue;
+                }
+            } catch (_) { }
+        }
+        hydrated.push(script);
+    }
+    return hydrated;
 }
 
 function getPtkEarlySastScriptRegistry() {
@@ -602,13 +651,14 @@ if (runtime?.onMessage) runtime.onMessage.addListener(function (message, sender,
 
     if (message.channel == "ptk_background2content_sast") {
         if (message.type == "collect_scripts") {
-            const payload = collectSastPayload();
-            sendRuntimeMessage({
-                channel: "ptk_content_sast2background_sast",
-                type: "scripts_collected",
-                requestId: message.requestId || null,
-                ...payload
-            }).catch(e => e)
+            collectSastPayload().then((payload) => {
+                sendRuntimeMessage({
+                    channel: "ptk_content_sast2background_sast",
+                    type: "scripts_collected",
+                    requestId: message.requestId || null,
+                    ...payload
+                }).catch(e => e)
+            }).catch(() => { })
             return Promise.resolve({ ok: true })
         }
         if (message.type == "sast_set_hash") {

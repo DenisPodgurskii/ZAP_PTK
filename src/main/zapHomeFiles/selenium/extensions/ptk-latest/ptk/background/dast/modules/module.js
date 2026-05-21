@@ -165,6 +165,11 @@ export class ptk_module {
             if (!ids.has(entryId)) continue
             const response = entry?.response || {}
             const status = response?.statusCode
+            if (baselineStatus == null && baselineResponse?.length == null) {
+                const numericStatus = Number(status)
+                if (Number.isFinite(numericStatus) && numericStatus >= 400) return true
+                continue
+            }
             if (baselineStatus != null && status != null && status !== baselineStatus) {
                 return true
             }
@@ -1155,15 +1160,37 @@ export class ptk_module {
     }
 
     _compileParamNameRegex(action) {
-        return this._compileSelectorRegex(action?.nameRegex, action?.flags)
+        return this._compileSelectorRegex(
+            this._resolveSelectorRegexPattern(action, 'nameRegex', 'nameRegexRef'),
+            action?.flags
+        )
     }
 
     _compileParamExcludeRegex(action) {
-        return this._compileSelectorRegex(action?.excludeNameRegex, action?.excludeFlags || action?.flags)
+        return this._compileSelectorRegex(
+            this._resolveSelectorRegexPattern(action, 'excludeNameRegex', 'excludeNameRegexRef'),
+            action?.excludeFlags || action?.flags
+        )
     }
 
     _compileParamValueRegex(action) {
-        return this._compileSelectorRegex(action?.valueRegex, action?.valueFlags || action?.flags)
+        return this._compileSelectorRegex(
+            this._resolveSelectorRegexPattern(action, 'valueRegex', 'valueRegexRef'),
+            action?.valueFlags || action?.flags
+        )
+    }
+
+    _resolveSelectorRegexPattern(action, directKey, refKey) {
+        if (typeof action?.[directKey] === 'string' && action[directKey].trim()) {
+            return action[directKey]
+        }
+        const refName = typeof action?.[refKey] === 'string' ? action[refKey].trim() : ''
+        if (!refName) return null
+        const constants = this?.metadata?.constants && typeof this.metadata.constants === 'object'
+            ? this.metadata.constants
+            : {}
+        const resolved = constants[refName]
+        return typeof resolved === 'string' && resolved.trim() ? resolved : null
     }
 
     _compileSelectorRegex(pattern, flags = null) {
@@ -1501,11 +1528,17 @@ export class ptk_module {
     }
 
     _compileSelectorPathRegex(action) {
-        return this._compileSelectorRegex(action?.pathRegex, action?.pathFlags || action?.flags)
+        return this._compileSelectorRegex(
+            this._resolveSelectorRegexPattern(action, 'pathRegex', 'pathRegexRef'),
+            action?.pathFlags || action?.flags
+        )
     }
 
     _compileSelectorJsonPathRegex(action) {
-        return this._compileSelectorRegex(action?.jsonPathRegex, action?.jsonPathFlags || action?.pathFlags || action?.flags)
+        return this._compileSelectorRegex(
+            this._resolveSelectorRegexPattern(action, 'jsonPathRegex', 'jsonPathRegexRef'),
+            action?.jsonPathFlags || action?.pathFlags || action?.flags
+        )
     }
 
     _candidatePathText(candidate) {
@@ -1739,9 +1772,13 @@ export class ptk_module {
     _selectorHasScoringSignals(action) {
         return Boolean(
             action?.nameRegex
+            || action?.nameRegexRef
             || action?.valueRegex
+            || action?.valueRegexRef
             || action?.pathRegex
+            || action?.pathRegexRef
             || action?.jsonPathRegex
+            || action?.jsonPathRegexRef
             || this._normalizeSelectorValueTypes(action?.valueTypeIn).length
             || (Array.isArray(action?.semanticTagsAny) && action.semanticTagsAny.length)
         )
@@ -3335,18 +3372,23 @@ export class ptk_module {
         return [
             'name',
             'nameRegex',
+            'nameRegexRef',
             'flags',
             'pathRegex',
+            'pathRegexRef',
             'pathFlags',
             'jsonPathRegex',
+            'jsonPathRegexRef',
             'jsonPathFlags',
             'valueRegex',
+            'valueRegexRef',
             'valueFlags',
             'valueTypeIn',
             'semanticTagsAny',
             'weight',
             'selectorMode',
             'excludeNameRegex',
+            'excludeNameRegexRef',
             'excludeFlags',
             'scoredFallback',
             'location'

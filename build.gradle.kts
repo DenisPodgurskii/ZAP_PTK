@@ -167,43 +167,51 @@ if (!diagnosticBuild) {
     }
 }
 
-tasks.register("verifyProductionArtifactClean") {
-    group = "verification"
-    description = "Verifies the production .zap does not contain diagnostic-only classes."
-    onlyIf { !diagnosticBuild }
-    dependsOn(tasks.named("jarZapAddOn"))
-    doLast {
-        val zapDir = layout.buildDirectory.dir("zapAddOn/bin").get().asFile
-        val zapFiles =
-            zapDir.listFiles { file -> file.isFile && file.name.endsWith(".zap") }
-                ?.toList()
-                ?: emptyList()
-        if (zapFiles.isEmpty()) {
-            throw GradleException("No production .zap found under ${zapDir.absolutePath}")
-        }
-        val forbiddenEntries =
-            listOf(
-                "org/zaproxy/addon/ptk/PtkBrowserCoverageJob.class",
-                "org/zaproxy/addon/ptk/PtkBrowserCoverageDiagnostic.class",
-                "org/zaproxy/addon/ptk/PtkBrowserCoverageTiming.class",
-                "META-INF/services/org.zaproxy.addon.ptk.PtkDiagnosticExtension",
-            )
-        for (zapFile in zapFiles) {
-            ZipFile(zapFile).use { zip ->
-                val names = zip.entries().asSequence().map { it.name }.toSet()
-                val present = forbiddenEntries.filter(names::contains)
-                if (present.isNotEmpty()) {
-                    throw GradleException(
-                        "Production artifact ${zapFile.name} contains diagnostic entries: $present",
-                    )
+val verifyProductionArtifactClean =
+    tasks.register("verifyProductionArtifactClean") {
+        group = "verification"
+        description = "Verifies the production .zap does not contain diagnostic-only classes."
+        onlyIf { !diagnosticBuild }
+        doLast {
+            val zapDir = layout.buildDirectory.dir("zapAddOn/bin").get().asFile
+            val zapFiles =
+                zapDir.listFiles { file -> file.isFile && file.name.endsWith(".zap") }
+                    ?.toList()
+                    ?: emptyList()
+            if (zapFiles.isEmpty()) {
+                throw GradleException("No production .zap found under ${zapDir.absolutePath}")
+            }
+            val forbiddenEntries =
+                listOf(
+                    "org/zaproxy/addon/ptk/PtkBrowserCoverageJob.class",
+                    "org/zaproxy/addon/ptk/PtkBrowserCoverageDiagnostic.class",
+                    "org/zaproxy/addon/ptk/PtkBrowserCoverageTiming.class",
+                    "META-INF/services/org.zaproxy.addon.ptk.PtkDiagnosticExtension",
+                )
+            for (zapFile in zapFiles) {
+                ZipFile(zapFile).use { zip ->
+                    val names = zip.entries().asSequence().map { it.name }.toSet()
+                    val present = forbiddenEntries.filter(names::contains)
+                    if (present.isNotEmpty()) {
+                        throw GradleException(
+                            "Production artifact ${zapFile.name} contains diagnostic entries: $present",
+                        )
+                    }
                 }
             }
         }
     }
+
+if (!diagnosticBuild) {
+    verifyProductionArtifactClean.configure {
+        dependsOn(tasks.named("jarZapAddOn"))
+    }
 }
 
 tasks.named("check") {
-    dependsOn(tasks.named("verifyProductionArtifactClean"))
+    if (!diagnosticBuild) {
+        dependsOn(verifyProductionArtifactClean)
+    }
 }
 
 tasks.register<JavaExec>("runPtkMappingCheck") {

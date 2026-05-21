@@ -25,8 +25,8 @@ public final class PtkBrowserCoverageDiagnostic implements PtkDiagnosticExtensio
         }
         browserCoverageJob = new PtkBrowserCoverageJob(ptk);
         extensionAutomation.registerAutomationJob(browserCoverageJob);
-        LOGGER.warn(
-                "PTK diagnostic browser coverage job registered; this artifact is not a production release");
+        LOGGER.warn("PTK diagnostic browser coverage artifact is not a production release");
+        LOGGER.info("PTK diagnostic browser coverage job registered");
     }
 
     @Override

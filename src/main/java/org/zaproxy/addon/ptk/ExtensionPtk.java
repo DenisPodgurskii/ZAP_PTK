@@ -8,7 +8,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.ServiceLoader;
@@ -26,6 +28,9 @@ import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.extension.Extension;
 import org.parosproxy.paros.extension.ExtensionAdaptor;
 import org.parosproxy.paros.extension.ExtensionHook;
+import org.parosproxy.paros.model.HistoryReference;
+import org.parosproxy.paros.model.Model;
+import org.parosproxy.paros.model.SiteNode;
 import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMessage;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
@@ -40,6 +45,7 @@ import org.zaproxy.zap.extension.selenium.BrowserExtension;
 import org.zaproxy.zap.extension.selenium.ExtensionSelenium;
 import org.zaproxy.zap.extension.selenium.SeleniumOptions;
 import org.zaproxy.zap.extension.selenium.SeleniumScriptUtils;
+import org.zaproxy.zap.model.Context;
 
 /*
  * Browser close timeout model:
@@ -249,6 +255,19 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
 
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
             List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
+    private static final List<Browser> PTK_CHROMIUM_BROWSERS =
+            List.of(Browser.CHROME, Browser.EDGE);
+    private static final List<String> PTK_CHROMIUM_BACKGROUND_ARGS =
+            List.of(
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-domain-reliability",
+                    "--disable-default-apps",
+                    "--disable-features=AutofillServerCommunication,OptimizationHints,OptimizationHintsFetching,OptimizationTargetPrediction,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn",
+                    "--disable-sync",
+                    "--no-default-browser-check",
+                    "--no-first-run");
+    private static final int ZAP_HISTORY_SEED_MAX_URLS = 500;
 
     private ClientCallBackImplementor callBackImplementor;
     private PtkOptionsPanel optionsPanel;
@@ -307,11 +326,6 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         if (hasView()) {
             extensionHook.getHookView().addOptionPanel(getOptionsPanel());
         }
-    }
-
-    @Override
-    public void postInit() {
-        super.postInit();
     }
 
     private PtkOptionsPanel getOptionsPanel() {
@@ -401,6 +415,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 LOGGER.warn("PTK Selenium extension config skipped; Selenium options unavailable");
                 return;
             }
+            ensurePtkSeleniumBrowserArguments(options);
             List<BrowserExtension> extensions = new ArrayList<>(options.getBrowserExtensions());
             boolean changed = false;
             changed |= ensureBrowserExtension(extensions, chromiumPath, Browser.CHROME, "Chromium");
@@ -412,6 +427,90 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         } catch (Exception e) {
             LOGGER.warn("PTK Selenium extension config failed: {}", e.getMessage());
         }
+    }
+
+    private static boolean ensurePtkSeleniumBrowserArguments(SeleniumOptions options) {
+        boolean changed = false;
+        for (Browser browser : PTK_CHROMIUM_BROWSERS) {
+            try {
+                changed |= ensurePtkSeleniumBrowserArguments(options, browser);
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                LOGGER.warn(
+                        "PTK Selenium browser argument config failed browser={} reason={}",
+                        browser,
+                        e.getMessage());
+            }
+        }
+        return changed;
+    }
+
+    private static boolean ensurePtkSeleniumBrowserArguments(
+            SeleniumOptions options, Browser browser) throws ReflectiveOperationException {
+        String browserId = browser.getId();
+        List<Object> arguments = getSeleniumBrowserArguments(options, browserId);
+        Set<String> existing = ConcurrentHashMap.newKeySet();
+        for (Object argument : arguments) {
+            String value = getBrowserArgumentValue(argument);
+            if (value != null && !value.isBlank()) {
+                existing.add(value);
+            }
+        }
+        boolean changed = false;
+        for (String argument : PTK_CHROMIUM_BACKGROUND_ARGS) {
+            if (existing.add(argument)) {
+                arguments.add(newBrowserArgument(argument));
+                changed = true;
+            }
+        }
+        if (changed) {
+            setSeleniumBrowserArguments(options, browserId, arguments);
+            LOGGER.debug(
+                    "PTK Selenium browser arguments configured browser={} added={}",
+                    browser,
+                    PTK_CHROMIUM_BACKGROUND_ARGS.size());
+        }
+        return changed;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Object> getSeleniumBrowserArguments(
+            SeleniumOptions options, String browserId) throws ReflectiveOperationException {
+        Method method =
+                SeleniumOptions.class.getDeclaredMethod("getBrowserArguments", String.class);
+        method.setAccessible(true);
+        Object value = method.invoke(options, browserId);
+        if (value instanceof List<?> arguments) {
+            return new ArrayList<>((List<Object>) arguments);
+        }
+        return new ArrayList<>();
+    }
+
+    private static void setSeleniumBrowserArguments(
+            SeleniumOptions options, String browserId, List<Object> arguments)
+            throws ReflectiveOperationException {
+        Method method =
+                SeleniumOptions.class.getDeclaredMethod(
+                        "setBrowserArguments", String.class, List.class);
+        method.setAccessible(true);
+        method.invoke(options, browserId, arguments);
+    }
+
+    private static Object newBrowserArgument(String argument) throws ReflectiveOperationException {
+        Class<?> argumentClass =
+                Class.forName("org.zaproxy.zap.extension.selenium.internal.BrowserArgument");
+        return argumentClass
+                .getConstructor(String.class, boolean.class)
+                .newInstance(argument, true);
+    }
+
+    private static String getBrowserArgumentValue(Object argument)
+            throws ReflectiveOperationException {
+        if (argument == null) {
+            return null;
+        }
+        Method method = argument.getClass().getMethod("getArgument");
+        Object value = method.invoke(argument);
+        return value == null ? null : String.valueOf(value);
     }
 
     private static boolean ensureBrowserExtension(
@@ -522,6 +621,133 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             cachedConfigJson = json;
             LOGGER.debug("PTK /ptk/config cache miss; rebuilt response");
             return json;
+        }
+    }
+
+    private String getConfigJsonForRequest(Map<String, Object> requestData) {
+        String baseJson = getCachedConfigJson();
+        Map<String, Object> seedConfig = buildZapHistorySeedConfig(requestData);
+        if (seedConfig.isEmpty()) {
+            return baseJson;
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> response = GSON.fromJson(baseJson, Map.class);
+        if (response == null) {
+            response = new LinkedHashMap<>();
+        }
+        response.putAll(seedConfig);
+        return GSON.toJson(response);
+    }
+
+    private Map<String, Object> buildZapHistorySeedConfig(Map<String, Object> requestData) {
+        if (requestData == null || requestData.isEmpty()) {
+            return Map.of();
+        }
+        String targetUrl = getStringField(requestData, "targetUrl");
+        String zapid = getStringField(requestData, "zapid");
+        if ((targetUrl == null || targetUrl.isBlank()) && zapid != null && !zapid.isBlank()) {
+            targetUrl = targetUrlByZapId.get(zapid);
+        }
+        List<String> urls = collectZapHistorySeedUrls(targetUrl, ZAP_HISTORY_SEED_MAX_URLS);
+        if (urls.isEmpty()) {
+            return Map.of();
+        }
+        String scope = PtkUrlUtils.deriveSameDirectoryPathScope(targetUrl);
+        if (scope == null || scope.isBlank()) {
+            scope = "zap-context";
+        }
+        LOGGER.info(
+                "PTK /ptk/config returning {} ZAP history seed URLs scope={}", urls.size(), scope);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("zapHistorySeedUrls", urls);
+        result.put("zapHistorySeedCount", urls.size());
+        result.put("zapHistorySeedMaxUrls", ZAP_HISTORY_SEED_MAX_URLS);
+        result.put("zapHistorySeedScope", scope);
+        return result;
+    }
+
+    private static String getStringField(Map<String, Object> body, String key) {
+        if (body == null || key == null) {
+            return null;
+        }
+        Object value = body.get(key);
+        return value instanceof String ? (String) value : null;
+    }
+
+    private List<String> collectZapHistorySeedUrls(String targetUrl, int maxUrls) {
+        String normalizedTarget = PtkUrlUtils.normalizeHttpUrlWithoutFragment(targetUrl);
+        if (maxUrls <= 0) {
+            return List.of();
+        }
+        Set<String> urls = new LinkedHashSet<>();
+        if (normalizedTarget != null) {
+            addZapHistorySeedUrl(urls, normalizedTarget, normalizedTarget, maxUrls);
+        }
+        try {
+            SiteNode root = Model.getSingleton().getSession().getSiteTree().getRoot();
+            if (root == null) {
+                return new ArrayList<>(urls);
+            }
+            List<Context> contexts = Model.getSingleton().getSession().getContexts();
+            Enumeration<?> nodes = root.preorderEnumeration();
+            while (nodes.hasMoreElements() && urls.size() < maxUrls) {
+                Object candidate = nodes.nextElement();
+                if (!(candidate instanceof SiteNode siteNode)) {
+                    continue;
+                }
+                HistoryReference historyReference = siteNode.getHistoryReference();
+                if (historyReference == null || historyReference.getHttpMessage() == null) {
+                    continue;
+                }
+                String url =
+                        historyReference.getHttpMessage().getRequestHeader().getURI().toString();
+                if (normalizedTarget != null) {
+                    addZapHistorySeedUrl(urls, normalizedTarget, url, maxUrls);
+                } else {
+                    addZapContextHistorySeedUrl(urls, contexts, url, maxUrls);
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.warn(
+                    "PTK failed to collect ZAP history seed URLs for {}",
+                    normalizedTarget != null ? normalizedTarget : "zap-context",
+                    e);
+        }
+        return new ArrayList<>(urls);
+    }
+
+    private static void addZapHistorySeedUrl(
+            Set<String> urls, String targetUrl, String candidateUrl, int maxUrls) {
+        if (urls.size() >= maxUrls) {
+            return;
+        }
+        if (!PtkUrlUtils.isSameOriginAndPathScoped(targetUrl, candidateUrl)) {
+            return;
+        }
+        String normalized = PtkUrlUtils.normalizeHttpUrlWithoutFragment(candidateUrl);
+        if (normalized != null) {
+            urls.add(normalized);
+        }
+    }
+
+    private static void addZapContextHistorySeedUrl(
+            Set<String> urls, List<Context> contexts, String candidateUrl, int maxUrls) {
+        if (urls.size() >= maxUrls || contexts == null || contexts.isEmpty()) {
+            return;
+        }
+        String normalized = PtkUrlUtils.normalizeHttpUrlWithoutFragment(candidateUrl);
+        if (normalized == null) {
+            return;
+        }
+        boolean inContext = false;
+        for (Context context : contexts) {
+            if (context != null && context.isInContext(normalized)) {
+                inContext = true;
+                break;
+            }
+        }
+        if (inContext) {
+            urls.add(normalized);
         }
     }
 
@@ -1888,7 +2114,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 rememberBrowserId(zapid, browserid);
                 markCallbackStart(zapid);
                 logBrowserEvidence(zapid, browserid, "config_callback", null, null);
-                msg.getResponseBody().setBody(getCachedConfigJson());
+                msg.getResponseBody().setBody(getConfigJsonForRequest(requestData));
                 long finishedAt = System.currentTimeMillis();
                 Long sinceFirstMs = getElapsedSinceFirst(zapid, finishedAt);
                 logCallbackSummary(

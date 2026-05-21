@@ -844,16 +844,22 @@ class ZapTransport {
             }
 
             try {
+                const requestBody = {
+                    zapid: this.zapid,
+                    browserid: this.browserid
+                }
+                const targetUrl = toNonEmptyString(options?.targetUrl)
+                if (targetUrl) {
+                    requestBody.targetUrl = targetUrl
+                }
+
                 const response = await fetchWithTimeout(this.configUrl, {
                     method: 'POST',
                     headers: {
                         'Accept': 'application/json',
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        zapid: this.zapid,
-                        browserid: this.browserid
-                    }),
+                    body: JSON.stringify(requestBody),
                     cache: 'no-store',
                     credentials: 'include'
                 }, CONFIG_DIRECT_FETCH_TIMEOUT_MS)

@@ -27,6 +27,83 @@ final class PtkUrlUtils {
         }
     }
 
+    static String normalizeHttpUrlWithoutFragment(String targetUrl) {
+        String normalized = normalizeHttpTargetUrl(targetUrl);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            URI uri = new URI(normalized);
+            if ("zap".equalsIgnoreCase(uri.getHost())) {
+                return null;
+            }
+            return new URI(
+                            uri.getScheme(),
+                            uri.getRawUserInfo(),
+                            uri.getHost(),
+                            uri.getPort(),
+                            uri.getRawPath(),
+                            uri.getRawQuery(),
+                            null)
+                    .toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static String deriveSameDirectoryPathScope(String targetUrl) {
+        String normalized = normalizeHttpTargetUrl(targetUrl);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            URI uri = new URI(normalized);
+            String path = uri.getPath();
+            if (path == null || path.isBlank() || "/".equals(path)) {
+                return "/";
+            }
+            if (path.endsWith("/")) {
+                return path;
+            }
+            int slash = path.lastIndexOf('/');
+            if (slash < 0) {
+                return "/";
+            }
+            return path.substring(0, slash + 1);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static boolean isSameOriginAndPathScoped(String targetUrl, String candidateUrl) {
+        String normalizedTarget = normalizeHttpTargetUrl(targetUrl);
+        String normalizedCandidate = normalizeHttpUrlWithoutFragment(candidateUrl);
+        String pathScope = deriveSameDirectoryPathScope(normalizedTarget);
+        if (normalizedTarget == null || normalizedCandidate == null || pathScope == null) {
+            return false;
+        }
+        try {
+            URI target = new URI(normalizedTarget);
+            URI candidate = new URI(normalizedCandidate);
+            if (!target.getScheme().equalsIgnoreCase(candidate.getScheme())) {
+                return false;
+            }
+            if (!target.getHost().equalsIgnoreCase(candidate.getHost())) {
+                return false;
+            }
+            if (target.getPort() != candidate.getPort()) {
+                return false;
+            }
+            String candidatePath = candidate.getPath();
+            if (candidatePath == null || candidatePath.isBlank()) {
+                candidatePath = "/";
+            }
+            return candidatePath.startsWith(pathScope);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     static String normalizeBrowserCoverageUrl(String targetUrl) {
         String normalized = normalizeHttpTargetUrl(targetUrl);
         if (normalized == null) {
