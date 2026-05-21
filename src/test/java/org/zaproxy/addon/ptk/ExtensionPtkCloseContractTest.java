@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.Test;
@@ -304,5 +305,51 @@ class ExtensionPtkCloseContractTest {
                 PtkUrlUtils.isSameOriginAndPathScoped(
                         target, "https://other.example.test/dom/index.html"));
         assertNull(PtkUrlUtils.normalizeHttpUrlWithoutFragment("https://zap/zapCallBackUrl/1"));
+    }
+
+    @Test
+    void zapHistorySeedScopeTreatsImplicitAndExplicitDefaultPortsAsSameOrigin() {
+        assertEquals(
+                true,
+                PtkUrlUtils.isSameOriginAndPathScoped(
+                        "https://example.test/dom/index.html",
+                        "https://example.test:443/dom/location/hash/eval"));
+        assertEquals(
+                true,
+                PtkUrlUtils.isSameOriginAndPathScoped(
+                        "http://example.test:80/dom/index.html",
+                        "http://example.test/dom/location/hash/eval"));
+        assertEquals(
+                false,
+                PtkUrlUtils.isSameOriginAndPathScoped(
+                        "https://example.test/dom/index.html",
+                        "https://example.test:444/dom/location/hash/eval"));
+        assertEquals(
+                false,
+                PtkUrlUtils.isSameOriginAndPathScoped(
+                        "https://example.test/dom/index.html", "file:///dom/location/hash/eval"));
+    }
+
+    @Test
+    void zapHistorySeedCandidateFilteringKeepsOnlyScopedHttpUrls() {
+        List<String> urls =
+                ExtensionPtk.collectZapHistorySeedUrlsFromCandidates(
+                        "https://example.test/dom/index.html",
+                        10,
+                        List.of(
+                                "https://example.test/dom/location/hash/eval#fragment",
+                                "https://example.test/dom/location/hash/eval",
+                                "https://example.test:443/dom/location/search/eval",
+                                "https://example.test/angular/index.html",
+                                "https://zap/zapCallBackUrl/1",
+                                "https://other.example.test/dom/location/hash/eval"),
+                        List.of());
+
+        assertEquals(
+                List.of(
+                        "https://example.test/dom/index.html",
+                        "https://example.test/dom/location/hash/eval",
+                        "https://example.test:443/dom/location/search/eval"),
+                urls);
     }
 }

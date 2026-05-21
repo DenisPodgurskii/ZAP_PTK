@@ -4,11 +4,15 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
     window.__ptkBrowserNavHarnessLoaded = true
 
     const ATTACK_TAB_MARKER = 'ptk_browser_nav_attack_tab'
+    const ATTACK_TAB_ATTRIBUTE = 'data-ptk-browser-nav-attack-tab'
+    const EXECUTION_MARKER_ATTRIBUTE = 'data-ptk-xss'
     const xssExecutionEvents = []
 
     function isAttackTab() {
         try {
-            return String(window.name || '').includes(ATTACK_TAB_MARKER)
+            if (String(window.name || '').includes(ATTACK_TAB_MARKER)) return true
+            const root = document.documentElement || document.body
+            return !!root && String(root.getAttribute?.(ATTACK_TAB_ATTRIBUTE) || '') === '1'
         } catch (_) {
             return false
         }
@@ -186,6 +190,18 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
         } catch (_) { }
     }
 
+    function recordDomExecutionMarker(markerToken) {
+        const markerId = String(markerToken || '').trim()
+        if (!markerId) return
+        try {
+            const root = document.documentElement || document.body
+            const markerValue = String(root?.getAttribute?.(EXECUTION_MARKER_ATTRIBUTE) || '')
+            if (markerValue === markerId || markerValue.split(/\s+/).includes(markerId)) {
+                recordExecutionMarker(markerId)
+            }
+        } catch (_) { }
+    }
+
     function injectMainWorldWindowNameProbe(markerToken) {
         const markerId = String(markerToken || '').trim()
         if (!markerId) return false
@@ -215,11 +231,27 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
         const markerId = String(markerToken || '').trim()
         if (!markerId) return
         recordWindowNameExecutionMarker(markerId)
+        recordDomExecutionMarker(markerId)
         if (xssExecutionEvents.some((event) => event.id === markerId)) return
         if (injectMainWorldWindowNameProbe(markerId)) {
             await sleep(25)
             recordWindowNameExecutionMarker(markerId)
+            recordDomExecutionMarker(markerId)
         }
+    }
+
+    async function waitForExecutionMarker(markerToken, timeoutMs = 0) {
+        const markerId = String(markerToken || '').trim()
+        if (!markerId) return false
+        const bounded = Math.max(0, Math.min(1500, Number(timeoutMs) || 0))
+        const deadline = Date.now() + bounded
+        do {
+            await probeWindowNameExecutionMarker(markerId)
+            if (xssExecutionEvents.some((event) => event.id === markerId)) return true
+            if (Date.now() >= deadline) break
+            await sleep(50)
+        } while (true)
+        return xssExecutionEvents.some((event) => event.id === markerId)
     }
 
     window.addEventListener('message', (event) => {
@@ -267,8 +299,8 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
             if (context) {
                 await exerciseExecutableContext(context)
             }
-            await probeWindowNameExecutionMarker(markerToken)
-            const executed = xssExecutionEvents.some((event) => event.id === markerToken)
+            const markerWaitMs = Math.max(250, Math.min(1000, Number(settleMs) || 250))
+            const executed = await waitForExecutionMarker(markerToken, markerWaitMs)
             const reflected = !!context
             result.dom_xss = {
                 vulnerable: !!executed,
@@ -429,8 +461,7 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
     }
 
     async function buildExecutedSourceResult(markerToken, sourceContext) {
-        await probeWindowNameExecutionMarker(markerToken)
-        const executed = xssExecutionEvents.some((event) => event.id === markerToken)
+        const executed = await waitForExecutionMarker(markerToken, 750)
         const context = executed
             ? {
                 type: 'browser_source',

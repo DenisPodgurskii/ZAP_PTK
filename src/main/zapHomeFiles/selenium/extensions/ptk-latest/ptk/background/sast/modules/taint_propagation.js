@@ -274,6 +274,16 @@ function sourceIdForUrlSourceHint(hint) {
   }
 }
 
+function stableMemberStoreKey(node) {
+  if (!node || node.type !== "MemberExpression") return null;
+  const parts = memberChainParts(node);
+  if (!parts || parts.length < 2) return null;
+  const normalized = parts.map((part) => String(part || ""));
+  const first = normalized[0].toLowerCase();
+  if (GLOBAL_ASSIGNED_FN_BASES.has(first)) normalized[0] = "window";
+  return normalized.join(".");
+}
+
 function maybeMarkScriptFromCall(callNode, callName) {
   if (!callNode || !callName) return;
   const lower = callName.toLowerCase();
@@ -775,6 +785,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
   const returnPassthroughEnabled = hasReturnPassthrough(options.catalog || {});
   const sourceTaintKindMap = buildSourceTaintKindMap(options.modules || []);
   const fnIndex = buildFunctionIndex(ast);
+  const propertyStores = new Map();
 
   const fileCache = { map: new Map(), list: [] };
   const rootScope = { parent: null, bindings: new Map(), isFunctionScope: true };
@@ -1074,6 +1085,11 @@ export function buildGlobalTaintContext(ast, options = {}) {
         visit(node.right, scope, nextParents, activeFnStack);
         visit(node.left, scope, nextParents, activeFnStack);
         graph.addEdge(node.right, node.left, "assign");
+        const storeKey = stableMemberStoreKey(node.left);
+        if (storeKey) {
+          if (!propertyStores.has(storeKey)) propertyStores.set(storeKey, []);
+          propertyStores.get(storeKey).push(node.right);
+        }
         if (node.left.type === "Identifier") {
           bind(scope, node.left.name, node.left);
           if (node.right && (node.right.type === "FunctionExpression" || node.right.type === "ArrowFunctionExpression")) {
@@ -1105,6 +1121,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
       }
 
       case "MemberExpression": {
+        const isAssignmentTarget = parents[parents.length - 2]?.type === "AssignmentExpression" && parents[parents.length - 2].left === node;
         if (node.object?._ptkIsScript) node._ptkIsScript = true;
         if (node.object?._ptkIsURLInstance) node._ptkIsURLInstance = true;
         if (node.object?._ptkIsURLSearchParams) node._ptkIsURLSearchParams = true;
@@ -1113,6 +1130,13 @@ export function buildGlobalTaintContext(ast, options = {}) {
         if (node.property) visit(node.property, scope, nextParents, activeFnStack);
         if (node.object) graph.addEdge(node.object, node, "member");
         if (node.computed && node.property) graph.addEdge(node.property, node, "member");
+        if (!isAssignmentTarget) {
+          const storeKey = stableMemberStoreKey(node);
+          const stores = storeKey ? propertyStores.get(storeKey) : null;
+          if (stores && stores.length) {
+            stores.forEach((storedNode) => storedNode && graph.addEdge(storedNode, node, "property_store"));
+          }
+        }
         shouldWalkChildren = false;
         // Heuristic: message data origins (event.data / e.data / etc.)
         const propName = (!node.computed && node.property && node.property.type === "Identifier")

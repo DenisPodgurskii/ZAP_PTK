@@ -85,13 +85,23 @@ final class PtkUrlUtils {
         try {
             URI target = new URI(normalizedTarget);
             URI candidate = new URI(normalizedCandidate);
-            if (!target.getScheme().equalsIgnoreCase(candidate.getScheme())) {
+            String targetScheme = target.getScheme();
+            String candidateScheme = candidate.getScheme();
+            String targetHost = target.getHost();
+            String candidateHost = candidate.getHost();
+            if (targetScheme == null
+                    || candidateScheme == null
+                    || targetHost == null
+                    || candidateHost == null) {
                 return false;
             }
-            if (!target.getHost().equalsIgnoreCase(candidate.getHost())) {
+            if (!targetScheme.equalsIgnoreCase(candidateScheme)) {
                 return false;
             }
-            if (target.getPort() != candidate.getPort()) {
+            if (!targetHost.equalsIgnoreCase(candidateHost)) {
+                return false;
+            }
+            if (effectiveHttpPort(target) != effectiveHttpPort(candidate)) {
                 return false;
             }
             String candidatePath = candidate.getPath();
@@ -102,6 +112,21 @@ final class PtkUrlUtils {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    private static int effectiveHttpPort(URI uri) {
+        int port = uri.getPort();
+        if (port >= 0) {
+            return port;
+        }
+        String scheme = uri.getScheme();
+        if ("http".equalsIgnoreCase(scheme)) {
+            return 80;
+        }
+        if ("https".equalsIgnoreCase(scheme)) {
+            return 443;
+        }
+        return -1;
     }
 
     static String normalizeBrowserCoverageUrl(String targetUrl) {

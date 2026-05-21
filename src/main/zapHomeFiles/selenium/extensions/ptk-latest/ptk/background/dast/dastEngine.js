@@ -5914,13 +5914,61 @@ export class dastEngine {
         }
     }
 
+    async _probeBrowserNavMainWorldWindowName(tabId, markerToken) {
+        const markerId = String(markerToken || '').trim()
+        if (!tabId || !markerId || !browser?.scripting?.executeScript) return false
+        try {
+            const results = await browser.scripting.executeScript({
+                target: { tabId },
+                world: 'MAIN',
+                func: (marker) => {
+                    try {
+                        const token = `ptk-xss:${String(marker || '').trim()}`
+                        return !!token && String(window.name || '').includes(token)
+                    } catch (_) {
+                        return false
+                    }
+                },
+                args: [markerId]
+            })
+            return Array.isArray(results) && results.some((entry) => entry?.result === true)
+        } catch (_) {
+            return false
+        }
+    }
+
     async _runBrowserNavChecksInTab(tabId, task, taskContext, markerToken, checks, settleMs) {
-        return this._sendBrowserNavHarnessMessage(tabId, {
+        const result = await this._sendBrowserNavHarnessMessage(tabId, {
             type: 'browserNavRun',
             markerToken,
             checks,
             settleMs
         }, task, taskContext)
+        if (
+            this._normalizeBrowserNavChecks(checks).includes('dom_xss')
+            && !result?.dom_xss?.vulnerable
+            && await this._probeBrowserNavMainWorldWindowName(tabId, markerToken)
+        ) {
+            return Object.assign({}, result, {
+                dom_xss: {
+                    vulnerable: true,
+                    executed: true,
+                    reflected: false,
+                    sinkKey: null,
+                    context: {
+                        type: 'window_name_marker',
+                        sourceDriver: null,
+                        sourceKey: null,
+                        tag: null,
+                        attr: 'window.name',
+                        cssPath: null,
+                        outerHTML: null,
+                        snippet: `ptk-xss:${String(markerToken || '').trim()}`
+                    }
+                }
+            })
+        }
+        return result
     }
 
     async _reloadBrowserNavAttackTab(tabId, task, taskContext) {
@@ -5938,7 +5986,8 @@ export class dastEngine {
         } catch (_) { }
         await ready
         await this._markSpaAttackTab(tabId, {
-            marker: DAST_BROWSER_NAV_TAB_MARKER
+            marker: DAST_BROWSER_NAV_TAB_MARKER,
+            domOnly: true
         })
         await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
     }
@@ -5946,7 +5995,8 @@ export class dastEngine {
     async _waitForBrowserNavAttackTabNavigation(tabId, task, taskContext, timeoutMs = 4500) {
         await this._waitForTabReady(tabId, timeoutMs)
         await this._markSpaAttackTab(tabId, {
-            marker: DAST_BROWSER_NAV_TAB_MARKER
+            marker: DAST_BROWSER_NAV_TAB_MARKER,
+            domOnly: true
         })
         await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
     }
@@ -7030,7 +7080,8 @@ export class dastEngine {
             // Re-apply it on the real target page before the harness ping so the content
             // script can identify the page as a browser-nav attack tab.
             await this._markSpaAttackTab(tabId, {
-                marker: DAST_BROWSER_NAV_TAB_MARKER
+                marker: DAST_BROWSER_NAV_TAB_MARKER,
+                domOnly: true
             })
             childTabMeta = {
                 tabId,
@@ -7262,8 +7313,17 @@ export class dastEngine {
         if (!tabId) return
         const marker = opts.marker || 'ptk_spa_attack_tab'
         const runAt = opts.runAt || "document_start"
-        const code = (name) => {
+        const domOnly = opts.domOnly === true
+        const code = (name, markDomOnly) => {
             try {
+                const attrName = name === 'ptk_browser_nav_attack_tab'
+                    ? 'data-ptk-browser-nav-attack-tab'
+                    : 'data-ptk-spa-attack-tab'
+                const root = document.documentElement || document.body
+                if (root && typeof root.setAttribute === 'function') {
+                    root.setAttribute(attrName, '1')
+                }
+                if (markDomOnly) return
                 if (!window.name || !window.name.includes(name)) {
                     window.name = (window.name ? window.name + " " : "") + name
                 }
@@ -7274,7 +7334,7 @@ export class dastEngine {
                 await browser.scripting.executeScript({
                     target: { tabId, allFrames: true },
                     func: code,
-                    args: [marker]
+                    args: [marker, domOnly]
                 })
                 return
             } catch (_) { }
@@ -7282,7 +7342,7 @@ export class dastEngine {
         if (browser?.tabs?.executeScript) {
             try {
                 await browser.tabs.executeScript(tabId, {
-                    code: `try{var n=${JSON.stringify(marker)};if(!window.name||window.name.indexOf(n)===-1){window.name=(window.name?window.name+' ':'')+n;}}catch(_){}`,
+                    code: `try{var n=${JSON.stringify(marker)};var d=${JSON.stringify(domOnly)};var a=n==='ptk_browser_nav_attack_tab'?'data-ptk-browser-nav-attack-tab':'data-ptk-spa-attack-tab';var r=document.documentElement||document.body;if(r&&r.setAttribute){r.setAttribute(a,'1')}if(!d){if(!window.name||window.name.indexOf(n)===-1){window.name=(window.name?window.name+' ':'')+n;}}}catch(_){}`,
                     allFrames: true,
                     runAt
                 })

@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openqa.selenium.JavascriptExecutor;
@@ -268,6 +269,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     "--no-default-browser-check",
                     "--no-first-run");
     private static final int ZAP_HISTORY_SEED_MAX_URLS = 500;
+    private static final int ZAP_HISTORY_SEED_MAX_SITE_NODES = 10_000;
+    private static final long ZAP_HISTORY_SEED_CACHE_TTL_MS = 2_000L;
+    private static final long ZAP_HISTORY_SEED_FAILURE_LOG_INTERVAL_MS = 60_000L;
 
     private ClientCallBackImplementor callBackImplementor;
     private PtkOptionsPanel optionsPanel;
@@ -277,6 +281,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private volatile PtkResourcesLoader.LoadedPtkResources cachedResources;
     private volatile String cachedConfigKey;
     private volatile String cachedConfigJson;
+    private final Map<String, ZapHistorySeedCacheEntry> zapHistorySeedCache =
+            new ConcurrentHashMap<>();
+    private final AtomicLong lastZapHistorySeedFailureLogAtMs = new AtomicLong(0L);
 
     private final Map<String, Integer> scanProgress = new ConcurrentHashMap<>();
     private final Map<String, String> scanStatus = new ConcurrentHashMap<>();
@@ -306,6 +313,16 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private final Set<String> terminalProgressLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> sessionEstablishedLogged = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> closedZapIds = new ConcurrentHashMap<>();
+
+    private static final class ZapHistorySeedCacheEntry {
+        private final List<String> urls;
+        private final long createdAtMs;
+
+        private ZapHistorySeedCacheEntry(List<String> urls, long createdAtMs) {
+            this.urls = List.copyOf(urls);
+            this.createdAtMs = createdAtMs;
+        }
+    }
 
     public ExtensionPtk() {
         super("ExtensionPtk");
@@ -648,7 +665,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         if ((targetUrl == null || targetUrl.isBlank()) && zapid != null && !zapid.isBlank()) {
             targetUrl = targetUrlByZapId.get(zapid);
         }
-        List<String> urls = collectZapHistorySeedUrls(targetUrl, ZAP_HISTORY_SEED_MAX_URLS);
+        List<String> urls = getCachedZapHistorySeedUrls(targetUrl, ZAP_HISTORY_SEED_MAX_URLS);
         if (urls.isEmpty()) {
             return Map.of();
         }
@@ -674,6 +691,29 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         return value instanceof String ? (String) value : null;
     }
 
+    private List<String> getCachedZapHistorySeedUrls(String targetUrl, int maxUrls) {
+        if (maxUrls <= 0) {
+            return List.of();
+        }
+        String normalizedTarget = PtkUrlUtils.normalizeHttpUrlWithoutFragment(targetUrl);
+        String cacheKey =
+                (normalizedTarget != null ? normalizedTarget : "zap-context") + "#" + maxUrls;
+        long now = System.currentTimeMillis();
+        ZapHistorySeedCacheEntry cached = zapHistorySeedCache.get(cacheKey);
+        if (cached != null && now - cached.createdAtMs <= ZAP_HISTORY_SEED_CACHE_TTL_MS) {
+            return cached.urls;
+        }
+        List<String> urls = collectZapHistorySeedUrls(targetUrl, maxUrls);
+        zapHistorySeedCache.put(cacheKey, new ZapHistorySeedCacheEntry(urls, now));
+        zapHistorySeedCache
+                .entrySet()
+                .removeIf(
+                        entry ->
+                                now - entry.getValue().createdAtMs
+                                        > ZAP_HISTORY_SEED_CACHE_TTL_MS * 4);
+        return urls;
+    }
+
     private List<String> collectZapHistorySeedUrls(String targetUrl, int maxUrls) {
         String normalizedTarget = PtkUrlUtils.normalizeHttpUrlWithoutFragment(targetUrl);
         if (maxUrls <= 0) {
@@ -690,30 +730,86 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             }
             List<Context> contexts = Model.getSingleton().getSession().getContexts();
             Enumeration<?> nodes = root.preorderEnumeration();
-            while (nodes.hasMoreElements() && urls.size() < maxUrls) {
+            int visitedNodes = 0;
+            while (nodes.hasMoreElements()
+                    && urls.size() < maxUrls
+                    && visitedNodes < ZAP_HISTORY_SEED_MAX_SITE_NODES) {
+                visitedNodes++;
                 Object candidate = nodes.nextElement();
                 if (!(candidate instanceof SiteNode siteNode)) {
                     continue;
                 }
                 HistoryReference historyReference = siteNode.getHistoryReference();
-                if (historyReference == null || historyReference.getHttpMessage() == null) {
+                String url = getHistoryReferenceUrl(historyReference);
+                if (url == null) {
                     continue;
                 }
-                String url =
-                        historyReference.getHttpMessage().getRequestHeader().getURI().toString();
                 if (normalizedTarget != null) {
                     addZapHistorySeedUrl(urls, normalizedTarget, url, maxUrls);
                 } else {
                     addZapContextHistorySeedUrl(urls, contexts, url, maxUrls);
                 }
             }
+            if (nodes.hasMoreElements() && visitedNodes >= ZAP_HISTORY_SEED_MAX_SITE_NODES) {
+                LOGGER.debug(
+                        "PTK ZAP history seed collection reached node cap target={} cap={}",
+                        normalizedTarget != null ? normalizedTarget : "zap-context",
+                        ZAP_HISTORY_SEED_MAX_SITE_NODES);
+            }
         } catch (Exception e) {
-            LOGGER.warn(
-                    "PTK failed to collect ZAP history seed URLs for {}",
-                    normalizedTarget != null ? normalizedTarget : "zap-context",
-                    e);
+            logZapHistorySeedCollectionFailure(
+                    normalizedTarget != null ? normalizedTarget : "zap-context", e);
         }
         return new ArrayList<>(urls);
+    }
+
+    static List<String> collectZapHistorySeedUrlsFromCandidates(
+            String targetUrl, int maxUrls, Iterable<String> candidateUrls, List<Context> contexts) {
+        String normalizedTarget = PtkUrlUtils.normalizeHttpUrlWithoutFragment(targetUrl);
+        if (maxUrls <= 0) {
+            return List.of();
+        }
+        Set<String> urls = new LinkedHashSet<>();
+        if (normalizedTarget != null) {
+            addZapHistorySeedUrl(urls, normalizedTarget, normalizedTarget, maxUrls);
+        }
+        if (candidateUrls == null) {
+            return new ArrayList<>(urls);
+        }
+        for (String candidateUrl : candidateUrls) {
+            if (urls.size() >= maxUrls) {
+                break;
+            }
+            if (normalizedTarget != null) {
+                addZapHistorySeedUrl(urls, normalizedTarget, candidateUrl, maxUrls);
+            } else {
+                addZapContextHistorySeedUrl(urls, contexts, candidateUrl, maxUrls);
+            }
+        }
+        return new ArrayList<>(urls);
+    }
+
+    private static String getHistoryReferenceUrl(HistoryReference historyReference) {
+        if (historyReference == null) {
+            return null;
+        }
+        try {
+            org.apache.commons.httpclient.URI uri = historyReference.getURI();
+            return uri != null ? uri.toString() : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private void logZapHistorySeedCollectionFailure(String scope, Exception error) {
+        long now = System.currentTimeMillis();
+        long last = lastZapHistorySeedFailureLogAtMs.get();
+        if (now - last >= ZAP_HISTORY_SEED_FAILURE_LOG_INTERVAL_MS
+                && lastZapHistorySeedFailureLogAtMs.compareAndSet(last, now)) {
+            LOGGER.warn("PTK failed to collect ZAP history seed URLs for {}", scope, error);
+        } else {
+            LOGGER.debug("PTK failed to collect ZAP history seed URLs for {}", scope, error);
+        }
     }
 
     private static void addZapHistorySeedUrl(
