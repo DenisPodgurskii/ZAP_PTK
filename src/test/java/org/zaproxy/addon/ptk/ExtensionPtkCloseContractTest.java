@@ -171,7 +171,7 @@ class ExtensionPtkCloseContractTest {
         closeDecision.put("zapProgressTerminalPosted", false);
         closeDecision.put("stopRequested", true);
         assertEquals(
-                true,
+                false,
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 67, "running"));
 
         closeDecision.put("stopRequested", false);
@@ -181,16 +181,22 @@ class ExtensionPtkCloseContractTest {
     }
 
     @Test
-    void closeDecisionAcceptsAlreadyTerminalStateBeforeProgressMapUpdates() {
+    void closeDecisionRejectsAlreadyTerminalStateWhenJavaProgressStillRuns() {
         Map<String, Object> closeDecision = new LinkedHashMap<>();
         closeDecision.put("decision", "safe_to_close");
         closeDecision.put("scanState", "completed");
         closeDecision.put("reason", "already_terminal");
 
         assertEquals(
+                false,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 35, "running"));
+
+        closeDecision.put("zapProgressTerminalPosted", true);
+        assertEquals(
                 true,
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 35, "running"));
 
+        closeDecision.put("zapProgressTerminalPosted", false);
         closeDecision.put("reason", "close_requested");
         assertEquals(
                 false,

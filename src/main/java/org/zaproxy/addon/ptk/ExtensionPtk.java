@@ -227,9 +227,6 @@ final class PtkCloseContract {
             return false;
         }
         String reason = getString(closeDecision, "reason");
-        if ("already_terminal".equals(reason)) {
-            return true;
-        }
         if (Boolean.TRUE.equals(closeDecision.get("zapProgressTerminalPosted"))) {
             return true;
         }
@@ -239,7 +236,7 @@ final class PtkCloseContract {
                 return true;
             }
         }
-        return Boolean.TRUE.equals(closeDecision.get("stopRequested"));
+        return false;
     }
 
     private static String getString(Map<String, Object> map, String key) {
