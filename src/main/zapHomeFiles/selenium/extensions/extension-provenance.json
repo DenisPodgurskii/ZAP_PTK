@@ -3,20 +3,20 @@
   "packageName": "ZAP_PTK",
   "extensionVersion": "9.9.5",
   "manifestVersion": 3,
-  "createdAt": "2026-05-22T12:44:04.751Z",
+  "createdAt": "2026-05-22T15:32:31.342Z",
   "source": {
     "crx": "ptk-latest.crx",
     "xpi": "ptk-latest.xpi"
   },
   "hashes": {
-    "crxSha256": "35dee40ec0cf516b03a220d9f20ddfc90b8ac099cea1b003d4fd14624fbf54ef",
-    "xpiSha256": "e161e11a85b3deadc7c03e0b11c4bd8f80802be50044988cf64177335998640c",
+    "crxSha256": "294112ab8b9eeed6668ee8150cf51249f50fc7fdb5ce6015f164603712379280",
+    "xpiSha256": "cd537ca115bd0b7af58f24f347849646d6d2224c9fff264e15112c619eede5a8",
     "manifestSha256": "a0d7f931763dfe38e00662fdf5186f6c31d31c5e558d06b2ac7bbcbb378c7c24",
-    "unpackedTreeSha256": "7b7dbbbd1d4a1122ac540f167bfeff60f419c877c092adfa66d07c31a110823d"
+    "unpackedTreeSha256": "6689d4f70f2d521c0e2faac3114c181ffe836c142a1426dcd939a7dbba06c4e0"
   },
   "sizes": {
-    "crxBytes": 9508969,
-    "xpiBytes": 9465105
+    "crxBytes": 9509637,
+    "xpiBytes": 9465772
   },
   "paths": {
     "chromiumUnpacked": "selenium/extensions/ptk-latest",

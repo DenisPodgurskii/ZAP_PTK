@@ -44,7 +44,8 @@ const DAST_BROWSER_NAV_HARNESS_SCRIPT_ID = "ptk-dast-browser-nav-harness"
 const DAST_BROWSER_NAV_TAB_MARKER = "ptk_browser_nav_attack_tab"
 const DAST_BROWSER_NAV_DEFAULT_SETTLE_MS = 900
 const DAST_BROWSER_NAV_SUPPORTED_CHECKS = new Set([
-    "dom_xss"
+    "dom_xss",
+    "template_marker"
 ])
 const DAST_BROWSER_NAV_SOURCE_DRIVERS = new Set([
     "cookie",
@@ -5779,6 +5780,28 @@ export class dastEngine {
         return normalized.length ? normalized : ['dom_xss']
     }
 
+    _browserNavVulnerableCheck(response, checks = []) {
+        if (!response || typeof response !== 'object') return null
+        for (const checkName of this._normalizeBrowserNavChecks(checks)) {
+            const result = response?.[checkName]
+            if (result?.vulnerable) {
+                return {
+                    name: checkName,
+                    result
+                }
+            }
+        }
+        return null
+    }
+
+    _browserNavCheckSummary(response, checks = []) {
+        const summary = {}
+        for (const checkName of this._normalizeBrowserNavChecks(checks)) {
+            summary[checkName] = !!response?.[checkName]?.vulnerable
+        }
+        return summary
+    }
+
     _normalizeBrowserNavSourceDrivers(values = []) {
         return Array.from(new Set(
             (Array.isArray(values) ? values : [values])
@@ -6001,8 +6024,8 @@ export class dastEngine {
         await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
     }
 
-    _buildBrowserNavAttackResult(task, payload, uiUrl, attacked, checks, markerToken, domXss, runtimeMode, sourceInfo = null) {
-        const sinkKey = domXss.sinkKey ? `${uiUrl}|${domXss.sinkKey}` : null
+    _buildBrowserNavAttackResult(task, payload, uiUrl, attacked, checks, markerToken, checkResult, runtimeMode, sourceInfo = null, checkName = 'dom_xss') {
+        const sinkKey = checkResult.sinkKey ? `${uiUrl}|${checkResult.sinkKey}` : null
         if (sinkKey && this._browserNavSeenSinks?.has(sinkKey)) {
             return { duplicate: true, sinkKey }
         }
@@ -6018,19 +6041,21 @@ export class dastEngine {
                 attacked,
                 checks,
                 markerToken,
-                executed: !!domXss.executed,
-                reflected: !!domXss.reflected,
-                context: domXss.context || null,
+                browserNavCheck: checkName,
+                executed: !!checkResult.executed,
+                reflected: !!checkResult.reflected,
+                context: checkResult.context || null,
                 sinkKey: sinkKey || null,
                 runtimeMode
             },
             sourceInfo ? { browserSource: sourceInfo } : {}
         )
         const proof = JSON.stringify({
-            executed: !!domXss.executed,
-            reflected: !!domXss.reflected,
+            check: checkName,
+            executed: !!checkResult.executed,
+            reflected: !!checkResult.reflected,
             sinkKey: sinkKey || null,
-            context: domXss.context || null,
+            context: checkResult.context || null,
             source: sourceInfo || null
         })
 
@@ -6088,7 +6113,7 @@ export class dastEngine {
                         settleMs: options.settleMs,
                         payload: payloadValue
                     }, task, taskContext)
-                    if (submitted?.dom_xss?.vulnerable) {
+                    if (this._browserNavVulnerableCheck(submitted, options.checks)) {
                         return {
                             res: submitted,
                             sourceInfo: submitted.sourceContext || {
@@ -6185,7 +6210,7 @@ export class dastEngine {
                             originalValue
                         }, task, taskContext).catch(() => null)
                     }
-                    if (res?.dom_xss?.vulnerable) {
+                    if (this._browserNavVulnerableCheck(res, options.checks)) {
                         return {
                             res,
                             sourceInfo: {
@@ -6201,11 +6226,11 @@ export class dastEngine {
                 }
             })
 
-            const domXss = result?.res?.dom_xss
-            if (domXss?.vulnerable) {
+            const check = this._browserNavVulnerableCheck(result?.res, options.checks)
+            if (check?.result?.vulnerable) {
                 return {
                     uiUrl,
-                    domXss,
+                    check,
                     sourceInfo: result.sourceInfo || { driver }
                 }
             }
@@ -6282,11 +6307,13 @@ export class dastEngine {
         }
 
         try {
-            let domXss = null
+            let browserNavCheck = null
+            let browserNavResponse = null
             if (attackedLocation === 'query') {
                 const res = await this._withBrowserNavAttackTab(uiUrl, (tabId) => (
                     this._runBrowserNavChecksInTab(tabId, task, taskContext, markerToken, checks, settleMs)
                 ))
+                browserNavResponse = res
                 if (this._spaResponseMissingChecks(res, checks)) {
                     this._appendTaskRuntimeEvent(task, taskContext, {
                         type: 'dast_browser_nav_filtered',
@@ -6296,10 +6323,10 @@ export class dastEngine {
                     })
                     return null
                 }
-                domXss = res?.dom_xss || null
+                browserNavCheck = this._browserNavVulnerableCheck(res, checks)
             }
 
-            if (domXss?.vulnerable) {
+            if (browserNavCheck?.result?.vulnerable) {
                 const built = this._buildBrowserNavAttackResult(
                     task,
                     payload,
@@ -6307,8 +6334,10 @@ export class dastEngine {
                     attacked,
                     checks,
                     markerToken,
-                    domXss,
-                    'browser_nav'
+                    browserNavCheck.result,
+                    'browser_nav',
+                    null,
+                    browserNavCheck.name
                 )
                 if (built?.duplicate) {
                     this._appendTaskRuntimeEvent(task, taskContext, {
@@ -6332,7 +6361,7 @@ export class dastEngine {
                     ? payload.metadata.browserSource.cookieEncoding
                     : browserNavCfg.cookieEncoding
             })
-            if (sourceResult?.domXss?.vulnerable) {
+            if (sourceResult?.check?.result?.vulnerable) {
                 const sourceAttacked = Object.assign({}, attacked || {}, {
                     location: 'browser_source',
                     name: sourceResult.sourceInfo?.key || sourceResult.sourceInfo?.driver || 'browser_source',
@@ -6346,9 +6375,10 @@ export class dastEngine {
                     sourceAttacked,
                     checks,
                     markerToken,
-                    sourceResult.domXss,
+                    sourceResult.check.result,
                     'browser_source',
-                    sourceResult.sourceInfo
+                    sourceResult.sourceInfo,
+                    sourceResult.check.name
                 )
                 if (built?.duplicate) {
                     this._appendTaskRuntimeEvent(task, taskContext, {
@@ -6366,7 +6396,7 @@ export class dastEngine {
                 type: 'dast_browser_nav_filtered',
                 phase: 'attack_eval',
                 reason: 'no_vulnerability_match',
-                checks: { dom_xss: !!domXss?.vulnerable },
+                checks: this._browserNavCheckSummary(browserNavResponse, checks),
                 sourceDrivers
             })
             return null
