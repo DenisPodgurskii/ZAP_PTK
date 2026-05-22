@@ -202,42 +202,11 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
         } catch (_) { }
     }
 
-    function injectMainWorldWindowNameProbe(markerToken) {
-        const markerId = String(markerToken || '').trim()
-        if (!markerId) return false
-        try {
-            const doc = document
-            const root = doc?.documentElement || doc?.head || doc?.body
-            if (!doc?.createElement || !root?.appendChild) return false
-            const script = doc.createElement('script')
-            const markerJson = JSON.stringify(markerId)
-            const tokenJson = JSON.stringify(`ptk-xss:${markerId}`)
-            script.textContent = [
-                'try{',
-                `var t=${tokenJson};`,
-                `if(String(window.name||'').indexOf(t)!==-1){window.postMessage({source:'ptk-xss',id:${markerJson}},'*');}`,
-                '}catch(_){}'
-            ].join('')
-            root.appendChild(script)
-            if (typeof script.remove === 'function') script.remove()
-            else if (script.parentNode && typeof script.parentNode.removeChild === 'function') script.parentNode.removeChild(script)
-            return true
-        } catch (_) {
-            return false
-        }
-    }
-
     async function probeWindowNameExecutionMarker(markerToken) {
         const markerId = String(markerToken || '').trim()
         if (!markerId) return
         recordWindowNameExecutionMarker(markerId)
         recordDomExecutionMarker(markerId)
-        if (xssExecutionEvents.some((event) => event.id === markerId)) return
-        if (injectMainWorldWindowNameProbe(markerId)) {
-            await sleep(25)
-            recordWindowNameExecutionMarker(markerId)
-            recordDomExecutionMarker(markerId)
-        }
     }
 
     async function waitForExecutionMarker(markerToken, timeoutMs = 0) {

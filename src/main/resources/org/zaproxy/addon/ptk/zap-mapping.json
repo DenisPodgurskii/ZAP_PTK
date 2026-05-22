@@ -144,30 +144,6 @@
           }
         },
         {
-          "moduleId": "dom_xss_url_params",
-          "baseAlertId": 200022,
-          "rules": {
-            "dom_xss_url_params_html_img_onerror": 1,
-            "dom_xss_url_params_attr_breakout": 2,
-            "dom_xss_url_params_js_double_quote_breakout": 3,
-            "dom_xss_url_params_js_single_quote_breakout": 4,
-            "dom_xss_url_params_js_template_literal_breakout": 5,
-            "dom_xss_url_params_js_expression": 6,
-            "dom_xss_url_params_js_regex_breakout": 7,
-            "dom_xss_url_params_js_comment_breakout": 8,
-            "dom_xss_url_params_js_script_tag_breakout": 9,
-            "dom_xss_url_params_event_handler_value": 10,
-            "dom_xss_url_params_attribute_name_event": 11,
-            "dom_xss_url_params_attr_double_quote_event": 12,
-            "dom_xss_url_params_attr_double_quote_onerror": 13,
-            "dom_xss_url_params_attr_single_quote_event": 14,
-            "dom_xss_url_params_attr_unquoted_event": 15,
-            "dom_xss_url_params_tagname_svg_event": 16,
-            "dom_xss_url_params_href_javascript_url": 17,
-            "dom_xss_url_params_style_text_breakout": 18
-          }
-        },
-        {
           "moduleId": "websocket_security",
           "baseAlertId": 200008,
           "rules": {

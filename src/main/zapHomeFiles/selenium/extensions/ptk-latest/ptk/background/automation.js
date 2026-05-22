@@ -679,6 +679,62 @@ export class ptk_automation {
         return this.sessions.get(sessionId) || null
     }
 
+    _hasActiveSessionInAnyTab() {
+        for (const session of this.sessions.values()) {
+            if (this._isActiveSessionStatus(session?.status)) return true
+        }
+        return false
+    }
+
+    _isPtkChildTab(tabId) {
+        if (!Number.isInteger(tabId)) return false
+        for (const record of this.ptkChildTabRecords.values()) {
+            if (Number(record?.tabId) === tabId) return true
+        }
+        return false
+    }
+
+    _getDastController() {
+        return this.app?.dast || this.app?.rattacker || null
+    }
+
+    _isBrowserEngineScanRunningForTab(tabId) {
+        if (!Number.isInteger(tabId)) return false
+
+        const dast = this._getDastController()
+        if (dast?.sessionCoordinator?.isRunningForTab?.(tabId) === true) return true
+        if (dast?.engine?.isRunning === true && Number(dast.engine.tabId) === tabId) return true
+
+        const iast = this.app?.iast || null
+        if (iast?.isTrackedScanTab?.(tabId) === true) return true
+        if (iast?.isScanRunning === true && Number(iast?.scanResult?.tabId) === tabId) return true
+
+        const sast = this.app?.sast || null
+        if (sast?.isScanRunning === true && Number(sast?.activeTabId) === tabId) return true
+        if (sast?.sessionCoordinator?.isScanRunning === true && Number(sast.sessionCoordinator.activeTabId) === tabId) return true
+
+        const sca = this.app?.sca || null
+        if (sca?.isScanRunning === true && Number(sca?.activeTabId) === tabId) return true
+
+        return false
+    }
+
+    _hasBrowserEngineScanRunningInAnyTab() {
+        const dast = this._getDastController()
+        if (dast?.engine?.isRunning === true) return true
+
+        const iast = this.app?.iast || null
+        if (iast?.isScanRunning === true) return true
+
+        const sast = this.app?.sast || null
+        if (sast?.isScanRunning === true || sast?.sessionCoordinator?.isScanRunning === true) return true
+
+        const sca = this.app?.sca || null
+        if (sca?.isScanRunning === true) return true
+
+        return false
+    }
+
     _isZapManagedActiveSessionForTab(tabId) {
         const session = this._getSessionForTab(tabId)
         if (!session || session.source !== 'zap') return false
@@ -845,6 +901,8 @@ export class ptk_automation {
                 })
             }
         }
+        // Target observations grant automation only after zapTransport accepts
+        // the URL as scoped to the active ZAP target.
         const profile = this._getContentRuntimeProfile({ tabId, frameId, url, zapTargetObserved })
         const files = CONTENT_RUNTIME_FILES[profile.script] || []
         const useStaticFirefoxManualRuntime = profile.script === CONTENT_RUNTIME_SCRIPT_MANUAL && this._isFirefoxRuntime()
@@ -868,6 +926,53 @@ export class ptk_automation {
         }
 
         return profile
+    }
+
+    handleManualAutomationAuthorization(message = {}, sender = {}) {
+        const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
+        const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
+        const url = typeof message?.url === 'string'
+            ? message.url
+            : (typeof sender?.url === 'string' ? sender.url : '')
+
+        if (!this.isAutomationEnabled()) {
+            return { ok: true, allowed: false, reason: 'automation_disabled' }
+        }
+
+        if (!Number.isInteger(tabId)) {
+            return { ok: true, allowed: false, reason: 'no_tab_context' }
+        }
+
+        const session = this._getSessionForTab(tabId)
+        if (session && this._isActiveSessionStatus(session.status)) {
+            return { ok: true, allowed: true, reason: 'active_session_tab', tabId, frameId, sessionId: session.id }
+        }
+
+        if (this._isPtkChildTab(tabId)) {
+            return { ok: true, allowed: true, reason: 'ptk_child_tab', tabId, frameId }
+        }
+
+        if (this._isBrowserEngineScanRunningForTab(tabId)) {
+            return { ok: true, allowed: true, reason: 'browser_scan_tab', tabId, frameId }
+        }
+
+        const transport = this.zap?.transport || null
+        const detectedPayload = transport?.getLastDetectedPayload?.() || null
+        const detectedTabId = Number.isInteger(detectedPayload?.tabId) ? detectedPayload.tabId : null
+        if (Number.isInteger(detectedTabId) && detectedTabId === tabId) {
+            return { ok: true, allowed: true, reason: 'zap_detected_tab', tabId, frameId }
+        }
+        if (transport?.isBootstrapUrl?.(url) === true) {
+            return { ok: true, allowed: true, reason: 'zap_bootstrap_url', tabId, frameId }
+        }
+
+        if (this._hasActiveSessionInAnyTab() || this._hasBrowserEngineScanRunningInAnyTab()) {
+            return { ok: true, allowed: false, reason: 'other_scan_active', tabId, frameId }
+        }
+
+        // Preserve PTK_AGENT/SDK startup: before the first session exists, the
+        // intended page must be able to expose the agent so it can start one.
+        return { ok: true, allowed: true, reason: 'bootstrap_no_active_session', tabId, frameId }
     }
 
     _getZapTimingForSession(session = null) {
