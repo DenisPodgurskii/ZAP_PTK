@@ -231,15 +231,13 @@ class ExtensionPtkCloseContractTest {
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
         assertEquals(
                 false,
-                PtkCloseContract.canAcceptCloseDecisionSafeToClose(
-                        closeDecision, 100, "running"));
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 100, "running"));
 
         closeDecision.put("scanState", "completed");
         closeDecision.put("zapProgressTerminalPosted", true);
         assertEquals(
                 true,
-                PtkCloseContract.canAcceptCloseDecisionSafeToClose(
-                        closeDecision, 99, "running"));
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
     }
 
     @Test
@@ -250,20 +248,17 @@ class ExtensionPtkCloseContractTest {
         closeDecision.put("reason", "no_active_browser_work");
         closeDecision.put("stopRequested", false);
 
-        assertEquals(
-                true, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
+        assertEquals(true, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
         assertEquals(
                 false,
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
 
         closeDecision.put("stopRequested", true);
-        assertEquals(
-                false, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
+        assertEquals(false, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
 
         closeDecision.put("stopRequested", false);
         closeDecision.put("reason", "ptk_active_work");
-        assertEquals(
-                false, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
+        assertEquals(false, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
     }
 
     @Test
