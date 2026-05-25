@@ -268,7 +268,7 @@ class EngineAdapter {
                 dastSettings.cveRulepack = options.cveRulepack
             }
             // Use startAutomationSession for proper session tracking
-            await dast.startAutomationSession({
+            return await dast.startAutomationSession({
                 sessionId,
                 tabId,
                 host,
@@ -1742,7 +1742,33 @@ export class ptk_automation {
         }
 
         let zapCloseProgress = {}
+        let zapCloseContext = null
         if (isZapBrowserCloseOptions(options)) {
+            const requestTabId = Number.isInteger(tabId) ? tabId : null
+            const sessionTabId = Number.isInteger(resolution.session?.tabId) ? resolution.session.tabId : null
+            const senderUrl = toNonEmptyString(sender?.tab?.url)
+                || toNonEmptyString(options?.currentUrl)
+                || null
+            const targetUrl = toNonEmptyString(resolution.session?.targetUrl)
+                || toNonEmptyString(resolution.session?.pageUrl)
+                || null
+            const sameTab = requestTabId !== null && sessionTabId !== null && requestTabId === sessionTabId
+            const matchesTargetUrl = Boolean(
+                senderUrl
+                && targetUrl
+                && isHttpPageUrl(senderUrl)
+                && isHttpPageUrl(targetUrl)
+                && sameDocumentUrl(senderUrl, targetUrl, targetUrl)
+            )
+            zapCloseContext = {
+                requestTabId,
+                sessionTabId,
+                sameTab,
+                currentUrl: senderUrl,
+                targetUrl,
+                matchesTargetUrl,
+                shouldStopSession: sameTab || matchesTargetUrl
+            }
             const terminalStatus = ['none', 'completed', 'error', 'timeout', 'cancelled']
             let zapProgressTerminalPosted = this.zap?.transport?.isSessionTerminal?.({
                 zapid: options?.zapid,
@@ -1771,7 +1797,8 @@ export class ptk_automation {
                 zapProgressTerminalPosted,
                 zapProgressTerminalDetails: this.zap?.transport?.getSessionTerminalDetails?.() || null,
                 zapTerminalPost,
-                zapPublisherDrain: await this._getZapPublisherDrainState()
+                zapPublisherDrain: await this._getZapPublisherDrainState(),
+                zapCloseContext
             }
         }
 

@@ -52,6 +52,7 @@ Important close-decision states:
 |---|---|
 | `safe_to_close` + `terminal_after_stop` | PTK stopped and reached terminal state during close. |
 | `safe_to_close` + `already_terminal` | PTK was already terminal before the close request completed. |
+| `browser_tab_safe_to_close` + `no_active_browser_work` | The current WebDriver tab has no PTK browser-local work left and may close, but this is not global PTK session terminal evidence. |
 | `wait` + `close_requested` | PTK accepted stop, but Java should keep waiting for terminal progress. |
 | `not_applicable` + `automation_disabled` | The page bridge did not expose PTK automation for the current tab. Treat this as a startup/session issue, not as a finding issue. |
 | `forced_closed` | ZAP exhausted the close budget. This is a lifecycle warning even if findings were imported. |
@@ -104,6 +105,7 @@ Important close states are:
 | State | Meaning |
 |---|---|
 | `safe_to_close` | PTK reported terminal progress or an accepted safe close decision after ZAP requested close. |
+| `browser_tab_safe_to_close` | ZAP can close the current browser tab without treating the whole PTK scan as terminal. |
 | `forced_closed` | ZAP exhausted the bounded close budget and closed the browser without terminal PTK evidence. |
 | `engine_incomplete` | PTK stopped but at least one engine reported incomplete/cancelled work. Treat findings as usable only with lifecycle warning. |
 | `completionStatus` | PTK engine completion status returned by the browser-side close decision. |

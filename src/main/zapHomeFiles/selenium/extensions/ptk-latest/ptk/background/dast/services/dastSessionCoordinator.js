@@ -39,7 +39,7 @@ function withTimeout(promise, timeoutMs) {
     let timer = null
     return Promise.race([
         Promise.resolve(promise)
-            .then(() => ({ timedOut: false }))
+            .then(value => ({ timedOut: false, value }))
             .catch(error => ({ timedOut: false, error })),
         new Promise(resolve => {
             timer = setTimeout(() => resolve({ timedOut: true }), boundedMs)
@@ -272,7 +272,6 @@ export class DastSessionCoordinator {
             resolvedSettings.policyCode = policyCode
         }
         this.runBackgroundScan(tabId, host, domains || host, resolvedSettings)
-        this._seedZapAutomationRequests(tabId, resolvedSettings)
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks({
                 sessionId,
@@ -280,7 +279,11 @@ export class DastSessionCoordinator {
                 onTaskFinished: hooks?.onTaskFinished
             })
         }
-        return { success: true }
+        this._seedZapAutomationRequests(tabId, resolvedSettings)
+        return {
+            success: true,
+            seed: null
+        }
     }
 
     _seedZapAutomationRequests(tabId, settings = {}) {

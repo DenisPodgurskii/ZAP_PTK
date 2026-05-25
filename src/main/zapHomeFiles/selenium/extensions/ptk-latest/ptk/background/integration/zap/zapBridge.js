@@ -23,10 +23,10 @@ const ZAP_PASSIVE_ENGINE_IDLE_GRACE_MS = 8000
 const ZAP_TARGET_ACTIVITY_QUIET_GRACE_MS = 2500
 const ZAP_PROGRESS_FLUSH_TIMEOUT_MS = 3000
 const ZAP_PROGRESS_DRAIN_MAX_PASSES = 4
-// Mirrors the ZAP add-on close-contract PTK stop budget. Keep this documented
-// here because the browser extension can receive closeRequested before Java's
-// WebDriver close script runs; changing the add-on value should be reviewed
-// alongside this cap.
+// Mirrors the ZAP add-on close-contract PTK stop budget for legacy
+// closeRequested progress controls. Normal ZAP browser-close handling now uses
+// the WebDriver close-decision script instead of progress callbacks to avoid
+// stopping an active scan while ZAP is merely trying to close a browser tab.
 const ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS = 25000
 const ZAP_PROGRESS_STATUS_READY = 'ready'
 const ZAP_PROGRESS_STATUS_CALLBACK = 'callback'
