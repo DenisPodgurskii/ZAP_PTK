@@ -35,8 +35,10 @@ import org.zaproxy.addon.automation.AutomationProgress;
 import org.zaproxy.addon.automation.ContextWrapper;
 import org.zaproxy.addon.client.ClientOptions;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
+import org.zaproxy.addon.client.internal.ClientMap;
 import org.zaproxy.addon.client.spider.ClientSpider;
-import org.zaproxy.zap.ZAP;
+import org.zaproxy.addon.client.spider.ScanOptions;
+import org.zaproxy.addon.commonlib.ExtensionCommonlib;
 import org.zaproxy.zap.extension.selenium.ExtensionSelenium;
 import org.zaproxy.zap.model.Context;
 
@@ -676,14 +678,37 @@ class PtkBrowserCoverageJob extends AutomationJob {
             throw new IllegalStateException("Selenium add-on unavailable");
         }
         ClientOptions options = createClientOptions();
-        ClientSpider spider = new ClientSpider(client, target.url, target.url, options, 0);
-        detachClientSpiderEventConsumer(spider);
+        ClientSpider spider =
+                new ClientSpider(
+                        client,
+                        getClientMap(client),
+                        target.url,
+                        target.url,
+                        options,
+                        ScanOptions.builder().build(),
+                        Control.getSingleton()
+                                .getExtensionLoader()
+                                .getExtension(ExtensionCommonlib.class)
+                                .getValueProvider(),
+                        0);
         Object process = spider.getWebDriverProcess();
         WebDriver driver = extractWebDriver(process);
         if (driver == null) {
             throw new IllegalStateException("ClientSpider returned no WebDriver");
         }
         return new DirectBrowser(spider, process, driver);
+    }
+
+    private static ClientMap getClientMap(ExtensionClientIntegration client) {
+        try {
+            return (ClientMap) client.getClass().getDeclaredField("clientTree").get(client);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            LOGGER.warn(
+                    "PTK_REFLECTION_FALLBACK component=client-spider-map reason={}",
+                    e.getMessage());
+            throw new IllegalStateException(
+                    "Failed to read ClientMap from the ExtensionClientIntegration", e);
+        }
     }
 
     private static WebDriver extractWebDriver(Object process) {
@@ -1277,7 +1302,6 @@ class PtkBrowserCoverageJob extends AutomationJob {
         if (spider == null) {
             return;
         }
-        detachClientSpiderEventConsumer(spider);
         try {
             var unload = ClientSpider.class.getDeclaredMethod("unload");
             unload.setAccessible(true);
@@ -1289,13 +1313,6 @@ class PtkBrowserCoverageJob extends AutomationJob {
                     "PTK_REFLECTION_FALLBACK component=client-spider-unload reason={}",
                     e.getMessage());
         }
-    }
-
-    private static void detachClientSpiderEventConsumer(ClientSpider spider) {
-        if (spider == null) {
-            return;
-        }
-        ZAP.getEventBus().unregisterConsumer(spider, CLIENT_MAP_EVENT_SOURCE);
     }
 
     private static String safeCurrentUrl(WebDriver driver) {

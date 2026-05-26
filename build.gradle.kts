@@ -24,37 +24,6 @@ if (diagnosticBuild) {
     version = "${project.version}-diagnostic"
 }
 
-val automationVersion = "0.60.0"
-val automationZapFile =
-    layout.buildDirectory.file("zap-addons/automation-beta-$automationVersion.zap")
-val automationZapUrl =
-    "https://github.com/zaproxy/zap-extensions/releases/download/" +
-        "automation-v$automationVersion/automation-beta-$automationVersion.zap"
-
-// Diagnostic-only classpath workaround until the Automation add-on is available as a Maven dependency.
-val downloadAutomationZap =
-    if (diagnosticBuild) {
-        tasks.register("downloadAutomationZap") {
-            inputs.property("automationVersion", automationVersion)
-            inputs.property("automationZapUrl", automationZapUrl)
-            outputs.file(automationZapFile)
-            outputs.upToDateWhen { automationZapFile.get().asFile.isFile }
-            doLast {
-                val outputFile = automationZapFile.get().asFile
-                outputFile.parentFile.mkdirs()
-                ant.withGroovyBuilder {
-                    "get"(
-                        "src" to automationZapUrl,
-                        "dest" to outputFile,
-                        "usetimestamp" to true,
-                    )
-                }
-            }
-        }
-    } else {
-        null
-    }
-
 description = "Adds the OWASP PTK extension to browsers launched from ZAP."
 
 zapAddOn {
@@ -78,10 +47,11 @@ zapAddOn {
             addOns {
                 if (diagnosticBuild) {
                     register("automation")
+                    register("commonlib")
                 }
                 register("selenium")
                 register("client") {
-                    version.set(">=0.21.0")
+                    version.set(">=0.25.0")
                 }
             }
         }
@@ -103,26 +73,31 @@ sourceSets {
     }
 }
 
+val zapAddOn by configurations.creating
+
+configurations {
+    "compileOnly" {
+        extendsFrom(zapAddOn)
+    }
+
+    "testImplementation" {
+        extendsFrom(zapAddOn)
+    }
+}
+
 dependencies {
-    compileOnly("com.fasterxml.jackson.core:jackson-annotations:2.20")
-    compileOnly("org.zaproxy.addon:client:0.22.0-SNAPSHOT")
-    compileOnly("org.zaproxy.addon:selenium:15.43.0")
+    if (diagnosticBuild) {
+        zapAddOn("org.zaproxy.addon:automation:0.60.0")
+        zapAddOn("org.zaproxy.addon:commonlib:1.40.0")
+    }
+    zapAddOn("org.zaproxy.addon:client:0.25.0")
+    zapAddOn("org.zaproxy.addon:selenium:15.43.0")
     compileOnly("org.projectlombok:lombok:1.18.34")
     annotationProcessor("org.projectlombok:lombok:1.18.34")
     implementation("com.google.code.gson:gson:2.10.1")
+
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
-    testCompileOnly("com.fasterxml.jackson.core:jackson-annotations:2.20")
-    testCompileOnly("org.zaproxy.addon:client:0.22.0-SNAPSHOT")
-    testCompileOnly("org.zaproxy.addon:selenium:15.43.0")
-    testRuntimeOnly("com.fasterxml.jackson.core:jackson-annotations:2.20")
-    testRuntimeOnly("org.zaproxy.addon:client:0.22.0-SNAPSHOT")
-    testRuntimeOnly("org.zaproxy.addon:selenium:15.43.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-    if (diagnosticBuild) {
-        compileOnly(files(automationZapFile))
-        testCompileOnly(files(automationZapFile))
-        testRuntimeOnly(files(automationZapFile))
-    }
 }
 
 java {
@@ -132,7 +107,6 @@ java {
 }
 
 tasks.withType<JavaCompile>().configureEach {
-    downloadAutomationZap?.let { dependsOn(it) }
     val lintFlags = mutableListOf("-processing")
     if (JavaVersion.current().getMajorVersion() >= "21") {
         lintFlags.add("-this-escape")
