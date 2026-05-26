@@ -253,6 +253,12 @@ class ExtensionPtkCloseContractTest {
                 false,
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
 
+        closeDecision.put("reason", "non_owner_active_work");
+        assertEquals(true, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
+        assertEquals(
+                false,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
+
         closeDecision.put("stopRequested", true);
         assertEquals(false, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
 

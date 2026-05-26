@@ -264,7 +264,7 @@ final class PtkCloseContract {
             return false;
         }
         String reason = getString(closeDecision, "reason");
-        return "no_active_browser_work".equals(reason);
+        return "no_active_browser_work".equals(reason) || "non_owner_active_work".equals(reason);
     }
 
     private static boolean isBrowserLocalNonParticipantReason(String reason) {
