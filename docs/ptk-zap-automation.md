@@ -46,6 +46,8 @@ ZAP should not force-close a PTK browser while PTK is still producing findings. 
 
 `safeToClose` from progress callbacks is accepted only after ZAP has explicitly started the close request for that zapid. This prevents a normal page/progress callback from pre-setting close readiness.
 
+The close budget is intentionally generous for overloaded multi-browser client-spider runs: Java can wait through the configured polling window plus bounded follow-up close-decision scripts before recording `forced_closed`. Tab-local decisions such as `browser_tab_safe_to_close` return through a fast path and should not consume that budget.
+
 Important close-decision states:
 
 | Decision / Reason | Meaning |
@@ -53,6 +55,7 @@ Important close-decision states:
 | `safe_to_close` + `terminal_after_stop` | PTK stopped and reached terminal state during close. |
 | `safe_to_close` + `already_terminal` | PTK was already terminal before the close request completed. |
 | `browser_tab_safe_to_close` + `no_active_browser_work` | The current WebDriver tab has no PTK browser-local work left and may close, but this is not global PTK session terminal evidence. |
+| `browser_tab_safe_to_close` + `non_owner_active_work` | The current WebDriver tab is not the PTK session owner for the active target and may close without stopping the global PTK session. |
 | `wait` + `close_requested` | PTK accepted stop, but Java should keep waiting for terminal progress. |
 | `not_applicable` + `automation_disabled` | The page bridge did not expose PTK automation for the current tab. Treat this as a startup/session issue, not as a finding issue. |
 | `forced_closed` | ZAP exhausted the close budget. This is a lifecycle warning even if findings were imported. |
