@@ -152,6 +152,38 @@ function safeParseUrl(value) {
     return null
 }
 
+function effectiveHttpPort(parsed) {
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) return -1
+    if (parsed.port) return Number(parsed.port)
+    return parsed.protocol === 'https:' ? 443 : 80
+}
+
+function targetScopePathPrefix(pathname = '') {
+    const path = typeof pathname === 'string' && pathname.startsWith('/') ? pathname : '/'
+    if (!path || path === '/') return '/'
+    if (path.endsWith('/')) return path
+    const index = path.lastIndexOf('/')
+    return index >= 0 ? path.slice(0, index + 1) : '/'
+}
+
+function isSameOriginAndPathScoped(targetValue, candidateValue) {
+    const targetString = safeParseUrl(targetValue)
+    const candidateString = safeParseUrl(candidateValue)
+    if (!targetString || !candidateString) return false
+
+    try {
+        const target = new URL(targetString)
+        const candidate = new URL(candidateString)
+        if (target.protocol !== candidate.protocol) return false
+        if (!target.hostname || !candidate.hostname) return false
+        if (target.hostname.toLowerCase() !== candidate.hostname.toLowerCase()) return false
+        if (effectiveHttpPort(target) !== effectiveHttpPort(candidate)) return false
+        return candidate.pathname.startsWith(targetScopePathPrefix(target.pathname))
+    } catch (_) {
+        return false
+    }
+}
+
 function parseCallbackUrl(rawUrl) {
     if (typeof rawUrl !== 'string' || !rawUrl) return null
 
@@ -695,6 +727,34 @@ class ZapTransport {
         }
         const targetUrl = safeParseUrl(url)
         if (!targetUrl || isZapBootstrapUrl(targetUrl)) {
+            return false
+        }
+
+        const detectedPayload = this._lastDetectedPayload || null
+        const detectedTabId = Number.isInteger(detectedPayload?.tabId) ? detectedPayload.tabId : null
+        const scopedTargetUrl = safeParseUrl(detectedPayload?.targetUrl)
+
+        if (scopedTargetUrl) {
+            if (!isSameOriginAndPathScoped(scopedTargetUrl, targetUrl)) {
+                debugLog('[PTK ZAP] Rejected out-of-scope target URL', {
+                    tabId,
+                    frameId,
+                    url: targetUrl,
+                    targetUrl: scopedTargetUrl
+                })
+                return false
+            }
+        } else if (Number.isInteger(detectedTabId) && detectedTabId === tabId) {
+            this._lastDetectedPayload = Object.assign({}, detectedPayload || {}, {
+                targetUrl
+            })
+        } else {
+            debugLog('[PTK ZAP] Rejected unclaimed target URL', {
+                tabId,
+                frameId,
+                url: targetUrl,
+                detectedTabId
+            })
             return false
         }
 

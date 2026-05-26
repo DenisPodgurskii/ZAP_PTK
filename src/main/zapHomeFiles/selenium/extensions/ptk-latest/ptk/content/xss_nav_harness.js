@@ -128,6 +128,60 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
         return null
     }
 
+    function detectTemplateMarker(marker) {
+        const root = document.documentElement || document.body
+        const markerText = String(marker || '').trim()
+        if (!markerText || !root) return null
+
+        const skipTextParent = (node) => {
+            const tag = String(node?.parentElement?.tagName || '').toLowerCase()
+            return ['script', 'style', 'noscript', 'template'].includes(tag)
+        }
+
+        const walker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+            null
+        )
+
+        let node
+        while ((node = walker.nextNode())) {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                for (const attr of Array.from(node.attributes || [])) {
+                    const value = String(attr?.value || '')
+                    if (!value.includes(markerText)) continue
+                    return {
+                        node,
+                        type: 'template_marker_attribute',
+                        tag: node.tagName.toLowerCase(),
+                        attr: attr.name,
+                        outerHTML: node.outerHTML ? node.outerHTML.slice(0, 512) : null,
+                        cssPath: computeCssPath(node),
+                        snippet: value.slice(0, 200)
+                    }
+                }
+                continue
+            }
+
+            if (node.nodeType === Node.TEXT_NODE && !skipTextParent(node)) {
+                const text = String(node.nodeValue || '')
+                if (!text.includes(markerText)) continue
+                const parent = node.parentElement
+                return {
+                    node: parent || null,
+                    type: 'template_marker_text',
+                    tag: parent?.tagName ? parent.tagName.toLowerCase() : '#text',
+                    attr: null,
+                    outerHTML: parent?.outerHTML ? parent.outerHTML.slice(0, 512) : text.slice(0, 512),
+                    cssPath: parent ? computeCssPath(parent) : '',
+                    snippet: text.slice(0, 200)
+                }
+            }
+        }
+
+        return null
+    }
+
     async function exerciseExecutableContext(context) {
         const node = context?.node
         if (!node || node.nodeType !== Node.ELEMENT_NODE) return
@@ -202,42 +256,11 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
         } catch (_) { }
     }
 
-    function injectMainWorldWindowNameProbe(markerToken) {
-        const markerId = String(markerToken || '').trim()
-        if (!markerId) return false
-        try {
-            const doc = document
-            const root = doc?.documentElement || doc?.head || doc?.body
-            if (!doc?.createElement || !root?.appendChild) return false
-            const script = doc.createElement('script')
-            const markerJson = JSON.stringify(markerId)
-            const tokenJson = JSON.stringify(`ptk-xss:${markerId}`)
-            script.textContent = [
-                'try{',
-                `var t=${tokenJson};`,
-                `if(String(window.name||'').indexOf(t)!==-1){window.postMessage({source:'ptk-xss',id:${markerJson}},'*');}`,
-                '}catch(_){}'
-            ].join('')
-            root.appendChild(script)
-            if (typeof script.remove === 'function') script.remove()
-            else if (script.parentNode && typeof script.parentNode.removeChild === 'function') script.parentNode.removeChild(script)
-            return true
-        } catch (_) {
-            return false
-        }
-    }
-
     async function probeWindowNameExecutionMarker(markerToken) {
         const markerId = String(markerToken || '').trim()
         if (!markerId) return
         recordWindowNameExecutionMarker(markerId)
         recordDomExecutionMarker(markerId)
-        if (xssExecutionEvents.some((event) => event.id === markerId)) return
-        if (injectMainWorldWindowNameProbe(markerId)) {
-            await sleep(25)
-            recordWindowNameExecutionMarker(markerId)
-            recordDomExecutionMarker(markerId)
-        }
     }
 
     async function waitForExecutionMarker(markerToken, timeoutMs = 0) {
@@ -309,6 +332,10 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
                 sinkKey: buildSinkKey(context),
                 context: publicContext(context)
             }
+        }
+
+        if (normalizedChecks.includes('template_marker')) {
+            result.template_marker = buildTemplateMarkerResult(markerToken)
         }
 
         return result
@@ -483,6 +510,17 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
         }
     }
 
+    function buildTemplateMarkerResult(markerToken) {
+        const context = detectTemplateMarker(markerToken)
+        return {
+            vulnerable: !!context,
+            executed: false,
+            reflected: !!context,
+            sinkKey: buildSinkKey(context),
+            context: publicContext(context)
+        }
+    }
+
     async function runPostMessageSourceProbe({ markerToken, checks = [], settleMs = 0, payload } = {}) {
         if (!isAttackTab()) {
             return { error: 'not_attack_tab' }
@@ -519,6 +557,9 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
                 driver: 'postMessage',
                 key: 'window'
             })
+        }
+        if (normalizedChecks.includes('template_marker')) {
+            result.template_marker = buildTemplateMarkerResult(markerToken)
         }
         return result
     }
@@ -622,7 +663,11 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
             if (normalizedChecks.includes('dom_xss')) {
                 result.dom_xss = await buildExecutedSourceResult(markerToken, sourceContext)
             }
+            if (normalizedChecks.includes('template_marker')) {
+                result.template_marker = buildTemplateMarkerResult(markerToken)
+            }
             if (result.dom_xss?.vulnerable) return result
+            if (result.template_marker?.vulnerable) return result
         }
 
         if (!anyFilled) {

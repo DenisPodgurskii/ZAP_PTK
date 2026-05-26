@@ -181,6 +181,13 @@ export class ptk_app {
             ).then((response) => response || { mode: 'pending', script: 'none' })
         }
 
+        if (message?.channel === "ptk_content2background_runtime" && message?.type === "manual_automation_authorization") {
+            return this.ready.then(() => {
+                return this.automation?.handleManualAutomationAuthorization?.(message, sender)
+                    || { ok: true, allowed: false, reason: 'automation_unavailable' }
+            })
+        }
+
         if (message?.channel != "ptk_popup2background_app") {
             return undefined
         }

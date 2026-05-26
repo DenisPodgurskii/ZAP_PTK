@@ -1055,9 +1055,16 @@ export class ptk_request {
                         rbSchema.response.body = await response.text()
                         rbSchema.response.length = typeof rbSchema.response.body === 'string' ? rbSchema.response.body.length : null
                         if (trackingRequest) {
-                            rbSchema.response.headers = trackingRequest.response.responseHeaders
+                            rbSchema.response.headers = trackingRequest.response.responseHeaders || rh
                             rbSchema.response.statusLine = trackingRequest.response.statusLine
-                            rbSchema.response.statusCode = trackingRequest.response.statusCode
+                            rbSchema.response.statusCode = trackingRequest.response.statusCode ?? response.status
+                            if (!rbSchema.response.statusLine) {
+                                const protocolVersion = (rbSchema.request.protocolVersion || 'HTTP/1.1').trim()
+                                const statusText = typeof response.statusText === 'string' ? response.statusText.trim() : ''
+                                rbSchema.response.statusLine = statusText
+                                    ? `${protocolVersion} ${response.status} ${statusText}`
+                                    : `${protocolVersion} ${response.status}`
+                            }
                         } else {
                             rbSchema.response.headers = rh
                             rbSchema.response.statusCode = response.status

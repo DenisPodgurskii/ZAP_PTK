@@ -38,28 +38,43 @@ class ExtensionPtkCloseContractTest {
     }
 
     @Test
-    void closeRequestedIsNotVisibleUntilCloseDecisionAttemptIsRecorded() {
-        Map<String, Long> closeRequestedByZapId = new ConcurrentHashMap<>();
+    void safeToCloseIsNotAcceptedUntilCloseDecisionAttemptIsRecorded() {
+        Map<String, Long> closeDecisionAttemptedByZapId = new ConcurrentHashMap<>();
 
-        assertNull(PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, "zap-1"));
-        assertEquals(false, PtkCloseContract.canAcceptSafeToClose(closeRequestedByZapId, "zap-1"));
+        assertNull(
+                PtkCloseContract.getCloseDecisionAttemptedAtMs(
+                        closeDecisionAttemptedByZapId, "zap-1"));
+        assertEquals(
+                false,
+                PtkCloseContract.canAcceptSafeToClose(closeDecisionAttemptedByZapId, "zap-1"));
 
-        PtkCloseContract.markCloseDecisionAttempted(closeRequestedByZapId, "zap-1", 123L);
+        PtkCloseContract.markCloseDecisionAttempted(closeDecisionAttemptedByZapId, "zap-1", 123L);
 
-        assertEquals(123L, PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, "zap-1"));
-        assertEquals(true, PtkCloseContract.canAcceptSafeToClose(closeRequestedByZapId, "zap-1"));
+        assertEquals(
+                123L,
+                PtkCloseContract.getCloseDecisionAttemptedAtMs(
+                        closeDecisionAttemptedByZapId, "zap-1"));
+        assertEquals(
+                true,
+                PtkCloseContract.canAcceptSafeToClose(closeDecisionAttemptedByZapId, "zap-1"));
     }
 
     @Test
     void firstCloseDecisionAttemptTimestampIsPreserved() {
-        Map<String, Long> closeRequestedByZapId = new ConcurrentHashMap<>();
+        Map<String, Long> closeDecisionAttemptedByZapId = new ConcurrentHashMap<>();
 
-        PtkCloseContract.markCloseDecisionAttempted(closeRequestedByZapId, "zap-1", 123L);
-        PtkCloseContract.markCloseDecisionAttempted(closeRequestedByZapId, "zap-1", 456L);
+        PtkCloseContract.markCloseDecisionAttempted(closeDecisionAttemptedByZapId, "zap-1", 123L);
+        PtkCloseContract.markCloseDecisionAttempted(closeDecisionAttemptedByZapId, "zap-1", 456L);
 
-        assertEquals(123L, PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, "zap-1"));
-        assertNull(PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, null));
-        assertNull(PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, ""));
+        assertEquals(
+                123L,
+                PtkCloseContract.getCloseDecisionAttemptedAtMs(
+                        closeDecisionAttemptedByZapId, "zap-1"));
+        assertNull(
+                PtkCloseContract.getCloseDecisionAttemptedAtMs(
+                        closeDecisionAttemptedByZapId, null));
+        assertNull(
+                PtkCloseContract.getCloseDecisionAttemptedAtMs(closeDecisionAttemptedByZapId, ""));
     }
 
     @Test
@@ -171,7 +186,7 @@ class ExtensionPtkCloseContractTest {
         closeDecision.put("zapProgressTerminalPosted", false);
         closeDecision.put("stopRequested", true);
         assertEquals(
-                true,
+                false,
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 67, "running"));
 
         closeDecision.put("stopRequested", false);
@@ -181,7 +196,7 @@ class ExtensionPtkCloseContractTest {
     }
 
     @Test
-    void closeDecisionAcceptsAlreadyTerminalStateBeforeProgressMapUpdates() {
+    void closeDecisionAcceptsAlreadyTerminalStateWhenJavaProgressStillRuns() {
         Map<String, Object> closeDecision = new LinkedHashMap<>();
         closeDecision.put("decision", "safe_to_close");
         closeDecision.put("scanState", "completed");
@@ -191,10 +206,83 @@ class ExtensionPtkCloseContractTest {
                 true,
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 35, "running"));
 
+        closeDecision.put("zapProgressTerminalPosted", true);
+        assertEquals(
+                true,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 35, "running"));
+
+        closeDecision.put("zapProgressTerminalPosted", false);
         closeDecision.put("reason", "close_requested");
         assertEquals(
                 false,
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 35, "running"));
+    }
+
+    @Test
+    void closeDecisionRejectsNoActiveBrowserWorkWhileSessionRuns() {
+        Map<String, Object> closeDecision = new LinkedHashMap<>();
+        closeDecision.put("decision", "safe_to_close");
+        closeDecision.put("scanState", "running");
+        closeDecision.put("reason", "no_active_browser_work");
+        closeDecision.put("stopRequested", false);
+
+        assertEquals(
+                false,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
+        assertEquals(
+                false,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 100, "running"));
+
+        closeDecision.put("scanState", "completed");
+        closeDecision.put("zapProgressTerminalPosted", true);
+        assertEquals(
+                true,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
+    }
+
+    @Test
+    void browserLocalTabSafeToCloseDoesNotRepresentSessionTerminalState() {
+        Map<String, Object> closeDecision = new LinkedHashMap<>();
+        closeDecision.put("decision", "browser_tab_safe_to_close");
+        closeDecision.put("scanState", "running");
+        closeDecision.put("reason", "no_active_browser_work");
+        closeDecision.put("stopRequested", false);
+
+        assertEquals(true, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
+        assertEquals(
+                false,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
+
+        closeDecision.put("reason", "non_owner_active_work");
+        assertEquals(true, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
+        assertEquals(
+                false,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
+
+        closeDecision.put("stopRequested", true);
+        assertEquals(false, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
+
+        closeDecision.put("stopRequested", false);
+        closeDecision.put("reason", "ptk_active_work");
+        assertEquals(false, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
+    }
+
+    @Test
+    void localNonParticipantCloseDecisionDoesNotRepresentSessionTerminalState() {
+        Map<String, Object> closeDecision = new LinkedHashMap<>();
+        closeDecision.put("decision", "not_applicable");
+        closeDecision.put("scanState", "callback");
+        closeDecision.put("reason", "automation_disabled");
+
+        assertEquals(
+                true, PtkCloseContract.isBrowserLocalNonParticipantCloseDecision(closeDecision));
+        assertEquals(
+                false,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
+
+        closeDecision.put("decision", "wait");
+        assertEquals(
+                false, PtkCloseContract.isBrowserLocalNonParticipantCloseDecision(closeDecision));
     }
 
     @Test

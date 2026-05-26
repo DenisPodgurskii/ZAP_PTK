@@ -803,6 +803,39 @@ function isCypressRunnerFrame() {
     }
 }
 
+async function isManualAutomationActivationAllowed(reason = 'settings') {
+    if (typeof browser === 'undefined' || !browser?.runtime?.sendMessage) return false
+    try {
+        const response = await browser.runtime.sendMessage({
+            channel: 'ptk_content2background_runtime',
+            type: 'manual_automation_authorization',
+            url: window.location.href,
+            reason
+        })
+        return response?.allowed === true
+    } catch (_) {
+        return false
+    }
+}
+
+function installDisabledAutomationBridgeForTopFrame() {
+    try {
+        if (window.top !== window) return
+    } catch (_) {
+        return
+    }
+    installPtkAutomationBridge(ptkAutomationVersion, automationNonce, false)
+    initZapCloseAutomationMessaging()
+}
+
+async function enableAutomationIfAllowed(reason = 'settings') {
+    if (isCypressRunnerFrame()) return false
+    const allowed = await isManualAutomationActivationAllowed(reason)
+    if (!allowed) return false
+    enableAutomation()
+    return automationEnabled
+}
+
 // Dynamic enable/disable via storage.onChanged
 ;(async function initAutomation() {
     // Check if browser API is available (content script context)
@@ -817,23 +850,19 @@ function isCypressRunnerFrame() {
     try {
         const result = await browser.storage.local.get(SETTINGS_KEY)
         enabled = result?.[SETTINGS_KEY]?.automation?.enable === true
+        if (enabled && isCypressRunnerFrame()) {
+            return
+        }
         if (enabled) {
-            enableAutomation()
+            await enableAutomationIfAllowed('initial')
         }
     } catch (e) {
         // Silently fail - automation stays disabled
     }
 
     // Automation OFF: keep existing behavior (top frame only)
-    if (!enabled) {
-        try {
-            if (window.top !== window) return
-        } catch (_) { return }
-        installPtkAutomationBridge(ptkAutomationVersion, automationNonce, false)
-        initZapCloseAutomationMessaging()
-    } else if (isCypressRunnerFrame()) {
-        // Automation ON: skip Cypress runner frames
-        return
+    if (!automationEnabled) {
+        installDisabledAutomationBridgeForTopFrame()
     }
 
     // Listen for settings changes (no page reload needed)
@@ -846,7 +875,13 @@ function isCypressRunnerFrame() {
 
         if (newEnabled && !oldEnabled) {
             if (!isCypressRunnerFrame()) {
-                enableAutomation()
+                enableAutomationIfAllowed('settings_enabled').then((activated) => {
+                    if (!activated) {
+                        installDisabledAutomationBridgeForTopFrame()
+                    }
+                }).catch(() => {
+                    installDisabledAutomationBridgeForTopFrame()
+                })
             }
         } else if (!newEnabled && oldEnabled) {
             disableAutomation()

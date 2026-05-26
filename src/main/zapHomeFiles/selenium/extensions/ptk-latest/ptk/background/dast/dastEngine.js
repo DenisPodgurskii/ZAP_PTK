@@ -44,7 +44,8 @@ const DAST_BROWSER_NAV_HARNESS_SCRIPT_ID = "ptk-dast-browser-nav-harness"
 const DAST_BROWSER_NAV_TAB_MARKER = "ptk_browser_nav_attack_tab"
 const DAST_BROWSER_NAV_DEFAULT_SETTLE_MS = 900
 const DAST_BROWSER_NAV_SUPPORTED_CHECKS = new Set([
-    "dom_xss"
+    "dom_xss",
+    "template_marker"
 ])
 const DAST_BROWSER_NAV_SOURCE_DRIVERS = new Set([
     "cookie",
@@ -3437,9 +3438,22 @@ export class dastEngine {
 
     _filterActiveValidationResult(task, validationResult, executed, context = null) {
         const moduleId = String(task?.moduleId || task?.module?.id || '').trim().toLowerCase()
+        if (moduleId === 'jwt_injection') {
+            if (!validationResult?.success) {
+                const jwtRecovered = this._recoverJwtValidationFromProbeContrast(task, validationResult, executed, context)
+                return jwtRecovered || validationResult
+            }
+            const jwtProof = this._validateJwtCarrierProof(task, executed, context)
+            if (jwtProof?.ok) return validationResult
+            this._appendTaskRuntimeEvent(task, context, {
+                type: 'dast_validation_suppressed',
+                phase: 'validation',
+                reason: jwtProof?.reason || 'jwt_carrier_proof_missing'
+            })
+            return null
+        }
         if (!validationResult?.success) {
-            const jwtRecovered = this._recoverJwtValidationFromProbeContrast(task, validationResult, executed, context)
-            return jwtRecovered || validationResult
+            return validationResult
         }
         if (moduleId !== 'xss') return validationResult
         const body = executed?.response?.body || ''
@@ -3469,12 +3483,76 @@ export class dastEngine {
         return Number.isFinite(leftLength) && Number.isFinite(rightLength) && Math.abs(leftLength - rightLength) > 30
     }
 
+    _jwtResponseMatchesBaseline(left = null, right = null) {
+        const leftStatus = Number(left?.statusCode ?? left?.status)
+        const rightStatus = Number(right?.statusCode ?? right?.status)
+        if (!Number.isFinite(leftStatus) || !Number.isFinite(rightStatus) || leftStatus !== rightStatus) {
+            return false
+        }
+        if (typeof left?.body === 'string' && typeof right?.body === 'string') {
+            return left.body === right.body
+        }
+        const leftLength = Number(left?.length ?? (typeof left?.body === 'string' ? left.body.length : NaN))
+        const rightLength = Number(right?.length ?? (typeof right?.body === 'string' ? right.body.length : NaN))
+        return Number.isFinite(leftLength) && Number.isFinite(rightLength) && leftLength === rightLength
+    }
+
+    _jwtResponseDiffersFromBaseline(left = null, right = null) {
+        const leftStatus = Number(left?.statusCode ?? left?.status)
+        const rightStatus = Number(right?.statusCode ?? right?.status)
+        if (Number.isFinite(leftStatus) && Number.isFinite(rightStatus) && leftStatus !== rightStatus) {
+            return true
+        }
+        if (typeof left?.body === 'string' && typeof right?.body === 'string') {
+            return left.body !== right.body
+        }
+        const leftLength = Number(left?.length ?? (typeof left?.body === 'string' ? left.body.length : NaN))
+        const rightLength = Number(right?.length ?? (typeof right?.body === 'string' ? right.body.length : NaN))
+        return Number.isFinite(leftLength) && Number.isFinite(rightLength) && leftLength !== rightLength
+    }
+
     _requestEvidenceContainsJwtNone(request = null, surface = 'any') {
         const text = JSON.stringify(request || '')
         if (!/eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0\./.test(text)) return false
         if (surface === 'cookie') return /cookie/i.test(text)
         if (surface === 'authorization') return /authorization/i.test(text)
         return true
+    }
+
+    _jwtCarrierExpectation(attackId = '') {
+        if (attackId === 'jwt_1') {
+            return { surface: 'cookie', probeIds: new Set(['jwt_probe_no_cookie']) }
+        }
+        if (attackId === 'jwt_3') {
+            return { surface: 'authorization', probeIds: new Set(['jwt_probe_no_authz']) }
+        }
+        return null
+    }
+
+    _validateJwtCarrierProof(task, executed, context = null) {
+        const attackId = String(task?.attack?.id || executed?.metadata?.id || executed?.ruleId || '').trim()
+        const expectation = this._jwtCarrierExpectation(attackId)
+        if (!expectation) return { ok: false, reason: 'jwt_unknown_attack' }
+
+        const attackResponse = executed?.response || null
+        const originalResponse = context?.original?.response || null
+        if (!this._requestEvidenceContainsJwtNone(executed?.request, expectation.surface)) {
+            return { ok: false, reason: 'jwt_none_not_on_expected_surface' }
+        }
+        if (!this._jwtResponseMatchesBaseline(attackResponse, originalResponse)) {
+            return { ok: false, reason: 'jwt_attack_response_not_baseline_equivalent' }
+        }
+
+        const history = Array.isArray(task?.module?.executed) ? task.module.executed : []
+        const contrastingProbe = history.find((entry) => {
+            const entryId = String(entry?.metadata?.id || '').trim()
+            if (!expectation.probeIds.has(entryId)) return false
+            return this._jwtResponseDiffersFromBaseline(entry?.response, originalResponse)
+        })
+        if (!contrastingProbe) {
+            return { ok: false, reason: 'jwt_carrier_probe_did_not_differ' }
+        }
+        return { ok: true, probe: contrastingProbe }
     }
 
     _recoverJwtValidationFromProbeContrast(task, validationResult, executed, context = null) {
@@ -3485,23 +3563,9 @@ export class dastEngine {
         const attackStatus = Number(attackResponse?.statusCode ?? attackResponse?.status)
         if (!Number.isFinite(attackStatus) || attackStatus >= 500) return null
 
-        const expectedProbeIds = attackId === 'jwt_1'
-            ? new Set(['jwt_probe_no_cookie', 'jwt_probe_no_both'])
-            : attackId === 'jwt_3'
-                ? new Set(['jwt_probe_no_authz', 'jwt_probe_no_both'])
-                : null
-        if (!expectedProbeIds) return null
-
-        const surface = attackId === 'jwt_1' ? 'cookie' : 'authorization'
-        if (!this._requestEvidenceContainsJwtNone(executed?.request, surface)) return null
-
-        const history = Array.isArray(task?.module?.executed) ? task.module.executed : []
-        const contrastingProbe = history.find((entry) => {
-            const entryId = String(entry?.metadata?.id || '').trim()
-            if (!expectedProbeIds.has(entryId)) return false
-            return this._responseDiffersEnough(entry?.response, attackResponse)
-        })
-        if (!contrastingProbe) return null
+        const jwtProof = this._validateJwtCarrierProof(task, executed, context)
+        if (!jwtProof?.ok) return null
+        const contrastingProbe = jwtProof.probe
 
         this._appendTaskRuntimeEvent(task, context, {
             type: 'dast_validation_recovered',
@@ -3828,7 +3892,7 @@ export class dastEngine {
                 const executed = await this.activeAttack(preparedPayload)
                 if (executed) {
                     const trackingResult = await this._runTracking(task, executed, context)
-                    const validationResult = task.attack?.validation
+                    let validationResult = task.attack?.validation
                         ? this._filterActiveValidationResult(task, task.module.validateAttack(executed, context.original), executed, context)
                         : null
                     const renderFollowup = validationResult && !validationResult?.success
@@ -5779,6 +5843,28 @@ export class dastEngine {
         return normalized.length ? normalized : ['dom_xss']
     }
 
+    _browserNavVulnerableCheck(response, checks = []) {
+        if (!response || typeof response !== 'object') return null
+        for (const checkName of this._normalizeBrowserNavChecks(checks)) {
+            const result = response?.[checkName]
+            if (result?.vulnerable) {
+                return {
+                    name: checkName,
+                    result
+                }
+            }
+        }
+        return null
+    }
+
+    _browserNavCheckSummary(response, checks = []) {
+        const summary = {}
+        for (const checkName of this._normalizeBrowserNavChecks(checks)) {
+            summary[checkName] = !!response?.[checkName]?.vulnerable
+        }
+        return summary
+    }
+
     _normalizeBrowserNavSourceDrivers(values = []) {
         return Array.from(new Set(
             (Array.isArray(values) ? values : [values])
@@ -6001,8 +6087,8 @@ export class dastEngine {
         await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
     }
 
-    _buildBrowserNavAttackResult(task, payload, uiUrl, attacked, checks, markerToken, domXss, runtimeMode, sourceInfo = null) {
-        const sinkKey = domXss.sinkKey ? `${uiUrl}|${domXss.sinkKey}` : null
+    _buildBrowserNavAttackResult(task, payload, uiUrl, attacked, checks, markerToken, checkResult, runtimeMode, sourceInfo = null, checkName = 'dom_xss') {
+        const sinkKey = checkResult.sinkKey ? `${uiUrl}|${checkResult.sinkKey}` : null
         if (sinkKey && this._browserNavSeenSinks?.has(sinkKey)) {
             return { duplicate: true, sinkKey }
         }
@@ -6018,19 +6104,21 @@ export class dastEngine {
                 attacked,
                 checks,
                 markerToken,
-                executed: !!domXss.executed,
-                reflected: !!domXss.reflected,
-                context: domXss.context || null,
+                browserNavCheck: checkName,
+                executed: !!checkResult.executed,
+                reflected: !!checkResult.reflected,
+                context: checkResult.context || null,
                 sinkKey: sinkKey || null,
                 runtimeMode
             },
             sourceInfo ? { browserSource: sourceInfo } : {}
         )
         const proof = JSON.stringify({
-            executed: !!domXss.executed,
-            reflected: !!domXss.reflected,
+            check: checkName,
+            executed: !!checkResult.executed,
+            reflected: !!checkResult.reflected,
             sinkKey: sinkKey || null,
-            context: domXss.context || null,
+            context: checkResult.context || null,
             source: sourceInfo || null
         })
 
@@ -6088,7 +6176,7 @@ export class dastEngine {
                         settleMs: options.settleMs,
                         payload: payloadValue
                     }, task, taskContext)
-                    if (submitted?.dom_xss?.vulnerable) {
+                    if (this._browserNavVulnerableCheck(submitted, options.checks)) {
                         return {
                             res: submitted,
                             sourceInfo: submitted.sourceContext || {
@@ -6185,7 +6273,7 @@ export class dastEngine {
                             originalValue
                         }, task, taskContext).catch(() => null)
                     }
-                    if (res?.dom_xss?.vulnerable) {
+                    if (this._browserNavVulnerableCheck(res, options.checks)) {
                         return {
                             res,
                             sourceInfo: {
@@ -6201,11 +6289,11 @@ export class dastEngine {
                 }
             })
 
-            const domXss = result?.res?.dom_xss
-            if (domXss?.vulnerable) {
+            const check = this._browserNavVulnerableCheck(result?.res, options.checks)
+            if (check?.result?.vulnerable) {
                 return {
                     uiUrl,
-                    domXss,
+                    check,
                     sourceInfo: result.sourceInfo || { driver }
                 }
             }
@@ -6282,11 +6370,13 @@ export class dastEngine {
         }
 
         try {
-            let domXss = null
+            let browserNavCheck = null
+            let browserNavResponse = null
             if (attackedLocation === 'query') {
                 const res = await this._withBrowserNavAttackTab(uiUrl, (tabId) => (
                     this._runBrowserNavChecksInTab(tabId, task, taskContext, markerToken, checks, settleMs)
                 ))
+                browserNavResponse = res
                 if (this._spaResponseMissingChecks(res, checks)) {
                     this._appendTaskRuntimeEvent(task, taskContext, {
                         type: 'dast_browser_nav_filtered',
@@ -6296,10 +6386,10 @@ export class dastEngine {
                     })
                     return null
                 }
-                domXss = res?.dom_xss || null
+                browserNavCheck = this._browserNavVulnerableCheck(res, checks)
             }
 
-            if (domXss?.vulnerable) {
+            if (browserNavCheck?.result?.vulnerable) {
                 const built = this._buildBrowserNavAttackResult(
                     task,
                     payload,
@@ -6307,8 +6397,10 @@ export class dastEngine {
                     attacked,
                     checks,
                     markerToken,
-                    domXss,
-                    'browser_nav'
+                    browserNavCheck.result,
+                    'browser_nav',
+                    null,
+                    browserNavCheck.name
                 )
                 if (built?.duplicate) {
                     this._appendTaskRuntimeEvent(task, taskContext, {
@@ -6332,7 +6424,7 @@ export class dastEngine {
                     ? payload.metadata.browserSource.cookieEncoding
                     : browserNavCfg.cookieEncoding
             })
-            if (sourceResult?.domXss?.vulnerable) {
+            if (sourceResult?.check?.result?.vulnerable) {
                 const sourceAttacked = Object.assign({}, attacked || {}, {
                     location: 'browser_source',
                     name: sourceResult.sourceInfo?.key || sourceResult.sourceInfo?.driver || 'browser_source',
@@ -6346,9 +6438,10 @@ export class dastEngine {
                     sourceAttacked,
                     checks,
                     markerToken,
-                    sourceResult.domXss,
+                    sourceResult.check.result,
                     'browser_source',
-                    sourceResult.sourceInfo
+                    sourceResult.sourceInfo,
+                    sourceResult.check.name
                 )
                 if (built?.duplicate) {
                     this._appendTaskRuntimeEvent(task, taskContext, {
@@ -6366,7 +6459,7 @@ export class dastEngine {
                 type: 'dast_browser_nav_filtered',
                 phase: 'attack_eval',
                 reason: 'no_vulnerability_match',
-                checks: { dom_xss: !!domXss?.vulnerable },
+                checks: this._browserNavCheckSummary(browserNavResponse, checks),
                 sourceDrivers
             })
             return null

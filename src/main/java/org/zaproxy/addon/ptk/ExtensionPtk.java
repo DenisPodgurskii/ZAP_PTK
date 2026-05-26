@@ -56,8 +56,8 @@ import org.zaproxy.zap.model.Context;
  * - BROWSER_CLOSE_SCRIPT_TIMEOUT_MS is the Selenium async-script budget for a
  *   single close-decision call. It must be greater than the PTK stop budget so
  *   WebDriver can receive PTK's callback rather than timing out first.
- * - BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS is the stopTimeoutMs value sent both to the
- *   ZAP progress callback response and the injected PTK close-decision script.
+ * - BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS is the stopTimeoutMs value sent to the
+ *   injected PTK close-decision script when it needs to stop a session.
  * - The injected script derives its internal call timeout directly from that
  *   stopTimeoutMs value; there is no separate JavaScript cap to keep in sync.
  * - Follow-up WebDriver decisions are attempted every
@@ -70,7 +70,7 @@ import org.zaproxy.zap.model.Context;
  *   handshake is delayed.
  */
 final class PtkCloseContract {
-    static final int BROWSER_CLOSE_MAX_ATTEMPTS = 12;
+    static final int BROWSER_CLOSE_MAX_ATTEMPTS = 120;
     static final long BROWSER_CLOSE_WAIT_SLICE_MS = 1000;
     static final long BROWSER_CLOSE_NO_PROGRESS_GRACE_MS = 25000;
     static final long BROWSER_CLOSE_AUTOMATION_DISABLED_GRACE_MS = 2500;
@@ -80,7 +80,7 @@ final class PtkCloseContract {
             BROWSER_CLOSE_MAX_ATTEMPTS * BROWSER_CLOSE_WAIT_SLICE_MS;
     static final long BROWSER_CLOSE_SCRIPT_TIMEOUT_MS = 30000;
     static final int BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS = 25000;
-    static final int BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS = 5;
+    static final int BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS = 15;
     static final int BROWSER_CLOSE_MAX_FOLLOW_UP_DECISIONS =
             BROWSER_CLOSE_MAX_ATTEMPTS / BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS;
     static final long BROWSER_CLOSE_MAX_WALL_CLOCK_MS =
@@ -99,23 +99,25 @@ final class PtkCloseContract {
 
     private PtkCloseContract() {}
 
-    static Long getCloseRequestedAtMs(Map<String, Long> closeRequestedByZapId, String zapid) {
+    static Long getCloseDecisionAttemptedAtMs(
+            Map<String, Long> closeDecisionAttemptedByZapId, String zapid) {
         if (zapid == null || zapid.isBlank()) {
             return null;
         }
-        return closeRequestedByZapId.get(zapid);
+        return closeDecisionAttemptedByZapId.get(zapid);
     }
 
     static void markCloseDecisionAttempted(
-            Map<String, Long> closeRequestedByZapId, String zapid, long decidedAtMs) {
+            Map<String, Long> closeDecisionAttemptedByZapId, String zapid, long decidedAtMs) {
         if (zapid == null || zapid.isBlank()) {
             return;
         }
-        closeRequestedByZapId.putIfAbsent(zapid, decidedAtMs);
+        closeDecisionAttemptedByZapId.putIfAbsent(zapid, decidedAtMs);
     }
 
-    static boolean canAcceptSafeToClose(Map<String, Long> closeRequestedByZapId, String zapid) {
-        return getCloseRequestedAtMs(closeRequestedByZapId, zapid) != null;
+    static boolean canAcceptSafeToClose(
+            Map<String, Long> closeDecisionAttemptedByZapId, String zapid) {
+        return getCloseDecisionAttemptedAtMs(closeDecisionAttemptedByZapId, zapid) != null;
     }
 
     static String normalizeHttpTargetUrl(String targetUrl) {
@@ -226,11 +228,11 @@ final class PtkCloseContract {
         if (!isTerminalProgressValue(null, scanState)) {
             return false;
         }
-        String reason = getString(closeDecision, "reason");
-        if ("already_terminal".equals(reason)) {
+        if (Boolean.TRUE.equals(closeDecision.get("zapProgressTerminalPosted"))) {
             return true;
         }
-        if (Boolean.TRUE.equals(closeDecision.get("zapProgressTerminalPosted"))) {
+        String reason = getString(closeDecision, "reason");
+        if ("already_terminal".equals(reason)) {
             return true;
         }
         Object zapTerminalPost = closeDecision.get("zapTerminalPost");
@@ -239,7 +241,37 @@ final class PtkCloseContract {
                 return true;
             }
         }
-        return Boolean.TRUE.equals(closeDecision.get("stopRequested"));
+        return false;
+    }
+
+    static boolean isBrowserLocalNonParticipantCloseDecision(Map<String, Object> closeDecision) {
+        String decision = getString(closeDecision, "decision");
+        if (!"not_applicable".equals(decision)) {
+            return false;
+        }
+        String reason = getString(closeDecision, "reason");
+        String error = getString(closeDecision, "error");
+        return isBrowserLocalNonParticipantReason(reason)
+                || isBrowserLocalNonParticipantReason(error);
+    }
+
+    static boolean isBrowserLocalTabSafeToCloseDecision(Map<String, Object> closeDecision) {
+        String decision = getString(closeDecision, "decision");
+        if (!"browser_tab_safe_to_close".equals(decision)) {
+            return false;
+        }
+        if (Boolean.TRUE.equals(closeDecision.get("stopRequested"))) {
+            return false;
+        }
+        String reason = getString(closeDecision, "reason");
+        return "no_active_browser_work".equals(reason) || "non_owner_active_work".equals(reason);
+    }
+
+    private static boolean isBrowserLocalNonParticipantReason(String reason) {
+        return "automation_disabled".equals(reason)
+                || "ptk_automation_unavailable".equals(reason)
+                || "ptk_agent_unavailable".equals(reason)
+                || "ptk_automation_untrusted".equals(reason);
     }
 
     private static String getString(Map<String, Object> map, String key) {
@@ -301,7 +333,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
      */
     private final Map<String, Boolean> safeToCloseByZapId = new ConcurrentHashMap<>();
     private final Map<String, String> lastCloseDecisionByZapId = new ConcurrentHashMap<>();
-    private final Map<String, Long> closeRequestedByZapId = new ConcurrentHashMap<>();
+    private final Map<String, Long> closeDecisionAttemptedByZapId = new ConcurrentHashMap<>();
     private final Map<String, String> sessionIdByZapId = new ConcurrentHashMap<>();
     private final Map<String, String> targetUrlByZapId = new ConcurrentHashMap<>();
     private final Map<String, String> browserCoverageTargetUrlByZapId = new ConcurrentHashMap<>();
@@ -1191,7 +1223,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 return false;
             }
             String decision = getStringField(closeDecision, "decision");
-            if ("safe_to_close".equals(decision) || "wait".equals(decision)) {
+            if ("safe_to_close".equals(decision)
+                    || "wait".equals(decision)
+                    || "browser_tab_safe_to_close".equals(decision)) {
                 return true;
             }
             if ("failed".equals(decision) || "not_applicable".equals(decision)) {
@@ -1356,7 +1390,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             lastProgressSummaryByZapId.remove(zapid);
             safeToCloseByZapId.remove(zapid);
             lastCloseDecisionByZapId.remove(zapid);
-            closeRequestedByZapId.remove(zapid);
+            closeDecisionAttemptedByZapId.remove(zapid);
             sessionIdByZapId.remove(zapid);
             targetUrlByZapId.remove(zapid);
             browserCoverageTargetUrlByZapId.remove(zapid);
@@ -1417,12 +1451,14 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             }
         }
 
-        Long getCloseRequestedAtMs(String zapid) {
-            return PtkCloseContract.getCloseRequestedAtMs(closeRequestedByZapId, zapid);
+        Long getCloseDecisionAttemptedAtMs(String zapid) {
+            return PtkCloseContract.getCloseDecisionAttemptedAtMs(
+                    closeDecisionAttemptedByZapId, zapid);
         }
 
         void markCloseDecisionAttempted(String zapid, long decidedAtMs) {
-            PtkCloseContract.markCloseDecisionAttempted(closeRequestedByZapId, zapid, decidedAtMs);
+            PtkCloseContract.markCloseDecisionAttempted(
+                    closeDecisionAttemptedByZapId, zapid, decidedAtMs);
         }
 
         private long remainingCloseBudgetMs(long closeDeadlineMs) {
@@ -1501,6 +1537,47 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                       const status = String(value && (value.status || value.completionStatus || value.summary && value.summary.status) || '').toLowerCase();
                       return status;
                     };
+                    const currentCloseUrl = String(location && location.href || '');
+                    const shouldStopForClose = (snapshot) => {
+                      const context = snapshot && snapshot.zapCloseContext && typeof snapshot.zapCloseContext === 'object'
+                        ? snapshot.zapCloseContext
+                        : {};
+                      return context.shouldStopSession === true;
+                    };
+                    const numberOf = (value) => {
+                      const parsed = Number(value);
+                      return Number.isFinite(parsed) ? parsed : 0;
+                    };
+                    const concreteEngineWork = (engine) => {
+                      if (!engine || typeof engine !== 'object') return false;
+                      const telemetry = engine.telemetry && typeof engine.telemetry === 'object'
+                        ? engine.telemetry
+                        : engine;
+                      const progress = telemetry.progress && typeof telemetry.progress === 'object'
+                        ? telemetry.progress
+                        : (engine.progress && typeof engine.progress === 'object' ? engine.progress : {});
+                      const state = String(engine.state || telemetry.status || '').toLowerCase();
+                      return [
+                        telemetry.activeTasks,
+                        telemetry.taskQueue,
+                        telemetry.requestQueue,
+                        telemetry.pendingPlans,
+                        telemetry.planning,
+                        telemetry.pendingCaptures,
+                        telemetry.pendingAutomationSeeds,
+                        telemetry.pendingHtmlDiscovery,
+                        telemetry.remaining,
+                        progress.remaining
+                      ].some((value) => numberOf(value) > 0)
+                        || telemetry.isRunning === true
+                        || telemetry.isScanRunning === true
+                        || state === 'running'
+                        || state === 'scanning';
+                    };
+                    const hasConcreteBrowserWork = (snapshot) => {
+                      if (!snapshot || snapshot.ok !== true || !snapshot.engines || typeof snapshot.engines !== 'object') return true;
+                      return Object.values(snapshot.engines).some(concreteEngineWork);
+                    };
                     const withTimeout = (promise, label, ms) => Promise.race([
                       Promise.resolve(promise),
                       timeoutAfter(label, ms)
@@ -1559,7 +1636,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                           options: Object.assign({}, payload.options || {}, {
                             sessionId: explicitSessionId,
                             source: 'zap_browser_close',
-                            zapid: explicitZapId
+                            zapid: explicitZapId,
+                            currentUrl: currentCloseUrl
                           }),
                           wait: payload.wait,
                           includeFindings: payload.includeFindings === true,
@@ -1572,7 +1650,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     });
                     const readProgressDirect = () => sendZapCloseMessage(
                       'get-session-progress',
-                      { options: { sessionId: explicitSessionId, source: 'zap_browser_close' } },
+                      { options: { sessionId: explicitSessionId, source: 'zap_browser_close', currentUrl: currentCloseUrl } },
                       3000
                     );
                     const stopDirect = () => sendZapCloseMessage(
@@ -1582,7 +1660,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         options: {
                           sessionId: explicitSessionId,
                           source: 'zap_browser_close',
-                          stopTimeoutMs
+                          stopTimeoutMs,
+                          currentUrl: currentCloseUrl
                         }
                       },
                       Math.min(5000, callTimeoutMs)
@@ -1596,7 +1675,12 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                           : null;
                         if (trustedAutomation && typeof trustedAutomation.endSession === 'function') {
                           const readProgress = () => typeof trustedAutomation.getSessionProgress === 'function'
-                            ? withTimeout(trustedAutomation.getSessionProgress({ sessionId: explicitSessionId, source: 'zap_browser_close', zapid: explicitZapId }), 'scan_status', 3000)
+                            ? withTimeout(trustedAutomation.getSessionProgress({
+                                sessionId: explicitSessionId,
+                                source: 'zap_browser_close',
+                                zapid: explicitZapId,
+                                currentUrl: currentCloseUrl
+                              }), 'scan_status', 3000)
                             : Promise.resolve(null);
                           const waitForTerminal = async (maxMs) => {
                             const deadline = Date.now() + Math.max(0, maxMs || 0);
@@ -1635,13 +1719,49 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             });
                             return;
                           }
+                          if (before && before.ok === true) {
+                            if (!hasConcreteBrowserWork(before)) {
+                              done({
+                                ok: true,
+                                participant: 'ptk',
+                                decision: 'browser_tab_safe_to_close',
+                                scanState: statusBefore || 'running',
+                                statusBefore,
+                                sessionId: explicitSessionId,
+                                stopRequested: false,
+                                reason: 'no_active_browser_work',
+                                stopVia: 'automation_bridge'
+                              });
+                              return;
+                            }
+                            if (!shouldStopForClose(before)) {
+                              done({
+                                ok: true,
+                                participant: 'ptk',
+                                decision: 'browser_tab_safe_to_close',
+                                scanState: statusBefore || 'running',
+                                statusBefore,
+                                sessionId: explicitSessionId,
+                                stopRequested: false,
+                                reason: 'non_owner_active_work',
+                                stopVia: 'automation_bridge'
+                              });
+                              return;
+                            }
+                            // Closing the ZAP-owned target tab is the end of the client
+                            // spider browser lifecycle, so ask PTK to stop and publish
+                            // terminal progress. Child attack tabs are handled above.
+                            // This preserves child-tab safety without leaving the primary
+                            // ZAP session stuck at running until force-close.
+                          }
                           const stop = await withTimeout(
                             trustedAutomation.endSession({
                               sessionId: explicitSessionId,
                               wait: false,
                               source: 'zap_browser_close',
                               zapid: explicitZapId,
-                              stopTimeoutMs
+                              stopTimeoutMs,
+                              currentUrl: currentCloseUrl
                             }),
                             'stop_scan',
                             Math.min(5000, callTimeoutMs)
@@ -1654,7 +1774,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                                 wait: false,
                                 source: 'zap_browser_close',
                                 zapid: explicitZapId,
-                                stopTimeoutMs
+                                stopTimeoutMs,
+                                currentUrl: currentCloseUrl
                               }),
                               'stop_scan_retry',
                               Math.min(5000, callTimeoutMs)
@@ -1712,6 +1833,36 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                               stopVia: 'direct_zap_close'
                             });
                             return;
+                          }
+                          if (before && before.ok === true) {
+                            if (!hasConcreteBrowserWork(before)) {
+                              done({
+                                ok: true,
+                                participant: 'ptk',
+                                decision: 'browser_tab_safe_to_close',
+                                scanState: statusBefore || 'running',
+                                statusBefore,
+                                sessionId: explicitSessionId,
+                                stopRequested: false,
+                                stopVia: 'direct_zap_close',
+                                reason: 'no_active_browser_work'
+                              });
+                              return;
+                            }
+                            if (!shouldStopForClose(before)) {
+                              done({
+                                ok: true,
+                                participant: 'ptk',
+                                decision: 'browser_tab_safe_to_close',
+                                scanState: statusBefore || 'running',
+                                statusBefore,
+                                sessionId: explicitSessionId,
+                                stopRequested: false,
+                                stopVia: 'direct_zap_close',
+                                reason: 'non_owner_active_work'
+                              });
+                              return;
+                            }
                           }
                           const stop = await stopDirect();
                           const after = await readProgressDirect();
@@ -2333,7 +2484,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         boolean acceptedSafeToClose = false;
                         if (safeToClose != null) {
                             if (PtkCloseContract.canAcceptSafeToClose(
-                                    closeRequestedByZapId, zapid)) {
+                                    closeDecisionAttemptedByZapId, zapid)) {
                                 safeToCloseByZapId.put(zapid, safeToClose);
                                 acceptedSafeToClose = Boolean.TRUE.equals(safeToClose);
                             } else {
@@ -2438,16 +2589,6 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             extra.put("alertsTotal", getAlertsRaisedTotal(zapid));
                             logTimingSummary(
                                     zapid, browserid, "progress.terminal", sinceFirstMs, extra);
-                        }
-                        if (zapid != null && !zapid.isBlank()) {
-                            Long closeRequestedAt = getCloseRequestedAtMs(zapid);
-                            if (closeRequestedAt != null) {
-                                response.put("closeRequested", true);
-                                response.put("closeRequestedAt", closeRequestedAt);
-                                response.put(
-                                        "stopTimeoutMs",
-                                        PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS);
-                            }
                         }
                     } else {
                         LOGGER.warn("PTK progress missing zapid or progress: {}", requestBody);
@@ -2648,6 +2789,51 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         "PTK browserExiting: no progress for UUID {} url={}",
                         ccbutils.getUuid(),
                         currentUrl);
+                return;
+            }
+            if (PtkCloseContract.isBrowserLocalNonParticipantCloseDecision(closeDecision)) {
+                logCloseContractDecision(
+                        zapid,
+                        browserid,
+                        initialDecision != null ? initialDecision : "not_applicable",
+                        initialScanState,
+                        (System.currentTimeMillis() - start),
+                        scanProgress.getOrDefault(zapid, 0),
+                        scanStatus.getOrDefault(zapid, ""),
+                        closeDecision);
+                return;
+            }
+            if (PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision)) {
+                long waitedMs = System.currentTimeMillis() - start;
+                int progress = scanProgress.getOrDefault(zapid, 0);
+                String status = scanStatus.getOrDefault(zapid, "");
+                logCloseContractDecision(
+                        zapid,
+                        browserid,
+                        initialDecision != null ? initialDecision : "browser_tab_safe_to_close",
+                        initialScanState,
+                        waitedMs,
+                        progress,
+                        status,
+                        closeDecision);
+                Map<String, Object> closeExtra = new LinkedHashMap<>();
+                closeExtra.put("waitedMs", waitedMs);
+                closeExtra.put("forced", false);
+                closeExtra.put("decision", "browser_tab_safe_to_close");
+                closeExtra.put("progress", progress);
+                if (status != null && !status.isBlank()) {
+                    closeExtra.put("status", status);
+                }
+                closeExtra.put("alertsTotal", getAlertsRaisedTotal(zapid));
+                closeExtra.put("terminalSeen", terminalProgressLogged.contains(zapid));
+                closeExtra.put("reason", getStringField(closeDecision, "reason"));
+                logTimingSummary(
+                        zapid,
+                        browserid,
+                        "browser_close.end",
+                        getElapsedSinceFirst(zapid, System.currentTimeMillis()),
+                        closeExtra);
+                clearTrackingState(zapid);
                 return;
             }
             logCloseContractDecision(
