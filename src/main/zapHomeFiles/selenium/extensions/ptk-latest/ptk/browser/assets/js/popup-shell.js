@@ -26,10 +26,10 @@ const RELEASE_NOTE_HTML = `
     <button id="ptk_release_note_close" class="ptk-shell-release-note-close" type="button" aria-label="Close release notes">x</button>
     <h3>Release notes - ${version}</h3>
     <ul>
-      <li><strong>Automation reliability:</strong> Improved PTK/ZAP browser automation startup, runtime selection, and scan session coordination.</li>
-      <li><strong>More XSS attacks:</strong> Expanded reflected XSS coverage across script, SVG/onload, JavaScript, and attribute contexts.</li>
-      <li><strong>Cleaner results:</strong> Reduced duplicate SPA/DOM XSS and IAST findings while preserving useful occurrence samples.</li>
-      <li><strong>Performance and exports:</strong> Improved automated scan workflows, telemetry, export normalization, and redaction handling.</li>
+      <li><strong>ZAP automation reliability:</strong> Hardened browser close handling, target scoping, and multi-browser Edge/Firefox scan coordination.</li>
+      <li><strong>AngularJS and XSS checks:</strong> Improved AngularJS template-injection coverage and safer template-marker proof for noisy Angular contexts.</li>
+      <li><strong>Accuracy fixes:</strong> Fixed JWT carrier false positives and improved SAST/IAST DOM taint coverage for message, storage, navigation, and form flows.</li>
+      <li><strong>Agent workflows:</strong> Added stronger <code>ptk-scan</code> / Agent SDK workflows, scenario runs, matrices, and larger report exports.</li>
     </ul>
     <p>More details on <a href="https://pentestkit.co.uk/release_notes.html" target="_blank" rel="noopener">https://pentestkit.co.uk/release_notes.html</a></p>
   </div>

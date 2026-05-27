@@ -854,6 +854,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
     if (!handlerNode) return;
     if (handlerNode.type === "FunctionExpression" || handlerNode.type === "ArrowFunctionExpression") {
       markFunctionParamsAsMessage(handlerNode);
+      addMessageDataOriginsInFunction(handlerNode);
       return;
     }
     if (handlerNode.type === "Identifier") {
@@ -864,6 +865,17 @@ export function buildGlobalTaintContext(ast, options = {}) {
         addMessageDataOriginsInFunction(fn);
       }
     }
+  }
+
+  function isAddEventListenerCall(node, lowerName = "") {
+    if (!node || node.type !== "CallExpression") return false;
+    if (lowerName && lowerName.endsWith("addeventlistener")) return true;
+    const callee = node.callee;
+    if (callee?.type === "Identifier") return callee.name === "addEventListener";
+    if (callee?.type === "MemberExpression") {
+      return memberPropName(callee) === "addEventListener";
+    }
+    return false;
   }
 
   function isDomEventTargetValueRead(node) {
@@ -1194,7 +1206,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
             if (canonical) param._ptkCanonicalName = canonical;
           });
         }
-        if (node.type === "CallExpression" && lowerName.endsWith("addeventlistener")) {
+        if (isAddEventListenerCall(node, lowerName)) {
           const evtArg = node.arguments?.[0];
           const evtName = literalStringValue(evtArg)?.toLowerCase();
           const handlerArg = node.arguments?.[1];
@@ -1422,6 +1434,10 @@ export function buildGlobalTaintContext(ast, options = {}) {
               if (parentIsSource) {
                 return; // suppress base origin only when parent member is also a source
               }
+            }
+            const nodeId = graph.nodeIdForAstNode(node);
+            if (graph.isSourceNode(nodeId) && graph.getOrigins(nodeId)?.size) {
+              return;
             }
             addOriginForNode(node, matcher, graph, originTable, fileCache, sourceTaintKindMap);
             return; // one match per node is enough
