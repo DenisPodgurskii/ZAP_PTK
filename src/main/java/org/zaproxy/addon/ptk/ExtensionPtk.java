@@ -269,6 +269,7 @@ final class PtkCloseContract {
 
     private static boolean isBrowserLocalNonParticipantReason(String reason) {
         return "automation_disabled".equals(reason)
+                || "manual_mode".equals(reason)
                 || "ptk_automation_unavailable".equals(reason)
                 || "ptk_agent_unavailable".equals(reason)
                 || "ptk_automation_untrusted".equals(reason);
@@ -344,6 +345,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private final Set<String> firstAlertLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> terminalProgressLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> sessionEstablishedLogged = ConcurrentHashMap.newKeySet();
+    private final Set<String> manualModeConfigZapIds = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> closedZapIds = new ConcurrentHashMap<>();
 
     private static final class ZapHistorySeedCacheEntry {
@@ -705,7 +707,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         if (scope == null || scope.isBlank()) {
             scope = "zap-context";
         }
-        LOGGER.info(
+        LOGGER.debug(
                 "PTK /ptk/config returning {} ZAP history seed URLs scope={}", urls.size(), scope);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("zapHistorySeedUrls", urls);
@@ -1300,6 +1302,52 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             browserIdByZapId.put(zapid, browserid);
         }
 
+        private void rememberConfigMode(String zapid, boolean automatedScanningEnabled) {
+            if (zapid == null || zapid.isBlank()) {
+                return;
+            }
+            if (automatedScanningEnabled) {
+                manualModeConfigZapIds.remove(zapid);
+            } else {
+                manualModeConfigZapIds.add(zapid);
+            }
+        }
+
+        private boolean isManualModeCallbackProgress(
+                String zapid, Integer progress, String status, String sessionId) {
+            if (zapid == null || zapid.isBlank() || !manualModeConfigZapIds.contains(zapid)) {
+                return false;
+            }
+            if (sessionId != null && !sessionId.isBlank()) {
+                return false;
+            }
+            if (progress != null && progress.intValue() > 0) {
+                return false;
+            }
+            return status == null || status.isBlank() || "callback".equalsIgnoreCase(status);
+        }
+
+        private boolean isManualModeConfigOnlyClose(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return false;
+            }
+            return isManualModeCallbackProgress(
+                    zapid,
+                    scanProgress.get(zapid),
+                    scanStatus.get(zapid),
+                    sessionIdByZapId.get(zapid));
+        }
+
+        private Map<String, Object> buildManualModeCloseDecision() {
+            Map<String, Object> closeDecision = new LinkedHashMap<>();
+            closeDecision.put("participant", "ptk");
+            closeDecision.put("decision", "not_applicable");
+            closeDecision.put("scanState", "manual");
+            closeDecision.put("reason", "manual_mode");
+            closeDecision.put("stopRequested", false);
+            return closeDecision;
+        }
+
         private long markCallbackStart(String zapid) {
             if (zapid == null || zapid.isBlank()) {
                 return -1L;
@@ -1398,6 +1446,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             firstProgressLogged.remove(zapid);
             firstAlertLogged.remove(zapid);
             terminalProgressLogged.remove(zapid);
+            manualModeConfigZapIds.remove(zapid);
         }
 
         private boolean isTerminalProgressValue(Integer progress, String status) {
@@ -2359,8 +2408,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 String zapid = getStringField(requestData, "zapid");
                 String browserid = getStringField(requestData, "browserid");
                 rememberBrowserId(zapid, browserid);
+                rememberConfigMode(zapid, getParam().isAutomatedScanningEnabled());
                 markCallbackStart(zapid);
-                logBrowserEvidence(zapid, browserid, "config_callback", null, null);
                 msg.getResponseBody().setBody(getConfigJsonForRequest(requestData));
                 long finishedAt = System.currentTimeMillis();
                 Long sinceFirstMs = getElapsedSinceFirst(zapid, finishedAt);
@@ -2504,6 +2553,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         if (terminalProgress && zapid != null && !zapid.isBlank()) {
                             terminalProgressLogged.add(zapid);
                         }
+                        boolean manualModeCallbackOnly =
+                                isManualModeCallbackProgress(
+                                        zapid, progress.intValue(), status, sessionId);
                         String progressSummary = summarizeProgressPayload(progressData);
                         boolean progressChanged =
                                 zapid != null
@@ -2512,7 +2564,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                                         && !progressSummary.equals(
                                                 lastProgressSummaryByZapId.put(
                                                         zapid, progressSummary));
-                        if (firstProgress || sessionEstablished || terminalProgress) {
+                        if ((firstProgress || sessionEstablished || terminalProgress)
+                                && !manualModeCallbackOnly) {
                             Map<String, Object> evidenceExtra = new LinkedHashMap<>();
                             evidenceExtra.put("progress", progress.intValue());
                             if (status != null && !status.isBlank()) {
@@ -2667,6 +2720,35 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             long start = System.currentTimeMillis();
             long closeDeadlineMs = start + PtkCloseContract.BROWSER_CLOSE_MAX_WALL_CLOCK_MS;
             String browserid = browserIdByZapId.get(zapid);
+            if (isManualModeConfigOnlyClose(zapid)) {
+                Map<String, Object> closeDecision = buildManualModeCloseDecision();
+                long waitedMs = System.currentTimeMillis() - start;
+                logCloseContractDecision(
+                        zapid,
+                        browserid,
+                        "not_applicable",
+                        "manual",
+                        waitedMs,
+                        0,
+                        "manual",
+                        closeDecision);
+                logTimingSummary(
+                        zapid,
+                        browserid,
+                        "browser_close.end",
+                        getElapsedSinceFirst(zapid, System.currentTimeMillis()),
+                        Map.of(
+                                "waitedMs",
+                                waitedMs,
+                                "forced",
+                                false,
+                                "decision",
+                                "not_applicable",
+                                "reason",
+                                "manual_mode"));
+                clearTrackingState(zapid);
+                return;
+            }
             waitForSessionStartBeforeClose(zapid, closeDeadlineMs);
             boolean hadProgressBeforeClose = scanProgress.containsKey(zapid);
             Map<String, Object> closeDecision =
