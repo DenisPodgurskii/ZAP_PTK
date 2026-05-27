@@ -280,6 +280,13 @@ class ExtensionPtkCloseContractTest {
                 false,
                 PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
 
+        closeDecision.put("reason", "manual_mode");
+        assertEquals(
+                true, PtkCloseContract.isBrowserLocalNonParticipantCloseDecision(closeDecision));
+        assertEquals(
+                false,
+                PtkCloseContract.canAcceptCloseDecisionSafeToClose(closeDecision, 99, "running"));
+
         closeDecision.put("decision", "wait");
         assertEquals(
                 false, PtkCloseContract.isBrowserLocalNonParticipantCloseDecision(closeDecision));
