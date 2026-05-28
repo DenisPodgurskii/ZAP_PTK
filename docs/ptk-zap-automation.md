@@ -4,6 +4,8 @@ This document describes how PTK is expected to work inside production ZAP automa
 
 The important rule is simple: do not hide instability by changing scan strategy, rulepacks, seed URLs, or `spiderClient` behavior. First prove where the loss happens.
 
+For the full callback, progress, finding-publish, Client Spider, and browser-close lifecycle contract, see [ptk-zap-lifecycle-contract.md](ptk-zap-lifecycle-contract.md).
+
 ## Standard Flow
 
 A normal PTK/ZAP browser automation run should keep the ZAP exploration path intact:
@@ -40,9 +42,9 @@ ZAP should not force-close a PTK browser while PTK is still producing findings. 
 
 1. ZAP calls a WebDriver script in the browser before closing it.
 2. The script asks PTK for current session progress.
-3. If needed, the script asks PTK to stop the session.
-4. PTK flushes findings and reports a terminal state or `safeToClose=true`.
-5. ZAP closes the browser only when the close decision is safe, or after a bounded timeout.
+3. The script reports terminal, local-tab-safe, or wait state. It must not stop PTK merely because a close grace window elapsed.
+4. PTK continues publishing findings/progress through normal callbacks.
+5. ZAP closes the browser only when the close decision is terminal-safe, local-tab-safe, or after a bounded forced/incomplete timeout.
 
 `safeToClose` from progress callbacks is accepted only after ZAP has explicitly started the close request for that zapid. This prevents a normal page/progress callback from pre-setting close readiness.
 
@@ -52,11 +54,12 @@ Important close-decision states:
 
 | Decision / Reason | Meaning |
 |---|---|
-| `safe_to_close` + `terminal_after_stop` | PTK stopped and reached terminal state during close. |
 | `safe_to_close` + `already_terminal` | PTK was already terminal before the close request completed. |
 | `browser_tab_safe_to_close` + `no_active_browser_work` | The current WebDriver tab has no PTK browser-local work left and may close, but this is not global PTK session terminal evidence. |
 | `browser_tab_safe_to_close` + `non_owner_active_work` | The current WebDriver tab is not the PTK session owner for the active target and may close without stopping the global PTK session. |
-| `wait` + `close_requested` | PTK accepted stop, but Java should keep waiting for terminal progress. |
+| `wait` + `active_browser_work` | The ZAP-owned PTK session is still active. Java should keep waiting while meaningful progress or alert activity remains fresh. |
+| `wait` + `owner_waiting_for_terminal` | The owner tab is non-terminal but has no concrete browser-local work in the progress snapshot. This is not clean close evidence. |
+| `wait` + `activity_stale_waiting_for_terminal` | Java has not seen meaningful progress/alert activity recently. With the legacy extension contract this is diagnostic evidence only; hard timeout still records forced/incomplete. |
 | `not_applicable` + `automation_disabled` | The page bridge did not expose PTK automation for the current tab. Treat this as a startup/session issue, not as a finding issue. |
 | `forced_closed` | ZAP exhausted the close budget. This is a lifecycle warning even if findings were imported. |
 | `browser_session_invalid:*` | ZAP could not prove a valid browser/PTK session for the target. |
@@ -65,14 +68,13 @@ Do not treat `progress=0 status=callback` as a started PTK scan. It only proves 
 
 ## Browser Evidence Logs
 
-The add-on logs PTK/ZAP browser truth as `PTK_BROWSER_EVIDENCE` lines in `zap.log`.
+The add-on logs PTK/ZAP browser truth as `PTK_BROWSER_EVIDENCE` lines in `zap.log`. Config callbacks are logged through debug callback/timing logs rather than browser evidence; do not treat config callback evidence as scan-start evidence.
 
 Key events:
 
 | Event | Meaning |
 |---|---|
 | `browser_loaded` | ZAP launched or navigated a browser to a URL. |
-| `config_callback` | Browser requested PTK configuration from ZAP. |
 | `ptk_progress_seen` | ZAP received progress, usually initial callback state. May not include a PTK session yet. |
 | `ptk_session_established` | A PTK session id was observed for the zapid. This is the session-start proof. |
 | `ptk_session_terminal` | PTK reported terminal progress. |

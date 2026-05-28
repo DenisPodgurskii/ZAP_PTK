@@ -54,12 +54,10 @@ import org.zaproxy.zap.model.Context;
  *   close decision has returned. ZAP waits this long for progress callbacks to
  *   report terminal state or safeToClose before forcing the browser closed.
  * - BROWSER_CLOSE_SCRIPT_TIMEOUT_MS is the Selenium async-script budget for a
- *   single close-decision call. It must be greater than the PTK stop budget so
- *   WebDriver can receive PTK's callback rather than timing out first.
- * - BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS is the stopTimeoutMs value sent to the
- *   injected PTK close-decision script when it needs to stop a session.
- * - The injected script derives its internal call timeout directly from that
- *   stopTimeoutMs value; there is no separate JavaScript cap to keep in sync.
+ *   single close-decision call.
+ * - BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS is now the legacy close-decision bridge call
+ *   timeout. The close-decision script must not stop PTK merely because this or any
+ *   other close budget elapsed.
  * - Follow-up WebDriver decisions are attempted every
  *   BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS slices while the Java polling
  *   budget remains open. The worst-case wall-clock bound is therefore
@@ -68,6 +66,7 @@ import org.zaproxy.zap.model.Context;
  *   startup grace. This avoids closing a valid page too early when many
  *   WebDriver browsers are started concurrently and the PTK content/background
  *   handshake is delayed.
+ * - Hard timeout means forced/incomplete. It is not clean close evidence.
  */
 final class PtkCloseContract {
     static final int BROWSER_CLOSE_MAX_ATTEMPTS = 120;
@@ -80,6 +79,7 @@ final class PtkCloseContract {
             BROWSER_CLOSE_MAX_ATTEMPTS * BROWSER_CLOSE_WAIT_SLICE_MS;
     static final long BROWSER_CLOSE_SCRIPT_TIMEOUT_MS = 30000;
     static final int BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS = 25000;
+    static final long BROWSER_CLOSE_ACTIVITY_STALE_MS = 30_000L;
     static final int BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS = 15;
     static final int BROWSER_CLOSE_MAX_FOLLOW_UP_DECISIONS =
             BROWSER_CLOSE_MAX_ATTEMPTS / BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS;
@@ -93,7 +93,7 @@ final class PtkCloseContract {
     static {
         if (BROWSER_CLOSE_SCRIPT_TIMEOUT_MS < BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS) {
             throw new IllegalStateException(
-                    "PTK browser close script timeout must cover PTK stop timeout");
+                    "PTK browser close script timeout must cover PTK bridge timeout");
         }
     }
 
@@ -267,6 +267,113 @@ final class PtkCloseContract {
         return "no_active_browser_work".equals(reason) || "non_owner_active_work".equals(reason);
     }
 
+    @SuppressWarnings("unchecked")
+    static String canonicalProgressSummary(Map<String, Object> progressData) {
+        if (progressData == null || progressData.isEmpty()) {
+            return "";
+        }
+        StringBuilder summary = new StringBuilder();
+        appendSummaryField(summary, "sid", getString(progressData, "sessionId"));
+        appendSummaryField(summary, "aseq", getInteger(progressData, "activitySeq"));
+        appendSummaryField(summary, "afp", getString(progressData, "activityFingerprint"));
+        Object safeToClose = progressData.get("safeToClose");
+        if (safeToClose instanceof Boolean) {
+            appendSummaryField(summary, "safe", safeToClose);
+        }
+        String status = getString(progressData, "status");
+        Integer progress = getInteger(progressData, "progress");
+        if ((status != null && !status.isBlank()) || progress != null) {
+            appendSummaryField(
+                    summary,
+                    "top",
+                    (status != null ? status : "") + ":" + (progress != null ? progress : 0));
+        }
+        Object publisherValue = progressData.get("publisher");
+        if (publisherValue instanceof Map<?, ?> rawPublisher) {
+            Map<String, Object> publisher = (Map<String, Object>) rawPublisher;
+            appendSummaryField(summary, "pf", getInteger(publisher, "pendingFindings"));
+            appendSummaryField(summary, "ifb", getInteger(publisher, "inFlightBatches"));
+            Object drained = publisher.get("drained");
+            if (drained instanceof Boolean) {
+                appendSummaryField(summary, "pdr", drained);
+            }
+            appendSummaryField(summary, "lab", getInteger(publisher, "lastAckedBatchSeq"));
+        }
+        Object enginesValue = progressData.get("engines");
+        if (!(enginesValue instanceof Map<?, ?> engines) || engines.isEmpty()) {
+            return summary.toString();
+        }
+        engines.forEach(
+                (engineName, engineValue) -> {
+                    if (!(engineName instanceof String) || !(engineValue instanceof Map<?, ?>)) {
+                        return;
+                    }
+                    Map<String, Object> engine = (Map<String, Object>) engineValue;
+                    if (!summary.isEmpty()) {
+                        summary.append(',');
+                    }
+                    Integer engineProgress = getInteger(engine, "progress");
+                    summary.append(engineName)
+                            .append(':')
+                            .append(getString(engine, "status"))
+                            .append(':')
+                            .append(engineProgress != null ? engineProgress : 0);
+                    Object detailsValue = engine.get("details");
+                    if (detailsValue instanceof Map<?, ?> rawDetails) {
+                        Map<String, Object> details = (Map<String, Object>) rawDetails;
+                        summary.append('[');
+                        appendDetailField(summary, details, "planned", "p");
+                        appendDetailField(summary, details, "executed", "e");
+                        appendDetailField(summary, details, "remaining", "rem");
+                        appendDetailField(summary, details, "requestQueue", "rq");
+                        appendDetailField(summary, details, "taskQueue", "tq");
+                        appendDetailField(summary, details, "activeTasks", "at");
+                        appendDetailField(summary, details, "planning", "pl");
+                        appendDetailField(summary, details, "pendingCaptures", "pcap");
+                        appendDetailField(summary, details, "findingsCount", "f");
+                        appendDetailField(summary, details, "seededRequests", "seed");
+                        appendDetailField(summary, details, "agentReady", "iar");
+                        appendDetailField(summary, details, "requestsCount", "ireq");
+                        appendDetailField(summary, details, "runtimeEventsCount", "irt");
+                        appendDetailField(summary, details, "findingReportsAccepted", "ifa");
+                        appendDetailField(
+                                summary, details, "findingReportsDroppedInactive", "ifdi");
+                        appendDetailField(
+                                summary, details, "findingReportsDroppedTabMismatch", "ifdt");
+                        appendDetailField(summary, details, "runtimeSignalsAccepted", "irsa");
+                        appendDetailField(summary, details, "modulesSentOk", "imok");
+                        appendDetailField(summary, details, "modulesSentSkipped", "imsk");
+                        appendDetailField(summary, details, "modulesSentError", "imerr");
+                        appendDetailField(summary, details, "pendingFindings", "pf");
+                        appendDetailField(summary, details, "inFlightBatches", "ifb");
+                        summary.append(']');
+                    }
+                });
+        return summary.toString();
+    }
+
+    static Long newestActivityAt(Long progressChangedAtMs, Long alertChangedAtMs) {
+        if (progressChangedAtMs == null) {
+            return alertChangedAtMs;
+        }
+        if (alertChangedAtMs == null) {
+            return progressChangedAtMs;
+        }
+        return Math.max(progressChangedAtMs, alertChangedAtMs);
+    }
+
+    static boolean isActivityFresh(Long lastActivityAtMs, long nowMs) {
+        return lastActivityAtMs != null
+                && nowMs - lastActivityAtMs <= BROWSER_CLOSE_ACTIVITY_STALE_MS;
+    }
+
+    static long activityIdleMs(Long lastActivityAtMs, long nowMs) {
+        if (lastActivityAtMs == null) {
+            return -1L;
+        }
+        return Math.max(0L, nowMs - lastActivityAtMs);
+    }
+
     private static boolean isBrowserLocalNonParticipantReason(String reason) {
         return "automation_disabled".equals(reason)
                 || "manual_mode".equals(reason)
@@ -278,6 +385,34 @@ final class PtkCloseContract {
     private static String getString(Map<String, Object> map, String key) {
         Object value = map != null ? map.get(key) : null;
         return value == null ? null : String.valueOf(value);
+    }
+
+    private static Integer getInteger(Map<String, Object> map, String key) {
+        Object value = map != null ? map.get(key) : null;
+        return value instanceof Number ? ((Number) value).intValue() : null;
+    }
+
+    private static void appendDetailField(
+            StringBuilder summary, Map<String, Object> details, String key, String label) {
+        Object value = details.get(key);
+        if (!(value instanceof Number)) {
+            return;
+        }
+        summary.append(';').append(label).append('=').append(((Number) value).intValue());
+    }
+
+    private static void appendSummaryField(StringBuilder summary, String label, Object value) {
+        if (value == null) {
+            return;
+        }
+        String text = String.valueOf(value);
+        if (text.isBlank()) {
+            return;
+        }
+        if (!summary.isEmpty()) {
+            summary.append(',');
+        }
+        summary.append(label).append('=').append(text);
     }
 }
 
@@ -325,6 +460,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private final Map<String, Integer> alertsRaisedByZapId = new ConcurrentHashMap<>();
     private final Map<String, Long> firstAlertSeenAtMs = new ConcurrentHashMap<>();
     private final Map<String, String> lastProgressSummaryByZapId = new ConcurrentHashMap<>();
+    private final Map<String, Long> lastProgressChangedAtMsByZapId = new ConcurrentHashMap<>();
+    private final Map<String, Long> lastAlertChangedAtMsByZapId = new ConcurrentHashMap<>();
+    private final Set<String> staleCloseLogged = ConcurrentHashMap.newKeySet();
     /*
      * safeToClose is advisory state accepted only through the ZAP callback flow for
      * the current zapid/WebDriver-controlled browser. Page scripts can observe the
@@ -469,7 +607,10 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             ensurePtkSeleniumBrowserArguments(options);
             List<BrowserExtension> extensions = new ArrayList<>(options.getBrowserExtensions());
             boolean changed = false;
-            changed |= ensureBrowserExtension(extensions, chromiumPath, Browser.CHROME, "Chromium");
+            for (Browser browser : PTK_CHROMIUM_BROWSERS) {
+                changed |=
+                        ensureBrowserExtension(extensions, chromiumPath, browser, browser.getId());
+            }
             changed |= ensureBrowserExtension(extensions, xpiPath, Browser.FIREFOX, "Firefox");
             if (changed) {
                 options.setBrowserExtensions(extensions);
@@ -1286,15 +1427,6 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             return value instanceof Number ? ((Number) value).intValue() : null;
         }
 
-        private void appendDetailField(
-                StringBuilder summary, Map<String, Object> details, String key, String label) {
-            Object value = details.get(key);
-            if (!(value instanceof Number)) {
-                return;
-            }
-            summary.append(';').append(label).append('=').append(((Number) value).intValue());
-        }
-
         private void rememberBrowserId(String zapid, String browserid) {
             if (zapid == null || zapid.isBlank() || browserid == null || browserid.isBlank()) {
                 return;
@@ -1370,7 +1502,12 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             if (zapid == null || zapid.isBlank()) {
                 return Math.max(0, raised);
             }
-            return alertsRaisedByZapId.merge(zapid, Math.max(0, raised), Integer::sum);
+            int previous = alertsRaisedByZapId.getOrDefault(zapid, 0);
+            int total = alertsRaisedByZapId.merge(zapid, Math.max(0, raised), Integer::sum);
+            if (total != previous) {
+                lastAlertChangedAtMsByZapId.put(zapid, System.currentTimeMillis());
+            }
+            return total;
         }
 
         private int getAlertsRaisedTotal(String zapid) {
@@ -1398,6 +1535,40 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             return getElapsedSinceFirst(zapid, firstAlertAt);
         }
 
+        private Long getLastMeaningfulActivityAtMs(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return null;
+            }
+            return PtkCloseContract.newestActivityAt(
+                    lastProgressChangedAtMsByZapId.get(zapid),
+                    lastAlertChangedAtMsByZapId.get(zapid));
+        }
+
+        private boolean hasRecentMeaningfulActivity(String zapid, long nowMs) {
+            return PtkCloseContract.isActivityFresh(getLastMeaningfulActivityAtMs(zapid), nowMs);
+        }
+
+        private void putActivitySummaryFields(Map<String, Object> extra, String zapid, long nowMs) {
+            if (extra == null) {
+                return;
+            }
+            Long activityAt = getLastMeaningfulActivityAtMs(zapid);
+            long idleMs = PtkCloseContract.activityIdleMs(activityAt, nowMs);
+            if (idleMs >= 0L) {
+                extra.put("activityIdleMs", idleMs);
+                extra.put("activityFresh", PtkCloseContract.isActivityFresh(activityAt, nowMs));
+            }
+            Long progressChangedAt =
+                    zapid != null ? lastProgressChangedAtMsByZapId.get(zapid) : null;
+            if (progressChangedAt != null) {
+                extra.put("progressIdleMs", Math.max(0L, nowMs - progressChangedAt));
+            }
+            Long alertChangedAt = zapid != null ? lastAlertChangedAtMsByZapId.get(zapid) : null;
+            if (alertChangedAt != null) {
+                extra.put("alertIdleMs", Math.max(0L, nowMs - alertChangedAt));
+            }
+        }
+
         private Map<String, Object> buildSessionSummaryExtra(
                 String zapid, boolean forced, long waitedMs, Integer progress, String status) {
             Map<String, Object> extra = new LinkedHashMap<>();
@@ -1421,6 +1592,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             if (firstAlertMs != null) {
                 extra.put("firstAlertMs", firstAlertMs);
             }
+            putActivitySummaryFields(extra, zapid, System.currentTimeMillis());
             return extra;
         }
 
@@ -1436,6 +1608,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             alertsRaisedByZapId.remove(zapid);
             firstAlertSeenAtMs.remove(zapid);
             lastProgressSummaryByZapId.remove(zapid);
+            lastProgressChangedAtMsByZapId.remove(zapid);
+            lastAlertChangedAtMsByZapId.remove(zapid);
+            staleCloseLogged.remove(zapid);
             safeToCloseByZapId.remove(zapid);
             lastCloseDecisionByZapId.remove(zapid);
             closeDecisionAttemptedByZapId.remove(zapid);
@@ -1534,7 +1709,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             }
             long scriptTimeoutMs =
                     Math.min(PtkCloseContract.BROWSER_CLOSE_SCRIPT_TIMEOUT_MS, remainingMs);
-            long ptkStopTimeoutMs =
+            long ptkBridgeTimeoutMs =
                     Math.min(PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS, scriptTimeoutMs);
 
             if (ccbutils == null) {
@@ -1573,10 +1748,10 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             String script =
                     """
                     const done = arguments[arguments.length - 1];
-                    const stopTimeoutMs = arguments[0] || 10000;
+                    const bridgeTimeoutMs = arguments[0] || 10000;
                     const explicitSessionId = arguments[1] || null;
                     const explicitZapId = arguments[2] || null;
-                    const callTimeoutMs = Math.max(2000, stopTimeoutMs);
+                    const callTimeoutMs = Math.max(2000, bridgeTimeoutMs);
                     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
                     const timeoutAfter = (label, ms) => new Promise((resolve) => setTimeout(() => {
                       resolve({ ok: false, code: label + '_timeout', status: 'unknown' });
@@ -1702,19 +1877,6 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                       { options: { sessionId: explicitSessionId, source: 'zap_browser_close', currentUrl: currentCloseUrl } },
                       3000
                     );
-                    const stopDirect = () => sendZapCloseMessage(
-                      'session-end',
-                      {
-                        wait: false,
-                        options: {
-                          sessionId: explicitSessionId,
-                          source: 'zap_browser_close',
-                          stopTimeoutMs,
-                          currentUrl: currentCloseUrl
-                        }
-                      },
-                      Math.min(5000, callTimeoutMs)
-                    );
                     (async () => {
                       try {
                         await refreshAutomationStatus();
@@ -1722,7 +1884,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         const trustedAutomation = automation && automation.bridgeId === 'ptk-automation-bridge'
                           ? automation
                           : null;
-                        if (trustedAutomation && typeof trustedAutomation.endSession === 'function') {
+                        if (trustedAutomation && typeof trustedAutomation.getSessionProgress === 'function') {
                           const readProgress = () => typeof trustedAutomation.getSessionProgress === 'function'
                             ? withTimeout(trustedAutomation.getSessionProgress({
                                 sessionId: explicitSessionId,
@@ -1769,7 +1931,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                             return;
                           }
                           if (before && before.ok === true) {
-                            if (!hasConcreteBrowserWork(before)) {
+                            const ownerClose = shouldStopForClose(before);
+                            const concreteWork = hasConcreteBrowserWork(before);
+                            if (!ownerClose) {
                               done({
                                 ok: true,
                                 participant: 'ptk',
@@ -1778,94 +1942,24 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                                 statusBefore,
                                 sessionId: explicitSessionId,
                                 stopRequested: false,
-                                reason: 'no_active_browser_work',
+                                reason: concreteWork ? 'non_owner_active_work' : 'no_active_browser_work',
                                 stopVia: 'automation_bridge'
                               });
                               return;
                             }
-                            if (!shouldStopForClose(before)) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'browser_tab_safe_to_close',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                reason: 'non_owner_active_work',
-                                stopVia: 'automation_bridge'
-                              });
-                              return;
-                            }
-                            // Closing the ZAP-owned target tab is the end of the client
-                            // spider browser lifecycle, so ask PTK to stop and publish
-                            // terminal progress. Child attack tabs are handled above.
-                            // This preserves child-tab safety without leaving the primary
-                            // ZAP session stuck at running until force-close.
-                          }
-                          const stop = await withTimeout(
-                            trustedAutomation.endSession({
-                              sessionId: explicitSessionId,
-                              wait: false,
-                              source: 'zap_browser_close',
-                              zapid: explicitZapId,
-                              stopTimeoutMs,
-                              currentUrl: currentCloseUrl
-                            }),
-                            'stop_scan',
-                            Math.min(5000, callTimeoutMs)
-                          );
-                          if (stop && stop.error === 'automation_disabled') {
-                            await refreshAutomationStatus();
-                            const retryStop = await withTimeout(
-                              trustedAutomation.endSession({
-                                sessionId: explicitSessionId,
-                                wait: false,
-                                source: 'zap_browser_close',
-                                zapid: explicitZapId,
-                                stopTimeoutMs,
-                                currentUrl: currentCloseUrl
-                              }),
-                              'stop_scan_retry',
-                              Math.min(5000, callTimeoutMs)
-                            );
-                            if (retryStop && retryStop.ok !== false) {
-                              Object.assign(stop, retryStop);
-                            }
-                            if (stop && stop.error === 'automation_disabled') {
-                              const directStop = await stopDirect();
-                              if (directStop && directStop.ok !== false) {
-                                directStop.stopVia = 'direct_zap_close';
-                                Object.assign(stop, directStop);
-                              }
-                            }
-                          }
-                          let after = await waitForTerminal(Math.max(1000, callTimeoutMs - 5000));
-                          const directAfter = after && after.error === 'automation_disabled'
-                            ? await readProgressDirect()
-                            : null;
-                          if (directAfter && directAfter.ok !== false) {
-                            after = Object.assign(after || {}, directAfter);
-                          }
-                          const stopStatus = statusOf(stop);
-                          const finalStatus = statusOf(after) || stopStatus || statusBefore || 'stopping';
-                          const finalCompletionStatus = String(after && (after.completionStatus || after.summary && after.summary.status) || stop && (stop.completionStatus || stop.summary && stop.summary.status) || '').toLowerCase();
-                          const terminalPosted = Boolean(after && after.zapProgressTerminalPosted === true || stop && stop.zapProgressTerminalPosted === true);
                           done({
-                            ok: stop && stop.ok !== false,
+                            ok: true,
                             participant: 'ptk',
-                            decision: terminal.has(finalStatus) ? 'safe_to_close' : 'wait',
-                            scanState: finalStatus,
-                            completionStatus: finalCompletionStatus || null,
-                            zapProgressTerminalPosted: terminalPosted,
-                            zapTerminalPost: after && after.zapTerminalPost || stop && stop.zapTerminalPost || null,
+                            decision: 'wait',
+                            scanState: statusBefore || 'running',
                             statusBefore,
                             sessionId: explicitSessionId,
-                            stopRequested: true,
-                            stopVia: stop && stop.stopVia ? stop.stopVia : 'automation_bridge',
-                            reason: terminal.has(finalStatus) ? 'terminal_after_stop' : stop && stop.error || 'close_requested'
+                            stopRequested: false,
+                            stopVia: 'automation_bridge',
+                            reason: concreteWork ? 'active_browser_work' : 'owner_waiting_for_terminal'
                           });
                           return;
+                        }
                         }
                         {
                           const before = await readProgressDirect();
@@ -1913,26 +2007,17 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                               return;
                             }
                           }
-                          const stop = await stopDirect();
-                          const after = await readProgressDirect();
-                          const stopStatus = statusOf(stop);
-                          const finalStatus = statusOf(after) || stopStatus || statusBefore || 'stopping';
-                          const finalCompletionStatus = String(after && (after.completionStatus || after.summary && after.summary.status) || stop && (stop.completionStatus || stop.summary && stop.summary.status) || '').toLowerCase();
-                          const terminalPosted = Boolean(after && after.zapProgressTerminalPosted === true || stop && stop.zapProgressTerminalPosted === true);
-                          if (stop && stop.ok !== false) {
+                          if (before && before.ok === true) {
                             done({
                               ok: true,
                               participant: 'ptk',
-                              decision: terminal.has(finalStatus) ? 'safe_to_close' : 'wait',
-                              scanState: finalStatus,
-                              completionStatus: finalCompletionStatus || null,
-                              zapProgressTerminalPosted: terminalPosted,
-                              zapTerminalPost: after && after.zapTerminalPost || stop && stop.zapTerminalPost || null,
+                              decision: 'wait',
+                              scanState: statusBefore || 'running',
                               statusBefore,
                               sessionId: explicitSessionId,
-                              stopRequested: true,
+                              stopRequested: false,
                               stopVia: 'direct_zap_close',
-                              reason: terminal.has(finalStatus) ? 'terminal_after_stop' : stop.error || 'close_requested'
+                              reason: hasConcreteBrowserWork(before) ? 'active_browser_work' : 'owner_waiting_for_terminal'
                             });
                             return;
                           }
@@ -1964,35 +2049,15 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                           });
                           return;
                         }
-                        if (typeof agent.stopScan !== 'function') {
-                          done({
-                            ok: false,
-                            participant: 'ptk',
-                            decision: 'wait',
-                            scanState: statusBefore || 'running',
-                            statusBefore,
-                            sessionId: before && before.sessionId || null,
-                            reason: 'stop_scan_unavailable'
-                          });
-                          return;
-                        }
-                        const stop = await Promise.race([
-                          Promise.resolve(agent.stopScan({
-                            wait: false,
-                            stopTimeoutMs
-                          })),
-                          timeoutAfter('stop_scan', Math.min(5000, callTimeoutMs))
-                        ]);
-                        const stopStatus = String(stop && stop.status || stop && stop.summary && stop.summary.status || '').toLowerCase();
                         done({
-                          ok: stop && stop.ok !== false,
+                          ok: before && before.ok !== false,
                           participant: 'ptk',
-                          decision: terminal.has(stopStatus) ? 'safe_to_close' : 'wait',
-                          scanState: stopStatus || statusBefore || 'stopping',
+                          decision: 'wait',
+                          scanState: statusBefore || 'running',
                           statusBefore,
                           sessionId: before && before.sessionId || null,
-                          stopRequested: true,
-                          reason: stop && stop.code || stop && stop.error || 'close_requested'
+                          stopRequested: false,
+                          reason: 'agent_running_without_terminal'
                         });
                       } catch (error) {
                         done({
@@ -2018,7 +2083,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             if (windowHandles.isEmpty()) {
                 try {
                     Object rawResult =
-                            js.executeAsyncScript(script, ptkStopTimeoutMs, sessionId, zapid);
+                            js.executeAsyncScript(script, ptkBridgeTimeoutMs, sessionId, zapid);
                     return normalizeCloseScriptResult(rawResult, fallback, 0, null);
                 } catch (WebDriverException e) {
                     fallback.put("reason", "webdriver_script_failed");
@@ -2035,7 +2100,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     driver.switchTo().window(handle);
                     currentUrl = driver.getCurrentUrl();
                     Object rawResult =
-                            js.executeAsyncScript(script, ptkStopTimeoutMs, sessionId, zapid);
+                            js.executeAsyncScript(script, ptkBridgeTimeoutMs, sessionId, zapid);
                     Map<String, Object> result =
                             normalizeCloseScriptResult(rawResult, fallback, i, currentUrl);
                     String decision = getStringField(result, "decision");
@@ -2063,7 +2128,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                     driver.switchTo().window(windowHandles.get(0));
                     driver.navigate().to(targetUrl);
                     Object rawResult =
-                            js.executeAsyncScript(script, ptkStopTimeoutMs, sessionId, zapid);
+                            js.executeAsyncScript(script, ptkBridgeTimeoutMs, sessionId, zapid);
                     Map<String, Object> result =
                             normalizeCloseScriptResult(
                                     rawResult, fallback, windowHandles.size(), targetUrl);
@@ -2216,63 +2281,8 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             }
         }
 
-        @SuppressWarnings("unchecked")
         private String summarizeProgressPayload(Map<String, Object> progressData) {
-            StringBuilder summary = new StringBuilder();
-            Object enginesValue = progressData.get("engines");
-            if (!(enginesValue instanceof Map<?, ?> engines) || engines.isEmpty()) {
-                return "";
-            }
-            engines.forEach(
-                    (engineName, engineValue) -> {
-                        if (!(engineName instanceof String)
-                                || !(engineValue instanceof Map<?, ?>)) {
-                            return;
-                        }
-                        Map<String, Object> engine = (Map<String, Object>) engineValue;
-                        if (!summary.isEmpty()) {
-                            summary.append(',');
-                        }
-                        summary.append(engineName)
-                                .append(':')
-                                .append(getStringField(engine, "status"))
-                                .append(':');
-                        Object progress = engine.get("progress");
-                        if (progress instanceof Number) {
-                            summary.append(((Number) progress).intValue());
-                        } else {
-                            summary.append('0');
-                        }
-                        Object detailsValue = engine.get("details");
-                        if (detailsValue instanceof Map<?, ?> rawDetails) {
-                            Map<String, Object> details = (Map<String, Object>) rawDetails;
-                            summary.append('[');
-                            appendDetailField(summary, details, "planned", "p");
-                            appendDetailField(summary, details, "executed", "e");
-                            appendDetailField(summary, details, "remaining", "rem");
-                            appendDetailField(summary, details, "requestQueue", "rq");
-                            appendDetailField(summary, details, "taskQueue", "tq");
-                            appendDetailField(summary, details, "activeTasks", "at");
-                            appendDetailField(summary, details, "planning", "pl");
-                            appendDetailField(summary, details, "pendingCaptures", "pcap");
-                            appendDetailField(summary, details, "findingsCount", "f");
-                            appendDetailField(summary, details, "seededRequests", "seed");
-                            appendDetailField(summary, details, "agentReady", "iar");
-                            appendDetailField(summary, details, "requestsCount", "ireq");
-                            appendDetailField(summary, details, "runtimeEventsCount", "irt");
-                            appendDetailField(summary, details, "findingReportsAccepted", "ifa");
-                            appendDetailField(
-                                    summary, details, "findingReportsDroppedInactive", "ifdi");
-                            appendDetailField(
-                                    summary, details, "findingReportsDroppedTabMismatch", "ifdt");
-                            appendDetailField(summary, details, "runtimeSignalsAccepted", "irsa");
-                            appendDetailField(summary, details, "modulesSentOk", "imok");
-                            appendDetailField(summary, details, "modulesSentSkipped", "imsk");
-                            appendDetailField(summary, details, "modulesSentError", "imerr");
-                            summary.append(']');
-                        }
-                    });
-            return summary.toString();
+            return PtkCloseContract.canonicalProgressSummary(progressData);
         }
 
         private void logCallbackSummary(
@@ -2557,13 +2567,21 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                                 isManualModeCallbackProgress(
                                         zapid, progress.intValue(), status, sessionId);
                         String progressSummary = summarizeProgressPayload(progressData);
+                        String previousProgressSummary =
+                                zapid != null && !zapid.isBlank() && !progressSummary.isBlank()
+                                        ? lastProgressSummaryByZapId.put(zapid, progressSummary)
+                                        : null;
                         boolean progressChanged =
                                 zapid != null
                                         && !zapid.isBlank()
                                         && !progressSummary.isBlank()
-                                        && !progressSummary.equals(
-                                                lastProgressSummaryByZapId.put(
-                                                        zapid, progressSummary));
+                                        && !progressSummary.equals(previousProgressSummary);
+                        if ((firstProgress || progressChanged)
+                                && zapid != null
+                                && !zapid.isBlank()
+                                && !progressSummary.isBlank()) {
+                            lastProgressChangedAtMsByZapId.put(zapid, finishedAt);
+                        }
                         if ((firstProgress || sessionEstablished || terminalProgress)
                                 && !manualModeCallbackOnly) {
                             Map<String, Object> evidenceExtra = new LinkedHashMap<>();
@@ -2873,6 +2891,36 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                         currentUrl);
                 return;
             }
+            if (!hasSessionId(zapid) && isWaitingForSessionStart(zapid)) {
+                String currentUrl = null;
+                try {
+                    currentUrl = ccbutils.getWebDriver().getCurrentUrl();
+                } catch (RuntimeException e) {
+                    LOGGER.debug(
+                            "PTK browserExiting failed to read current URL for UUID {}: {}",
+                            ccbutils.getUuid(),
+                            e.getMessage());
+                }
+                Map<String, Object> extra = new LinkedHashMap<>();
+                extra.put("reason", "no_ptk_session_after_startup_grace");
+                extra.put("progress", scanProgress.getOrDefault(zapid, 0));
+                String status = scanStatus.get(zapid);
+                if (status != null && !status.isBlank()) {
+                    extra.put("status", status);
+                }
+                putActivitySummaryFields(extra, zapid, System.currentTimeMillis());
+                logBrowserEvidence(zapid, browserid, "browser_session_invalid", currentUrl, extra);
+                logCloseContractDecision(
+                        zapid,
+                        browserid,
+                        "browser_session_invalid",
+                        status,
+                        System.currentTimeMillis() - start,
+                        scanProgress.getOrDefault(zapid, 0),
+                        status,
+                        extra);
+                return;
+            }
             if (PtkCloseContract.isBrowserLocalNonParticipantCloseDecision(closeDecision)) {
                 logCloseContractDecision(
                         zapid,
@@ -2909,13 +2957,16 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 closeExtra.put("alertsTotal", getAlertsRaisedTotal(zapid));
                 closeExtra.put("terminalSeen", terminalProgressLogged.contains(zapid));
                 closeExtra.put("reason", getStringField(closeDecision, "reason"));
+                putActivitySummaryFields(closeExtra, zapid, System.currentTimeMillis());
                 logTimingSummary(
                         zapid,
                         browserid,
                         "browser_close.end",
                         getElapsedSinceFirst(zapid, System.currentTimeMillis()),
                         closeExtra);
-                clearTrackingState(zapid);
+                // This is a browser-tab/local close decision, not a PTK/ZAP session-terminal
+                // decision. Keep zapid tracking alive so sibling/owner browser work can still
+                // publish progress and findings for the same ZAP session.
                 return;
             }
             logCloseContractDecision(
@@ -2930,6 +2981,22 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
 
             int count = 0;
             while (!isSafeToClose(zapid)) {
+                long nowMs = System.currentTimeMillis();
+                if (!hasRecentMeaningfulActivity(zapid, nowMs) && staleCloseLogged.add(zapid)) {
+                    Map<String, Object> staleExtra = new LinkedHashMap<>();
+                    staleExtra.put("reason", "activity_stale_waiting_for_terminal");
+                    staleExtra.put("stopRequested", false);
+                    putActivitySummaryFields(staleExtra, zapid, nowMs);
+                    logCloseContractDecision(
+                            zapid,
+                            browserid,
+                            "wait",
+                            scanStatus.getOrDefault(zapid, ""),
+                            nowMs - start,
+                            scanProgress.getOrDefault(zapid, 0),
+                            scanStatus.getOrDefault(zapid, ""),
+                            staleExtra);
+                }
                 if (count >= PtkCloseContract.BROWSER_CLOSE_MAX_ATTEMPTS
                         || !hasCloseBudget(closeDeadlineMs, 250L)) {
                     Map<String, Object> summaryExtra =
@@ -2939,6 +3006,9 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                                     (System.currentTimeMillis() - start),
                                     scanProgress.getOrDefault(zapid, 0),
                                     scanStatus.getOrDefault(zapid, ""));
+                    if (!hasRecentMeaningfulActivity(zapid, System.currentTimeMillis())) {
+                        summaryExtra.put("reason", "activity_stale_forced_close");
+                    }
                     LOGGER.warn(
                             "PTK browserClosing uuid={} forced=true waitedMs={} progress={} status={}",
                             ccbutils.getUuid(),
@@ -3035,8 +3105,13 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         }
 
         private boolean isTerminalProgress(String zapid) {
-            return isTerminalProgressValue(
-                    scanProgress.getOrDefault(zapid, 100), scanStatus.get(zapid));
+            if (zapid == null || zapid.isBlank()) {
+                return false;
+            }
+            if (terminalProgressLogged.contains(zapid)) {
+                return true;
+            }
+            return isTerminalProgressValue(scanProgress.get(zapid), scanStatus.get(zapid));
         }
     }
 }

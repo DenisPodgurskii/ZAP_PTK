@@ -23,6 +23,9 @@ class ExtensionPtkCloseContractTest {
         assertTrue(
                 PtkCloseContract.BROWSER_CLOSE_SCRIPT_TIMEOUT_MS
                         >= PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS);
+        assertTrue(
+                PtkCloseContract.BROWSER_CLOSE_ACTIVITY_STALE_MS
+                        > PtkCloseContract.BROWSER_CLOSE_WAIT_SLICE_MS);
         assertEquals(
                 PtkCloseContract.BROWSER_CLOSE_MAX_ATTEMPTS
                         / PtkCloseContract.BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS,
@@ -35,6 +38,44 @@ class ExtensionPtkCloseContractTest {
                         + (PtkCloseContract.BROWSER_CLOSE_MAX_FOLLOW_UP_DECISIONS
                                 * PtkCloseContract.BROWSER_CLOSE_SCRIPT_TIMEOUT_MS),
                 PtkCloseContract.BROWSER_CLOSE_MAX_WALL_CLOCK_MS);
+    }
+
+    @Test
+    void canonicalProgressSummaryIgnoresVolatileHeartbeatFields() {
+        Map<String, Object> first = progressPayload(1_000L, 10);
+        Map<String, Object> second = progressPayload(2_000L, 10);
+
+        assertEquals(
+                PtkCloseContract.canonicalProgressSummary(first),
+                PtkCloseContract.canonicalProgressSummary(second));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void canonicalProgressSummaryChangesOnMeaningfulProgressAndPublisherState() {
+        Map<String, Object> first = progressPayload(1_000L, 10);
+        Map<String, Object> progressChanged = progressPayload(1_000L, 11);
+        Map<String, Object> publisherChanged = progressPayload(1_000L, 10);
+        ((Map<String, Object>) publisherChanged.get("publisher")).put("pendingFindings", 2);
+
+        assertTrue(
+                !PtkCloseContract.canonicalProgressSummary(first)
+                        .equals(PtkCloseContract.canonicalProgressSummary(progressChanged)));
+        assertTrue(
+                !PtkCloseContract.canonicalProgressSummary(first)
+                        .equals(PtkCloseContract.canonicalProgressSummary(publisherChanged)));
+    }
+
+    @Test
+    void activityFreshnessUsesJavaReceiptTimeOnly() {
+        assertEquals(false, PtkCloseContract.isActivityFresh(null, 1_000L));
+        assertEquals(true, PtkCloseContract.isActivityFresh(1_000L, 1_000L));
+        assertEquals(
+                false,
+                PtkCloseContract.isActivityFresh(
+                        1_000L, 1_001L + PtkCloseContract.BROWSER_CLOSE_ACTIVITY_STALE_MS));
+        assertEquals(25L, PtkCloseContract.activityIdleMs(1_000L, 1_025L));
+        assertEquals(-1L, PtkCloseContract.activityIdleMs(null, 1_025L));
     }
 
     @Test
@@ -446,5 +487,39 @@ class ExtensionPtkCloseContractTest {
                         "https://example.test/dom/location/hash/eval",
                         "https://example.test:443/dom/location/search/eval"),
                 urls);
+    }
+
+    private static Map<String, Object> progressPayload(long timestampMs, int executed) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("planned", 16);
+        details.put("executed", executed);
+        details.put("remaining", 16 - executed);
+        details.put("heartbeatCount", timestampMs);
+        details.put("lastPostAt", timestampMs);
+
+        Map<String, Object> dast = new LinkedHashMap<>();
+        dast.put("status", "running");
+        dast.put("progress", 35);
+        dast.put("details", details);
+
+        Map<String, Object> engines = new LinkedHashMap<>();
+        engines.put("DAST", dast);
+
+        Map<String, Object> publisher = new LinkedHashMap<>();
+        publisher.put("pendingFindings", 1);
+        publisher.put("inFlightBatches", 0);
+        publisher.put("drained", false);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("sessionId", "session-1");
+        payload.put("status", "running");
+        payload.put("progress", 35);
+        payload.put("timestamp", timestampMs);
+        payload.put("elapsedMs", timestampMs);
+        payload.put("lastPostAt", timestampMs);
+        payload.put("heartbeatCount", timestampMs);
+        payload.put("publisher", publisher);
+        payload.put("engines", engines);
+        return payload;
     }
 }
