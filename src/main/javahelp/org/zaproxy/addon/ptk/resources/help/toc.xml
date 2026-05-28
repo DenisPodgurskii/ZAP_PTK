@@ -8,6 +8,7 @@
 		<tocitem text="Add Ons" tocid="addons">
 			<tocitem text="OWASP PTK" image="addon.ptk-icon" target="addon.ptk">
 				<tocitem text="Options" target="ptk.options"/>
+				<tocitem text="Active Scan Rule" target="ptk.ascan"/>
 			</tocitem>
 		</tocitem>
 	</tocitem>

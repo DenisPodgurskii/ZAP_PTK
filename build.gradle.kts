@@ -90,8 +90,8 @@ dependencies {
         zapAddOn("org.zaproxy.addon:automation:0.60.0")
         zapAddOn("org.zaproxy.addon:commonlib:1.40.0")
     }
-    zapAddOn("org.zaproxy.addon:client:0.25.0")
-    zapAddOn("org.zaproxy.addon:selenium:15.43.0")
+    zapAddOn("org.zaproxy.addon:client:0.26.0")
+    zapAddOn("org.zaproxy.addon:selenium:15.49.0")
     compileOnly("org.projectlombok:lombok:1.18.34")
     annotationProcessor("org.projectlombok:lombok:1.18.34")
     implementation("com.google.code.gson:gson:2.10.1")

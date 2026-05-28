@@ -7,5 +7,6 @@
 	<mapID target="addon.ptk-icon" url="contents/images/OWASP-PTK.png" />
     <mapID target="addon.ptk" url="contents/ptk.html" />
     <mapID target="ptk.options" url="contents/ptk-options.html" />
+    <mapID target="ptk.ascan" url="contents/ptk-ascan.html" />
 </map>
 

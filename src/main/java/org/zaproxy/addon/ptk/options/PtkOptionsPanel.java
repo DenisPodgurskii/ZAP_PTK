@@ -1,21 +1,26 @@
 package org.zaproxy.addon.ptk.options;
 
 import java.awt.BorderLayout;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
+import java.awt.Insets;
 import java.awt.event.MouseEvent;
 import java.util.HashSet;
 import java.util.Set;
-import javax.swing.BorderFactory;
 import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
+import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JTabbedPane;
 import javax.swing.ToolTipManager;
 import javax.swing.border.EmptyBorder;
-import javax.swing.border.TitledBorder;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreeModel;
 import javax.swing.tree.TreePath;
 import org.parosproxy.paros.Constant;
+import org.parosproxy.paros.control.Control;
 import org.parosproxy.paros.model.OptionsParam;
 import org.parosproxy.paros.view.AbstractParamPanel;
 import org.zaproxy.addon.ptk.PtkResourcesLoader;
@@ -24,7 +29,11 @@ import org.zaproxy.addon.ptk.model.PtkAttack;
 import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.PtkRule;
+import org.zaproxy.zap.extension.selenium.ExtensionSelenium;
+import org.zaproxy.zap.extension.selenium.ProvidedBrowserUI;
+import org.zaproxy.zap.utils.ZapNumberSpinner;
 import org.zaproxy.zap.view.JCheckBoxTree;
+import org.zaproxy.zap.view.LayoutHelper;
 
 /**
  * Options panel that displays a checkbox tree of PTK engines, modules, and rules/attacks loaded
@@ -37,6 +46,11 @@ public class PtkOptionsPanel extends AbstractParamPanel {
 
     private static final String MESSAGE_PREFIX = "ptk.options.";
 
+    private static final String CLIENT_LABEL_BROWSER = "client.scandialog.label.browser";
+    private static final String CLIENT_LABEL_ACTION_WAIT_TIME =
+            "client.options.label.actionwaittime";
+    private static final String CLIENT_LABEL_THREAD_COUNT = "client.options.label.browsers";
+
     /**
      * User object stored in each tree node. The label is shown in the tree; the id is used when
      * persisting the enabled state to config.
@@ -48,21 +62,34 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         }
     }
 
+    private final JCheckBox enableActiveScanRuleCheckBox;
     private final JCheckBox enableAutomatedScanningCheckBox;
+    private final JComboBox<String> browserComboBox;
+    private final ZapNumberSpinner actionWaitTimeSpinner;
+    private final ZapNumberSpinner threadCountSpinner;
     private final JCheckBoxTree tree;
 
     public PtkOptionsPanel() {
         super();
         setName(Constant.messages.getString(MESSAGE_PREFIX + "panel.title"));
         setLayout(new BorderLayout());
+        enableActiveScanRuleCheckBox =
+                new JCheckBox(
+                        Constant.messages.getString(MESSAGE_PREFIX + "enableActiveScanRule"),
+                        false);
         enableAutomatedScanningCheckBox =
                 new JCheckBox(
-                        Constant.messages.getString(MESSAGE_PREFIX + "enableAutomatedScanning"),
+                        Constant.messages.getString(
+                                MESSAGE_PREFIX + "enableAutomatedScanningDeprecated"),
                         false);
-        JPanel topPanel = new JPanel(new BorderLayout());
-        topPanel.setBorder(new EmptyBorder(0, 0, 10, 0));
-        topPanel.add(enableAutomatedScanningCheckBox, BorderLayout.WEST);
-        add(topPanel, BorderLayout.NORTH);
+        browserComboBox = new JComboBox<>();
+        actionWaitTimeSpinner =
+                new ZapNumberSpinner(
+                        0, PtkParam.DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME, Integer.MAX_VALUE);
+        threadCountSpinner =
+                new ZapNumberSpinner(
+                        1, PtkParam.getDefaultActiveScanThreadCount(), Integer.MAX_VALUE);
+        enableActiveScanRuleCheckBox.addItemListener(e -> syncActiveScanTabState());
         tree =
                 new JCheckBoxTree() {
                     @Override
@@ -84,15 +111,71 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         tree.setModel(buildTreeModel());
         expandEnginesAndModulesOnly(tree);
         checkAll(tree);
-        JPanel scanRulesSection = new JPanel(new BorderLayout());
-        scanRulesSection.setBorder(
-                BorderFactory.createTitledBorder(
-                        BorderFactory.createEtchedBorder(),
-                        Constant.messages.getString(MESSAGE_PREFIX + "scanRules.title"),
-                        TitledBorder.LEADING,
-                        TitledBorder.DEFAULT_POSITION));
-        scanRulesSection.add(new JScrollPane(tree), BorderLayout.CENTER);
-        add(scanRulesSection, BorderLayout.CENTER);
+
+        JPanel scanRulesTab = new JPanel(new BorderLayout());
+        scanRulesTab.add(new JScrollPane(tree), BorderLayout.CENTER);
+
+        JPanel activeScanTab = new JPanel(new GridBagLayout());
+        activeScanTab.setBorder(new EmptyBorder(10, 10, 10, 10));
+        int row = 0;
+        activeScanTab.add(
+                enableActiveScanRuleCheckBox,
+                LayoutHelper.getGBC(
+                        0, row, GridBagConstraints.REMAINDER, 1.0, new Insets(2, 2, 2, 2)));
+        row++;
+        activeScanTab.add(
+                enableAutomatedScanningCheckBox,
+                LayoutHelper.getGBC(
+                        0, row, GridBagConstraints.REMAINDER, 1.0, new Insets(2, 2, 8, 2)));
+        row++;
+
+        JLabel browserLabel = new JLabel(Constant.messages.getString(CLIENT_LABEL_BROWSER));
+        browserLabel.setLabelFor(browserComboBox);
+        activeScanTab.add(
+                browserLabel,
+                LayoutHelper.getGBC(
+                        0, row, GridBagConstraints.RELATIVE, 1.0, new Insets(2, 2, 2, 2)));
+        activeScanTab.add(
+                browserComboBox,
+                LayoutHelper.getGBC(
+                        1, row, GridBagConstraints.REMAINDER, 1.0, new Insets(2, 2, 2, 2)));
+        row++;
+
+        JLabel actionWaitLabel =
+                new JLabel(Constant.messages.getString(CLIENT_LABEL_ACTION_WAIT_TIME));
+        actionWaitLabel.setLabelFor(actionWaitTimeSpinner);
+        activeScanTab.add(
+                actionWaitLabel,
+                LayoutHelper.getGBC(
+                        0, row, GridBagConstraints.RELATIVE, 1.0, new Insets(2, 2, 2, 2)));
+        activeScanTab.add(
+                actionWaitTimeSpinner,
+                LayoutHelper.getGBC(
+                        1, row, GridBagConstraints.REMAINDER, 1.0, new Insets(2, 2, 2, 2)));
+        row++;
+
+        JLabel threadCountLabel =
+                new JLabel(Constant.messages.getString(CLIENT_LABEL_THREAD_COUNT));
+        threadCountLabel.setLabelFor(threadCountSpinner);
+        activeScanTab.add(
+                threadCountLabel,
+                LayoutHelper.getGBC(
+                        0, row, GridBagConstraints.RELATIVE, 1.0, new Insets(2, 2, 2, 2)));
+        activeScanTab.add(
+                threadCountSpinner,
+                LayoutHelper.getGBC(
+                        1, row, GridBagConstraints.REMAINDER, 1.0, new Insets(2, 2, 2, 2)));
+        row++;
+
+        activeScanTab.add(new JLabel(), LayoutHelper.getGBC(0, row + 1, 1, 0.5D, 1.0D));
+        syncActiveScanTabState();
+
+        JTabbedPane tabbedPane = new JTabbedPane();
+        tabbedPane.addTab(
+                Constant.messages.getString(MESSAGE_PREFIX + "tab.scanRules"), scanRulesTab);
+        tabbedPane.addTab(
+                Constant.messages.getString(MESSAGE_PREFIX + "tab.activeScan"), activeScanTab);
+        add(tabbedPane, BorderLayout.CENTER);
     }
 
     private static TreeModel buildTreeModel() {
@@ -203,7 +286,12 @@ public class PtkOptionsPanel extends AbstractParamPanel {
     @Override
     public void initParam(Object obj) {
         PtkParam param = getPtkParam(obj);
+        enableActiveScanRuleCheckBox.setSelected(param.isActiveScanRuleEnabled());
         enableAutomatedScanningCheckBox.setSelected(param.isAutomatedScanningEnabled());
+        updateBrowsers(param.getActiveScanBrowserId());
+        actionWaitTimeSpinner.setValue(param.getActiveScanActionWaitTimeInSecs());
+        threadCountSpinner.setValue(param.getActiveScanThreadCount());
+        syncActiveScanTabState();
         tree.setModel(buildTreeModel());
         expandEnginesAndModulesOnly(tree);
 
@@ -256,7 +344,19 @@ public class PtkOptionsPanel extends AbstractParamPanel {
     @Override
     public void saveParam(Object obj) throws Exception {
         PtkParam param = getPtkParam(obj);
-        param.setAutomatedScanningEnabled(enableAutomatedScanningCheckBox.isSelected());
+        boolean activeScanRuleEnabled = enableActiveScanRuleCheckBox.isSelected();
+        param.setActiveScanRuleEnabled(activeScanRuleEnabled);
+        if (activeScanRuleEnabled) {
+            param.setAutomatedScanningEnabled(false);
+        } else {
+            param.setAutomatedScanningEnabled(enableAutomatedScanningCheckBox.isSelected());
+        }
+        String browserId = getSelectedBrowserId();
+        if (browserId != null) {
+            param.setActiveScanBrowserId(browserId);
+        }
+        param.setActiveScanActionWaitTimeInSecs(actionWaitTimeSpinner.getValue());
+        param.setActiveScanThreadCount(threadCountSpinner.getValue());
 
         // Collect the IDs of enabled leaves (rule/attack nodes only; ignore parent paths).
         Set<String> enabledLeafIds = new HashSet<>();
@@ -277,6 +377,65 @@ public class PtkOptionsPanel extends AbstractParamPanel {
 
     private static PtkParam getPtkParam(Object obj) {
         return ((OptionsParam) obj).getParamSet(PtkParam.class);
+    }
+
+    /**
+     * Updates the browser combo box from the Selenium extension, selecting the entry for {@code
+     * browserId} when present.
+     */
+    private void syncActiveScanTabState() {
+        boolean activeScanRuleEnabled = enableActiveScanRuleCheckBox.isSelected();
+        enableAutomatedScanningCheckBox.setEnabled(!activeScanRuleEnabled);
+        browserComboBox.setEnabled(activeScanRuleEnabled);
+        actionWaitTimeSpinner.setEnabled(activeScanRuleEnabled);
+        threadCountSpinner.setEnabled(activeScanRuleEnabled);
+        if (activeScanRuleEnabled) {
+            enableAutomatedScanningCheckBox.setSelected(false);
+        }
+    }
+
+    private void updateBrowsers(String browserId) {
+        browserComboBox.removeAllItems();
+        ExtensionSelenium extSel = getExtensionSelenium();
+        if (extSel == null) {
+            return;
+        }
+
+        String selectedName = null;
+        for (ProvidedBrowserUI browser : extSel.getProvidedBrowserUIList()) {
+            browserComboBox.addItem(browser.getName());
+            if (browser.getBrowser().getId().equals(browserId)) {
+                selectedName = browser.getName();
+            }
+        }
+        if (selectedName != null) {
+            browserComboBox.setSelectedItem(selectedName);
+        } else if (browserComboBox.getItemCount() > 0) {
+            browserComboBox.setSelectedIndex(0);
+        }
+    }
+
+    private String getSelectedBrowserId() {
+        Object selected = browserComboBox.getSelectedItem();
+        if (!(selected instanceof String browserName) || browserName.isEmpty()) {
+            return null;
+        }
+
+        ExtensionSelenium extSel = getExtensionSelenium();
+        if (extSel == null) {
+            return null;
+        }
+
+        for (ProvidedBrowserUI browser : extSel.getProvidedBrowserUIList()) {
+            if (browserName.equals(browser.getName())) {
+                return browser.getBrowser().getId();
+            }
+        }
+        return null;
+    }
+
+    private static ExtensionSelenium getExtensionSelenium() {
+        return Control.getSingleton().getExtensionLoader().getExtension(ExtensionSelenium.class);
     }
 
     public void unload() {
