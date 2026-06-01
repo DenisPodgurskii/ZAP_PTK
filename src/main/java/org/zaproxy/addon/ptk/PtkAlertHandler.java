@@ -130,9 +130,6 @@ public final class PtkAlertHandler {
                 URI uri;
                 try {
                     uri = new URI(url, true);
-                    // Strip URL fragment - fragments are client-side only and absent from Sites
-                    // Tree
-                    uri.setFragment(null);
                 } catch (Exception e) {
                     LOGGER.error("PTK could not parse URL '{}': {}", url, e.getMessage());
                     return false;
@@ -155,6 +152,13 @@ public final class PtkAlertHandler {
                         existing != null && !existing.isEmpty()
                                 ? existing + "\n" + otherInfoNote
                                 : otherInfoNote);
+            }
+            String uriStr = msg.getRequestHeader().getURI().toString();
+            int fragmentOffset = uriStr.indexOf("%23");
+            if (fragmentOffset > 0) {
+                // Strip URL fragment - fragments are client-side only and absent from Sites
+                // Tree
+                msg.getRequestHeader().setURI(new URI(uriStr.substring(0, fragmentOffset), true));
             }
 
             HistoryReference ref =
