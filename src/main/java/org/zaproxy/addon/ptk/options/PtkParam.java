@@ -8,6 +8,7 @@ import java.util.Set;
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.zaproxy.addon.client.ClientOptions;
 import org.zaproxy.addon.ptk.PtkResourcesLoader;
 import org.zaproxy.addon.ptk.PtkResourcesLoader.LoadedPtkResources;
 import org.zaproxy.addon.ptk.model.PtkAttack;
@@ -15,6 +16,7 @@ import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.PtkRule;
 import org.zaproxy.zap.common.VersionedAbstractParam;
+import org.zaproxy.zap.extension.selenium.Browser;
 
 /**
  * PTK add-on parameters persisted in the ZAP config file.
@@ -54,12 +56,50 @@ public class PtkParam extends VersionedAbstractParam {
     private static final String V1_CHECKED_LIST_KEY = SCAN_RULES_KEY + ".checked";
     private static final String AUTOMATED_SCANNING_ENABLED_KEY =
             BASE_KEY + ".automatedScanning.enabled";
+    private static final String ACTIVE_SCAN_RULE_ENABLED_KEY =
+            BASE_KEY + ".activescan.rule.enabled";
+    private static final String ACTIVE_SCAN_BROWSER_ID_KEY = BASE_KEY + ".activescan.browserId";
+    private static final String ACTIVE_SCAN_ACTION_WAIT_TIME_KEY =
+            BASE_KEY + ".activescan.actionWaitTime";
+    private static final String ACTIVE_SCAN_THREAD_COUNT_KEY = BASE_KEY + ".activescan.threadCount";
+
+    /** Default browser for the PTK active scan rule (same as the Client add-on). */
+    public static final String DEFAULT_ACTIVE_SCAN_BROWSER_ID = ClientOptions.DEFAULT_BROWSER_ID;
+
+    /**
+     * Default action wait for the PTK active scan rule. The Client add-on defaults to {@code 0};
+     * PTK uses {@code 2} seconds so automated active scans allow pages to settle.
+     */
+    public static final int DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME = 2;
 
     private boolean automatedScanningEnabled = false;
+    private boolean activeScanRuleEnabled = false;
+    private String activeScanBrowserId = DEFAULT_ACTIVE_SCAN_BROWSER_ID;
+    private int activeScanActionWaitTimeInSecs = DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME;
+    private int activeScanThreadCount = getDefaultActiveScanThreadCount();
+
+    /** Returns half the available processor count, with a minimum of {@code 1}. */
+    public static int getDefaultActiveScanThreadCount() {
+        return Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+    }
 
     @Override
     protected void parseImpl() {
         automatedScanningEnabled = getConfig().getBoolean(AUTOMATED_SCANNING_ENABLED_KEY, false);
+        activeScanRuleEnabled = getConfig().getBoolean(ACTIVE_SCAN_RULE_ENABLED_KEY, false);
+        activeScanBrowserId = getString(ACTIVE_SCAN_BROWSER_ID_KEY, DEFAULT_ACTIVE_SCAN_BROWSER_ID);
+        activeScanActionWaitTimeInSecs =
+                getInt(ACTIVE_SCAN_ACTION_WAIT_TIME_KEY, DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME);
+        activeScanThreadCount =
+                Math.max(
+                        1, getInt(ACTIVE_SCAN_THREAD_COUNT_KEY, getDefaultActiveScanThreadCount()));
+        if (Browser.getBrowserWithIdNoFailSafe(activeScanBrowserId) == null) {
+            LOGGER.warn(
+                    "Unknown PTK active scan browser [{}] using default [{}].",
+                    activeScanBrowserId,
+                    DEFAULT_ACTIVE_SCAN_BROWSER_ID);
+            activeScanBrowserId = DEFAULT_ACTIVE_SCAN_BROWSER_ID;
+        }
         // Scan-rule flags are read on demand via isRuleEnabled / isModuleEnabled / isEngineEnabled.
     }
 
@@ -180,6 +220,42 @@ public class PtkParam extends VersionedAbstractParam {
     public void setAutomatedScanningEnabled(boolean enabled) {
         this.automatedScanningEnabled = enabled;
         getConfig().setProperty(AUTOMATED_SCANNING_ENABLED_KEY, this.automatedScanningEnabled);
+    }
+
+    public boolean isActiveScanRuleEnabled() {
+        return activeScanRuleEnabled;
+    }
+
+    public void setActiveScanRuleEnabled(boolean enabled) {
+        this.activeScanRuleEnabled = enabled;
+        getConfig().setProperty(ACTIVE_SCAN_RULE_ENABLED_KEY, this.activeScanRuleEnabled);
+    }
+
+    public String getActiveScanBrowserId() {
+        return activeScanBrowserId;
+    }
+
+    public void setActiveScanBrowserId(String browserId) {
+        this.activeScanBrowserId = browserId;
+        getConfig().setProperty(ACTIVE_SCAN_BROWSER_ID_KEY, browserId);
+    }
+
+    public int getActiveScanActionWaitTimeInSecs() {
+        return activeScanActionWaitTimeInSecs;
+    }
+
+    public void setActiveScanActionWaitTimeInSecs(int actionWaitTimeInSecs) {
+        this.activeScanActionWaitTimeInSecs = actionWaitTimeInSecs;
+        getConfig().setProperty(ACTIVE_SCAN_ACTION_WAIT_TIME_KEY, actionWaitTimeInSecs);
+    }
+
+    public int getActiveScanThreadCount() {
+        return activeScanThreadCount;
+    }
+
+    public void setActiveScanThreadCount(int threadCount) {
+        this.activeScanThreadCount = Math.max(1, threadCount);
+        getConfig().setProperty(ACTIVE_SCAN_THREAD_COUNT_KEY, this.activeScanThreadCount);
     }
 
     /**

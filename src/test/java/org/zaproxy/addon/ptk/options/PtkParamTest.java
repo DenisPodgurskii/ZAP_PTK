@@ -8,6 +8,7 @@ import java.util.Iterator;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.zaproxy.addon.client.ClientOptions;
 import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
 /** Unit tests for {@link PtkParam}. */
@@ -43,6 +44,42 @@ class PtkParamTest {
         assertTrue(param.isModuleEnabled(SAST, SAST_MOD));
         assertTrue(param.isRuleEnabled(SAST, SAST_MOD, SAST_RULE_0));
         assertFalse(param.isAutomatedScanningEnabled());
+        assertFalse(param.isActiveScanRuleEnabled());
+        assertEquals(PtkParam.DEFAULT_ACTIVE_SCAN_BROWSER_ID, param.getActiveScanBrowserId());
+        assertEquals(
+                PtkParam.DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME,
+                param.getActiveScanActionWaitTimeInSecs());
+        assertEquals(PtkParam.getDefaultActiveScanThreadCount(), param.getActiveScanThreadCount());
+    }
+
+    @Test
+    void activeScanOptions_persistedAndReloaded() {
+        param.setActiveScanRuleEnabled(true);
+        param.setActiveScanBrowserId(ClientOptions.DEFAULT_BROWSER_ID);
+        param.setActiveScanActionWaitTimeInSecs(5);
+        param.setActiveScanThreadCount(3);
+
+        PtkParam reloaded = new PtkParam();
+        reloaded.load(config);
+
+        assertTrue(reloaded.isActiveScanRuleEnabled());
+        assertEquals(ClientOptions.DEFAULT_BROWSER_ID, reloaded.getActiveScanBrowserId());
+        assertEquals(5, reloaded.getActiveScanActionWaitTimeInSecs());
+        assertEquals(3, reloaded.getActiveScanThreadCount());
+    }
+
+    @Test
+    void activeScanThreadCount_minimumIsOne() {
+        param.setActiveScanThreadCount(0);
+        assertEquals(1, param.getActiveScanThreadCount());
+    }
+
+    @Test
+    void unknownActiveScanBrowser_fallsBackToDefault() {
+        config.setProperty("ptk.activescan.browserId", "not-a-real-browser");
+        PtkParam reloaded = new PtkParam();
+        reloaded.load(config);
+        assertEquals(PtkParam.DEFAULT_ACTIVE_SCAN_BROWSER_ID, reloaded.getActiveScanBrowserId());
     }
 
     // --- engine-level flag ---
