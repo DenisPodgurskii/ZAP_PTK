@@ -8,12 +8,19 @@ OWASP PTK Options
 <BODY>
 <H1>OWASP PTK Options</H1>
 
-<H2>Enable Automated Scanning</H2>
-When checked, PTK will automatically run its configured scan rules during browser sessions.
+<H2>Active Scan</H2>
+On the <strong>Active Scan</strong> tab, <strong>Enable Active Scan Rule</strong> controls whether the
+PTK active scan rule runs during ZAP active scans.
+<p>
+<strong>Enable automated scanning (deprecated)</strong> controls the older in-browser automated mode
+exposed via the PTK API (<code>mode:auto</code>). It is disabled while the active scan rule is enabled.
 When unchecked, PTK will still be active in the browser but no automated scanning will take place.
+<p>
+<strong>Browser</strong>, <strong>Action Wait Time (seconds)</strong>, and <strong>Number of Browser Windows to Open</strong>
+apply to the PTK active scan rule. The default thread count is half the number of available processor cores.
 
 <H2>Scan Rules</H2>
-The scan rules tree lists all available PTK rules grouped by engine (DAST, IAST, SAST) and module.
+On the <strong>Scan Rules</strong> tab, the scan rules tree lists all available PTK rules grouped by engine (DAST, IAST, SAST) and module.
 Any rule that is enabled here will be available to PTK when it runs in the browser.
 Rules that are disabled will be ignored by PTK entirely.
 <p>
@@ -33,7 +40,11 @@ Configuration keys follow the hierarchy of the scan-rules tree:
   <li><code>ptk.scanrules.<i>ENGINE</i>.enabled</code> — enable or disable an entire engine</li>
   <li><code>ptk.scanrules.<i>ENGINE</i>.<i>moduleId</i>.enabled</code> — enable or disable a module within an engine</li>
   <li><code>ptk.scanrules.<i>ENGINE</i>.<i>moduleId</i>.<i>ruleId</i>.enabled</code> — enable or disable a single rule</li>
-  <li><code>ptk.automatedScanning.enabled</code> — enable or disable automated scanning</li>
+  <li><code>ptk.activescan.rule.enabled</code> — enable or disable the PTK active scan rule</li>
+  <li><code>ptk.automatedScanning.enabled</code> — enable or disable automated scanning (deprecated; use the active scan rule instead)</li>
+  <li><code>ptk.activescan.browserId</code> — browser ID for the PTK active scan rule (see Selenium documentation for valid IDs)</li>
+  <li><code>ptk.activescan.actionWaitTime</code> — action wait time in seconds for the PTK active scan rule</li>
+  <li><code>ptk.activescan.threadCount</code> — number of browser windows (threads) for the PTK active scan rule</li>
 </ul>
 Engine names are <code>SAST</code>, <code>IAST</code>, and <code>DAST</code>.
 Module and rule IDs can be found by hovering over a node in the Options dialog tree — the tooltip shows the internal ID used in configuration keys.
@@ -67,9 +78,21 @@ zap.sh -config ptk.scanrules.SAST.enabled=false \
         -config ptk.scanrules.SAST.dom-xss.no-inner-outer-html.enabled=true
 </pre>
 
-Enable automated scanning:
+Enable the PTK active scan rule:
+<pre>
+zap.sh -config ptk.activescan.rule.enabled=true
+</pre>
+
+Enable automated scanning (deprecated):
 <pre>
 zap.sh -config ptk.automatedScanning.enabled=true
+</pre>
+
+Configure the PTK active scan rule browser, action wait time, and thread count:
+<pre>
+zap.sh -config ptk.activescan.browserId=firefox-headless \
+        -config ptk.activescan.actionWaitTime=2 \
+        -config ptk.activescan.threadCount=4
 </pre>
 
 For many options, use a properties file with <code>-configfile</code>:

@@ -35,12 +35,15 @@ import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.extension.Extension;
 import org.parosproxy.paros.extension.ExtensionAdaptor;
 import org.parosproxy.paros.extension.ExtensionHook;
+import org.parosproxy.paros.extension.OptionsChangedListener;
 import org.parosproxy.paros.model.HistoryReference;
 import org.parosproxy.paros.model.Model;
+import org.parosproxy.paros.model.OptionsParam;
 import org.parosproxy.paros.model.SiteNode;
 import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMalformedHeaderException;
 import org.parosproxy.paros.network.HttpMessage;
+import org.parosproxy.paros.network.HttpSender;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
 import org.zaproxy.addon.client.ClientCallBackUtils;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
@@ -587,7 +590,8 @@ final class PtkCloseContract {
     }
 }
 
-public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvider {
+public class ExtensionPtk extends ExtensionAdaptor
+        implements ExampleAlertProvider, OptionsChangedListener {
 
     private static final Logger LOGGER = LogManager.getLogger(ExtensionPtk.class);
     private static final String PREFIX = "ptk";
@@ -633,6 +637,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
     private volatile PtkResourcesLoader.LoadedPtkResources cachedResources;
     private volatile String cachedConfigKey;
     private volatile String cachedConfigJson;
+    private volatile int cachedInitiator;
     private final Map<String, ZapHistorySeedCacheEntry> zapHistorySeedCache =
             new ConcurrentHashMap<>();
     private final AtomicLong lastZapHistorySeedFailureLogAtMs = new AtomicLong(0L);
@@ -1160,10 +1165,25 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         ensurePtkSeleniumExtensionsConfigured(
                 Control.getSingleton().getExtensionLoader().getExtension(ExtensionSelenium.class));
         loadDiagnosticExtensions(extensionHook);
+        extensionHook.addOptionsChangedListener(this);
         extensionHook.addOptionsParamSet(getParam());
         if (hasView()) {
             extensionHook.getHookView().addOptionPanel(getOptionsPanel());
         }
+    }
+
+    @Override
+    public void optionsChanged(OptionsParam optionsParam) {
+        clearConfigCache();
+    }
+
+    private void clearConfigCache() {
+        synchronized (configCacheLock) {
+            cachedConfigKey = null;
+            cachedConfigJson = null;
+            cachedInitiator = 0;
+        }
+        LOGGER.debug("PTK /ptk/config cache cleared after options change");
     }
 
     private PtkOptionsPanel getOptionsPanel() {
@@ -1173,7 +1193,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         return optionsPanel;
     }
 
-    private PtkParam getParam() {
+    public PtkParam getParam() {
         if (ptkParam == null) {
             ptkParam = new PtkParam();
         }
@@ -1436,24 +1456,43 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
         }
     }
 
-    private String getCachedConfigJson() {
+    private String getCachedConfigJson(ClientCallBackImplementor.ClientCallBackContext cbContext) {
         PtkParam param = getParam();
         PtkResourcesLoader.LoadedPtkResources resources = getLoadedResources();
         String configKey = param.buildConfigCacheKey(resources);
+        if (cbContext.initiator() != cachedInitiator) {
+            clearConfigCache();
+        }
         String json = cachedConfigJson;
-        if (json != null && configKey.equals(cachedConfigKey)) {
+
+        if (json != null
+                && configKey.equals(cachedConfigKey)
+                && cbContext.initiator() == cachedInitiator) {
             LOGGER.debug("PTK /ptk/config cache hit");
             return json;
         }
 
         synchronized (configCacheLock) {
-            if (cachedConfigJson != null && configKey.equals(cachedConfigKey)) {
+            if (cachedConfigJson != null
+                    && configKey.equals(cachedConfigKey)
+                    && cbContext.initiator() == cachedInitiator) {
                 LOGGER.debug("PTK /ptk/config cache hit after lock");
                 return cachedConfigJson;
             }
+            String mode = "manual";
+            if (param.isAutomatedScanningEnabled()
+                    || (cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
+                            && param.isActiveScanRuleEnabled())) {
+                mode = "auto";
+            }
+            LOGGER.info(
+                    "PTK mode {} auto={} active={}",
+                    mode,
+                    param.isAutomatedScanningEnabled(),
+                    param.isActiveScanRuleEnabled());
 
             Map<String, Object> response = new LinkedHashMap<>();
-            response.put("mode", param.isAutomatedScanningEnabled() ? "auto" : "manual");
+            response.put("mode", mode);
             response.put("contractVersion", 2);
             response.put("ptkControlSupported", true);
             response.put("controlPath", "/ptk/control");
@@ -1465,13 +1504,16 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
             json = GSON.toJson(response);
             cachedConfigKey = configKey;
             cachedConfigJson = json;
+            cachedInitiator = cbContext.initiator();
             LOGGER.debug("PTK /ptk/config cache miss; rebuilt response");
             return json;
         }
     }
 
-    private String getConfigJsonForRequest(Map<String, Object> requestData) {
-        String baseJson = getCachedConfigJson();
+    private String getConfigJsonForRequest(
+            Map<String, Object> requestData,
+            ClientCallBackImplementor.ClientCallBackContext cbContext) {
+        String baseJson = getCachedConfigJson(cbContext);
         Map<String, Object> seedConfig = buildZapHistorySeedConfig(requestData);
         if (seedConfig.isEmpty()) {
             return baseJson;
@@ -4047,6 +4089,13 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
 
         @Override
         public String handleCallBack(HttpMessage msg) {
+            // No longer used
+            return null;
+        }
+
+        @Override
+        public String handleCallBack(
+                HttpMessage msg, ClientCallBackImplementor.ClientCallBackContext cbContext) {
             String uri =
                     msg.getRequestHeader().getURI() != null
                             ? msg.getRequestHeader().getURI().toString()
@@ -4060,6 +4109,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                 rememberBrowserId(zapid, browserid);
                 rememberConfigMode(zapid, getParam().isAutomatedScanningEnabled());
                 markCallbackStart(zapid);
+                logBrowserEvidence(zapid, browserid, "config_callback", null, null);
                 if (zapid != null && contractCallbackLogged.add(zapid + ":config")) {
                     logContractPhase(
                             "callback_detected",
@@ -4073,7 +4123,7 @@ public class ExtensionPtk extends ExtensionAdaptor implements ExampleAlertProvid
                                             ? "automated"
                                             : "manual"));
                 }
-                String configJson = getConfigJsonForRequest(requestData);
+                String configJson = getConfigJsonForRequest(requestData, cbContext);
                 msg.getResponseBody().setBody(configJson);
                 long finishedAt = System.currentTimeMillis();
                 Map<String, Object> configResponse = parseRequestBody(configJson);
