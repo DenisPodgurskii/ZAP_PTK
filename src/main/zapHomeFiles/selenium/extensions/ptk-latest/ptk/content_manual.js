@@ -18,6 +18,7 @@ const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
 
 const PTK_SPA_ATTACK_TAB_MARKER = 'ptk_spa_attack_tab';
 const PTK_SPA_DIALOG_PARAM = 'ptk_dast=1';
+const PTK_AGENT_AUTOMATION_SCRIPT_ID = 'ptk-agent-automation-layer';
 
 function shouldSuppressSpaDialogs() {
     if (typeof window === 'undefined') return false
@@ -135,6 +136,8 @@ function handleIastPageBridgePayload(data) {
         }).then(resp => {
             dispatchIastBridgeToPage({
                 channel: 'ptk_background_iast2content_modules',
+                active: resp?.active !== false,
+                reason: resp?.reason || null,
                 iastModules: resp?.iastModules || null,
                 iastModulesSignature: resp?.iastModulesSignature || null,
                 scanStrategy: resp?.scanStrategy || null
@@ -145,6 +148,7 @@ function handleIastPageBridgePayload(data) {
             } catch (_) { }
             dispatchIastBridgeToPage({
                 channel: 'ptk_background_iast2content_modules',
+                active: true,
                 iastModules: null
             });
         });
@@ -524,11 +528,19 @@ async function hydrateSameOriginSastScripts(scripts) {
             try {
                 const response = await fetch(script.src, { credentials: 'include', cache: 'force-cache' });
                 if (response?.ok) {
-                    let text = await response.text();
-                    if (text.length > SAST_EXTERNAL_SCRIPT_MAX_BYTES) {
-                        text = text.slice(0, SAST_EXTERNAL_SCRIPT_MAX_BYTES);
+                    const text = await response.text();
+                    const code = normalizeSastScriptCode(text);
+                    if (text.length > SAST_EXTERNAL_SCRIPT_MAX_BYTES || code.length < text.length) {
+                        hydrated.push({
+                            ...script,
+                            code: null,
+                            truncated: true,
+                            originalLength: text.length,
+                            truncationLimit: Math.min(SAST_EXTERNAL_SCRIPT_MAX_BYTES, code.length || SAST_EXTERNAL_SCRIPT_MAX_BYTES)
+                        });
+                        continue;
                     }
-                    hydrated.push({ ...script, code: normalizeSastScriptCode(text) });
+                    hydrated.push({ ...script, code });
                     continue;
                 }
             } catch (_) { }
@@ -727,6 +739,8 @@ if (runtime?.onMessage) runtime.onMessage.addListener(function (message, sender,
     if (!sharedIastBridgeActive && message.channel == "ptk_background_iast2content_modules" && message.iastModules) {
         dispatchIastBridgeToPage({
             channel: 'ptk_background_iast2content_modules',
+            active: message.active !== false,
+            reason: message.reason || null,
             iastModules: message.iastModules,
             iastModulesSignature: message.iastModulesSignature || null,
             scanStrategy: message.scanStrategy || null
@@ -803,19 +817,34 @@ function isCypressRunnerFrame() {
     }
 }
 
-async function isManualAutomationActivationAllowed(reason = 'settings') {
-    if (typeof browser === 'undefined' || !browser?.runtime?.sendMessage) return false
+async function requestManualAutomationAuthorization(reason = 'settings') {
+    if (typeof browser === 'undefined' || !browser?.runtime?.sendMessage) {
+        return { ok: false, allowed: false, reason: 'runtime_unavailable' }
+    }
     try {
-        const response = await browser.runtime.sendMessage({
+        return await browser.runtime.sendMessage({
             channel: 'ptk_content2background_runtime',
             type: 'manual_automation_authorization',
             url: window.location.href,
             reason
-        })
-        return response?.allowed === true
+        }) || { ok: true, allowed: false, reason: 'authorization_empty_response' }
     } catch (_) {
-        return false
+        return { ok: false, allowed: false, reason: 'authorization_failed' }
     }
+}
+
+function shouldInstallDisabledAutomationBridgeForDenial(response = null) {
+    const reason = String(response?.reason || '')
+    return ![
+        'other_scan_active',
+        'other_scan_active_out_of_scope',
+        'active_session_out_of_scope',
+        'terminal_session_out_of_scope',
+        'ptk_child_tab_out_of_scope',
+        'zap_detected_tab_out_of_scope',
+        'inactive_tab',
+        'not_top_frame'
+    ].includes(reason)
 }
 
 function installDisabledAutomationBridgeForTopFrame() {
@@ -828,10 +857,27 @@ function installDisabledAutomationBridgeForTopFrame() {
     initZapCloseAutomationMessaging()
 }
 
+function injectPtkAgentAutomationLayer() {
+    try {
+        if (window.PTK_AGENT) return
+        if (document.getElementById(PTK_AGENT_AUTOMATION_SCRIPT_ID)) return
+        const src = runtimeGetURL('ptk/ptkAgentAutomation.js')
+        if (!src) return
+        const script = document.createElement('script')
+        script.id = PTK_AGENT_AUTOMATION_SCRIPT_ID
+        script.async = false
+        script.src = src
+        script.onload = () => script.remove()
+        script.onerror = () => script.remove()
+        const parent = document.documentElement || document.head || document.body
+        parent && parent.appendChild(script)
+    } catch (_) { }
+}
+
 async function enableAutomationIfAllowed(reason = 'settings') {
     if (isCypressRunnerFrame()) return false
-    const allowed = await isManualAutomationActivationAllowed(reason)
-    if (!allowed) return false
+    const authorization = await requestManualAutomationAuthorization(reason)
+    if (authorization?.allowed !== true) return false
     enableAutomation()
     return automationEnabled
 }
@@ -844,6 +890,7 @@ async function enableAutomationIfAllowed(reason = 'settings') {
     }
 
     let enabled = false
+    let initialAuthorization = null
 
     // Initial check - use settings key with automation.enable
     // When automation is enabled, we inject in ALL frames (including Cypress AUT iframe)
@@ -854,14 +901,17 @@ async function enableAutomationIfAllowed(reason = 'settings') {
             return
         }
         if (enabled) {
-            await enableAutomationIfAllowed('initial')
+            initialAuthorization = await requestManualAutomationAuthorization('initial')
+            if (initialAuthorization?.allowed === true) {
+                enableAutomation()
+            }
         }
     } catch (e) {
         // Silently fail - automation stays disabled
     }
 
     // Automation OFF: keep existing behavior (top frame only)
-    if (!automationEnabled) {
+    if (!automationEnabled && (!enabled || shouldInstallDisabledAutomationBridgeForDenial(initialAuthorization))) {
         installDisabledAutomationBridgeForTopFrame()
     }
 
@@ -875,8 +925,10 @@ async function enableAutomationIfAllowed(reason = 'settings') {
 
         if (newEnabled && !oldEnabled) {
             if (!isCypressRunnerFrame()) {
-                enableAutomationIfAllowed('settings_enabled').then((activated) => {
-                    if (!activated) {
+                requestManualAutomationAuthorization('settings_enabled').then((authorization) => {
+                    if (authorization?.allowed === true) {
+                        enableAutomation()
+                    } else if (shouldInstallDisabledAutomationBridgeForDenial(authorization)) {
                         installDisabledAutomationBridgeForTopFrame()
                     }
                 }).catch(() => {
@@ -976,6 +1028,53 @@ function initZapCloseAutomationMessaging() {
     })
 }
 
+async function handleManualAutomationActivationRequest(data = {}) {
+    const responseNonce = data.nonce || ''
+    const requestId = data.requestId || null
+    try {
+        if (automationEnabled) {
+            window.postMessage({
+                source: 'ptk-extension',
+                nonce: responseNonce,
+                requestId,
+                ok: true,
+                allowed: true,
+                reason: 'already_enabled'
+            }, '*')
+            return
+        }
+
+        const response = await browser.runtime.sendMessage({
+            channel: 'ptk_content2background_runtime',
+            type: 'manual_automation_activation_request',
+            url: window.location.href,
+            reason: data.reason || 'bridge_request'
+        })
+
+        window.postMessage({
+            source: 'ptk-extension',
+            nonce: responseNonce,
+            requestId,
+            ok: response?.ok !== false,
+            allowed: response?.allowed === true,
+            reason: response?.reason || 'manual_activation_denied',
+            error: response?.allowed === true ? undefined : (response?.reason || 'manual_activation_denied')
+        }, '*')
+        if (response?.allowed === true) {
+            setTimeout(() => enableAutomation(), 0)
+        }
+    } catch (error) {
+        window.postMessage({
+            source: 'ptk-extension',
+            nonce: responseNonce,
+            requestId,
+            ok: false,
+            allowed: false,
+            error: error?.message || 'manual_activation_failed'
+        }, '*')
+    }
+}
+
 window.addEventListener(PTK_IAST_PAGE_TO_CONTENT_EVENT, (event) => {
     if (sharedIastBridgeActive) return
     handleIastPageBridgePayload(parseIastBridgeEventDetail(event?.detail))
@@ -983,6 +1082,11 @@ window.addEventListener(PTK_IAST_PAGE_TO_CONTENT_EVENT, (event) => {
 
 window.addEventListener("message", (event) => {
     const data = event.data || {}
+
+    if (data?.source === 'ptk-automation' && data?.type === 'automation-activate') {
+        handleManualAutomationActivationRequest(data).catch(() => { })
+        return
+    }
 
     if (data?.channel === 'ptk_inject2content' && data?.requestId) {
         const pending = pendingWappalyzerRequests.get(data.requestId)
@@ -1086,6 +1190,7 @@ function installPtkAutomationBridge(version, nonce, automationEnabledState) {
     if (existingBridge && !(automationEnabledState === true && existingBridge._automationEnabled === false)) return
     const script = document.createElement('script')
     const bridgeUrl = browser.runtime.getURL('ptk/automationBridge.js')
+    script.async = false
     script.src = bridgeUrl
     script.dataset.ptkVersion = version || 'unknown'
     script.dataset.ptkNonce = nonce || ''  // Pass nonce to bridge
@@ -1093,6 +1198,9 @@ function installPtkAutomationBridge(version, nonce, automationEnabledState) {
     try {
         script.dataset.ptkExtensionOrigin = new URL(bridgeUrl).origin
     } catch (_) { }
+    if (automationEnabledState === true) {
+        script.onload = () => injectPtkAgentAutomationLayer()
+    }
     const parent = document.documentElement || document.head || document.body
     parent.appendChild(script)
 }

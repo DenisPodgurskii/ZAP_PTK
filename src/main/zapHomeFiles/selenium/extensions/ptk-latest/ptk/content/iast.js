@@ -33,6 +33,26 @@ if (globalThis.__PTK_IAST_AGENT_LOADED__) {
     } catch (_) { }
     return;
 }
+
+function isIastAgentAuthorizedForPageHooks() {
+    try {
+        return globalThis.__PTK_IAST_AGENT_AUTHORIZED__ === true
+            || globalThis.__PTK_IAST_PROVISIONAL_HOOKS__ === true;
+    } catch (_) {
+        return false;
+    }
+}
+
+if (!isIastAgentAuthorizedForPageHooks()) {
+    try {
+        emitIastPageBridgeMessage({
+            channel: 'ptk_iast_agent_ignored',
+            reason: 'missing_extension_authorization'
+        });
+    } catch (_) { }
+    return;
+}
+
 globalThis.__PTK_IAST_AGENT_LOADED__ = true;
 
 const FREE_SAFE_HOOK_GROUPS = Object.freeze([
@@ -568,6 +588,11 @@ const IAST_TRUSTED_HTML_RESTRICTION = {
 };
 
 function enableProvisionalPreModuleHooks() {
+    try {
+        if (globalThis.__PTK_IAST_PROVISIONAL_HOOKS__ !== true) return;
+    } catch (_) {
+        return;
+    }
     if (IAST_MODULES || IAST_RUNTIME_PLAN) return;
     IAST_PROVISIONAL_PRE_MODULE_HOOK_GROUPS.forEach((groupId) => {
         IAST_HOOK_GROUPS.enabled.add(groupId);
@@ -1060,6 +1085,10 @@ function getIastRuleByRuleId(ruleId) {
 function handleBackgroundIastBridgeMessage(data) {
     data = data || {}
     if (data.channel === 'ptk_background_iast2content_modules') {
+        if (data.active === false) {
+            disableIastRuntimeHooks(data.reason || 'inactive_scan_tab');
+            return;
+        }
         if (data.scanStrategy) setIastScanStrategy(data.scanStrategy);
         if (!data.iastModules) return;
         initIastRuleIndex(data.iastModules, {
@@ -1423,23 +1452,22 @@ function isTrustedTypesHtmlRestricted() {
         return IAST_TRUSTED_HTML_RESTRICTION.enforced;
     }
     IAST_TRUSTED_HTML_RESTRICTION.checked = true;
-    try {
-        if (!window.trustedTypes || typeof document?.createElement !== 'function') {
-            return false;
-        }
-        withoutHooks(() => {
-            const probe = document.createElement('div');
-            probe.innerHTML = '';
-        });
-        return false;
-    } catch (error) {
-        if (isTrustedTypesHtmlRestrictionError(error)) {
-            IAST_TRUSTED_HTML_RESTRICTION.enforced = true;
-            IAST_TRUSTED_HTML_RESTRICTION.message = String(error?.message || error || '');
-            return true;
-        }
-        return false;
-    }
+    return IAST_TRUSTED_HTML_RESTRICTION.enforced;
+}
+
+function markTrustedTypesHtmlRestricted(error) {
+    if (!isTrustedTypesHtmlRestrictionError(error)) return false;
+    IAST_TRUSTED_HTML_RESTRICTION.checked = true;
+    IAST_TRUSTED_HTML_RESTRICTION.enforced = true;
+    IAST_TRUSTED_HTML_RESTRICTION.message = String(error?.message || error || '');
+    return true;
+}
+
+function disableIastRuntimeHooks(reason = 'inactive') {
+    IAST_HOOK_GROUPS.enabled = new Set();
+    IAST_HOOK_GROUPS.globallyDisabled = new Set();
+    IAST_HOOK_GROUPS.runtimeState = reason || 'inactive';
+    emitIastRuntimeHealthUpdate({ force: true });
 }
 
 function installHookGroup(groupId) {
@@ -1588,7 +1616,8 @@ function htmlDecode(input) {
             ta.innerHTML = str;
             return ta.value;
         });
-    } catch (_) {
+    } catch (error) {
+        markTrustedTypesHtmlRestricted(error);
         return str;
     }
 }
@@ -1697,7 +1726,9 @@ function enrichContext(ctx = {}) {
             const first = tmp.firstElementChild;
             const path = computeDomPath(first);
             if (path) context.domPath = path;
-        } catch (_) { }
+        } catch (error) {
+            markTrustedTypesHtmlRestricted(error);
+        }
     }
     if (!context.domPath && context.target && context.target.nodeType === 1) {
         const path = computeDomPath(context.target);

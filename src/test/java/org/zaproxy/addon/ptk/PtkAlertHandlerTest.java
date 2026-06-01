@@ -9,7 +9,11 @@ import com.google.gson.Gson;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -186,6 +190,100 @@ class PtkAlertHandlerTest {
         Alert alert =
                 PtkAlertBuilder.buildFromFinding(clientInjectionFinding, "SAST", mapper, resources);
         assertNull(alert);
+    }
+
+    @Test
+    void alertBatchAckReturnsStructuredRejectedFindingAndIsIdempotent() {
+        String requestBody =
+                """
+                {
+                  "source": "ptk",
+                  "type": "dast_findings_batch",
+                  "batchId": "ack-test-batch-1",
+                  "batchSeq": 7,
+                  "zapid": "zap-ack-test",
+                  "payload": {
+                    "engine": "DAST",
+                    "scanId": "scan-ack-test",
+                    "sessionId": "session-ack-test",
+                    "findings": [
+                      {
+                        "id": "finding-ack-test-1",
+                        "moduleId": "missing-module",
+                        "ruleId": "missing-rule",
+                        "uri": "https://example.test/app"
+                      }
+                    ]
+                  }
+                }
+                """;
+
+        PtkAlertHandler.AlertBatchAck ack = PtkAlertHandler.processAlertBatchWithAck(requestBody);
+        PtkAlertHandler.AlertBatchAck repeated =
+                PtkAlertHandler.processAlertBatchWithAck(requestBody);
+
+        assertEquals("OK", ack.result);
+        assertEquals(2, ack.contractVersion);
+        assertEquals(true, ack.structuredAck);
+        assertEquals(false, ack.legacyAck);
+        assertEquals("ack-test-batch-1", ack.batchId);
+        assertEquals(7, ack.batchSeq);
+        assertEquals(1, ack.received);
+        assertEquals(0, ack.accepted);
+        assertEquals(0, ack.alertsRaised);
+        assertEquals(1, ack.findingResults.size());
+        assertEquals("finding-ack-test-1", ack.findingResults.get(0).id);
+        assertEquals("rejected_missing_mapping", ack.findingResults.get(0).status);
+        assertEquals(ack.findingResults.get(0).status, repeated.findingResults.get(0).status);
+    }
+
+    @Test
+    void alertBatchAckIsStableForConcurrentDuplicateBatches() throws Exception {
+        String requestBody =
+                """
+                {
+                  "source": "ptk",
+                  "type": "dast_findings_batch",
+                  "batchId": "ack-test-batch-concurrent",
+                  "batchSeq": 8,
+                  "zapid": "zap-ack-test-concurrent",
+                  "payload": {
+                    "engine": "DAST",
+                    "scanId": "scan-ack-test-concurrent",
+                    "sessionId": "session-ack-test-concurrent",
+                    "findings": [
+                      {
+                        "id": "finding-ack-test-concurrent-1",
+                        "moduleId": "missing-module",
+                        "ruleId": "missing-rule",
+                        "uri": "https://example.test/app"
+                      }
+                    ]
+                  }
+                }
+                """;
+
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<PtkAlertHandler.AlertBatchAck>> futures = new ArrayList<>();
+            for (int i = 0; i < 16; i++) {
+                futures.add(
+                        executor.submit(
+                                () -> PtkAlertHandler.processAlertBatchWithAck(requestBody)));
+            }
+            for (Future<PtkAlertHandler.AlertBatchAck> future : futures) {
+                PtkAlertHandler.AlertBatchAck ack = future.get();
+                assertEquals("OK", ack.result);
+                assertEquals("ack-test-batch-concurrent", ack.batchId);
+                assertEquals(8, ack.batchSeq);
+                assertEquals(1, ack.received);
+                assertEquals(0, ack.alertsRaised);
+                assertEquals(1, ack.findingResults.size());
+                assertEquals("rejected_missing_mapping", ack.findingResults.get(0).status);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test

@@ -2,7 +2,8 @@
 
 import zapTransport, {
     DAST_HISTORY_SEED_MAX_RESULTS,
-    POST_CALLBACK_CANDIDATE_MAX_RESULTS
+    POST_CALLBACK_CANDIDATE_MAX_RESULTS,
+    isSameOriginAndPathScoped
 } from './zapTransport.js'
 import ZapPublisher from './zapPublisher.js'
 
@@ -14,15 +15,25 @@ const TYPE_SAST_FINDINGS_BATCH = 'sast_findings_batch'
 const DAST_SCHEMA = 'ptk-zap-dast-finding-v1'
 const IAST_SCHEMA = 'ptk-zap-iast-finding-v1'
 const SAST_SCHEMA = 'ptk-zap-sast-finding-v1'
+const ZAP_PROGRESS_CONTRACT_VERSION = 2
 const DEFAULT_ZAP_ENGINES = ['DAST', 'IAST', 'SAST']
 const ZAP_MODE_AUTO = 'auto'
 const ZAP_MODE_MANUAL = 'manual'
 const ZAP_PROGRESS_HEARTBEAT_MS = 2000
+const ZAP_CONTROL_BACKGROUND_POLL_MS = 2000
+const ZAP_CONTROL_ALARM_NAME = 'ptk-zap-control-poll'
+const ZAP_CONTROL_ALARM_PERIOD_MINUTES = 0.5
+const ZAP_CONTROL_POLL_MIN_INTERVAL_MS = 1000
+const ZAP_PROGRESS_TICK_STALE_MS = 15000
 const ZAP_PROGRESS_IDLE_GRACE_MS = 6000
 const ZAP_PASSIVE_ENGINE_IDLE_GRACE_MS = 8000
 const ZAP_TARGET_ACTIVITY_QUIET_GRACE_MS = 2500
 const ZAP_PROGRESS_FLUSH_TIMEOUT_MS = 3000
 const ZAP_PROGRESS_DRAIN_MAX_PASSES = 4
+const ZAP_CLOSE_TERMINAL_RETRY_MS = 2000
+const ZAP_CLOSE_TERMINAL_RETRY_TIMEOUT_MS = 30000
+const ZAP_PENDING_TARGET_RECOVERY_INTERVAL_MS = 1000
+const ZAP_PENDING_TARGET_RECOVERY_MAX_MS = 120000
 // Mirrors the ZAP add-on close-contract PTK stop budget for legacy
 // closeRequested progress controls. Normal ZAP browser-close handling now uses
 // the WebDriver close-decision script instead of progress callbacks to avoid
@@ -52,6 +63,15 @@ const AUTO_START_NAV_SOURCES = new Set([
     'history.bootstrap',
     'history.onVisited',
     'content.zapTarget'
+])
+const TERMINAL_BLOCKING_TARGET_SOURCES = new Set([
+    'webNavigation.onCommitted',
+    'webNavigation.onBeforeNavigate',
+    'tabs.onUpdated',
+    'tabs.onReplaced',
+    'bootstrap.tabs.query',
+    'history.bootstrap',
+    'history.onVisited'
 ])
 const AUTO_START_OBSERVED_MAX_AGE_MS = 120000
 const ZAP_ALLOWED_DEBUG_PREFIXES = [
@@ -115,9 +135,26 @@ function isFiniteNumber(value) {
     return Number.isFinite(Number(value))
 }
 
+function isValidTabId(value) {
+    return Number.isInteger(value) && value >= 0
+}
+
 function clampProgress(value, max = 100) {
     const num = toFiniteNumber(value, 0)
     return Math.max(0, Math.min(max, Math.round(num)))
+}
+
+function stableStringify(value) {
+    if (value === null || value === undefined) return 'null'
+    if (typeof value === 'string') return JSON.stringify(value)
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+    if (Array.isArray(value)) {
+        return `[${value.map((entry) => stableStringify(entry)).join(',')}]`
+    }
+    if (typeof value === 'object') {
+        return `{${Object.keys(value).sort((a, b) => a.localeCompare(b)).map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+    }
+    return JSON.stringify(String(value))
 }
 
 function isZapTerminalStatus(status) {
@@ -197,9 +234,19 @@ class ZapBridge {
         this._lastStartSessionId = null
         this._pendingStart = null
         this._progressMonitor = null
+        this._progressMonitorsByKey = new Map()
+        this._controlAlarmActive = false
+        this._controlAlarmRegistered = false
+        this._controlAlarmHandler = null
+        this._closeTerminalRetryTimers = new Map()
         this._callbackProgressSent = new Set()
         this._lastTopLevelTargetObservation = null
+        this._pendingStartsByKey = new Map()
+        this._startInFlightByKey = new Map()
+        this._lastStartsByKey = new Map()
         this._timingStateByKey = new Map()
+        this._pendingTargetRecoveryTimer = null
+        this._pendingTargetRecoveryUntil = 0
         this._resolvedConfig = {
             mode: ZAP_MODE_MANUAL,
             engineConfigs: {},
@@ -220,6 +267,7 @@ class ZapBridge {
             this._handleUrlObserved(payload)
         })
         this.transport.init()
+        this._registerControlAlarmListener()
         this.bootstrapped = true
 
         this._debugLog('[PTK ZAP] zapBridge bootstrapped, waiting for ZAP detection')
@@ -325,6 +373,157 @@ class ZapBridge {
             || (Number.isInteger(tabId) ? `tab:${tabId}` : null)
             || toNonEmptyString(targetUrl)
             || null
+    }
+
+    _pendingStartKey(pending = {}) {
+        return toNonEmptyString(pending?.sessionKey)
+            || toNonEmptyString(pending?.zapid)
+            || [toNonEmptyString(pending?.baseUrl), pending?.tabId].filter(value => value !== null && value !== undefined && value !== '').join('|')
+            || null
+    }
+
+    _setPendingStart(pending = null) {
+        if (!pending || typeof pending !== 'object') {
+            return null
+        }
+        const key = this._pendingStartKey(pending)
+        if (key) {
+            this._pendingStartsByKey.set(key, pending)
+        }
+        this._pendingStart = pending
+        this._ensurePendingTargetRecovery()
+        return key
+    }
+
+    _clearPendingStart(pendingOrKey = null) {
+        const key = typeof pendingOrKey === 'string'
+            ? pendingOrKey
+            : this._pendingStartKey(pendingOrKey)
+        if (key) {
+            this._pendingStartsByKey.delete(key)
+        }
+        if (!pendingOrKey || this._pendingStart === pendingOrKey || this._pendingStartKey(this._pendingStart) === key) {
+            this._pendingStart = Array.from(this._pendingStartsByKey.values()).at(-1) || null
+        }
+        this._clearPendingTargetRecoveryIfIdle()
+    }
+
+    _hasPendingTargetRecoveryWork() {
+        return this._pendingStartsByKey.size > 0 || Boolean(this._pendingStart)
+    }
+
+    _clearPendingTargetRecoveryIfIdle() {
+        if (this._hasPendingTargetRecoveryWork()) return
+        if (this._pendingTargetRecoveryTimer) {
+            clearInterval(this._pendingTargetRecoveryTimer)
+            this._pendingTargetRecoveryTimer = null
+        }
+        this._pendingTargetRecoveryUntil = 0
+    }
+
+    _ensurePendingTargetRecovery() {
+        this._pendingTargetRecoveryUntil = Math.max(
+            this._pendingTargetRecoveryUntil || 0,
+            Date.now() + ZAP_PENDING_TARGET_RECOVERY_MAX_MS
+        )
+        if (this._pendingTargetRecoveryTimer) return
+
+        const tick = () => {
+            if (!this._hasPendingTargetRecoveryWork() || Date.now() > this._pendingTargetRecoveryUntil) {
+                this._clearPendingTargetRecoveryIfIdle()
+                if (this._pendingTargetRecoveryTimer) {
+                    clearInterval(this._pendingTargetRecoveryTimer)
+                    this._pendingTargetRecoveryTimer = null
+                }
+                return
+            }
+            void this._recoverPendingTargetStarts()
+        }
+
+        this._pendingTargetRecoveryTimer = setInterval(tick, ZAP_PENDING_TARGET_RECOVERY_INTERVAL_MS)
+        tick()
+    }
+
+    async _recoverPendingTargetStarts() {
+        const pendingStarts = this._pendingStartsByKey.size
+            ? Array.from(this._pendingStartsByKey.entries())
+            : (this._pendingStart ? [[this._pendingStartKey(this._pendingStart) || 'legacy', this._pendingStart]] : [])
+
+        for (const [pendingKey, pending] of pendingStarts) {
+            const targetUrl = await this._resolvePendingStartTargetUrl(pending)
+            if (!targetUrl) continue
+
+            const targetTabId = await this._resolveTargetTabId({
+                tabId: Number.isInteger(pending?.tabId) ? pending.tabId : null
+            }, targetUrl, 0)
+            if (!isValidTabId(targetTabId)) continue
+
+            const inFlightKey = `pending-recover|${pending.sessionKey || pending.baseUrl || pendingKey || ''}|${targetTabId}|${targetUrl}`
+            if (this._startInFlightByKey.has(inFlightKey)) continue
+
+            const run = async () => {
+                await this._startZapSession({
+                    tabId: targetTabId,
+                    targetUrl,
+                    engines: pending.engines,
+                    engineConfigs: pending.engineConfigs,
+                    baseUrl: pending.baseUrl,
+                    sessionKey: pending.sessionKey,
+                    zapid: pending.zapid
+                })
+            }
+
+            const inFlight = run().finally(() => {
+                this._startInFlightByKey.delete(inFlightKey)
+                if (this._startInFlight?.key === inFlightKey) {
+                    this._startInFlight = null
+                }
+            })
+            this._startInFlightByKey.set(inFlightKey, inFlight)
+            this._startInFlight = { key: inFlightKey, promise: inFlight }
+        }
+    }
+
+    async _resolvePendingStartTargetUrl(pending = {}) {
+        const scopedTargetUrl = this._resolvePendingStartScopeTargetUrl(pending)
+        if (scopedTargetUrl) return scopedTargetUrl
+
+        const observed = this._getFreshObservedTargetForPending(pending)
+        if (observed?.targetUrl) return observed.targetUrl
+
+        const pendingTabId = Number.isInteger(pending?.tabId) ? pending.tabId : null
+        if (isValidTabId(pendingTabId) && browser?.tabs?.get) {
+            try {
+                const tab = await browser.tabs.get(pendingTabId)
+                const tabUrl = toHttpUrl(tab?.url) || toHttpUrl(tab?.pendingUrl)
+                if (tabUrl) return tabUrl
+            } catch (_) {
+                // Keep trying open-tab fallbacks below.
+            }
+        }
+
+        return null
+    }
+
+    _resolvePendingStartScopeTargetUrl(pending = {}) {
+        const configuredTargetUrl = toHttpUrl(pending?.targetUrl)
+        if (configuredTargetUrl) return configuredTargetUrl
+
+        const seedTargetUrl = this._selectPostCallbackTargetUrl(this._collectConfigSeedUrls(pending?.engineConfigs))
+        if (seedTargetUrl) return seedTargetUrl
+
+        return null
+    }
+
+    _isPendingStartTargetUrlAllowed(pending = {}, targetUrl = '') {
+        const normalizedTargetUrl = toHttpUrl(targetUrl)
+        if (!normalizedTargetUrl) return false
+
+        const scopedTargetUrl = this._resolvePendingStartScopeTargetUrl(pending)
+        if (!scopedTargetUrl) return true
+
+        return normalizedTargetUrl === scopedTargetUrl
+            || isSameOriginAndPathScoped(scopedTargetUrl, normalizedTargetUrl)
     }
 
     _ensureTimingState({ zapSessionKey = null, zapid = null, browserid = null, automationSessionId = null, tabId = null, targetUrl = null, anchorMs = null } = {}) {
@@ -443,19 +642,135 @@ class ZapBridge {
         return true
     }
 
-    _clearProgressMonitor() {
-        if (this._progressMonitor?.intervalId) {
-            clearInterval(this._progressMonitor.intervalId)
+    _progressMonitorKey({ sessionKey = null, zapid = null, sessionId = null } = {}) {
+        return toNonEmptyString(sessionKey)
+            || [toNonEmptyString(zapid), toNonEmptyString(sessionId)].filter(Boolean).join('|')
+            || null
+    }
+
+    _clearProgressMonitor(monitor = null) {
+        if (monitor) {
+            if (monitor.intervalId) {
+                clearInterval(monitor.intervalId)
+            }
+            if (monitor.controlIntervalId) {
+                clearInterval(monitor.controlIntervalId)
+            }
+            const key = this._progressMonitorKey(monitor)
+            if (key) {
+                this._progressMonitorsByKey.delete(key)
+            }
+            if (this._progressMonitor === monitor) {
+                this._progressMonitor = Array.from(this._progressMonitorsByKey.values()).at(-1) || null
+            }
+            void this._clearControlAlarmIfIdle()
+            return
         }
+
+        for (const activeMonitor of this._progressMonitorsByKey.values()) {
+            if (activeMonitor?.intervalId) {
+                clearInterval(activeMonitor.intervalId)
+            }
+            if (activeMonitor?.controlIntervalId) {
+                clearInterval(activeMonitor.controlIntervalId)
+            }
+        }
+        this._progressMonitorsByKey.clear()
         this._progressMonitor = null
+        void this._clearControlAlarmIfIdle()
     }
 
     _clearProgressMonitorIfCurrent(monitor) {
-        if (this._progressMonitor !== monitor) return
-        this._clearProgressMonitor()
+        if (!monitor) return
+        this._clearProgressMonitor(monitor)
     }
 
-    _buildProgressMonitorPayload({ progress, status, message = null, engines = null, safeToClose = null, phase = null, completionStatus = null }) {
+    _registerControlAlarmListener() {
+        const alarms = globalThis.browser?.alarms
+        if (this._controlAlarmRegistered === true || !alarms?.onAlarm?.addListener) {
+            return this._controlAlarmRegistered === true
+        }
+        this._controlAlarmHandler = (alarm = {}) => {
+            if (alarm?.name && alarm.name !== ZAP_CONTROL_ALARM_NAME) {
+                return
+            }
+            void this._handleControlAlarmTick()
+        }
+        try {
+            alarms.onAlarm.addListener(this._controlAlarmHandler)
+            this._controlAlarmRegistered = true
+            return true
+        } catch (err) {
+            console.warn('[PTK ZAP] Failed to register control alarm listener:', err?.message || String(err))
+            this._controlAlarmHandler = null
+            return false
+        }
+    }
+
+    async _ensureControlAlarmActive() {
+        const alarms = globalThis.browser?.alarms
+        if (!this._progressMonitorsByKey.size || !alarms?.create) {
+            return false
+        }
+        this._registerControlAlarmListener()
+        if (this._controlAlarmRegistered !== true) {
+            return false
+        }
+        if (this._controlAlarmActive === true) {
+            return true
+        }
+        try {
+            await alarms.create(ZAP_CONTROL_ALARM_NAME, {
+                delayInMinutes: ZAP_CONTROL_ALARM_PERIOD_MINUTES,
+                periodInMinutes: ZAP_CONTROL_ALARM_PERIOD_MINUTES
+            })
+            this._controlAlarmActive = true
+            this._debugLog('[PTK ZAP] Control alarm armed:', {
+                name: ZAP_CONTROL_ALARM_NAME,
+                periodInMinutes: ZAP_CONTROL_ALARM_PERIOD_MINUTES
+            })
+            return true
+        } catch (err) {
+            console.warn('[PTK ZAP] Failed to arm control alarm:', err?.message || String(err))
+            return false
+        }
+    }
+
+    async _clearControlAlarmIfIdle() {
+        if (this._progressMonitorsByKey.size) {
+            return false
+        }
+        const alarms = globalThis.browser?.alarms
+        if (!alarms?.clear) {
+            this._controlAlarmActive = false
+            return false
+        }
+        if (this._controlAlarmActive !== true) {
+            return false
+        }
+        try {
+            await alarms.clear(ZAP_CONTROL_ALARM_NAME)
+        } catch (err) {
+            console.warn('[PTK ZAP] Failed to clear control alarm:', err?.message || String(err))
+        } finally {
+            this._controlAlarmActive = false
+        }
+        return true
+    }
+
+    async _handleControlAlarmTick() {
+        const monitors = this._progressMonitorsByKey.size
+        if (!monitors) {
+            await this._clearControlAlarmIfIdle()
+            return { ok: true, monitors: 0 }
+        }
+        this._debugLog('[PTK ZAP] Control alarm tick:', { monitors })
+        this.tickProgressMonitors({ source: 'control_alarm' })
+        this.pollControlMonitors({ source: 'control_alarm' })
+        return { ok: true, monitors }
+    }
+
+    _buildProgressMonitorPayload({ progress, status, message = null, engines = null, safeToClose = null, phase = null, completionStatus = null, releaseStatus = null }) {
         const payload = {
             progress,
             status
@@ -477,6 +792,10 @@ class ZapBridge {
         if (completion) {
             payload.completionStatus = completion
         }
+        const release = toNonEmptyString(releaseStatus)
+        if (release) {
+            payload.releaseStatus = release
+        }
         if (engines && typeof engines === 'object' && !Array.isArray(engines)) {
             payload.engines = engines
         }
@@ -490,11 +809,196 @@ class ZapBridge {
         if (monitor.sessionId && !payload.sessionId) {
             payload.sessionId = monitor.sessionId
         }
+        if (monitor.zapid && !payload.zapid) {
+            payload.zapid = monitor.zapid
+        }
+        if (monitor.baseUrl && !payload.baseUrl) {
+            payload.baseUrl = monitor.baseUrl
+        }
         const targetUrl = toHttpUrl(monitor.lastRuntimeSnapshot?.targetUrl)
         if (targetUrl && !payload.targetUrl) {
             payload.targetUrl = targetUrl
         }
         return payload
+    }
+
+    _normalizePublisherState(rawState = null) {
+        const pendingFindings = toFiniteNumber(rawState?.pendingFindings, 0)
+        const inFlightBatches = toFiniteNumber(rawState?.inFlightBatches, 0)
+        const lastAckedBatchSeq = toFiniteNumber(rawState?.lastAckedBatchSeq, 0)
+        const pendingByEngine = rawState?.pendingByEngine && typeof rawState.pendingByEngine === 'object' && !Array.isArray(rawState.pendingByEngine)
+            ? rawState.pendingByEngine
+            : {}
+        const inFlightByEngine = rawState?.inFlightByEngine && typeof rawState.inFlightByEngine === 'object' && !Array.isArray(rawState.inFlightByEngine)
+            ? rawState.inFlightByEngine
+            : {}
+        return {
+            pendingFindings,
+            inFlightBatches,
+            drained: rawState?.drained === true && pendingFindings === 0 && inFlightBatches === 0,
+            lastAckedBatchSeq,
+            pendingByEngine,
+            inFlightByEngine
+        }
+    }
+
+    async _getPublisherStateForProgress() {
+        try {
+            if (!this.publisher || typeof this.publisher.getDrainState !== 'function') {
+                return this._normalizePublisherState({ drained: true })
+            }
+            return this._normalizePublisherState(await this.publisher.getDrainState())
+        } catch (err) {
+            return this._normalizePublisherState({
+                drained: false,
+                pendingFindings: 0,
+                inFlightBatches: 1,
+                error: err?.message || String(err)
+            })
+        }
+    }
+
+    _sanitizeProgressEnginesForFingerprint(engines = null) {
+        if (!engines || typeof engines !== 'object' || Array.isArray(engines)) return null
+        const sanitized = {}
+        for (const [engineName, engineValue] of Object.entries(engines)) {
+            if (!engineValue || typeof engineValue !== 'object' || Array.isArray(engineValue)) continue
+            const details = engineValue.details && typeof engineValue.details === 'object' && !Array.isArray(engineValue.details)
+                ? engineValue.details
+                : {}
+            const safeDetails = {}
+            const detailKeys = [
+                'planned',
+                'executed',
+                'remaining',
+                'activeTasks',
+                'taskQueue',
+                'requestQueue',
+                'pendingPlans',
+                'planning',
+                'pendingCaptures',
+                'pendingAutomationSeeds',
+                'findingsCount',
+                'seededRequests',
+                'proxySeededRequests',
+                'historySeededRequests',
+                'agentReady',
+                'requestsCount',
+                'runtimeEventsCount',
+                'findingReportsAccepted',
+                'findingReportsDroppedInactive',
+                'findingReportsDroppedTabMismatch',
+                'runtimeSignalsAccepted',
+                'modulesSentOk',
+                'modulesSentSkipped',
+                'modulesSentError',
+                'collectionState',
+                'runtimeHealthState',
+                'completionStatus',
+                'error',
+                'message'
+            ]
+            for (const key of detailKeys) {
+                if (details[key] !== undefined && details[key] !== null) {
+                    safeDetails[key] = details[key]
+                }
+            }
+            sanitized[engineName] = {
+                status: engineValue.status || null,
+                progress: toFiniteNumber(engineValue.progress, 0),
+                completionStatus: engineValue.completionStatus || safeDetails.completionStatus || null,
+                details: safeDetails
+            }
+        }
+        return sanitized
+    }
+
+    _buildCloseReadiness(payload = {}, publisherState = {}, monitor = null) {
+        const terminal = isZapTerminalStatus(payload?.status) || payload?.safeToClose === true
+        const publisherDrained = publisherState?.drained === true
+        const completionStatus = String(payload?.completionStatus || '').toLowerCase()
+        const releaseStatus = String(payload?.releaseStatus || '').toLowerCase()
+        const physicalIncompleteClose = payload?.safeToClose === true
+            && (releaseStatus === 'incomplete'
+                || completionStatus === 'engine_incomplete'
+                || completionStatus === 'publisher_incomplete')
+        const safeToClose = terminal && (publisherDrained || physicalIncompleteClose)
+        let reason = 'running'
+        if (!terminal) {
+            reason = 'not_terminal'
+        } else if (!publisherDrained) {
+            reason = physicalIncompleteClose ? 'publisher_not_drained_incomplete_close' : 'publisher_not_drained'
+        } else if (monitor?.closeRequest?.id) {
+            reason = 'terminal_publisher_drained_after_close_request'
+        } else {
+            reason = 'terminal_publisher_drained'
+        }
+        return {
+            safeToClose,
+            reason,
+            terminal,
+            publisherDrained
+        }
+    }
+
+    _attachV2ProgressContract(payload, monitor, publisherState = {}) {
+        if (!payload || typeof payload !== 'object') return payload
+        const completionStatus = toNonEmptyString(payload.completionStatus)
+        let releaseStatus = toNonEmptyString(payload.releaseStatus)
+        const terminalCandidate = isZapTerminalStatus(payload?.status) || payload?.safeToClose === true
+        if (!releaseStatus && terminalCandidate) {
+            const status = String(payload?.status || '').toLowerCase()
+            releaseStatus = status === ZAP_PROGRESS_STATUS_ERROR || status === ZAP_PROGRESS_STATUS_CANCELLED
+                ? 'incomplete'
+                : completionStatus && completionStatus !== 'completed'
+                ? 'incomplete'
+                : (publisherState?.drained === true ? 'clean' : 'incomplete')
+        }
+        const progressPayload = releaseStatus
+            ? Object.assign({}, payload, { releaseStatus })
+            : payload
+        const closeReadiness = this._buildCloseReadiness(progressPayload, publisherState, monitor)
+        const closeRequest = monitor?.closeRequest || null
+        const fingerprintSource = {
+            sessionId: progressPayload.sessionId || monitor?.sessionId || null,
+            status: progressPayload.status || null,
+            progress: toFiniteNumber(progressPayload.progress, 0),
+            phase: progressPayload.phase || null,
+            completionStatus: progressPayload.completionStatus || null,
+            releaseStatus: progressPayload.releaseStatus || null,
+            safeToClose: closeReadiness.safeToClose,
+            closeRequestId: closeRequest?.id || null,
+            closeRequestAck: closeRequest?.acked === true,
+            publisher: {
+                pendingFindings: toFiniteNumber(publisherState?.pendingFindings, 0),
+                inFlightBatches: toFiniteNumber(publisherState?.inFlightBatches, 0),
+                drained: publisherState?.drained === true,
+                lastAckedBatchSeq: toFiniteNumber(publisherState?.lastAckedBatchSeq, 0)
+            },
+            engines: this._sanitizeProgressEnginesForFingerprint(payload.engines)
+        }
+        const fingerprint = stableStringify(fingerprintSource)
+        if (monitor) {
+            if (!monitor.activityFingerprint || monitor.activityFingerprint !== fingerprint) {
+                monitor.activitySeq = toFiniteNumber(monitor.activitySeq, 0) + 1
+                monitor.activityFingerprint = fingerprint
+            }
+        }
+        const v2Payload = Object.assign({}, progressPayload, {
+            contractVersion: ZAP_PROGRESS_CONTRACT_VERSION,
+            activitySeq: monitor?.activitySeq || 1,
+            activityFingerprint: fingerprint,
+            closeReadiness,
+            publisher: publisherState,
+            terminalSeen: closeReadiness.terminal,
+            safeToClose: closeReadiness.safeToClose
+        })
+        if (closeRequest?.id) {
+            v2Payload.closeRequestId = closeRequest.id
+            v2Payload.closeRequestAck = closeRequest.acked === true
+            v2Payload.closeRequestMode = closeRequest.mode || 'graceful_stop_and_drain'
+        }
+        return v2Payload
     }
 
     _getRequiredZapEngines(monitor = null, runtimeSnapshot = null) {
@@ -563,7 +1067,8 @@ class ZapBridge {
 
         this.transport.clearSessionTerminal?.()
 
-        const existing = this._progressMonitor
+        const monitorKey = this._progressMonitorKey({ sessionKey: effectiveSessionKey, zapid: effectiveZapId, sessionId })
+        const existing = monitorKey ? this._progressMonitorsByKey.get(monitorKey) : null
         if (existing && existing.sessionKey === effectiveSessionKey && existing.sessionId === (sessionId || null)) {
             if (Array.isArray(requiredEngines) && requiredEngines.length) {
                 existing.requiredEngines = normalizeEngineList(requiredEngines)
@@ -571,15 +1076,20 @@ class ZapBridge {
             if (terminalPayload) {
                 existing.terminalPayload = terminalPayload
             }
+            this._progressMonitor = existing
+            void this._ensureControlAlarmActive()
             return
         }
 
-        this._clearProgressMonitor()
+        if (existing) {
+            this._clearProgressMonitor(existing)
+        }
 
         const monitor = {
             sessionKey: effectiveSessionKey,
             sessionId: sessionId || null,
             zapid: effectiveZapId,
+            baseUrl: this.transport.getBaseUrl?.({ zapid: effectiveZapId }) || null,
             requiredEngines: normalizeEngineList(requiredEngines),
             readySent: terminalPayload ? true : false,
             quietSince: null,
@@ -588,9 +1098,21 @@ class ZapBridge {
             terminalPayload: terminalPayload || null,
             pendingFlushSince: null,
             enginePassiveSince: Object.create(null),
+            activitySeq: 0,
+            activityFingerprint: null,
+            closeRequest: null,
+            closeRequestedSent: false,
+            closeRequestAckPending: false,
+            closeStopRequested: false,
+            controlPollInFlight: false,
+            lastControlPollAt: 0,
+            controlIntervalId: null,
             intervalId: null
         }
 
+        if (monitorKey) {
+            this._progressMonitorsByKey.set(monitorKey, monitor)
+        }
         this._progressMonitor = monitor
         this._debugLog('[PTK ZAP] Starting progress monitor:', {
             sessionKey: effectiveSessionKey,
@@ -603,19 +1125,130 @@ class ZapBridge {
         const tick = () => {
             void this._tickProgressMonitor(monitor)
         }
+        const controlTick = () => {
+            void this._pollZapControl(monitor, { source: 'background_control_timer' })
+        }
 
         tick()
         monitor.intervalId = setInterval(tick, ZAP_PROGRESS_HEARTBEAT_MS)
+        monitor.controlIntervalId = setInterval(controlTick, ZAP_CONTROL_BACKGROUND_POLL_MS)
+        void this._ensureControlAlarmActive()
     }
 
-    async _handleZapProgressControlResponse(monitor, control = {}) {
-        if (this._progressMonitor !== monitor) {
+    async _postCloseRequestAck(monitor, { force = false } = {}) {
+        if (!monitor?.closeRequest?.id || !this.transport?.postProgressJson) {
+            return false
+        }
+        if (monitor.closeRequest.progressAckPosted === true && force !== true) {
+            return true
+        }
+        monitor.closeRequest.acked = true
+        const publisherState = await this._getPublisherStateForProgress()
+        const progress = clampProgress(
+            toFiniteNumber(monitor.lastDerivedEngineStates
+                ? this._computeZapAggregateProgress(monitor.lastDerivedEngineStates, monitor.requiredEngines)
+                : null, 99),
+            99
+        )
+        let payload = this._buildProgressMonitorPayload({
+            progress,
+            status: ZAP_PROGRESS_STATUS_RUNNING,
+            phase: 'draining',
+            message: 'ZAP close request acknowledged; stopping PTK session',
+            engines: monitor.lastDerivedEngineStates || this._buildReadyEngineStates(monitor.requiredEngines)
+        })
+        payload = this._attachProgressSessionContext(payload, monitor)
+        payload = this._attachV2ProgressContract(payload, monitor, Object.assign({}, publisherState, {
+            drained: false
+        }))
+        payload.safeToClose = false
+        payload.closeReadiness = Object.assign({}, payload.closeReadiness || {}, {
+            safeToClose: false,
+            reason: 'close_request_acknowledged',
+            terminal: false
+        })
+        try {
+            await this.transport.postProgressJson(payload)
+            monitor.closeRequest.progressAckPosted = true
+            monitor.closeRequestAckPending = false
+            return true
+        } catch (err) {
+            monitor.closeRequestAckPending = true
+            console.warn('[PTK ZAP] Failed to acknowledge ZAP close request:', err?.message || String(err))
+            return false
+        }
+    }
+
+    async _pollZapControl(monitor, { source = null, force = false } = {}) {
+        if (!monitor || typeof monitor !== 'object' || !this.transport?.postControlJson) {
+            return null
+        }
+        const key = this._progressMonitorKey(monitor)
+        if (key && this._progressMonitorsByKey.has(key) && this._progressMonitorsByKey.get(key) !== monitor) {
+            return null
+        }
+        if (monitor.controlPollInFlight === true) {
+            return null
+        }
+        const now = Date.now()
+        if (force !== true && monitor.lastControlPollAt && now - monitor.lastControlPollAt < ZAP_CONTROL_POLL_MIN_INTERVAL_MS) {
+            return null
+        }
+        monitor.controlPollInFlight = true
+        monitor.lastControlPollAt = now
+        try {
+            const publisherState = await this._getPublisherStateForProgress()
+            const response = await this.transport.postControlJson({
+                contractVersion: ZAP_PROGRESS_CONTRACT_VERSION,
+                zapid: monitor.zapid,
+                sessionId: monitor.sessionId,
+                activitySeq: monitor.activitySeq || 0,
+                activityFingerprint: monitor.activityFingerprint || null,
+                closeRequestId: monitor.closeRequest?.id || null,
+                closeRequestAck: monitor.closeRequest?.acked === true,
+                closeRequestMode: monitor.closeRequest?.mode || null,
+                publisher: publisherState,
+                source
+            })
+            await this._handleZapProgressControlResponse(monitor, response?.data, {
+                source: source || 'control_poll'
+            })
+            return response
+        } catch (err) {
+            console.warn('[PTK ZAP] Failed to poll ZAP control endpoint:', err?.message || String(err))
+            return null
+        } finally {
+            monitor.controlPollInFlight = false
+        }
+    }
+
+    pollControlMonitors({ source = 'external' } = {}) {
+        let monitors = 0
+        for (const monitor of this._progressMonitorsByKey.values()) {
+            if (!monitor || typeof monitor !== 'object') continue
+            monitors += 1
+            void this._pollZapControl(monitor, { source, force: true })
+        }
+        return { ok: true, monitors }
+    }
+
+    async _handleZapProgressControlResponse(monitor, control = {}, { source = 'progress_response' } = {}) {
+        const key = this._progressMonitorKey(monitor)
+        if (key && this._progressMonitorsByKey.has(key) && this._progressMonitorsByKey.get(key) !== monitor) {
             return
         }
         if (!control || typeof control !== 'object' || control.closeRequested !== true) {
             return
         }
-        if (monitor.closeRequestedSent) {
+        const closeRequestId = toNonEmptyString(control.closeRequestId)
+            || `${monitor.zapid || 'zap'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        if (monitor.closeRequest?.id && monitor.closeRequest.id !== closeRequestId && monitor.closeRequest.acked === true) {
+            this._debugLog('[PTK ZAP] Ignoring superseded close request after acknowledgement:', {
+                zapid: monitor.zapid,
+                sessionId: monitor.sessionId,
+                existingCloseRequestId: monitor.closeRequest.id,
+                closeRequestId
+            })
             return
         }
         const automation = this.app?.automation
@@ -623,24 +1256,67 @@ class ZapBridge {
             console.warn('[PTK ZAP] ZAP close request received but automation stop API is unavailable')
             return
         }
+        if (!monitor.closeRequest || monitor.closeRequest.id !== closeRequestId) {
+            monitor.closeRequest = {
+                id: closeRequestId,
+                mode: toNonEmptyString(control.mode) || 'graceful_stop_and_drain',
+                reason: toNonEmptyString(control.reason) || 'zap_requested_close',
+                requestedAt: Date.now(),
+                acked: false,
+                progressAckPosted: false
+            }
+        } else {
+            monitor.closeRequest.mode = toNonEmptyString(control.mode) || monitor.closeRequest.mode || 'graceful_stop_and_drain'
+            monitor.closeRequest.reason = toNonEmptyString(control.reason) || monitor.closeRequest.reason || 'zap_requested_close'
+        }
         monitor.closeRequestedSent = true
+        await this._postCloseRequestAck(monitor, {
+            force: source === 'control_poll' || control.closeRequested === true
+        })
         const stopTimeoutMs = Number.isFinite(Number(control.stopTimeoutMs))
             ? Math.max(1000, Math.min(Number(control.stopTimeoutMs), ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS))
             : ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS
-        try {
+        const drainTimeoutMs = Number.isFinite(Number(control.drainTimeoutMs))
+            ? Math.max(0, Math.min(Number(control.drainTimeoutMs), ZAP_CLOSE_CONTRACT_PTK_STOP_TIMEOUT_MS))
+            : stopTimeoutMs
+        this._startZapCloseStop(monitor, automation, {
+            closeRequestId,
+            stopTimeoutMs,
+            drainTimeoutMs
+        })
+    }
+
+    _startZapCloseStop(monitor, automation, { closeRequestId, stopTimeoutMs, drainTimeoutMs } = {}) {
+        if (!monitor?.closeRequest?.id || !automation || typeof automation.requestZapSessionStop !== 'function') {
+            return null
+        }
+        if (monitor.closeStopRequested === true) {
+            return monitor.closeStopPromise || null
+        }
+        monitor.closeStopRequested = true
+        monitor.closeStopPromise = Promise.resolve().then(async () => {
             const result = await automation.requestZapSessionStop(monitor.sessionId, {
                 timeoutMs: stopTimeoutMs,
-                source: 'zap_browser_close'
+                drainTimeoutMs,
+                source: 'zap_browser_close',
+                closeRequestId,
+                closeRequestMode: monitor.closeRequest.mode,
+                closeRequestReason: monitor.closeRequest.reason,
+                zapid: monitor.zapid
             })
             this._debugLog('[PTK ZAP] ZAP close request stop issued:', {
                 zapid: monitor.zapid,
                 sessionId: monitor.sessionId,
+                closeRequestId,
                 result
             })
-        } catch (err) {
-            monitor.closeRequestedSent = false
+            return result
+        }).catch((err) => {
+            monitor.closeStopError = err?.message || String(err)
             console.warn('[PTK ZAP] Failed to request PTK stop from ZAP close signal:', err?.message || String(err))
-        }
+            return { ok: false, error: monitor.closeStopError }
+        })
+        return monitor.closeStopPromise
     }
 
     _scheduleTerminalProgress({ sessionKey, sessionId = null, zapid = null, requiredEngines = null, status = ZAP_PROGRESS_STATUS_ERROR, message = null, engines = null } = {}) {
@@ -659,17 +1335,51 @@ class ZapBridge {
         })
     }
 
-    async _tickProgressMonitor(monitor) {
-        if (this._progressMonitor !== monitor) {
-            return
+    tickProgressMonitors({ source = null } = {}) {
+        let monitors = 0
+        for (const monitor of this._progressMonitorsByKey.values()) {
+            if (!monitor || typeof monitor !== 'object') continue
+            monitors += 1
+            void this._tickProgressMonitor(monitor, { source })
         }
-        if (this.transport.getZapId?.() !== monitor.zapid) {
-            this._debugLog('[PTK ZAP] Progress monitor switched zapid:', {
-                monitorZapId: monitor.zapid,
-                activeZapId: this.transport.getZapId?.() || null,
-                sessionId: monitor.sessionId
+        return { ok: true, monitors }
+    }
+
+    async _tickProgressMonitor(monitor, { source = null } = {}) {
+        if (!monitor || typeof monitor !== 'object') return
+        const now = Date.now()
+        if (monitor.tickInFlight === true) {
+            const startedAt = Number(monitor.tickStartedAt || 0)
+            const ageMs = startedAt > 0 ? now - startedAt : 0
+            if (ageMs >= 0 && ageMs < ZAP_PROGRESS_TICK_STALE_MS) return
+            monitor.tickStaleRecoveries = toFiniteNumber(monitor.tickStaleRecoveries, 0) + 1
+            console.warn('[PTK ZAP] Recovering stale progress monitor tick:', {
+                zapid: monitor.zapid,
+                sessionId: monitor.sessionId,
+                source,
+                ageMs,
+                recoveries: monitor.tickStaleRecoveries
             })
-            this._clearProgressMonitorIfCurrent(monitor)
+        }
+        const tickToken = toFiniteNumber(monitor.tickToken, 0) + 1
+        monitor.tickToken = tickToken
+        monitor.tickStartedAt = now
+        if (monitor && typeof monitor === 'object') {
+            monitor.tickInFlight = true
+        }
+        try {
+            return await this._tickProgressMonitorOnce(monitor)
+        } finally {
+            if (monitor && typeof monitor === 'object' && monitor.tickToken === tickToken) {
+                monitor.tickInFlight = false
+                monitor.tickStartedAt = null
+            }
+        }
+    }
+
+    async _tickProgressMonitorOnce(monitor) {
+        const monitorKey = this._progressMonitorKey(monitor)
+        if (monitorKey && this._progressMonitorsByKey.has(monitorKey) && this._progressMonitorsByKey.get(monitorKey) !== monitor) {
             return
         }
 
@@ -727,8 +1437,10 @@ class ZapBridge {
 
         try {
             payload = this._attachProgressSessionContext(payload, monitor)
+            payload = this._attachV2ProgressContract(payload, monitor, await this._getPublisherStateForProgress())
             const progressResponse = await this.transport.postProgressJson(payload)
             await this._handleZapProgressControlResponse(monitor, progressResponse?.data)
+            await this._pollZapControl(monitor, { source: 'progress_tick' })
             this.recordTiming({
                 phase: 'progress.post.first',
                 zapid: monitor.zapid,
@@ -786,12 +1498,13 @@ class ZapBridge {
             }
         } catch (err) {
             console.warn('[PTK ZAP] Failed to POST ZAP progress update:', err?.message || String(err))
+            await this._pollZapControl(monitor, { source: 'progress_post_failed', force: true })
         }
     }
 
-    async postTerminalProgressForClose({ sessionId = null, zapid = null } = {}) {
+    async postTerminalProgressForClose({ sessionId = null, zapid = null, allowRetry = true } = {}) {
         const effectiveZapId = zapid || this.transport.getZapId?.() || null
-        if (!sessionId || !effectiveZapId || !this.transport.isReady?.()) {
+        if (!sessionId || !effectiveZapId || !this.transport.isReady?.({ zapid: effectiveZapId })) {
             return { ok: false, posted: false, reason: 'zap_progress_not_ready' }
         }
 
@@ -805,23 +1518,40 @@ class ZapBridge {
             }
         }
 
-        const monitor = this._progressMonitor && this._progressMonitor.sessionId === sessionId
-            ? this._progressMonitor
+        const existingMonitor = Array.from(this._progressMonitorsByKey.values())
+            .find(candidate => candidate?.sessionId === sessionId && (!effectiveZapId || candidate?.zapid === effectiveZapId))
+        const monitor = existingMonitor
+            ? existingMonitor
             : {
                 sessionKey: this._buildZapSessionKey(this.transport.getBaseUrl?.(), effectiveZapId),
                 sessionId,
                 zapid: effectiveZapId,
+                baseUrl: this.transport.getBaseUrl?.({ zapid: effectiveZapId }) || null,
                 requiredEngines: this._getRequiredZapEngines(null, runtimeSnapshot),
                 readySent: true,
                 lastRuntimeSnapshot: runtimeSnapshot,
                 lastDerivedEngineStates: null,
                 terminalPayload: null,
                 pendingFlushSince: null,
-                enginePassiveSince: Object.create(null)
+                enginePassiveSince: Object.create(null),
+                activitySeq: 0,
+                activityFingerprint: null,
+                closeRequest: null,
+                closeRequestedSent: false,
+                closeStopRequested: false,
+                controlPollInFlight: false,
+                lastControlPollAt: 0
             }
 
         const derivedState = this._deriveZapProgressState(monitor, runtimeSnapshot)
         if (!derivedState?.terminal) {
+            if (allowRetry) {
+                this._scheduleCloseTerminalProgressRetry({
+                    sessionId,
+                    zapid: effectiveZapId,
+                    reason: 'not_terminal'
+                })
+            }
             return {
                 ok: true,
                 posted: false,
@@ -833,13 +1563,35 @@ class ZapBridge {
 
         const flushed = await this._flushPublisherWithTimeout()
         if (!flushed) {
-            return { ok: false, posted: false, reason: 'publisher_not_drained' }
+            if (allowRetry) {
+                this._scheduleCloseTerminalProgressRetry({
+                    sessionId,
+                    zapid: effectiveZapId,
+                    reason: 'publisher_not_drained'
+                })
+            }
+            if (allowRetry) {
+                return { ok: false, posted: false, reason: 'publisher_not_drained' }
+            }
         }
 
         let payload = this._buildZapProgressPayloadFromDerivedState(derivedState)
+        if (!flushed) {
+            payload = Object.assign({}, payload, {
+                progress: 100,
+                status: payload.status === ZAP_PROGRESS_STATUS_COMPLETED
+                    ? ZAP_PROGRESS_STATUS_COMPLETED
+                    : ZAP_PROGRESS_STATUS_CANCELLED,
+                completionStatus: 'publisher_incomplete',
+                releaseStatus: 'incomplete',
+                safeToClose: true,
+                message: payload.message || 'PTK scan terminal state reached but final finding publisher drain was incomplete'
+            })
+        }
         monitor.lastRuntimeSnapshot = runtimeSnapshot
         monitor.lastDerivedEngineStates = derivedState.engines
         payload = this._attachProgressSessionContext(payload, monitor)
+        payload = this._attachV2ProgressContract(payload, monitor, await this._getPublisherStateForProgress())
         await this.transport.postProgressJson(payload)
         this.transport.markSessionTerminal?.({
             zapid: effectiveZapId,
@@ -847,6 +1599,7 @@ class ZapBridge {
             progress: payload.progress,
             status: payload.status
         })
+        this._clearCloseTerminalProgressRetry({ sessionId, zapid: effectiveZapId })
         this._clearProgressMonitorIfCurrent(monitor)
         return {
             ok: true,
@@ -856,6 +1609,65 @@ class ZapBridge {
         }
     }
 
+    _closeTerminalProgressRetryKey({ sessionId = null, zapid = null } = {}) {
+        const safeSessionId = toNonEmptyString(sessionId)
+        const safeZapId = toNonEmptyString(zapid)
+        if (!safeSessionId || !safeZapId) return null
+        return `${safeZapId}::${safeSessionId}`
+    }
+
+    _clearCloseTerminalProgressRetry({ sessionId = null, zapid = null } = {}) {
+        const key = this._closeTerminalProgressRetryKey({ sessionId, zapid })
+        if (!key) return
+        const retry = this._closeTerminalRetryTimers.get(key)
+        if (!retry) return
+        clearInterval(retry.intervalId)
+        this._closeTerminalRetryTimers.delete(key)
+    }
+
+    _scheduleCloseTerminalProgressRetry({ sessionId = null, zapid = null, reason = null } = {}) {
+        const key = this._closeTerminalProgressRetryKey({ sessionId, zapid })
+        if (!key || this._closeTerminalRetryTimers.has(key)) return
+
+        const startedAt = Date.now()
+        const retry = {
+            startedAt,
+            intervalId: null,
+            running: false,
+            lastReason: reason || null
+        }
+        const runRetry = async () => {
+            if (retry.running) return
+            if (Date.now() - startedAt > ZAP_CLOSE_TERMINAL_RETRY_TIMEOUT_MS) {
+                this._clearCloseTerminalProgressRetry({ sessionId, zapid })
+                console.warn('[PTK ZAP] Gave up retrying close terminal progress:', {
+                    zapid,
+                    sessionId,
+                    reason: retry.lastReason
+                })
+                return
+            }
+            retry.running = true
+            try {
+                const result = await this.postTerminalProgressForClose({
+                    sessionId,
+                    zapid,
+                    allowRetry: false
+                })
+                retry.lastReason = result?.reason || null
+                if (result?.posted === true || this.transport.isSessionTerminal?.({ zapid, sessionId }) === true) {
+                    this._clearCloseTerminalProgressRetry({ sessionId, zapid })
+                }
+            } catch (err) {
+                retry.lastReason = err?.message || String(err)
+            } finally {
+                retry.running = false
+            }
+        }
+        retry.intervalId = setInterval(runRetry, ZAP_CLOSE_TERMINAL_RETRY_MS)
+        this._closeTerminalRetryTimers.set(key, retry)
+    }
+
     _deriveZapProgressState(monitor, runtimeSnapshot) {
         const requiredEngines = this._getRequiredZapEngines(monitor, runtimeSnapshot)
         const engineStates = this._deriveZapEngineStates(monitor, runtimeSnapshot, requiredEngines)
@@ -863,12 +1675,15 @@ class ZapBridge {
         const errorMessage = sessionMessage || this._findFirstEngineMessage(engineStates, requiredEngines)
         if (errorMessage) {
             const settled = this._areRequiredEnginesSettled(engineStates, requiredEngines)
+            const terminal = settled
             return {
-                status: settled ? ZAP_PROGRESS_STATUS_ERROR : ZAP_PROGRESS_STATUS_RUNNING,
-                progress: settled ? 100 : this._computeZapAggregateProgress(engineStates, requiredEngines),
+                status: terminal ? ZAP_PROGRESS_STATUS_ERROR : ZAP_PROGRESS_STATUS_RUNNING,
+                progress: terminal ? 100 : this._computeZapAggregateProgress(engineStates, requiredEngines),
                 engines: engineStates,
-                terminal: settled,
-                message: errorMessage
+                terminal,
+                message: errorMessage,
+                completionStatus: terminal ? 'engine_incomplete' : null,
+                releaseStatus: terminal ? 'incomplete' : null
             }
         }
 
@@ -886,7 +1701,8 @@ class ZapBridge {
                 message: cancelled
                     ? (incomplete ? 'PTK scan stopped after flushing findings; some engine work was incomplete' : 'PTK scan stopped after flushing findings')
                     : null,
-                completionStatus: incomplete ? 'engine_incomplete' : (cancelled ? 'completed' : null)
+                completionStatus: incomplete ? 'engine_incomplete' : (cancelled ? 'completed' : null),
+                releaseStatus: cancelled ? (incomplete ? 'incomplete' : 'clean') : null
             }
         }
 
@@ -897,7 +1713,9 @@ class ZapBridge {
                 progress: 100,
                 engines: engineStates,
                 terminal: true,
-                message: null
+                message: null,
+                completionStatus: 'completed',
+                releaseStatus: 'clean'
             }
         }
 
@@ -953,11 +1771,17 @@ class ZapBridge {
 
         const runtime = runtimeEntry.telemetry || {}
         const error = toNonEmptyString(runtime?.error)
+        const errorDetails = {
+            error: error || null,
+            message: error || null
+        }
         if (error) {
             return {
                 status: ZAP_PROGRESS_STATUS_ERROR,
                 progress: 100,
-                message: error
+                message: error,
+                completionStatus: 'engine_incomplete',
+                details: errorDetails
             }
         }
 
@@ -968,13 +1792,22 @@ class ZapBridge {
         const taskQueue = toFiniteNumber(runtime?.taskQueue, 0)
         const requestQueue = toFiniteNumber(runtime?.requestQueue, 0)
         const pendingPlans = toFiniteNumber(runtime?.pendingPlans, 0)
-        const planning = toFiniteNumber(runtime?.planning, 0)
+        const rawPlanning = toFiniteNumber(runtime?.planning, 0)
         const pendingCaptures = toFiniteNumber(runtime?.pendingCaptures, 0)
         const pendingAutomationSeeds = toFiniteNumber(runtime?.pendingAutomationSeeds, 0)
+        const concreteWork = activeTasks
+            + taskQueue
+            + requestQueue
+            + pendingPlans
+            + pendingCaptures
+            + pendingAutomationSeeds
+        const planning = rawPlanning > 0 && concreteWork > 0 ? rawPlanning : 0
+        const rawRemaining = toFiniteNumber(runtime?.remaining, 0)
+        const remaining = concreteWork > 0 || planning > 0 ? rawRemaining : 0
         const details = {
             planned: toFiniteNumber(runtime?.planned, 0),
             executed: toFiniteNumber(runtime?.executed, 0),
-            remaining: toFiniteNumber(runtime?.remaining, 0),
+            remaining,
             activeTasks,
             taskQueue,
             requestQueue,
@@ -990,13 +1823,7 @@ class ZapBridge {
             proxySeededRequests: toFiniteNumber(runtime?.proxySeededRequests, 0),
             historySeededRequests: toFiniteNumber(runtime?.historySeededRequests, 0)
         }
-        const hasActiveWork = activeTasks > 0
-            || taskQueue > 0
-            || requestQueue > 0
-            || pendingPlans > 0
-            || planning > 0
-            || pendingCaptures > 0
-            || pendingAutomationSeeds > 0
+        const hasActiveWork = concreteWork > 0 || planning > 0
         const progress = this._computeZapDastProgress(runtime)
 
         if (runtimeEntry.state === 'starting' || runtimeEntry.state === 'deferred_start') {
@@ -1057,11 +1884,17 @@ class ZapBridge {
         const runtime = runtimeEntry.telemetry || {}
         const previousRuntime = previousRuntimeEntry?.telemetry || null
         const error = toNonEmptyString(runtime?.error)
+        const errorDetails = {
+            error: error || null,
+            message: error || null
+        }
         if (error) {
             return {
                 status: ZAP_PROGRESS_STATUS_ERROR,
                 progress: 100,
-                message: error
+                message: error,
+                completionStatus: 'engine_incomplete',
+                details: errorDetails
             }
         }
 
@@ -1145,11 +1978,17 @@ class ZapBridge {
 
         const runtime = runtimeEntry.telemetry || {}
         const error = toNonEmptyString(runtime?.error)
+        const errorDetails = {
+            error: error || null,
+            message: error || null
+        }
         if (error) {
             return {
                 status: ZAP_PROGRESS_STATUS_ERROR,
                 progress: 100,
-                message: error
+                message: error,
+                completionStatus: 'engine_incomplete',
+                details: errorDetails
             }
         }
 
@@ -1160,7 +1999,11 @@ class ZapBridge {
         const firstCollectionStarted = runtime?.firstCollectionStarted === true
         const firstCollectionSettled = runtime?.firstCollectionSettled === true
         const activeCollectionCount = toFiniteNumber(runtime?.activeCollectionCount, 0)
+        const pendingCollectionCount = toFiniteNumber(runtime?.pendingCollectionCount, 0)
         const progress = this._computeZapSastProgress(runtime)
+        const waitingForFuturePageActivity = collectionState === 'waiting_for_page_activity'
+            && activeCollectionCount === 0
+            && pendingCollectionCount === 0
 
         if (runtimeEntry.state === 'starting' || runtimeEntry.state === 'deferred_start') {
             return { status: 'starting', progress: 0 }
@@ -1180,9 +2023,16 @@ class ZapBridge {
                 completionStatus: 'completed'
             }
         }
+        if (!hasObservedWork && waitingForFuturePageActivity) {
+            return {
+                status: ZAP_PROGRESS_STATUS_READY,
+                progress: 0
+            }
+        }
         if (!firstCollectionStarted
             || !firstCollectionSettled
             || activeCollectionCount > 0
+            || pendingCollectionCount > 0
             || collectionState === 'collection_pending'
             || collectionState === 'payload_received'
             || collectionState === 'scan_in_flight') {
@@ -1291,6 +2141,11 @@ class ZapBridge {
             return true
         }
 
+        const source = String(observed.source || '')
+        if (!TERMINAL_BLOCKING_TARGET_SOURCES.has(source)) {
+            return true
+        }
+
         const ageMs = Date.now() - observedAt
         if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs >= ZAP_TARGET_ACTIVITY_QUIET_GRACE_MS) {
             return true
@@ -1333,6 +2188,11 @@ class ZapBridge {
             delete passiveSince[normalizedEngineName]
         }
 
+        if (status === 'idle') {
+            clearPassive()
+            return true
+        }
+
         if (normalizedEngineName === 'DAST' && runtime?.isRunning === true) {
             const quietCandidate = runtime?.idle === true
                 || status === 'idle'
@@ -1362,11 +2222,21 @@ class ZapBridge {
             })
         }
         if (normalizedEngineName === 'SAST' && runtime?.isRunning === true) {
-            if (runtime?.firstCollectionStarted !== true
+            const waitingForFuturePageActivity = runtime?.hasObservedWork !== true
+                && String(runtime?.collectionState || '').toLowerCase() === 'waiting_for_page_activity'
+                && toFiniteNumber(runtime?.activeCollectionCount, 0) === 0
+                && toFiniteNumber(runtime?.pendingCollectionCount, 0) === 0
+            if (!waitingForFuturePageActivity
+                && (runtime?.firstCollectionStarted !== true
                 || runtime?.firstCollectionSettled !== true
-                || toFiniteNumber(runtime?.activeCollectionCount, 0) > 0) {
+                || toFiniteNumber(runtime?.activeCollectionCount, 0) > 0
+                || toFiniteNumber(runtime?.pendingCollectionCount, 0) > 0)) {
                 clearPassive()
                 return false
+            }
+            if (waitingForFuturePageActivity) {
+                clearPassive()
+                return true
             }
             const quietCandidate = !this._didZapSastRuntimeAdvance(runtime, previousRuntime)
             if (!quietCandidate) {
@@ -1379,11 +2249,6 @@ class ZapBridge {
                 passiveSince,
                 clearPassive
             })
-        }
-
-        if (status === 'idle') {
-            clearPassive()
-            return true
         }
 
         if (!normalizedEngineName || status === ZAP_PROGRESS_STATUS_ERROR || status === ZAP_PROGRESS_STATUS_CANCELLED) {
@@ -1434,7 +2299,8 @@ class ZapBridge {
             status: derivedState?.status,
             message: derivedState?.message || null,
             engines: derivedState?.engines || null,
-            completionStatus: derivedState?.completionStatus || null
+            completionStatus: derivedState?.completionStatus || null,
+            releaseStatus: derivedState?.releaseStatus || null
         })
     }
 
@@ -1496,47 +2362,80 @@ class ZapBridge {
             return true
         }
 
-        const currentActivityAt = Date.parse(runtime?.lastActivityAt || '')
-        const previousActivityAt = Date.parse(previousRuntime?.lastActivityAt || '')
-        if (Number.isFinite(currentActivityAt) && (!Number.isFinite(previousActivityAt) || currentActivityAt > previousActivityAt)) {
-            return true
-        }
-
         return false
     }
 
     _didZapDastRuntimeAdvance(runtime = {}, previousRuntime = null) {
-        if (!previousRuntime || typeof previousRuntime !== 'object') {
-            return runtime?.idle !== true && runtime?.hasObservedWork === true
+        const normalizeDastCounters = (entry = {}) => {
+            const activeTasks = toFiniteNumber(entry?.activeTasks, 0)
+            const taskQueue = toFiniteNumber(entry?.taskQueue, 0)
+            const requestQueue = toFiniteNumber(entry?.requestQueue, 0)
+            const pendingPlans = toFiniteNumber(entry?.pendingPlans, 0)
+            const pendingCaptures = toFiniteNumber(entry?.pendingCaptures, 0)
+            const pendingAutomationSeeds = toFiniteNumber(entry?.pendingAutomationSeeds, 0)
+            const concreteWork = activeTasks
+                + taskQueue
+                + requestQueue
+                + pendingPlans
+                + pendingCaptures
+                + pendingAutomationSeeds
+            const planning = toFiniteNumber(entry?.planning, 0) > 0 && concreteWork > 0
+                ? toFiniteNumber(entry?.planning, 0)
+                : 0
+            const remaining = concreteWork > 0 || planning > 0
+                ? toFiniteNumber(entry?.remaining, 0)
+                : 0
+            return {
+                planned: toFiniteNumber(entry?.planned, 0),
+                executed: toFiniteNumber(entry?.executed, 0),
+                remaining,
+                activeTasks,
+                taskQueue,
+                requestQueue,
+                pendingPlans,
+                planning,
+                pendingCaptures,
+                pendingAutomationSeeds,
+                seededRequests: toFiniteNumber(entry?.seededRequests, 0),
+                findingsCount: toFiniteNumber(entry?.findingsCount, 0),
+                active: concreteWork > 0 || planning > 0
+            }
         }
 
+        if (!previousRuntime || typeof previousRuntime !== 'object') {
+            const current = normalizeDastCounters(runtime)
+            return current.active === true || current.executed > 0 || current.seededRequests > 0 || current.findingsCount > 0
+        }
+
+        const current = normalizeDastCounters(runtime)
+        const previous = normalizeDastCounters(previousRuntime)
         const currentCounters = [
-            toFiniteNumber(runtime?.planned, 0),
-            toFiniteNumber(runtime?.executed, 0),
-            toFiniteNumber(runtime?.remaining, 0),
-            toFiniteNumber(runtime?.activeTasks, 0),
-            toFiniteNumber(runtime?.taskQueue, 0),
-            toFiniteNumber(runtime?.requestQueue, 0),
-            toFiniteNumber(runtime?.pendingPlans, 0),
-            toFiniteNumber(runtime?.planning, 0),
-            toFiniteNumber(runtime?.pendingCaptures, 0),
-            toFiniteNumber(runtime?.pendingAutomationSeeds, 0),
-            toFiniteNumber(runtime?.seededRequests, 0),
-            toFiniteNumber(runtime?.findingsCount, 0)
+            current.planned,
+            current.executed,
+            current.remaining,
+            current.activeTasks,
+            current.taskQueue,
+            current.requestQueue,
+            current.pendingPlans,
+            current.planning,
+            current.pendingCaptures,
+            current.pendingAutomationSeeds,
+            current.seededRequests,
+            current.findingsCount
         ]
         const previousCounters = [
-            toFiniteNumber(previousRuntime?.planned, 0),
-            toFiniteNumber(previousRuntime?.executed, 0),
-            toFiniteNumber(previousRuntime?.remaining, 0),
-            toFiniteNumber(previousRuntime?.activeTasks, 0),
-            toFiniteNumber(previousRuntime?.taskQueue, 0),
-            toFiniteNumber(previousRuntime?.requestQueue, 0),
-            toFiniteNumber(previousRuntime?.pendingPlans, 0),
-            toFiniteNumber(previousRuntime?.planning, 0),
-            toFiniteNumber(previousRuntime?.pendingCaptures, 0),
-            toFiniteNumber(previousRuntime?.pendingAutomationSeeds, 0),
-            toFiniteNumber(previousRuntime?.seededRequests, 0),
-            toFiniteNumber(previousRuntime?.findingsCount, 0)
+            previous.planned,
+            previous.executed,
+            previous.remaining,
+            previous.activeTasks,
+            previous.taskQueue,
+            previous.requestQueue,
+            previous.pendingPlans,
+            previous.planning,
+            previous.pendingCaptures,
+            previous.pendingAutomationSeeds,
+            previous.seededRequests,
+            previous.findingsCount
         ]
         if (currentCounters.some((value, index) => value !== previousCounters[index])) {
             return true
@@ -1545,20 +2444,14 @@ class ZapBridge {
         const currentMarkers = [
             String(runtime?.phase || ''),
             String(runtime?.status || ''),
-            runtime?.idle === true ? 'idle' : 'active'
+            current.active ? 'active' : 'idle'
         ]
         const previousMarkers = [
             String(previousRuntime?.phase || ''),
             String(previousRuntime?.status || ''),
-            previousRuntime?.idle === true ? 'idle' : 'active'
+            previous.active ? 'active' : 'idle'
         ]
         if (currentMarkers.some((value, index) => value !== previousMarkers[index])) {
-            return true
-        }
-
-        const currentActivityAt = Date.parse(runtime?.lastActivityAt || '')
-        const previousActivityAt = Date.parse(previousRuntime?.lastActivityAt || '')
-        if (Number.isFinite(currentActivityAt) && (!Number.isFinite(previousActivityAt) || currentActivityAt > previousActivityAt)) {
             return true
         }
 
@@ -1571,13 +2464,7 @@ class ZapBridge {
         passiveSince = null,
         clearPassive = null
     } = {}) {
-        const activityAt = Date.parse(runtime?.lastActivityAt || '')
         const now = Date.now()
-        if (Number.isFinite(activityAt) && (now - activityAt) < ZAP_PASSIVE_ENGINE_IDLE_GRACE_MS) {
-            clearPassive?.()
-            return false
-        }
-
         if (!passiveSince?.[normalizedEngineName]) {
             passiveSince[normalizedEngineName] = now
             return false
@@ -1629,23 +2516,22 @@ class ZapBridge {
             return true
         }
 
-        const currentActivityAt = Date.parse(runtime?.lastActivityAt || '')
-        const previousActivityAt = Date.parse(previousRuntime?.lastActivityAt || '')
-        if (Number.isFinite(currentActivityAt) && (!Number.isFinite(previousActivityAt) || currentActivityAt > previousActivityAt)) {
-            return true
-        }
-
         return false
     }
 
     async _flushPublisherWithTimeout(timeoutMs = ZAP_PROGRESS_FLUSH_TIMEOUT_MS) {
         const drainForTerminal = this.publisher?.flushPendingForTerminal
         const flushOnce = this.publisher?.flushOnce
+        const getDrainState = this.publisher?.getDrainState
+        const isDrained = (state) => this._normalizePublisherState(state).drained === true
         if (typeof drainForTerminal !== 'function' && typeof flushOnce !== 'function') {
             return true
         }
 
         try {
+            if (typeof getDrainState === 'function' && isDrained(await getDrainState.call(this.publisher))) {
+                return true
+            }
             const result = await Promise.race([
                 typeof drainForTerminal === 'function'
                     ? Promise.resolve(drainForTerminal.call(this.publisher, {
@@ -1655,9 +2541,18 @@ class ZapBridge {
                 new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs))
             ])
             if (typeof drainForTerminal === 'function') {
-                return result !== false && result?.drained === true
+                if (result !== false && isDrained(result)) {
+                    return true
+                }
+                if (typeof getDrainState === 'function' && isDrained(await getDrainState.call(this.publisher))) {
+                    return true
+                }
+                return false
             }
-            return result !== false
+            if (result !== false) {
+                return true
+            }
+            return typeof getDrainState === 'function' && isDrained(await getDrainState.call(this.publisher))
         } catch (err) {
             console.warn('[PTK ZAP] Failed to flush publisher before terminal progress:', err?.message || String(err))
             return false
@@ -1709,7 +2604,7 @@ class ZapBridge {
         return configs
     }
 
-    async sendAlertsBatch({ engine, scanId, alerts, truncated }) {
+    async sendAlertsBatch({ engine, scanId, alerts, truncated, batchId = null, batchSeq = null }) {
         if (!this.isActive()) {
             this._debugLog('[PTK ZAP] Cannot send alerts - ZAP not active')
             return
@@ -1725,9 +2620,10 @@ class ZapBridge {
             source: SOURCE,
             type: TYPE_ALERTS_BATCH,
             ts: Date.now(),
-            batchId: createBatchId(),
+            batchId: batchId || createBatchId(),
+            batchSeq: Number.isFinite(Number(batchSeq)) ? Number(batchSeq) : undefined,
             payload: {
-                sessionId: null,
+                sessionId: this._progressMonitor?.sessionId || this._lastStartSessionId || null,
                 engine: engine || null,
                 scanId: scanId || null,
                 alerts,
@@ -1735,11 +2631,12 @@ class ZapBridge {
             }
         }
 
-        await this.transport.postAlertsJson(envelope)
+        const result = await this.transport.postAlertsJson(this._attachZapEnvelopeContext(envelope, { engine, scanId }))
         this._debugLog('[PTK ZAP] Alerts batch sent successfully')
+        return result?.data || null
     }
 
-    async sendDastFindingsBatch({ scanId, findings, truncated }) {
+    async sendDastFindingsBatch({ scanId, findings, truncated, batchId = null, batchSeq = null }) {
         if (!this.isActive()) {
             this._debugLog('[PTK ZAP] Cannot send DAST findings - ZAP not active')
             return
@@ -1756,8 +2653,10 @@ class ZapBridge {
             type: TYPE_DAST_FINDINGS_BATCH,
             schema: DAST_SCHEMA,
             ts: Date.now(),
-            batchId: createBatchId(),
+            batchId: batchId || createBatchId(),
+            batchSeq: Number.isFinite(Number(batchSeq)) ? Number(batchSeq) : undefined,
             payload: {
+                sessionId: this._progressMonitor?.sessionId || this._lastStartSessionId || null,
                 engine: 'DAST',
                 scanId: scanId || null,
                 findings,
@@ -1765,11 +2664,12 @@ class ZapBridge {
             }
         }
 
-        await this.transport.postAlertsJson(envelope)
+        const result = await this.transport.postAlertsJson(this._attachZapEnvelopeContext(envelope, { engine: 'DAST', scanId }))
         this._debugLog('[PTK ZAP] DAST findings batch sent successfully')
+        return result?.data || null
     }
 
-    async sendIastFindingsBatch({ scanId, findings, truncated }) {
+    async sendIastFindingsBatch({ scanId, findings, truncated, batchId = null, batchSeq = null }) {
         if (!this.isActive()) return
         if (!Array.isArray(findings) || findings.length === 0) return
 
@@ -1780,8 +2680,10 @@ class ZapBridge {
             type: TYPE_IAST_FINDINGS_BATCH,
             schema: IAST_SCHEMA,
             ts: Date.now(),
-            batchId: createBatchId(),
+            batchId: batchId || createBatchId(),
+            batchSeq: Number.isFinite(Number(batchSeq)) ? Number(batchSeq) : undefined,
             payload: {
+                sessionId: this._progressMonitor?.sessionId || this._lastStartSessionId || null,
                 engine: 'IAST',
                 scanId: scanId || null,
                 findings,
@@ -1789,10 +2691,11 @@ class ZapBridge {
             }
         }
 
-        await this.transport.postAlertsJson(envelope)
+        const result = await this.transport.postAlertsJson(this._attachZapEnvelopeContext(envelope, { engine: 'IAST', scanId }))
+        return result?.data || null
     }
 
-    async sendSastFindingsBatch({ scanId, findings, truncated }) {
+    async sendSastFindingsBatch({ scanId, findings, truncated, batchId = null, batchSeq = null }) {
         if (!this.isActive()) return
         if (!Array.isArray(findings) || findings.length === 0) return
 
@@ -1803,8 +2706,10 @@ class ZapBridge {
             type: TYPE_SAST_FINDINGS_BATCH,
             schema: SAST_SCHEMA,
             ts: Date.now(),
-            batchId: createBatchId(),
+            batchId: batchId || createBatchId(),
+            batchSeq: Number.isFinite(Number(batchSeq)) ? Number(batchSeq) : undefined,
             payload: {
+                sessionId: this._progressMonitor?.sessionId || this._lastStartSessionId || null,
                 engine: 'SAST',
                 scanId: scanId || null,
                 findings,
@@ -1812,7 +2717,8 @@ class ZapBridge {
             }
         }
 
-        await this.transport.postAlertsJson(envelope)
+        const result = await this.transport.postAlertsJson(this._attachZapEnvelopeContext(envelope, { engine: 'SAST', scanId }))
+        return result?.data || null
     }
 
     async confirmAndGetConfig(options = {}) {
@@ -1834,6 +2740,7 @@ class ZapBridge {
         const zapid = payload.zapid || this.transport.getZapId?.() || null
         const browserid = payload.browserid || this.transport.getBrowserId?.() || null
         const sessionKey = this._buildZapSessionKey(baseUrl, zapid)
+        const previousBaseUrl = this.currentBaseUrl
         const isNewSession = !!sessionKey && sessionKey !== this.currentSessionKey
         this._debugLog('[PTK ZAP] ZAP detection context:', {
             baseUrl,
@@ -1857,10 +2764,6 @@ class ZapBridge {
         this.currentSessionKey = sessionKey || this.currentSessionKey
 
         if (isNewSession) {
-            this._clearProgressMonitor()
-            this._pendingStart = null
-            this._lastStartKey = null
-            this._lastStartSessionId = null
             this._resolvedConfig = {
                 mode: ZAP_MODE_MANUAL,
                 engineConfigs: {},
@@ -1880,7 +2783,7 @@ class ZapBridge {
         this._debugLog('[PTK ZAP] ZAP is active, starting publisher')
         this.start()
 
-        if (this.publisher && isNewSession) {
+        if (this.publisher && isNewSession && previousBaseUrl && baseUrl && previousBaseUrl !== baseUrl) {
             this._debugLog('[PTK ZAP] New base URL detected, resetting publisher state')
             this.publisher.resetState()
         }
@@ -1892,7 +2795,7 @@ class ZapBridge {
         }
 
         const startKeyBase = `${sessionKey || baseUrl || ''}|${payload.tabId || ''}`
-        if (this._startInFlight?.key === startKeyBase) {
+        if (this._startInFlightByKey.has(startKeyBase)) {
             return
         }
 
@@ -1907,6 +2810,8 @@ class ZapBridge {
                 targetUrl: payload?.targetUrl || null
             })
             const rawConfig = await this.confirmAndGetConfig({
+                zapid,
+                baseUrl,
                 targetUrl: payload?.targetUrl || null
             })
             this.recordTiming({
@@ -1938,20 +2843,22 @@ class ZapBridge {
             })
 
             if (parsedConfig.mode !== ZAP_MODE_AUTO) {
-                this._pendingStart = null
+                this._clearPendingStart(sessionKey)
                 this._debugLog('[PTK ZAP] mode is manual; automatic scan start is disabled')
                 return
             }
 
             const finalEngines = this._getAutoStartEngines(parsedConfig)
             const finalEngineConfigs = this._buildAutoStartEngineConfigs(parsedConfig, finalEngines)
+            const configSeedUrls = this._collectConfigSeedUrls(finalEngineConfigs)
+            const configSeedTargetUrl = this._selectPostCallbackTargetUrl(configSeedUrls)
             this._debugLog('[PTK ZAP] Auto-start engine selection:', {
                 zapid,
                 sessionKey,
                 engines: finalEngines
             })
             if (!finalEngines.length) {
-                this._pendingStart = null
+                this._clearPendingStart(sessionKey)
                 this._debugLog('[PTK ZAP] No enabled PTK engines in ZAP auto config; skipping automatic scan start')
                 this._scheduleTerminalProgress({
                     sessionKey,
@@ -1963,16 +2870,20 @@ class ZapBridge {
                 return
             }
 
-            this._pendingStart = {
-                tabId: null,
+            const pendingStart = {
+                tabId: Number.isInteger(payload?.tabId) && payload.tabId >= 0 ? payload.tabId : null,
                 baseUrl: baseUrl || null,
                 sessionKey,
                 zapid,
+                targetUrl: configSeedTargetUrl || toHttpUrl(payload?.targetUrl) || null,
                 engines: finalEngines,
                 engineConfigs: finalEngineConfigs
             }
+            this._setPendingStart(pendingStart)
             const targetUrlResolveStartedAt = Date.now()
-            const targetUrl = await this._resolveTargetUrl(payload, 120000)
+            const targetUrl = await this._resolveTargetUrl(Object.assign({}, payload, {
+                zapHistorySeedUrls: configSeedUrls
+            }), 120000)
             this._debugLog('[PTK ZAP] Resolved target URL:', {
                 zapid,
                 sessionKey,
@@ -1993,21 +2904,14 @@ class ZapBridge {
                 }
             })
             if (!targetUrl) {
-                this._pendingStart = {
-                    tabId: null,
-                    baseUrl: baseUrl || null,
-                    sessionKey,
-                    zapid,
-                    engines: finalEngines,
-                    engineConfigs: finalEngineConfigs
-                }
+                this._setPendingStart(pendingStart)
                 this._debugLog('[PTK ZAP] Target URL not available yet; waiting for next non-ZAP navigation')
-                await this._tryStartFromObservedTarget(this._pendingStart)
+                await this._tryStartFromObservedTarget(pendingStart)
                 return
             }
 
             const seededCallbackTabId = Number.isInteger(payload?.tabId) && payload.tabId >= 0
-                && payload?.targetUrl
+                && targetUrl
                 && typeof payload?.url === 'string'
                 && payload.url.includes('/zapCallBackUrl/')
                 ? payload.tabId
@@ -2036,17 +2940,10 @@ class ZapBridge {
                     source: seededCallbackTabId != null ? 'seeded_callback_tab' : 'target_navigation'
                 }
             })
-            if (!targetTabId) {
-                this._pendingStart = {
-                    tabId: null,
-                    baseUrl: baseUrl || null,
-                    sessionKey,
-                    zapid,
-                    engines: finalEngines,
-                    engineConfigs: finalEngineConfigs
-                }
+            if (!isValidTabId(targetTabId)) {
+                this._setPendingStart(Object.assign({}, pendingStart, { targetUrl }))
                 this._debugLog('[PTK ZAP] Target URL resolved but tabId is unavailable; waiting for next non-ZAP navigation')
-                await this._tryStartFromObservedTarget(this._pendingStart)
+                await this._tryStartFromObservedTarget(Object.assign({}, pendingStart, { targetUrl }))
                 return
             }
 
@@ -2061,19 +2958,21 @@ class ZapBridge {
             })
         }
 
-        this._startInFlight = { key: startKeyBase, promise: null }
-        this._startInFlight.promise = run().finally(() => {
+        const inFlight = run().finally(() => {
+            this._startInFlightByKey.delete(startKeyBase)
             if (this._startInFlight?.key === startKeyBase) {
                 this._startInFlight = null
             }
         })
+        this._startInFlightByKey.set(startKeyBase, inFlight)
+        this._startInFlight = { key: startKeyBase, promise: inFlight }
 
-        await this._startInFlight.promise
+        await inFlight
     }
 
     async _postCallbackHandshakeProgress({ sessionKey = null, zapid = null, source = null, tabId = null, targetUrl = null } = {}) {
         const effectiveZapId = zapid || this.transport.getZapId?.() || null
-        const progressUrl = this.transport.getProgressUrl?.() || null
+        const progressUrl = this.transport.getProgressUrl?.({ zapid: effectiveZapId }) || null
         const progressKey = sessionKey || this._buildZapSessionKey(this.transport.getBaseUrl?.(), effectiveZapId)
 
         if (!effectiveZapId || !progressUrl || !progressKey) {
@@ -2106,6 +3005,8 @@ class ZapBridge {
 
         try {
             await this.transport.postProgressJson({
+                zapid: effectiveZapId,
+                baseUrl: this.transport.getBaseUrl?.({ zapid: effectiveZapId }) || null,
                 progress: 0,
                 status: ZAP_PROGRESS_STATUS_CALLBACK,
                 message: 'ZAP callback detected; waiting for target navigation',
@@ -2137,47 +3038,65 @@ class ZapBridge {
     _handleUrlObserved(payload = {}) {
         this._rememberTopLevelTargetObservation(payload)
 
-        const pending = this._pendingStart
-        if (!pending) return
-
         const observedTabId = Number.isInteger(payload?.tabId) ? payload.tabId : null
-        if (Number.isInteger(pending.tabId) && observedTabId !== pending.tabId) {
-            return
-        }
-
         const targetUrl = toHttpUrl(payload?.url)
         if (!targetUrl) return
         if (!this._isTopLevelTargetObservation(payload)) return
 
-        const resolvedTabId = Number.isInteger(pending.tabId) ? pending.tabId : observedTabId
-        if (!Number.isInteger(resolvedTabId) || resolvedTabId < 0) {
-            this._debugLog('[PTK ZAP] Pending auto-start observed a target URL without a usable tabId; waiting for next navigation')
-            return
-        }
+        const pendingStarts = this._pendingStartsByKey.size
+            ? Array.from(this._pendingStartsByKey.entries())
+            : (this._pendingStart ? [[this._pendingStartKey(this._pendingStart) || 'legacy', this._pendingStart]] : [])
+        if (!pendingStarts.length) return
 
-        const run = async () => {
-            await this._startZapSession({
-                tabId: resolvedTabId,
-                targetUrl,
-                engines: pending.engines,
-                engineConfigs: pending.engineConfigs,
-                baseUrl: pending.baseUrl,
-                sessionKey: pending.sessionKey,
-                zapid: pending.zapid
-            })
-        }
-
-        const inFlightKey = `pending|${pending.sessionKey || pending.baseUrl || ''}|${resolvedTabId}`
-        if (this._startInFlight?.key === inFlightKey) {
-            return
-        }
-
-        this._startInFlight = { key: inFlightKey, promise: null }
-        this._startInFlight.promise = run().finally(() => {
-            if (this._startInFlight?.key === inFlightKey) {
-                this._startInFlight = null
+        for (const [pendingKey, pending] of pendingStarts) {
+            if (!pending) continue
+            if (Number.isInteger(pending.tabId) && observedTabId !== pending.tabId) {
+                continue
             }
-        })
+
+            const resolvedTabId = Number.isInteger(pending.tabId) ? pending.tabId : observedTabId
+            if (!Number.isInteger(resolvedTabId) || resolvedTabId < 0) {
+                this._debugLog('[PTK ZAP] Pending auto-start observed a target URL without a usable tabId; waiting for next navigation')
+                continue
+            }
+            if (!this._isPendingStartTargetUrlAllowed(pending, targetUrl)) {
+                this._debugLog('[PTK ZAP] Pending auto-start rejected out-of-scope target URL:', {
+                    zapid: pending.zapid || null,
+                    sessionKey: pending.sessionKey || null,
+                    tabId: resolvedTabId,
+                    targetUrl,
+                    scopeTargetUrl: this._resolvePendingStartScopeTargetUrl(pending)
+                })
+                continue
+            }
+            const startTargetUrl = this._resolvePendingStartScopeTargetUrl(pending) || targetUrl
+
+            const run = async () => {
+                await this._startZapSession({
+                    tabId: resolvedTabId,
+                    targetUrl: startTargetUrl,
+                    engines: pending.engines,
+                    engineConfigs: pending.engineConfigs,
+                    baseUrl: pending.baseUrl,
+                    sessionKey: pending.sessionKey,
+                    zapid: pending.zapid
+                })
+            }
+
+            const inFlightKey = `pending|${pending.sessionKey || pending.baseUrl || pendingKey || ''}|${resolvedTabId}|${startTargetUrl}`
+            if (this._startInFlightByKey.has(inFlightKey)) {
+                continue
+            }
+
+            const inFlight = run().finally(() => {
+                this._startInFlightByKey.delete(inFlightKey)
+                if (this._startInFlight?.key === inFlightKey) {
+                    this._startInFlight = null
+                }
+            })
+            this._startInFlightByKey.set(inFlightKey, inFlight)
+            this._startInFlight = { key: inFlightKey, promise: inFlight }
+        }
     }
 
     async _startZapSession({ tabId, targetUrl, engines, engineConfigs, baseUrl, sessionKey = null, zapid = null }) {
@@ -2188,7 +3107,7 @@ class ZapBridge {
         }
 
         const safeTabId = Number.isInteger(tabId) ? tabId : null
-        if (!safeTabId || !targetUrl) {
+        if (safeTabId === null || safeTabId < 0 || !targetUrl) {
             this._debugLog('[PTK ZAP] Starting ZAP-driven automation:', {
                 zapid,
                 sessionKey,
@@ -2209,6 +3128,19 @@ class ZapBridge {
             ? Number(detectedPayload.detectedAt)
             : null
         let effectiveEngineConfigs = engineConfigs
+        let seedSourceEngineConfigs = engineConfigs || {}
+        if ((safeEngines.includes('DAST') || safeEngines.includes('SAST')) && targetUrl) {
+            const targetScopedSeedConfigs = await this._fetchTargetScopedSeedConfigs({
+                targetUrl,
+                zapid: effectiveZapId,
+                sessionKey: effectiveSessionKey,
+                baseUrl
+            })
+            if (targetScopedSeedConfigs) {
+                seedSourceEngineConfigs = this._mergeEngineConfigs(seedSourceEngineConfigs, targetScopedSeedConfigs)
+                effectiveEngineConfigs = seedSourceEngineConfigs
+            }
+        }
         if (safeEngines.includes('DAST') || safeEngines.includes('SAST')) {
             let historySeedMetadata = {
                 urls: [],
@@ -2225,9 +3157,9 @@ class ZapBridge {
             }
             const rawHistorySeedUrls = Array.isArray(historySeedMetadata?.urls) ? historySeedMetadata.urls : []
             const configuredSeedUrls = normalizeHttpUrlList([
-                ...(Array.isArray(engineConfigs?.DAST?.zapHistorySeedUrls) ? engineConfigs.DAST.zapHistorySeedUrls : []),
-                ...(Array.isArray(engineConfigs?.SAST?.zapHistorySeedUrls) ? engineConfigs.SAST.zapHistorySeedUrls : []),
-                ...(Array.isArray(engineConfigs?.SAST?.zapPageSourceUrls) ? engineConfigs.SAST.zapPageSourceUrls : [])
+                ...(Array.isArray(seedSourceEngineConfigs?.DAST?.zapHistorySeedUrls) ? seedSourceEngineConfigs.DAST.zapHistorySeedUrls : []),
+                ...(Array.isArray(seedSourceEngineConfigs?.SAST?.zapHistorySeedUrls) ? seedSourceEngineConfigs.SAST.zapHistorySeedUrls : []),
+                ...(Array.isArray(seedSourceEngineConfigs?.SAST?.zapPageSourceUrls) ? seedSourceEngineConfigs.SAST.zapPageSourceUrls : [])
             ])
             const seedUrls = []
             const seenSeedUrls = new Set()
@@ -2255,7 +3187,7 @@ class ZapBridge {
             const historySeedDroppedByCap = Number(historySeedMetadata?.droppedByCap || 0)
                 + configuredSeedDroppedByCap
                 + Math.max(0, rawHistorySeedUrls.length + (targetSeedAdded ? 1 : 0) - seedUrls.length)
-            effectiveEngineConfigs = Object.assign({}, engineConfigs || {})
+            effectiveEngineConfigs = Object.assign({}, seedSourceEngineConfigs || {})
             const seedConfig = {
                 zapCallbackDetectedAt: callbackDetectedAt,
                 zapHistorySeedUrls: seedUrls,
@@ -2276,20 +3208,22 @@ class ZapBridge {
         }
         const startKeyBase = `${effectiveSessionKey || baseUrl || ''}|${safeTabId}`
         const startKey = `${startKeyBase}|${targetUrl}|${safeEngines.join(',')}`
-        if (startKey === this._lastStartKey) {
-            this._pendingStart = null
+        const previousStart = this._lastStartsByKey.get(startKey)
+        if (previousStart || startKey === this._lastStartKey) {
+            this._clearPendingStart(effectiveSessionKey)
             this._debugLog('[PTK ZAP] Duplicate ZAP-driven automation start suppressed:', {
                 zapid: effectiveZapId,
                 sessionKey: effectiveSessionKey,
                 tabId: safeTabId,
                 targetUrl,
                 engines: safeEngines,
-                sessionId: this._lastStartSessionId || null
+                sessionId: previousStart?.sessionId || this._lastStartSessionId || null
             })
-            if (this._lastStartSessionId) {
+            const previousSessionId = previousStart?.sessionId || this._lastStartSessionId
+            if (previousSessionId) {
                 this._startProgressMonitor({
                     sessionKey: effectiveSessionKey,
-                    sessionId: this._lastStartSessionId,
+                    sessionId: previousSessionId,
                     zapid: effectiveZapId,
                     requiredEngines: safeEngines
                 })
@@ -2333,7 +3267,11 @@ class ZapBridge {
         if (status === 'starting' || status === 'started' || status === 'already_running') {
             this._lastStartKey = startKey
             this._lastStartSessionId = startResult?.sessionId || this._lastStartSessionId
-            this._pendingStart = null
+            this._lastStartsByKey.set(startKey, {
+                sessionId: startResult?.sessionId || this._lastStartSessionId || null,
+                startedAt: Date.now()
+            })
+            this._clearPendingStart(effectiveSessionKey)
             this._startProgressMonitor({
                 sessionKey: effectiveSessionKey,
                 sessionId: startResult?.sessionId || this._lastStartSessionId || null,
@@ -2343,7 +3281,7 @@ class ZapBridge {
             return
         }
 
-        this._pendingStart = null
+        this._clearPendingStart(effectiveSessionKey)
         this._scheduleTerminalProgress({
             sessionKey: effectiveSessionKey,
             sessionId: startResult?.sessionId || null,
@@ -2353,6 +3291,108 @@ class ZapBridge {
             message: this._buildStartFailureMessage(startResult),
             engines: this._buildStartupFailureEngineStates(startResult, startResult?.requiredEngines || safeEngines)
         })
+    }
+
+    _mergeEngineConfigs(baseConfigs = {}, overlayConfigs = {}) {
+        const merged = Object.assign({}, baseConfigs || {})
+        for (const [engineName, overlay] of Object.entries(overlayConfigs || {})) {
+            if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) continue
+            merged[engineName] = Object.assign({}, merged[engineName] || {}, overlay)
+        }
+        return merged
+    }
+
+    _extractTargetScopedSeedConfigs(rawConfig) {
+        const parsed = this._parseConfig(rawConfig)
+        const result = {}
+        for (const engine of ['DAST', 'SAST']) {
+            const config = parsed.engineConfigs?.[engine]
+            if (!Array.isArray(config?.zapHistorySeedUrls) || !config.zapHistorySeedUrls.length) {
+                continue
+            }
+            result[engine] = {
+                zapHistorySeedUrls: config.zapHistorySeedUrls,
+                zapHistorySeedCount: config.zapHistorySeedCount,
+                zapHistorySeedScope: config.zapHistorySeedScope || null
+            }
+            if (engine === 'SAST') {
+                result[engine].zapPageSourceUrls = Array.isArray(config.zapPageSourceUrls)
+                    ? config.zapPageSourceUrls
+                    : config.zapHistorySeedUrls
+                if (Number.isFinite(Number(config.sastPageSourceMaxPages))) {
+                    result[engine].sastPageSourceMaxPages = Number(config.sastPageSourceMaxPages)
+                }
+            }
+        }
+        return Object.keys(result).length ? result : null
+    }
+
+    _collectConfigSeedUrls(engineConfigs = {}) {
+        const seeds = []
+        const seen = new Set()
+        for (const config of Object.values(engineConfigs || {})) {
+            for (const url of normalizeHttpUrlList(config?.zapHistorySeedUrls)) {
+                if (seen.has(url)) continue
+                seen.add(url)
+                seeds.push(url)
+            }
+        }
+        return seeds
+    }
+
+    async _fetchTargetScopedSeedConfigs({ targetUrl, zapid = null, sessionKey = null, baseUrl = null } = {}) {
+        if (!targetUrl || !this.transport || typeof this.transport.fetchConfig !== 'function') {
+            return null
+        }
+        const startedAt = Date.now()
+        try {
+            this.recordTiming({
+                phase: 'config.fetch.target_scoped.start',
+                zapid,
+                browserid: this.transport.getBrowserId?.() || null,
+                zapSessionKey: sessionKey,
+                targetUrl
+            })
+            const rawConfig = await this.transport.fetchConfig({
+                zapid,
+                baseUrl,
+                targetUrl
+            })
+            const seedConfigs = this._extractTargetScopedSeedConfigs(rawConfig)
+            this.recordTiming({
+                phase: 'config.fetch.target_scoped.end',
+                zapid,
+                browserid: this.transport.getBrowserId?.() || null,
+                zapSessionKey: sessionKey,
+                targetUrl,
+                extra: {
+                    durationMs: Date.now() - startedAt,
+                    seedCount: Array.isArray(seedConfigs?.DAST?.zapHistorySeedUrls)
+                        ? seedConfigs.DAST.zapHistorySeedUrls.length
+                        : 0
+                }
+            })
+            return seedConfigs
+        } catch (err) {
+            console.warn('[PTK ZAP] Target-scoped config seed refresh failed:', {
+                zapid,
+                sessionKey,
+                targetUrl,
+                error: err?.message || String(err)
+            })
+            this.recordTiming({
+                phase: 'config.fetch.target_scoped.error',
+                zapid,
+                browserid: this.transport.getBrowserId?.() || null,
+                zapSessionKey: sessionKey,
+                targetUrl,
+                extra: {
+                    durationMs: Date.now() - startedAt,
+                    error: err?.message || String(err)
+                }
+            })
+            return null
+        }
     }
 
     _parseConfig(rawConfig) {
@@ -2445,9 +3485,58 @@ class ZapBridge {
         })
     }
 
+    _getManagedScanContext(engine, scanId) {
+        const automation = this.app?.automation
+        if (!automation || typeof automation.getZapManagedScanContexts !== 'function') {
+            return null
+        }
+        const scanIdText = toNonEmptyString(scanId)
+        if (!scanIdText) return null
+        const contexts = automation.getZapManagedScanContexts({
+            engine,
+            host: this.getActiveTargetHost()
+        })
+        return contexts.find(entry => String(entry?.scanId || '') === scanIdText) || null
+    }
+
+    _zapIdFromSessionKey(sessionKey = null) {
+        const text = toNonEmptyString(sessionKey)
+        if (!text) return null
+        const index = text.lastIndexOf('|')
+        if (index < 0) return null
+        return toNonEmptyString(text.slice(index + 1))
+    }
+
+    _attachZapEnvelopeContext(envelope, { engine = null, scanId = null } = {}) {
+        if (!envelope || typeof envelope !== 'object') return envelope
+        const context = this._getManagedScanContext(engine, scanId)
+        const sessionId = context?.sessionId || this._progressMonitor?.sessionId || this._lastStartSessionId || null
+        const zapSessionKey = context?.zapSessionKey || null
+        const zapid = this._zapIdFromSessionKey(zapSessionKey) || this.transport.getZapId?.() || null
+        if (zapid && !envelope.zapid) {
+            envelope.zapid = zapid
+        }
+        if (zapSessionKey && !envelope.zapSessionKey) {
+            envelope.zapSessionKey = zapSessionKey
+        }
+        envelope.payload = Object.assign({}, envelope.payload || {}, {
+            sessionId: envelope.payload?.sessionId || sessionId,
+            zapSessionKey: envelope.payload?.zapSessionKey || zapSessionKey || undefined
+        })
+        return envelope
+    }
+
     async _resolveTargetUrl(payload = {}, maxWaitMs = 120000) {
+        const seedResolved = this._resolveTargetUrlFromConfigSeeds(payload)
+        const isAllowedBySeed = (candidateUrl) => {
+            const normalized = toHttpUrl(candidateUrl)
+            if (!normalized) return false
+            if (!seedResolved) return true
+            return normalized === seedResolved || isSameOriginAndPathScoped(seedResolved, normalized)
+        }
         const fromPayload = toHttpUrl(payload.targetUrl) || toHttpUrl(payload.pageUrl) || toHttpUrl(payload.url)
-        if (fromPayload) return fromPayload
+        if (fromPayload && isAllowedBySeed(fromPayload)) return fromPayload
+        if (seedResolved) return seedResolved
         const resolveFromLatestDetection = () => {
             const latest = this.transport.getLastDetectedPayload?.()
             if (!latest) return null
@@ -2461,13 +3550,14 @@ class ZapBridge {
             if (expectedZapId && latestZapId && expectedZapId !== latestZapId) {
                 return null
             }
-            return toHttpUrl(latest.targetUrl) || toHttpUrl(latest.pageUrl)
+            const candidate = toHttpUrl(latest.targetUrl) || toHttpUrl(latest.pageUrl)
+            return isAllowedBySeed(candidate) ? candidate : null
         }
         const fromLatestDetection = resolveFromLatestDetection()
         if (fromLatestDetection) return fromLatestDetection
 
         const historyResolved = await this._resolveTargetUrlFromPostCallbackHistory(payload)
-        if (historyResolved) return historyResolved
+        if (historyResolved && isAllowedBySeed(historyResolved)) return historyResolved
 
         const tabId = Number.isInteger(payload.tabId) ? payload.tabId : null
         if (tabId == null || !browser?.tabs?.get) {
@@ -2479,7 +3569,7 @@ class ZapBridge {
             try {
                 const tab = await browser.tabs.get(tabId)
                 const resolved = toHttpUrl(tab?.url) || toHttpUrl(tab?.pendingUrl)
-                if (resolved) return resolved
+                if (resolved && isAllowedBySeed(resolved)) return resolved
             } catch (_) {
                 return null
             }
@@ -2500,7 +3590,7 @@ class ZapBridge {
             const nextFromLatestDetection = resolveFromLatestDetection()
             if (nextFromLatestDetection) return nextFromLatestDetection
             const nextHistoryResolved = await this._resolveTargetUrlFromPostCallbackHistory(payload)
-            if (nextHistoryResolved) return nextHistoryResolved
+            if (nextHistoryResolved && isAllowedBySeed(nextHistoryResolved)) return nextHistoryResolved
             const nextObserved = this._getFreshObservedTargetForPending({ tabId })
             if (nextObserved?.targetUrl) return nextObserved.targetUrl
             const resolved = await resolveFromTab()
@@ -2508,6 +3598,19 @@ class ZapBridge {
         }
 
         return null
+    }
+
+    _resolveTargetUrlFromConfigSeeds(payload = {}) {
+        const candidates = normalizeHttpUrlList(payload?.zapHistorySeedUrls)
+        if (!candidates.length) return null
+        const targetUrl = this._selectPostCallbackTargetUrl(candidates)
+        if (targetUrl) {
+            this._debugLog('[PTK ZAP] Resolved target URL from ZAP config seed URLs:', {
+                targetUrl,
+                candidates: candidates.length
+            })
+        }
+        return targetUrl
     }
 
     async _resolveTargetUrlFromPostCallbackHistory(payload = {}) {
@@ -2644,6 +3747,9 @@ class ZapBridge {
         if (Number.isInteger(pendingTabId) && pendingTabId !== observed.tabId) {
             return null
         }
+        if (!this._isPendingStartTargetUrlAllowed(pending, observed.targetUrl)) {
+            return null
+        }
 
         return observed
     }
@@ -2659,10 +3765,11 @@ class ZapBridge {
             targetUrl: observed.targetUrl,
             source: observed.source
         })
+        const targetUrl = this._resolvePendingStartScopeTargetUrl(pending) || observed.targetUrl
 
         await this._startZapSession({
             tabId: observed.tabId,
-            targetUrl: observed.targetUrl,
+            targetUrl,
             engines: pending.engines,
             engineConfigs: pending.engineConfigs,
             baseUrl: pending.baseUrl,
@@ -2675,11 +3782,11 @@ class ZapBridge {
 
     async _resolveTargetTabId(payload = {}, targetUrl = '', maxWaitMs = 5000) {
         const tabId = Number.isInteger(payload?.tabId) ? payload.tabId : null
-        if (Number.isInteger(tabId) && tabId > 0 && browser?.tabs?.get) {
+        if (isValidTabId(tabId) && browser?.tabs?.get) {
             try {
                 const tab = await browser.tabs.get(tabId)
                 const tabUrl = toHttpUrl(tab?.url) || toHttpUrl(tab?.pendingUrl)
-                if (tabUrl === targetUrl) {
+                if (tabUrl === targetUrl || isSameOriginAndPathScoped(targetUrl, tabUrl)) {
                     return tabId
                 }
             } catch (_) {
@@ -2690,9 +3797,8 @@ class ZapBridge {
         const observed = this._lastTopLevelTargetObservation
         if (
             observed
-            && Number.isInteger(observed.tabId)
-            && observed.tabId > 0
-            && observed.targetUrl === targetUrl
+            && isValidTabId(observed.tabId)
+            && (observed.targetUrl === targetUrl || isSameOriginAndPathScoped(targetUrl, observed.targetUrl))
         ) {
             return observed.tabId
         }
@@ -2706,11 +3812,19 @@ class ZapBridge {
             try {
                 const tabs = await browser.tabs.query({})
                 const exactMatch = tabs.find(tab => {
-                    if (!Number.isInteger(tab?.id) || tab.id <= 0) return false
+                    if (!isValidTabId(tab?.id)) return false
                     return toHttpUrl(tab?.url) === targetUrl
                 })
-                if (Number.isInteger(exactMatch?.id) && exactMatch.id > 0) {
+                if (isValidTabId(exactMatch?.id)) {
                     return exactMatch.id
+                }
+                const scopedMatch = tabs.find(tab => {
+                    if (!isValidTabId(tab?.id)) return false
+                    const tabUrl = toHttpUrl(tab?.url) || toHttpUrl(tab?.pendingUrl)
+                    return isSameOriginAndPathScoped(targetUrl, tabUrl)
+                })
+                if (isValidTabId(scopedMatch?.id)) {
+                    return scopedMatch.id
                 }
                 let targetOrigin = null
                 try {
@@ -2720,7 +3834,7 @@ class ZapBridge {
                 }
                 if (targetOrigin) {
                     const sameOriginMatches = tabs
-                        .filter(tab => Number.isInteger(tab?.id) && tab.id > 0)
+                        .filter(tab => isValidTabId(tab?.id))
                         .map(tab => {
                             const tabUrl = toHttpUrl(tab?.url) || toHttpUrl(tab?.pendingUrl)
                             if (!tabUrl) return null
@@ -2740,7 +3854,7 @@ class ZapBridge {
                             if (left.active !== right.active) return left.active ? -1 : 1
                             return right.lastAccessed - left.lastAccessed
                         })
-                    if (Number.isInteger(sameOriginMatches[0]?.id) && sameOriginMatches[0].id > 0) {
+                    if (isValidTabId(sameOriginMatches[0]?.id)) {
                         return sameOriginMatches[0].id
                     }
                 }

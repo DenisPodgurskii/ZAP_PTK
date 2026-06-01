@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "ptk-extension-provenance-v1",
+  "packageName": "ZAP_PTK",
+  "extensionVersion": "9.9.7",
+  "manifestVersion": 3,
+  "createdAt": "2026-06-01T09:03:03.085Z",
+  "source": {
+    "crx": "ptk-latest.crx",
+    "xpi": "ptk-latest.xpi"
+  },
+  "hashes": {
+    "crxSha256": "04104980c52ff2327db2e965b3602cb3c60cf58a47cd4b95400e391adb0db002",
+    "xpiSha256": "9be1588f27997ce090a2b283342bc297ce4b0eb51e3c8d8d56f34a9983635329",
+    "manifestSha256": "ccb3c493a3d98bdd24db32be3e9beb5c42cfdc383e9c888281c51e5edca123e3",
+    "unpackedTreeSha256": "2b2957ff6f98b470cd6ba45c1135fcf1160e753d6287f4c8af256a08db5fec3d"
+  },
+  "sizes": {
+    "crxBytes": 9534110,
+    "xpiBytes": 9490243
+  },
+  "paths": {
+    "chromiumUnpacked": "selenium/extensions/ptk-latest",
+    "crx": "selenium/extensions/ptk-latest/ptk-latest.crx",
+    "xpi": "selenium/extensions/ptk-latest.xpi"
+  }
+}

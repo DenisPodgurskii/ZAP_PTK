@@ -9,6 +9,7 @@ const runtime = (typeof browser !== 'undefined' && browser?.runtime)
 const sharedIastBridgeActive = window.__PTK_SHARED_IAST_CONTENT_BRIDGE__ === true;
 const PTK_IAST_PAGE_TO_CONTENT_EVENT = 'ptk:iast:page-to-content:v1';
 const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
+const PTK_AGENT_AUTOMATION_SCRIPT_ID = 'ptk-agent-automation-layer';
 const ptkAutomationVersion = (() => {
     try {
         const manifest = runtime?.getManifest ? runtime.getManifest() : null;
@@ -19,6 +20,7 @@ const ptkAutomationVersion = (() => {
 })();
 let automationNonce = null;
 let automationMessageHandlerInstalled = false;
+let zapAutomationKeepaliveTimer = null;
 
 function sendRuntimeMessage(payload) {
     if (!runtime?.sendMessage) return Promise.resolve();
@@ -96,6 +98,8 @@ function handleIastPageBridgePayload(data) {
         }).then((resp) => {
             dispatchIastBridgeToPage({
                 channel: 'ptk_background_iast2content_modules',
+                active: resp?.active !== false,
+                reason: resp?.reason || null,
                 iastModules: resp?.iastModules || null,
                 iastModulesSignature: resp?.iastModulesSignature || null,
                 scanStrategy: resp?.scanStrategy || null
@@ -103,6 +107,7 @@ function handleIastPageBridgePayload(data) {
         }).catch(() => {
             dispatchIastBridgeToPage({
                 channel: 'ptk_background_iast2content_modules',
+                active: true,
                 iastModules: null
             });
         });
@@ -216,6 +221,7 @@ function installPtkAutomationBridge(version, nonce, automationEnabledState) {
         const src = runtimeGetURL('ptk/automationBridge.js');
         if (!src) return;
         const script = document.createElement('script');
+        script.async = false;
         script.src = src;
         script.dataset.ptkVersion = version || 'unknown';
         script.dataset.ptkNonce = nonce || '';
@@ -223,6 +229,28 @@ function installPtkAutomationBridge(version, nonce, automationEnabledState) {
         try {
             script.dataset.ptkExtensionOrigin = new URL(src).origin;
         } catch (_) { }
+        if (automationEnabledState === true) {
+            script.onload = () => injectPtkAgentAutomationLayer();
+        }
+        const parent = document.documentElement || document.head || document.body;
+        if (parent) {
+            parent.appendChild(script);
+        }
+    } catch (_) { }
+}
+
+function injectPtkAgentAutomationLayer() {
+    try {
+        if (window.PTK_AGENT) return;
+        if (document.getElementById(PTK_AGENT_AUTOMATION_SCRIPT_ID)) return;
+        const src = runtimeGetURL('ptk/ptkAgentAutomation.js');
+        if (!src) return;
+        const script = document.createElement('script');
+        script.id = PTK_AGENT_AUTOMATION_SCRIPT_ID;
+        script.async = false;
+        script.src = src;
+        script.onload = () => script.remove();
+        script.onerror = () => script.remove();
         const parent = document.documentElement || document.head || document.body;
         if (parent) {
             parent.appendChild(script);
@@ -324,6 +352,23 @@ function enableZapAutomationBridge() {
         if (data.nonce !== automationNonce) return;
         handleAutomationBridgeMessage(data);
     });
+
+    if (!zapAutomationKeepaliveTimer) {
+        const notifyBackgroundAlive = () => {
+            sendRuntimeMessage({
+                channel: 'ptk_content2background_automation',
+                type: 'zap-keepalive',
+                options: {
+                    source: 'zap_keepalive'
+                },
+                pageUrl: getCurrentHref()
+            }).catch(() => { });
+        };
+        try {
+            zapAutomationKeepaliveTimer = setInterval(notifyBackgroundAlive, 15000);
+            setTimeout(notifyBackgroundAlive, 5000);
+        } catch (_) { }
+    }
 }
 
 enableZapAutomationBridge();
@@ -503,11 +548,19 @@ async function hydrateSameOriginSastScripts(scripts) {
             try {
                 const response = await fetch(script.src, { credentials: 'include', cache: 'force-cache' });
                 if (response?.ok) {
-                    let text = await response.text();
-                    if (text.length > SAST_EXTERNAL_SCRIPT_MAX_BYTES) {
-                        text = text.slice(0, SAST_EXTERNAL_SCRIPT_MAX_BYTES);
+                    const text = await response.text();
+                    const code = normalizeSastScriptCode(text);
+                    if (text.length > SAST_EXTERNAL_SCRIPT_MAX_BYTES || code.length < text.length) {
+                        hydrated.push({
+                            ...script,
+                            code: null,
+                            truncated: true,
+                            originalLength: text.length,
+                            truncationLimit: Math.min(SAST_EXTERNAL_SCRIPT_MAX_BYTES, code.length || SAST_EXTERNAL_SCRIPT_MAX_BYTES)
+                        });
+                        continue;
                     }
-                    hydrated.push({ ...script, code: normalizeSastScriptCode(text) });
+                    hydrated.push({ ...script, code });
                     continue;
                 }
             } catch (_) { }
@@ -651,6 +704,8 @@ if (runtime?.onMessage) runtime.onMessage.addListener(function (message) {
     if (!sharedIastBridgeActive && message?.channel === 'ptk_background_iast2content_modules' && message.iastModules) {
         dispatchIastBridgeToPage({
             channel: 'ptk_background_iast2content_modules',
+            active: message.active !== false,
+            reason: message.reason || null,
             iastModules: message.iastModules,
             iastModulesSignature: message.iastModulesSignature || null,
             scanStrategy: message.scanStrategy || null

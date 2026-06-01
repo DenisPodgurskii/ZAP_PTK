@@ -49,7 +49,7 @@ The PTK extension derives these endpoint URLs:
 | Progress monitor tick | PTK session started | Immediate tick, then every 2000ms | First tick normally posts `ready`; later ticks post running/terminal progress. |
 | Finding publisher poll | ZAP active | Immediate poll on start, then every 2000ms | Sends only findings not previously published with the same signature. |
 | Finding alert batch | Publisher finds pending mapped findings | Chunks of 200 findings | DAST, IAST, and SAST use separate batch schemas. |
-| Terminal finding drain | Progress monitor sees terminal runtime state | Up to 4 drain passes; requires 2 stable drained passes | Prevents terminal progress before final findings reach ZAP. |
+| Terminal finding drain | Progress monitor sees terminal runtime state | Up to 4 drain passes; requires 2 stable drained passes | V2 progress reports publisher pending/in-flight/drained state; terminal close is clean only when publisher drain is true. |
 | Close decision script | ZAP calls browser close hook | Initial close script, then follow-up every 15s while Java waits | Runs inside the WebDriver browser to ask PTK whether this tab/session can close. |
 | Java close wait | Non-terminal close decision | Up to 120 attempts x 1s, bounded by script budget | Follow-up scripts can convert `wait` to `safe_to_close`; hard timeout is forced/incomplete, not clean close. |
 
@@ -113,9 +113,9 @@ sequenceDiagram
         EXT->>ZAP: drain /ptk/alert batches
         EXT->>ZAP: POST /ptk/progress status=completed progress=100
         WD-->>ZAP: decision=safe_to_close
-    else activity stale and no V2 drain proof
+    else activity stale before terminal/drain proof
         WD-->>ZAP: wait / stale diagnostics
-        ZAP->>ZAP: hard timeout records forced/incomplete
+        ZAP->>ZAP: keep bounded wait; forced/incomplete if terminal never arrives
     end
     ZAP->>CS: browser may close
 ```
@@ -178,20 +178,28 @@ stateDiagram-v2
     Finished --> [*]
 ```
 
-### Why `shutdownTime: 20`
+### What `shutdownTime` Does And Does Not Prove
 
-The default Client Spider shutdown quiet window is short. In PTK/ZAP release runs, especially Edge headless multi-browser runs, a page can finish its current WebDriver task before late browser-side discoveries and PTK target observations have fully arrived.
+The default Client Spider shutdown quiet window can be short. In PTK/ZAP diagnostic runs, especially browser-capacity or crawl-coverage runs, a page can finish its current WebDriver task before late browser-side discoveries have fully arrived.
 
-`shutdownTime: 20` gives Client Spider a 20-second quiet window after the queue becomes empty. It does not:
+An explicit `shutdownTime`, for example `20`, gives Client Spider a quiet window after the queue becomes empty. It does not:
 
 - add URLs to scope;
 - replay requests;
 - force more browsers to launch;
 - increase each page's WebDriver load timeout.
 
-It only tells Client Spider not to declare the crawl finished until client-map events have been quiet for 20 seconds.
+It only tells Client Spider not to declare the crawl finished until client-map events have been quiet for the configured number of seconds.
 
 This is different from `pageLoadTime`. `pageLoadTime` controls the timeout/dwell for individual browser tasks. `shutdownTime` controls how long Client Spider waits after the task queue empties.
+
+Release close-readiness contract gates should omit `shutdownTime` by default. If a run needs `shutdownTime` to pass, treat that as crawl/discovery timing evidence first, not proof that PTK close/drain is stable.
+
+## PTK-Owned DAST Attack Windows
+
+Client Spider owns the WebDriver target window. PTK owns the browser attack tabs it creates for DAST browser-nav, SPA, and browser-workflow probes. For ZAP-managed sessions, PTK opens those attack tabs in a PTK-owned auxiliary browser window when the browser supports `browser.windows.create`, with same-window tabs as a fallback.
+
+This prevents Client Spider's close request for the target WebDriver window from freezing or killing PTK-internal DAST attack tabs. The auxiliary window is closed by PTK at DAST stop/reset. Manual and non-ZAP browser scans continue to use the normal current-window tab path.
 
 ## Config Fetch Contract
 
@@ -332,7 +340,7 @@ This avoids the previous bug class where closing a non-owner tab stopped the who
 | `browser_tab_safe_to_close` | `non_owner_active_work` | Fast close this non-owner tab; active PTK work belongs elsewhere. |
 | `wait` | `active_browser_work` | Keep browser alive while Java sees fresh meaningful progress or alert activity. |
 | `wait` | `owner_waiting_for_terminal` | Owner tab is non-terminal without concrete browser-local work in the current snapshot. Not clean-close evidence. |
-| `wait` | `activity_stale_waiting_for_terminal` | Java activity evidence is stale. With the legacy extension contract this is diagnostic evidence; hard timeout records forced/incomplete. |
+| `wait` | `activity_stale_waiting_for_terminal` | Java activity evidence is stale. This is diagnostic evidence, not clean close evidence. |
 | `not_applicable` | `automation_disabled` / unavailable | Startup/session issue unless manual config-only. |
 | `forced_closed` | close budget exhausted | Lifecycle warning; findings may be incomplete. |
 
@@ -355,7 +363,7 @@ Java then tracks meaningful activity using callback receipt time:
 - terminal progress;
 - accepted `safeToClose` only after ZAP has started close handling.
 
-Heartbeat fields, elapsed time, timestamps, and wall-clock values are not activity. If activity becomes stale and the extension contract does not provide V2 publisher-drain proof, Java records stale diagnostics and ultimately `forced_closed` / incomplete on hard timeout. It must not silently request PTK stop from the close script.
+Heartbeat fields, elapsed time, timestamps, and wall-clock values are not activity. If activity becomes stale, Java records stale diagnostics and continues only within the bounded close budget. Clean close still requires terminal/readiness plus `publisher.drained=true`; legacy or insufficient evidence is not equivalent to V2 clean close. The close script itself must not silently stop PTK just because a grace window elapsed.
 
 Without this separation, a ZAP task-level close signal can truncate a PTK engine-level scan. That is the failure mode seen in unstable multi-browser Firing Range runs: ZAP close arrived while PTK still had remaining browser work, and imported findings were incomplete.
 
@@ -405,6 +413,69 @@ The five-browser path adds races:
 
 The close contract's `non_owner_active_work` and `no_active_browser_work` fast paths are what keep non-owner tab closes from consuming the long session-stop budget.
 
+## Close Control Delivery Contract
+
+`/ptk/control` is a delivery and acknowledgement channel between the extension background and the ZAP add-on. It must not create close requests from polling. Java creates close requests only from the browser-close/adaptive-stale decision path, then `/ptk/control` returns the active request until PTK acknowledges it.
+
+Delivery is bound to the active zapid/sessionId/browserid. If the request id or browser/session identity does not match, Java ignores the acknowledgement and does not deliver the request to that poll response.
+
+`closeRequestAck=true` means PTK received the active close request. It is not terminal evidence and it is not release-clean evidence. The extension should record the ack before echoing it through `/ptk/progress`, schedule stop/drain asynchronously, and leave future `/ptk/control` polls available for ack retry while stop/drain is running.
+
+The MV3 `chrome.alarms` recovery wakeup is allowed only while ZAP progress monitors are active. It is a background wakeup fallback for sleeping service workers, not a replacement for timer/event-driven polling.
+
+## V2 Progress Contract
+
+V2 progress adds explicit state so Java does not infer readiness from heartbeat timing.
+
+| Field | Source | Meaning |
+|---|---|---|
+| `contractVersion` | PTK extension | `2` for this contract. |
+| `activitySeq` | PTK extension | Monotonic counter incremented only when the stable activity fingerprint changes. |
+| `activityFingerprint` | PTK extension | Canonical summary of meaningful progress, engine counters, publisher state, and close-request state. Excludes timestamps, elapsed time, and heartbeat-only fields. |
+| `closeReadiness.safeToClose` | PTK extension | True only when terminal/readiness is true and publisher drain is true. |
+| `terminalSeen` | PTK extension | True when PTK considers the session terminal. |
+| `publisher.pendingFindings` | PTK publisher | Findings still waiting to be imported into ZAP. |
+| `publisher.inFlightBatches` | PTK publisher | Alert batches currently being posted to ZAP. |
+| `publisher.drained` | PTK publisher | True only when pending findings are zero, in-flight batches are zero, and the publisher poll is idle. |
+| `publisher.lastAckedBatchSeq` | PTK publisher | Highest batch sequence acknowledged by ZAP. |
+| `closeRequestId` | Java then PTK echo | Active Java close request identity. |
+| `closeRequestAck` | PTK extension | PTK received the active close request. Stop/drain may be scheduled asynchronously; this is receipt evidence, not terminal or clean-release evidence. |
+
+Java treats V2 terminal readiness as:
+
+```text
+terminal/readiness && publisher.drained && active close/readiness state belongs to this zapid/session
+```
+
+It does not hash the whole progress body. Volatile fields must not make a stuck session look active.
+
+## Alert Acknowledgement Contract
+
+`/ptk/alert` returns a structured acknowledgement for every batch:
+
+```json
+{
+  "result": "OK",
+  "batchId": "ptk-zap-batch-...",
+  "batchSeq": 12,
+  "received": 3,
+  "accepted": 2,
+  "alertsRaised": 1,
+  "findingResults": [
+    { "id": "finding-1", "status": "accepted_raised", "alertRef": "200001-1" },
+    { "id": "finding-2", "status": "accepted_duplicate", "alertRef": "200001-1" },
+    { "id": "finding-3", "status": "rejected_missing_site_tree_match" }
+  ]
+}
+```
+
+Publisher resolution rules:
+
+- `accepted_raised` and `accepted_duplicate` mark a finding as delivered.
+- Rejected statuses with a permanent reason also resolve publisher work: `rejected_missing_mapping`, `rejected_invalid_url`, `rejected_missing_site_tree_match`, and `rejected_raise_failed`.
+- Unknown/temporary statuses do not resolve the finding and remain pending for retry.
+- Reposting the same `batchId`/`batchSeq` is idempotent; Java returns the cached acknowledgement instead of double-raising alerts.
+
 ## Logs and What They Mean
 
 | Log | Meaning |
@@ -413,8 +484,14 @@ The close contract's `non_owner_active_work` and `no_active_browser_work` fast p
 | `PTK_BROWSER_EVIDENCE event=ptk_progress_seen progress=0 status=callback` | Callback handshake progress only. |
 | `PTK_BROWSER_EVIDENCE event=ptk_session_established sessionId=...` | PTK automation session is real. |
 | `PTK_BROWSER_EVIDENCE event=ptk_session_terminal` | PTK posted terminal progress to ZAP. |
+| `PTK_CONTRACT phase=progress_activity_changed` | Java saw a stable V2 progress/activity change. Heartbeat-only changes should not produce this. |
+| `PTK_CONTRACT phase=alert_batch_acknowledged` | Java processed a `/ptk/alert` batch and returned structured ack counts/statuses. |
+| `PTK_CONTRACT phase=close_wait_stale` | Java is waiting after stale activity; this is diagnostic evidence and may still end forced/incomplete if terminal never arrives. |
+| `PTK_CONTRACT phase=publisher_drained` | PTK posted V2 terminal/readiness evidence with publisher drain. |
+| `PTK_CONTRACT phase=clean_close` | Java accepted the session as cleanly safe to close. |
+| `PTK_CONTRACT phase=forced_close` | Java exhausted the close budget without clean close evidence. |
 | `PTK closeContract decision=wait reason=active_browser_work` | Expected if ZAP closes owner tab while PTK has active work. |
-| `PTK closeContract decision=wait reason=activity_stale_waiting_for_terminal` | Java has stopped seeing meaningful progress/alert activity before terminal evidence. |
+| `PTK closeContract decision=wait reason=activity_stale_waiting_for_terminal` | Java has stopped seeing meaningful progress/alert activity but has not accepted clean close. |
 | `PTK closeContract decision=browser_tab_safe_to_close reason=non_owner_active_work` | Non-owner tab can close without stopping PTK. |
 | `PTK closeContract decision=forced_closed` | Lifecycle warning; do not call the run clean without investigation. |
 | `PTK /ptk/config cache hit` | Java reused cached base config. |
@@ -462,9 +539,10 @@ flowchart TD
 | Setting | Value | Reason |
 |---|---|---|
 | `pageLoadTime` | `5` | Gives individual browser tasks enough time without hiding queue/shutdown bugs. |
-| `shutdownTime` | `20` | Keeps Client Spider alive for late client-map discoveries after the queue becomes empty. |
+| `shutdownTime` | omitted for contract gates | Optional crawl-coverage tuning only. It must not be required for PTK finding drain or close correctness. |
 | `numberOfBrowsers` | `1` and `5` release slices | Tests single-session and multi-worker behavior. Treat this as max concurrency. |
-| Close active-work grace | `60s` | Prevents early ZAP-owned target-tab close from truncating PTK engine work. |
+| Close activity stale window | `30s` | Diagnostic threshold for stale meaningful progress/alert activity. It does not make the run pass. |
+| Close stop/drain request budget | `25s` | Time passed to PTK when Java asks for graceful stop and publisher drain. |
 | Progress heartbeat | `2s` | Gives ZAP regular progress without excessive callback load. |
 | Finding batch size | `200` | Avoids huge alert callback bodies while keeping import efficient. |
 

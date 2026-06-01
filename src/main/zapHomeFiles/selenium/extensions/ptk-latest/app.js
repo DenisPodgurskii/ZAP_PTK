@@ -160,18 +160,46 @@ export class ptk_app {
 
     onMessage(message, sender, sendResponse) {
         if (message?.channel === "ptk_content2background_zap" && message?.type === "zap_callback_url") {
-            return this.ready.then(() => {
-                const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
-                const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
-                const url = typeof message.url === 'string'
-                    ? message.url
-                    : (typeof sender?.url === 'string' ? sender.url : '')
-                const processed = this.automation?.zap?.transport?.processContentObservedZapUrl?.({
+            const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
+            const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
+            const url = typeof message.url === 'string'
+                ? message.url
+                : (typeof sender?.url === 'string' ? sender.url : '')
+            let processed = false
+            let callbackError = null
+            try {
+                processed = this.automation?.zap?.transport?.processContentObservedZapUrl?.({
                     tabId,
                     frameId,
                     url
+                }) === true
+            } catch (error) {
+                callbackError = error?.message || String(error)
+            }
+
+            const isBootstrapUrl = this.automation?.zap?.transport?.isBootstrapUrl?.(url) === true
+            if (!callbackError && isBootstrapUrl) {
+                void this.ready.then(async () => {
+                    try {
+                        await this.automation?.handleContentBootstrapHello?.({
+                            channel: 'ptk_content2background_runtime',
+                            type: 'content_bootstrap_hello',
+                            url,
+                            zapHintUrl: url,
+                            reason: 'zap_callback_url'
+                        }, sender)
+                    } catch (error) {
+                        console.warn('[PTK] ZAP callback runtime bootstrap failed:', error?.message || String(error))
+                    }
+                }).catch((error) => {
+                    console.warn('[PTK] ZAP callback readiness wait failed:', error?.message || String(error))
                 })
-                return { ok: processed === true }
+            }
+
+            return Promise.resolve({
+                ok: callbackError ? false : (processed === true || isBootstrapUrl),
+                callbackProcessed: processed,
+                ...(callbackError ? { error: callbackError } : {})
             })
         }
 
@@ -184,6 +212,13 @@ export class ptk_app {
         if (message?.channel === "ptk_content2background_runtime" && message?.type === "manual_automation_authorization") {
             return this.ready.then(() => {
                 return this.automation?.handleManualAutomationAuthorization?.(message, sender)
+                    || { ok: true, allowed: false, reason: 'automation_unavailable' }
+            })
+        }
+
+        if (message?.channel === "ptk_content2background_runtime" && message?.type === "manual_automation_activation_request") {
+            return this.ready.then(() => {
+                return this.automation?.handleManualAutomationActivationRequest?.(message, sender)
                     || { ok: true, allowed: false, reason: 'automation_unavailable' }
             })
         }

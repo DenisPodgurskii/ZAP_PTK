@@ -15,6 +15,7 @@ public class PtkFindingPayload {
 
     private String engine;
     private String scanId;
+    private String sessionId;
     private Boolean truncated;
     private List<PtkFinding> findings;
 }

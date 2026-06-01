@@ -11,6 +11,7 @@ const runtime = (typeof browser !== 'undefined' && browser?.runtime)
 const PTK_SPA_ATTACK_TAB_MARKER = 'ptk_spa_attack_tab';
 const PTK_SPA_DIALOG_PARAM = 'ptk_dast=1';
 const ZAP_CALLBACK_PATH_REGEX = /^\/zapCallBackUrl\/[^/?#]+/i;
+const ZAP_CALLBACK_NOTIFY_RETRY_DELAYS_MS = [0, 100, 500, 1000, 2500, 5000, 9000, 10500, 11500, 11900];
 
 function runtimeGetURL(path) {
     if (!runtime?.getURL) return null;
@@ -371,16 +372,55 @@ async function collectSastPayload() {
     };
 }
 
+const zapCallbackNotifyState = {
+    acknowledged: false,
+    url: '',
+    timers: []
+};
+
+function clearZapCallbackNotifyTimers() {
+    for (const timer of zapCallbackNotifyState.timers.splice(0)) {
+        try {
+            clearTimeout(timer);
+        } catch (_) { }
+    }
+}
+
 function notifyZapCallbackPageIfPresent(reason = 'document_start') {
     if (!isTopFrame()) return;
     const href = getCurrentHref();
     if (!isZapCallbackPageUrl(href)) return;
+    if (zapCallbackNotifyState.acknowledged && zapCallbackNotifyState.url === href) return;
+    zapCallbackNotifyState.url = href;
     sendRuntimeMessage({
         channel: 'ptk_content2background_zap',
         type: 'zap_callback_url',
         url: href,
         reason
+    }).then((response) => {
+        if (response?.ok === true) {
+            zapCallbackNotifyState.acknowledged = true;
+            clearZapCallbackNotifyTimers();
+        }
     }).catch(() => { });
+}
+
+function scheduleZapCallbackNotifications() {
+    if (!isTopFrame() || !isZapCallbackPageUrl(getCurrentHref())) return;
+    clearZapCallbackNotifyTimers();
+    notifyZapCallbackPageIfPresent('document_start');
+    for (const delayMs of ZAP_CALLBACK_NOTIFY_RETRY_DELAYS_MS) {
+        const timer = setTimeout(() => {
+            notifyZapCallbackPageIfPresent(`retry_${delayMs}`);
+        }, delayMs);
+        zapCallbackNotifyState.timers.push(timer);
+    }
+    const eventRetry = (event) => {
+        notifyZapCallbackPageIfPresent(event?.type || 'event');
+    };
+    window.addEventListener('DOMContentLoaded', eventRetry, { once: true });
+    window.addEventListener('load', eventRetry, { once: true });
+    window.addEventListener('pageshow', eventRetry, { once: true });
 }
 
 function installSharedIastBridge() {
@@ -458,6 +498,8 @@ function installSharedIastBridge() {
             }).then((resp) => {
                 dispatchIastBridgeToPage({
                     channel: 'ptk_background_iast2content_modules',
+                    active: resp?.active !== false,
+                    reason: resp?.reason || null,
                     iastModules: resp?.iastModules || null,
                     iastModulesSignature: resp?.iastModulesSignature || null,
                     scanStrategy: resp?.scanStrategy || null
@@ -465,6 +507,7 @@ function installSharedIastBridge() {
             }).catch(() => {
                 dispatchIastBridgeToPage({
                     channel: 'ptk_background_iast2content_modules',
+                    active: true,
                     iastModules: null
                 });
             });
@@ -485,6 +528,8 @@ function installSharedIastBridge() {
             if (message?.channel === 'ptk_background_iast2content_modules' && message.iastModules) {
                 dispatchIastBridgeToPage({
                     channel: 'ptk_background_iast2content_modules',
+                    active: message.active !== false,
+                    reason: message.reason || null,
                     iastModules: message.iastModules,
                     iastModulesSignature: message.iastModulesSignature || null,
                     scanStrategy: message.scanStrategy || null
@@ -513,28 +558,17 @@ function installSharedIastBridge() {
     }, false);
 }
 
-function readStoredZapHintUrl() {
-    try {
-        const value = window.localStorage?.getItem?.('localzapurl');
-        return typeof value === 'string' && value.trim() ? value.trim() : '';
-    } catch (_) {
-        return '';
-    }
-}
-
 function requestRuntimeProfile(reason = 'document_start') {
     if (bootstrapState.requestInFlight || !runtime?.sendMessage) {
         return bootstrapState.requestInFlight || Promise.resolve(null);
     }
 
     const href = getCurrentHref();
-    const zapHintUrl = readStoredZapHintUrl();
 
     bootstrapState.requestInFlight = runtime.sendMessage({
         channel: 'ptk_content2background_runtime',
         type: 'content_bootstrap_hello',
         url: href,
-        zapHintUrl,
         reason,
         mode: bootstrapState.mode,
         script: bootstrapState.script
@@ -599,7 +633,7 @@ if (runtime?.onMessage) {
 installEarlySastScriptCapture();
 installSharedIastBridge();
 
-notifyZapCallbackPageIfPresent();
+scheduleZapCallbackNotifications();
 void requestRuntimeProfile();
 
 }

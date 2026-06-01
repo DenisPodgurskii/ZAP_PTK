@@ -276,7 +276,9 @@ export class DastSessionCoordinator {
             this.engine.setAutomationHooks({
                 sessionId,
                 onTaskStarted: hooks?.onTaskStarted,
-                onTaskFinished: hooks?.onTaskFinished
+                onTaskFinished: hooks?.onTaskFinished,
+                onPtkTabOpened: hooks?.onPtkTabOpened,
+                onPtkTabClosing: hooks?.onPtkTabClosing
             })
         }
         this._seedZapAutomationRequests(tabId, resolvedSettings)

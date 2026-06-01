@@ -19,6 +19,11 @@ const CONFIG_INITIAL_FETCH_DELAY_MS = 0
 // startup window instead of silently falling back to manual mode.
 const CONFIG_DIRECT_FETCH_RETRY_DELAYS_MS = [0, 250, 1000, 2500, 5000]
 const CONFIG_DIRECT_FETCH_TIMEOUT_MS = 2500
+const CALLBACK_PROGRESS_POST_TIMEOUT_MS = 2500
+const CALLBACK_PROGRESS_RETRY_DELAYS_MS = [250]
+const CALLBACK_ALERT_POST_TIMEOUT_MS = 10000
+const CALLBACK_CONTROL_POST_TIMEOUT_MS = 2500
+const CALLBACK_CONTROL_RETRY_DELAYS_MS = []
 const QUICKSTART_URL_REGEX = /^https?:\/\/zap\/OTHER\/quickstartlaunch\/other\/startPage\//i
 const QUICKSTART_PROBE_COOLDOWN_MS = 5000
 const QUICKSTART_SCRIPT_FETCH_LIMIT = 8
@@ -26,6 +31,9 @@ const QUICKSTART_SCRIPT_BODY_MAX = 250000
 const HISTORY_BOOTSTRAP_LOOKBACK_MS = 60 * 1000
 const HISTORY_BOOTSTRAP_MAX_RESULTS = 5
 const STARTUP_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 2000, 5000]
+const ACTIVE_CALLBACK_RECOVERY_INTERVAL_MS = 1000
+const ACTIVE_CALLBACK_RECOVERY_WINDOW_MS = 10 * 60 * 1000
+const TARGET_BOOTSTRAP_CALLBACK_RECOVERY_LOOKBACK_MS = 2 * 60 * 1000
 const POST_CALLBACK_CANDIDATE_MAX_RESULTS = 30
 const DAST_HISTORY_SEED_MAX_RESULTS = 256
 const DAST_HISTORY_SEED_SEARCH_MAX_RESULTS = Math.max(
@@ -166,7 +174,7 @@ function targetScopePathPrefix(pathname = '') {
     return index >= 0 ? path.slice(0, index + 1) : '/'
 }
 
-function isSameOriginAndPathScoped(targetValue, candidateValue) {
+export function isSameOriginAndPathScoped(targetValue, candidateValue) {
     const targetString = safeParseUrl(targetValue)
     const candidateString = safeParseUrl(candidateValue)
     if (!targetString || !candidateString) return false
@@ -361,6 +369,7 @@ class ZapTransport {
         this.configUrl = null
         this.alertsUrl = null
         this.progressUrl = null
+        this.controlUrl = null
         this.active = false
         this._activeSessionTerminal = false
         this._lastDetectedPayload = null
@@ -376,7 +385,14 @@ class ZapTransport {
         this._onHistoryVisited = null
         this._lastDetectionByTab = new Map()
         this._lastQuickstartProbeByTab = new Map()
+        this._callbackRoutesByZapId = new Map()
+        this._callbackRoutesByBaseUrl = new Map()
+        this._callbackRoutesByTabId = new Map()
+        this._controlSupportByRouteKey = new Map()
         this._startupBootstrapRunId = 0
+        this._activeCallbackRecoveryTimer = null
+        this._activeCallbackRecoveryUntil = 0
+        this._activeCallbackRecoveryRunning = false
     }
 
     _lifecycleLog(event, details = {}) {
@@ -418,14 +434,17 @@ class ZapTransport {
         return true
     }
 
-    _canProcessHistorySignals() {
+    _canProcessHistorySignals(url = '') {
+        if (isDirectZapCallbackUrl(url)) {
+            return true
+        }
         return this._isStartupGateOpen()
     }
 
     _shouldObserveUrl(source, url = '') {
         if (!url) return false
         if (source.startsWith('history.')) {
-            return this._canProcessHistorySignals()
+            return this._canProcessHistorySignals(url)
         }
         if (this.active) {
             if (this._activeSessionTerminal) {
@@ -491,6 +510,7 @@ class ZapTransport {
             return
         }
         if (this.active) {
+            this._extendActiveCallbackRecoveryWindow(source)
             return
         }
         this._scheduleStartupBootstraps(source)
@@ -536,6 +556,41 @@ class ZapTransport {
             ...snapshot
         })
         return snapshot
+    }
+
+    _extendActiveCallbackRecoveryWindow(source = 'unknown') {
+        if (!browser?.tabs?.query) return
+        const until = Date.now() + ACTIVE_CALLBACK_RECOVERY_WINDOW_MS
+        if (until > this._activeCallbackRecoveryUntil) {
+            this._activeCallbackRecoveryUntil = until
+        }
+        this._ensureActiveCallbackRecoveryScanner(source)
+    }
+
+    _ensureActiveCallbackRecoveryScanner(source = 'unknown') {
+        if (this._activeCallbackRecoveryTimer || !browser?.tabs?.query) return
+
+        const run = async () => {
+            this._activeCallbackRecoveryTimer = null
+            const shouldContinue = (this.active || this._isStartupGateOpen())
+                && Date.now() <= this._activeCallbackRecoveryUntil
+            if (!shouldContinue) return
+
+            if (!this._activeCallbackRecoveryRunning) {
+                this._activeCallbackRecoveryRunning = true
+                try {
+                    await this._scanOpenTabsForDirectCallbackUrls(`active.callback.recovery:${source}`)
+                } finally {
+                    this._activeCallbackRecoveryRunning = false
+                }
+            }
+
+            if ((this.active || this._isStartupGateOpen()) && Date.now() <= this._activeCallbackRecoveryUntil) {
+                this._activeCallbackRecoveryTimer = setTimeout(run, ACTIVE_CALLBACK_RECOVERY_INTERVAL_MS)
+            }
+        }
+
+        this._activeCallbackRecoveryTimer = setTimeout(run, ACTIVE_CALLBACK_RECOVERY_INTERVAL_MS)
     }
 
     setDebugEnabled(enabled) {
@@ -622,6 +677,8 @@ class ZapTransport {
         this._listenerAttached = true
         if (this._isStartupGateOpen()) {
             this._scheduleStartupBootstraps('init')
+        } else if (this.active) {
+            this._extendActiveCallbackRecoveryWindow('init.active')
         } else {
             this._lifecycleLog('zapTransport.init.gateClosed', {
                 active: this.active,
@@ -634,8 +691,16 @@ class ZapTransport {
         return this.active && !!this.baseUrl && !!this.configUrl && !!this.alertsUrl && !!this.progressUrl
     }
 
-    getBaseUrl() {
-        return this.baseUrl
+    isReady(options = {}) {
+        if (!options || (!options.zapid && !options.baseUrl)) {
+            return this.isActive()
+        }
+        const route = this._getCallbackRoute(options)
+        return !!(route?.baseUrl && route?.configUrl && route?.alertsUrl && route?.progressUrl)
+    }
+
+    getBaseUrl(options = {}) {
+        return this._getCallbackRoute(options)?.baseUrl || this.baseUrl
     }
 
     getZapId() {
@@ -646,16 +711,20 @@ class ZapTransport {
         return this.browserid
     }
 
-    getConfigUrl() {
-        return this.configUrl
+    getConfigUrl(options = {}) {
+        return this._getCallbackRoute(options)?.configUrl || this.configUrl
     }
 
-    getAlertsUrl() {
-        return this.alertsUrl
+    getAlertsUrl(options = {}) {
+        return this._getCallbackRoute(options)?.alertsUrl || this.alertsUrl
     }
 
-    getProgressUrl() {
-        return this.progressUrl
+    getProgressUrl(options = {}) {
+        return this._getCallbackRoute(options)?.progressUrl || this.progressUrl
+    }
+
+    getControlUrl(options = {}) {
+        return this._getCallbackRoute(options)?.controlUrl || this.controlUrl
     }
 
     onZapDetected(cb) {
@@ -700,7 +769,7 @@ class ZapTransport {
         return isZapBootstrapUrl(url)
     }
 
-    processContentObservedZapUrl({ tabId = null, frameId = 0, url = '' } = {}) {
+    processContentObservedZapUrl({ tabId = null, frameId = 0, url = '', targetUrl = null } = {}) {
         if (!isZapBootstrapUrl(url)) {
             return false
         }
@@ -714,7 +783,8 @@ class ZapTransport {
         return this._processPotentialZapUrl({
             tabId,
             url,
-            source: 'content.zapCallback'
+            source: 'content.zapCallback',
+            targetUrl
         })
     }
 
@@ -733,8 +803,34 @@ class ZapTransport {
         const detectedPayload = this._lastDetectedPayload || null
         const detectedTabId = Number.isInteger(detectedPayload?.tabId) ? detectedPayload.tabId : null
         const scopedTargetUrl = safeParseUrl(detectedPayload?.targetUrl)
+        const routeForTab = this._getCallbackRouteByTabId(tabId)
 
-        if (scopedTargetUrl) {
+        if (routeForTab) {
+            const scopedRouteTargetUrl = safeParseUrl(routeForTab.targetUrl)
+            if (scopedRouteTargetUrl && !isSameOriginAndPathScoped(scopedRouteTargetUrl, targetUrl)) {
+                debugLog('[PTK ZAP] Rejected out-of-scope target URL for callback tab', {
+                    tabId,
+                    frameId,
+                    url: targetUrl,
+                    targetUrl: scopedRouteTargetUrl
+                })
+                return false
+            }
+            if (!scopedRouteTargetUrl) {
+                this._rememberCallbackRoute(Object.assign({}, routeForTab, {
+                    tabId,
+                    targetUrl
+                }))
+                const routeMatchesCurrentPayload = (routeForTab.zapid && routeForTab.zapid === detectedPayload?.zapid)
+                    || (routeForTab.baseUrl && routeForTab.baseUrl === detectedPayload?.baseUrl)
+                    || (Number.isInteger(detectedTabId) && detectedTabId === tabId)
+                if (routeMatchesCurrentPayload) {
+                    this._lastDetectedPayload = Object.assign({}, detectedPayload || {}, {
+                        targetUrl
+                    })
+                }
+            }
+        } else if (scopedTargetUrl) {
             if (!isSameOriginAndPathScoped(scopedTargetUrl, targetUrl)) {
                 debugLog('[PTK ZAP] Rejected out-of-scope target URL', {
                     tabId,
@@ -766,20 +862,86 @@ class ZapTransport {
         return true
     }
 
-    async _postJsonWithRetry(url, obj, errorCode) {
+    async recoverCallbackFromTargetBootstrap({ tabId = null, frameId = 0, url = '' } = {}) {
+        if (frameId !== 0 || !browser?.history?.search) {
+            return false
+        }
+
+        const targetUrl = safeParseUrl(url)
+        if (!targetUrl || isZapBootstrapUrl(targetUrl)) {
+            return false
+        }
+
+        const detectedPayload = this._lastDetectedPayload || null
+        const existingZapId = this.zapid || detectedPayload?.zapid || null
+        const scopedTargetUrl = safeParseUrl(detectedPayload?.targetUrl)
+        if (this.active && (!scopedTargetUrl || !isSameOriginAndPathScoped(scopedTargetUrl, targetUrl))) {
+            return false
+        }
+
+        try {
+            const items = await browser.history.search({
+                text: 'zapCallBackUrl',
+                startTime: Date.now() - TARGET_BOOTSTRAP_CALLBACK_RECOVERY_LOOKBACK_MS,
+                maxResults: HISTORY_BOOTSTRAP_MAX_RESULTS
+            })
+            if (!Array.isArray(items) || !items.length) {
+                return false
+            }
+
+            const sortedItems = items
+                .slice()
+                .sort((left, right) => Number(right?.lastVisitTime || 0) - Number(left?.lastVisitTime || 0))
+
+            for (const item of sortedItems) {
+                const callbackUrl = typeof item?.url === 'string' ? item.url : ''
+                const callbackInfo = parseCallbackUrl(callbackUrl)
+                if (!callbackInfo?.secret) {
+                    continue
+                }
+                if (this.active && callbackInfo.zapid && callbackInfo.zapid === existingZapId) {
+                    continue
+                }
+
+                this._logCaughtUrl('content.target.historyRecovery', {
+                    tabId,
+                    frameId: 0,
+                    url: callbackUrl
+                })
+                return this._processPotentialZapUrl({
+                    tabId,
+                    url: callbackUrl,
+                    source: 'content.target.historyRecovery',
+                    targetUrl
+                })
+            }
+        } catch (err) {
+            console.warn('[PTK ZAP] Failed to recover ZAP callback from target bootstrap history:', err?.message || String(err))
+        }
+
+        return false
+    }
+
+    async _postJsonWithRetry(url, obj, errorCode, options = {}) {
         if (!url) {
             throw new Error(errorCode)
         }
+        const timeoutMs = Number.isFinite(Number(options?.timeoutMs))
+            ? Math.max(250, Number(options.timeoutMs))
+            : CONFIG_DIRECT_FETCH_TIMEOUT_MS
+        const retryDelaysMs = Array.isArray(options?.retryDelaysMs)
+            ? options.retryDelaysMs
+            : RETRY_DELAYS_MS
         let lastError = null
-        for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+        for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
             try {
-                const response = await fetch(url, {
+                const response = await fetchWithTimeout(url, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify(obj)
-                })
+                }, timeoutMs)
 
                 const acceptedStatusZero = response.status === 0 && response.type !== 'opaque'
                 if (!response.ok && !acceptedStatusZero) {
@@ -789,53 +951,153 @@ class ZapTransport {
                 return response
             } catch (err) {
                 lastError = err
-                if (attempt >= RETRY_DELAYS_MS.length) {
+                if (attempt >= retryDelaysMs.length) {
                     break
                 }
-                await sleep(RETRY_DELAYS_MS[attempt])
+                await sleep(retryDelaysMs[attempt])
             }
         }
 
         throw lastError || new Error(errorCode)
     }
 
+    _rememberCallbackRoute(payload = {}) {
+        const route = {
+            zapid: toNonEmptyString(payload.zapid) || null,
+            baseUrl: toNonEmptyString(payload.baseUrl) || null,
+            configUrl: toNonEmptyString(payload.configUrl) || null,
+            alertsUrl: toNonEmptyString(payload.alertsUrl) || null,
+            progressUrl: toNonEmptyString(payload.progressUrl) || null,
+            controlUrl: toNonEmptyString(payload.controlUrl) || null,
+            secret: toNonEmptyString(payload.secret) || null,
+            tabId: Number.isInteger(payload.tabId) ? payload.tabId : null,
+            targetUrl: toNonEmptyString(payload.targetUrl) || null,
+            detectedAt: Number.isFinite(Number(payload.detectedAt)) ? Number(payload.detectedAt) : Date.now()
+        }
+        if (!route.configUrl || !route.alertsUrl || !route.progressUrl) {
+            return null
+        }
+        if (route.zapid) {
+            this._callbackRoutesByZapId.set(route.zapid, route)
+        }
+        if (route.baseUrl) {
+            this._callbackRoutesByBaseUrl.set(route.baseUrl, route)
+        }
+        if (Number.isInteger(route.tabId) && route.tabId >= 0) {
+            this._callbackRoutesByTabId.set(route.tabId, route)
+        }
+        return route
+    }
+
+    _getCallbackRoute(options = {}) {
+        const zapid = toNonEmptyString(options?.zapid)
+            || toNonEmptyString(options?.payload?.zapid)
+            || toNonEmptyString(options?.body?.zapid)
+        if (zapid && this._callbackRoutesByZapId.has(zapid)) {
+            return this._callbackRoutesByZapId.get(zapid)
+        }
+
+        const baseUrl = toNonEmptyString(options?.baseUrl)
+            || toNonEmptyString(options?.payload?.baseUrl)
+            || toNonEmptyString(options?.body?.baseUrl)
+        if (baseUrl && this._callbackRoutesByBaseUrl.has(baseUrl)) {
+            return this._callbackRoutesByBaseUrl.get(baseUrl)
+        }
+
+        if (this.configUrl || this.alertsUrl || this.progressUrl) {
+            return {
+                zapid: this.zapid || null,
+                baseUrl: this.baseUrl || null,
+                configUrl: this.configUrl || null,
+                alertsUrl: this.alertsUrl || null,
+                progressUrl: this.progressUrl || null,
+                controlUrl: this.controlUrl || null,
+                secret: this.secret || null
+            }
+        }
+        return null
+    }
+
+    _getCallbackRouteByTabId(tabId) {
+        if (!Number.isInteger(tabId) || tabId < 0) {
+            return null
+        }
+        return this._callbackRoutesByTabId.get(tabId) || null
+    }
+
+    _controlRouteKey(route = null) {
+        const zapid = toNonEmptyString(route?.zapid) || this.zapid || null
+        if (zapid) return `zapid:${zapid}`
+        const baseUrl = toNonEmptyString(route?.baseUrl) || this.baseUrl || null
+        if (baseUrl) return `base:${baseUrl}`
+        return null
+    }
+
+    _markControlSupport(route = null, supported = true) {
+        const key = this._controlRouteKey(route)
+        if (!key) return
+        this._controlSupportByRouteKey.set(key, supported === true)
+    }
+
+    _isControlUnsupported(route = null) {
+        const key = this._controlRouteKey(route)
+        return key ? this._controlSupportByRouteKey.get(key) === false : false
+    }
+
     async postAlertsJson(obj) {
-        if (!this.alertsUrl) {
+        const body = isObjectPayload(obj) ? { ...obj } : obj
+        const route = this._getCallbackRoute(body)
+        const alertsUrl = route?.alertsUrl || this.alertsUrl
+        if (!alertsUrl) {
             throw new Error('zap_alerts_not_ready')
         }
 
-        const body = isObjectPayload(obj) ? { ...obj } : obj
         if (isObjectPayload(body)) {
-            if (!toNonEmptyString(body.zapid) && this.zapid) {
-                body.zapid = this.zapid
+            if (!toNonEmptyString(body.zapid) && route?.zapid) {
+                body.zapid = route.zapid
             }
             if (!toNonEmptyString(body.browserid) && this.browserid) {
                 body.browserid = this.browserid
             }
         }
 
-        debugLog('[PTK ZAP] Sending alerts POST to:', this.alertsUrl)
-        const response = await this._postJsonWithRetry(this.alertsUrl, body, 'zap_alerts_failed')
+        debugLog('[PTK ZAP] Sending alerts POST to:', alertsUrl)
+        const response = await this._postJsonWithRetry(alertsUrl, body, 'zap_alerts_failed', {
+            timeoutMs: CALLBACK_ALERT_POST_TIMEOUT_MS
+        })
         if (response.status === 0 && response.type !== 'opaque') {
             debugLog('[PTK ZAP] Alerts POST accepted from non-OK HTTP status because transport returned status 0')
         }
         debugLog('[PTK ZAP] Alerts POST response:', response.status)
-        return response
+        let data = null
+        try {
+            const text = await response.clone().text()
+            data = text ? JSON.parse(text) : null
+        } catch (err) {
+            debugLog('[PTK ZAP] Alerts response parse skipped:', err?.message || String(err))
+        }
+        return { response, data }
     }
 
     async postProgressJson(payload = {}) {
-        if (!this.progressUrl) {
+        const route = this._getCallbackRoute(payload)
+        const progressUrl = route?.progressUrl || this.progressUrl
+        const zapid = toNonEmptyString(payload?.zapid) || route?.zapid || this.zapid
+        if (!progressUrl) {
             throw new Error('zap_progress_not_ready')
         }
-        if (!this.zapid) {
+        if (!zapid) {
             throw new Error('zap_progress_missing_zapid')
         }
 
         const body = {
-            zapid: this.zapid,
+            zapid,
             browserid: this.browserid,
             progress: payload.progress,
             status: payload.status
+        }
+        if (Number.isFinite(Number(payload.contractVersion))) {
+            body.contractVersion = Number(payload.contractVersion)
         }
         if (toNonEmptyString(payload.phase)) {
             body.phase = payload.phase.trim()
@@ -852,15 +1114,48 @@ class ZapTransport {
         if (toNonEmptyString(payload.message)) {
             body.message = payload.message.trim()
         }
+        if (toNonEmptyString(payload.completionStatus)) {
+            body.completionStatus = payload.completionStatus.trim()
+        }
+        if (toNonEmptyString(payload.releaseStatus)) {
+            body.releaseStatus = payload.releaseStatus.trim()
+        }
         if (payload.engines && typeof payload.engines === 'object' && !Array.isArray(payload.engines)) {
             body.engines = payload.engines
         }
+        if (Number.isFinite(Number(payload.activitySeq))) {
+            body.activitySeq = Number(payload.activitySeq)
+        }
+        if (toNonEmptyString(payload.activityFingerprint)) {
+            body.activityFingerprint = payload.activityFingerprint.trim()
+        }
+        if (payload.closeReadiness && typeof payload.closeReadiness === 'object' && !Array.isArray(payload.closeReadiness)) {
+            body.closeReadiness = payload.closeReadiness
+        }
+        if (payload.publisher && typeof payload.publisher === 'object' && !Array.isArray(payload.publisher)) {
+            body.publisher = payload.publisher
+        }
+        if (typeof payload.terminalSeen === 'boolean') {
+            body.terminalSeen = payload.terminalSeen
+        }
+        if (toNonEmptyString(payload.closeRequestId)) {
+            body.closeRequestId = payload.closeRequestId.trim()
+        }
+        if (typeof payload.closeRequestAck === 'boolean') {
+            body.closeRequestAck = payload.closeRequestAck
+        }
+        if (toNonEmptyString(payload.closeRequestMode)) {
+            body.closeRequestMode = payload.closeRequestMode.trim()
+        }
 
         debugLog('[PTK ZAP] Sending progress POST:', {
-            url: this.progressUrl,
+            url: progressUrl,
             body
         })
-        const response = await this._postJsonWithRetry(this.progressUrl, body, 'zap_progress_failed')
+        const response = await this._postJsonWithRetry(progressUrl, body, 'zap_progress_failed', {
+            timeoutMs: CALLBACK_PROGRESS_POST_TIMEOUT_MS,
+            retryDelaysMs: CALLBACK_PROGRESS_RETRY_DELAYS_MS
+        })
         let data = null
         try {
             const text = await response.clone().text()
@@ -871,17 +1166,104 @@ class ZapTransport {
         return { response, data }
     }
 
+    async postControlJson(payload = {}) {
+        const route = this._getCallbackRoute(payload)
+        const controlUrl = route?.controlUrl || this.controlUrl
+        const zapid = toNonEmptyString(payload?.zapid) || route?.zapid || this.zapid
+        if (!controlUrl || this._isControlUnsupported(route)) {
+            return {
+                response: null,
+                data: { result: 'UNSUPPORTED', closeRequested: false, controlUnsupported: true },
+                unsupported: true
+            }
+        }
+        if (!zapid) {
+            throw new Error('zap_control_missing_zapid')
+        }
+
+        const body = {
+            contractVersion: Number.isFinite(Number(payload.contractVersion))
+                ? Number(payload.contractVersion)
+                : 2,
+            zapid,
+            browserid: this.browserid
+        }
+        for (const key of [
+            'sessionId',
+            'activityFingerprint',
+            'closeRequestId',
+            'closeRequestMode'
+        ]) {
+            if (toNonEmptyString(payload[key])) {
+                body[key] = payload[key].trim()
+            }
+        }
+        if (Number.isFinite(Number(payload.activitySeq))) {
+            body.activitySeq = Number(payload.activitySeq)
+        }
+        if (payload.publisher && typeof payload.publisher === 'object' && !Array.isArray(payload.publisher)) {
+            body.publisher = payload.publisher
+        }
+        if (typeof payload.closeRequestAck === 'boolean') {
+            body.closeRequestAck = payload.closeRequestAck
+        }
+
+        try {
+            const response = await this._postJsonWithRetry(controlUrl, body, 'zap_control_failed', {
+                timeoutMs: CALLBACK_CONTROL_POST_TIMEOUT_MS,
+                retryDelaysMs: CALLBACK_CONTROL_RETRY_DELAYS_MS
+            })
+            let data = null
+            try {
+                const text = await response.clone().text()
+                data = text ? JSON.parse(text) : null
+            } catch (_) {
+                this._markControlSupport(route, false)
+                return {
+                    response,
+                    data: { result: 'UNSUPPORTED', closeRequested: false, controlUnsupported: true },
+                    unsupported: true
+                }
+            }
+            if (!data || typeof data !== 'object' || Array.isArray(data)) {
+                this._markControlSupport(route, false)
+                return {
+                    response,
+                    data: { result: 'UNSUPPORTED', closeRequested: false, controlUnsupported: true },
+                    unsupported: true
+                }
+            }
+            this._markControlSupport(route, true)
+            return { response, data }
+        } catch (err) {
+            const message = err?.message || String(err)
+            if (/zap_control_failed_http_(?:400|404|405|410|501)/.test(message)) {
+                this._markControlSupport(route, false)
+                return {
+                    response: null,
+                    data: { result: 'UNSUPPORTED', closeRequested: false, controlUnsupported: true },
+                    unsupported: true,
+                    error: message
+                }
+            }
+            throw err
+        }
+    }
+
     // Backward-compatible alias.
     async postJson(obj) {
         return this.postAlertsJson(obj)
     }
 
     async fetchConfig(options = {}) {
-        if (!this.configUrl) {
+        const route = this._getCallbackRoute(options)
+        const configUrl = route?.configUrl || this.configUrl
+        const zapid = toNonEmptyString(options?.zapid) || route?.zapid || this.zapid
+        if (!configUrl) {
             debugLog('[PTK ZAP] No callback URL stored, cannot fetch config')
             return {}
         }
-        if (!this.zapid) {
+        if (!zapid) {
             debugLog('[PTK ZAP] No zapid stored, cannot fetch config yet')
             return {}
         }
@@ -889,7 +1271,7 @@ class ZapTransport {
         const startedAt = Date.now()
         const diagnostics = []
 
-        debugLog('[PTK ZAP] Fetching config from:', this.configUrl)
+        debugLog('[PTK ZAP] Fetching config from:', configUrl)
         debugLog('[PTK ZAP] Config fetch startup delay (ms):', CONFIG_INITIAL_FETCH_DELAY_MS)
         if (CONFIG_INITIAL_FETCH_DELAY_MS > 0) {
             await sleep(CONFIG_INITIAL_FETCH_DELAY_MS)
@@ -905,7 +1287,7 @@ class ZapTransport {
 
             try {
                 const requestBody = {
-                    zapid: this.zapid,
+                    zapid,
                     browserid: this.browserid
                 }
                 const targetUrl = toNonEmptyString(options?.targetUrl)
@@ -913,7 +1295,7 @@ class ZapTransport {
                     requestBody.targetUrl = targetUrl
                 }
 
-                const response = await fetchWithTimeout(this.configUrl, {
+                const response = await fetchWithTimeout(configUrl, {
                     method: 'POST',
                     headers: {
                         'Accept': 'application/json',
@@ -982,6 +1364,12 @@ class ZapTransport {
                         if (!response.ok) {
                             debugLog('[PTK ZAP] Config accepted from non-OK HTTP status because JSON body is valid')
                         }
+                        const route = this._getCallbackRoute({ zapid, baseUrl: this.baseUrl })
+                        if (data.ptkControlSupported === true || data.controlSupported === true) {
+                            this._markControlSupport(route, true)
+                        } else if (data.ptkControlSupported === false || data.controlSupported === false) {
+                            this._markControlSupport(route, false)
+                        }
                         debugLog('[PTK ZAP] Config response data:', data)
                         return data
                     }
@@ -1013,8 +1401,8 @@ class ZapTransport {
         }
 
         logStructured('[PTK ZAP] Config fetch diagnostics summary:', {
-            configUrl: this.configUrl,
-            zapid: this.zapid,
+            configUrl,
+            zapid,
             elapsedMs: Date.now() - startedAt,
             strategy: 'background_fetch_only',
             recentDiagnostics: diagnostics.slice(-12)
@@ -1174,7 +1562,7 @@ class ZapTransport {
         const url = typeof historyItem?.url === 'string' ? historyItem.url : ''
         if (!url) return
 
-        if (!this._canProcessHistorySignals()) {
+        if (!this._canProcessHistorySignals(url)) {
             return
         }
 
@@ -1431,7 +1819,37 @@ class ZapTransport {
         }
     }
 
-    _processPotentialZapUrl({ tabId, url, source = 'unknown' } = {}) {
+    async _scanOpenTabsForDirectCallbackUrls(source = 'active.callback.recovery') {
+        if (!browser?.tabs?.query) return false
+
+        let observed = false
+        const tabs = await browser.tabs.query({})
+        for (const tab of tabs) {
+            const urls = [
+                tab?.pendingUrl || '',
+                tab?.url || ''
+            ].filter(Boolean)
+
+            for (const url of urls) {
+                if (!isDirectZapCallbackUrl(url)) {
+                    continue
+                }
+                this._logCaughtUrl(source, {
+                    tabId: tab.id,
+                    frameId: 0,
+                    url
+                })
+                observed = this._processPotentialZapUrl({
+                    tabId: tab.id,
+                    url,
+                    source
+                }) || observed
+            }
+        }
+        return observed
+    }
+
+    _processPotentialZapUrl({ tabId, url, source = 'unknown', targetUrl: observedTargetUrl = null } = {}) {
         if (!this._canProcessLiveSignals(url, source)) {
             return false
         }
@@ -1466,10 +1884,11 @@ class ZapTransport {
         const configUrl = `${baseUrl}/ptk/config`
         const alertsUrl = `${baseUrl}/ptk/alert`
         const progressUrl = `${baseUrl}/ptk/progress`
+        const controlUrl = `${baseUrl}/ptk/control`
         const existingZapId = this.zapid || this._lastDetectedPayload?.zapid || null
         const changed = this.baseUrl !== baseUrl || (!!existingZapId && !!detectedZapId && existingZapId !== detectedZapId)
         const needsZapIdEnrichment = !changed && !!detectedZapId && detectedZapId !== existingZapId
-        const targetUrl = extractTargetUrl(url)
+        const targetUrl = extractTargetUrl(url) || safeParseUrl(observedTargetUrl)
         const now = Date.now()
         const hasLiveTabId = Number.isInteger(tabId) && tabId >= 0
         const currentTabId = this._lastDetectedPayload?.tabId
@@ -1490,12 +1909,15 @@ class ZapTransport {
                     changed: false,
                     zapid: detectedZapId || existingZapId || null,
                     progressUrl: this.progressUrl || this._lastDetectedPayload?.progressUrl || null,
+                    controlUrl: this.controlUrl || this._lastDetectedPayload?.controlUrl || null,
                     targetUrl: targetUrl || this._lastDetectedPayload?.targetUrl || null,
                     detectedAt: this._lastDetectedPayload?.detectedAt || now
                 })
                 this.zapid = payload.zapid || null
                 this._lastDetectedPayload = payload
+                this._rememberCallbackRoute(payload)
                 this._emitDetected(payload)
+                this._extendActiveCallbackRecoveryWindow(source)
                 return true
             }
             return false
@@ -1503,7 +1925,7 @@ class ZapTransport {
 
         debugLog('[PTK ZAP] Checking ZAP URL:', url)
 
-        const dedupeKey = `${tabId || 'na'}|${baseUrl}|${detectedZapId || ''}`
+        const dedupeKey = `${Number.isInteger(tabId) ? tabId : 'na'}|${baseUrl}|${detectedZapId || ''}`
         const previousDetection = this._lastDetectionByTab.get(dedupeKey)
         if (
             previousDetection
@@ -1530,6 +1952,7 @@ class ZapTransport {
             configUrl,
             alertsUrl,
             progressUrl,
+            controlUrl,
             zapid: detectedZapId || null,
             browserid: this.browserid,
             changed,
@@ -1548,6 +1971,7 @@ class ZapTransport {
         this.configUrl = configUrl
         this.alertsUrl = alertsUrl
         this.progressUrl = progressUrl
+        this.controlUrl = controlUrl
         this.active = true
         this._activeSessionTerminal = false
         const payload = {
@@ -1558,6 +1982,7 @@ class ZapTransport {
             configUrl,
             alertsUrl,
             progressUrl,
+            controlUrl,
             tabId,
             url,
             targetUrl,
@@ -1567,7 +1992,9 @@ class ZapTransport {
         }
 
         this._lastDetectedPayload = payload
+        this._rememberCallbackRoute(payload)
         this._emitDetected(payload)
+        this._extendActiveCallbackRecoveryWindow(source)
         return true
     }
 

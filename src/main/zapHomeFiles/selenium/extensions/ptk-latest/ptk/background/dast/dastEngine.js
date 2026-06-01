@@ -43,6 +43,8 @@ const HTML_LINK_DISCOVERY_LABEL = "Auto-discovered"
 const DAST_BROWSER_NAV_HARNESS_SCRIPT_ID = "ptk-dast-browser-nav-harness"
 const DAST_BROWSER_NAV_TAB_MARKER = "ptk_browser_nav_attack_tab"
 const DAST_BROWSER_NAV_DEFAULT_SETTLE_MS = 900
+const DAST_BROWSER_NAV_MESSAGE_TIMEOUT_MS = 8000
+const DAST_BROWSER_NAV_MESSAGE_TIMEOUT_PADDING_MS = 2500
 const DAST_BROWSER_NAV_SUPPORTED_CHECKS = new Set([
     "dom_xss",
     "template_marker"
@@ -354,6 +356,7 @@ export class dastEngine {
     }
 
     reset() {
+        this._scheduleCloseZapAttackWindow?.('reset')
         this._detachOastCallbackProbe()
         this.isRunning = false
         this.inProgress = false
@@ -415,6 +418,11 @@ export class dastEngine {
         this.scanResult.performance = { dast: this._performanceTelemetry }
         this._requestSeq = 0
         this._attackSeq = 0
+        this._zapAttackWindowId = null
+        this._zapAttackWindowAnchorTabId = null
+        this._zapAttackTabIds = new Set()
+        this._zapAttackWindowDisabled = false
+        this._zapAttackWindowWarningShown = false
         ptk_request.clearStoredHeaders()
     }
 
@@ -2886,6 +2894,7 @@ export class dastEngine {
     stop() {
         this.isRunning = false
         this.inProgress = false
+        this._scheduleCloseZapAttackWindow('stop')
         this._detachOastCallbackProbe()
         this._unregisterBrowserNavHarnessScript().catch(() => {})
         this._unregisterBrowserWorkflowHarnessScript().catch(() => {})
@@ -3443,7 +3452,7 @@ export class dastEngine {
                 const jwtRecovered = this._recoverJwtValidationFromProbeContrast(task, validationResult, executed, context)
                 return jwtRecovered || validationResult
             }
-            const jwtProof = this._validateJwtCarrierProof(task, executed, context)
+            const jwtProof = this._validateJwtCarrierProof(task, executed, context, validationResult)
             if (jwtProof?.ok) return validationResult
             this._appendTaskRuntimeEvent(task, context, {
                 type: 'dast_validation_suppressed',
@@ -3519,6 +3528,60 @@ export class dastEngine {
         return true
     }
 
+    _jwtResponseBodyMatchesRegex(response = null, regexSource = '') {
+        const body = String(response?.body || '')
+        const source = String(regexSource || '').trim()
+        if (!body || !source) return false
+        try {
+            return new RegExp(source, 'i').test(body)
+        } catch (_) {
+            return false
+        }
+    }
+
+    _jwtAttackConstants(task = null, executed = null) {
+        return Object.assign(
+            {},
+            task?.attack?.metadata?.constants && typeof task.attack.metadata.constants === 'object'
+                ? task.attack.metadata.constants
+                : {},
+            executed?.metadata?.constants && typeof executed.metadata.constants === 'object'
+                ? executed.metadata.constants
+                : {}
+        )
+    }
+
+    _jwtAuthorizationNonBaselineProofAllowed(task, executed, context, validationResult, contrastingProbe) {
+        if (!validationResult?.success) return false
+
+        const attackResponse = executed?.response || null
+        const originalResponse = context?.original?.response || null
+        const probeResponse = contrastingProbe?.response || null
+        const attackStatus = Number(attackResponse?.statusCode ?? attackResponse?.status)
+        const originalStatus = Number(originalResponse?.statusCode ?? originalResponse?.status)
+        const probeStatus = Number(probeResponse?.statusCode ?? probeResponse?.status)
+
+        if (!Number.isFinite(attackStatus) || attackStatus >= 500) return false
+        if (!Number.isFinite(originalStatus) || originalStatus >= 500) return false
+        if (!Number.isFinite(probeStatus)) return false
+
+        const constants = this._jwtAttackConstants(task, executed)
+        const authRequiredBodyRegex = constants.authRequiredBodyRegex || "No Authorization header was found|credentials_required"
+        const jwtAuthErrorBodyRegex = constants.jwtAuthErrorBodyRegex
+            || "No Authorization header was found|credentials_required|invalid\\s+signature|jwt\\s+malformed|invalid\\s+token|JsonWebTokenError|UnauthorizedError|jwt\\s+expired|invalid\\s+algorithm|algorithm\\s+not\\s+allowed"
+
+        if (this._jwtResponseBodyMatchesRegex(attackResponse, jwtAuthErrorBodyRegex)) return false
+
+        const probeLooksLikeMissingAuth = (
+            probeStatus === 401
+            || probeStatus === 403
+            || this._jwtResponseBodyMatchesRegex(probeResponse, authRequiredBodyRegex)
+        )
+        if (!probeLooksLikeMissingAuth) return false
+
+        return this._jwtResponseDiffersFromBaseline(attackResponse, probeResponse)
+    }
+
     _jwtCarrierExpectation(attackId = '') {
         if (attackId === 'jwt_1') {
             return { surface: 'cookie', probeIds: new Set(['jwt_probe_no_cookie']) }
@@ -3529,7 +3592,7 @@ export class dastEngine {
         return null
     }
 
-    _validateJwtCarrierProof(task, executed, context = null) {
+    _validateJwtCarrierProof(task, executed, context = null, validationResult = null) {
         const attackId = String(task?.attack?.id || executed?.metadata?.id || executed?.ruleId || '').trim()
         const expectation = this._jwtCarrierExpectation(attackId)
         if (!expectation) return { ok: false, reason: 'jwt_unknown_attack' }
@@ -3539,10 +3602,6 @@ export class dastEngine {
         if (!this._requestEvidenceContainsJwtNone(executed?.request, expectation.surface)) {
             return { ok: false, reason: 'jwt_none_not_on_expected_surface' }
         }
-        if (!this._jwtResponseMatchesBaseline(attackResponse, originalResponse)) {
-            return { ok: false, reason: 'jwt_attack_response_not_baseline_equivalent' }
-        }
-
         const history = Array.isArray(task?.module?.executed) ? task.module.executed : []
         const contrastingProbe = history.find((entry) => {
             const entryId = String(entry?.metadata?.id || '').trim()
@@ -3551,6 +3610,14 @@ export class dastEngine {
         })
         if (!contrastingProbe) {
             return { ok: false, reason: 'jwt_carrier_probe_did_not_differ' }
+        }
+        if (!this._jwtResponseMatchesBaseline(attackResponse, originalResponse)) {
+            if (
+                expectation.surface !== 'authorization'
+                || !this._jwtAuthorizationNonBaselineProofAllowed(task, executed, context, validationResult, contrastingProbe)
+            ) {
+                return { ok: false, reason: 'jwt_attack_response_not_baseline_equivalent' }
+            }
         }
         return { ok: true, probe: contrastingProbe }
     }
@@ -3986,10 +4053,24 @@ export class dastEngine {
         const captureStats = this._captureProgressSnapshot()
         const pendingCaptures = Math.max(0, Number(captureStats?.pendingObservedRequests || 0))
         const nonExecuted = Math.max(planned - executed, 0)
-        const planning = this.inProgress ? 1 : 0
-        const pipelineRemaining = Math.max(taskQueue + activeTasks + requestQueue + pendingPlans + planning + pendingCaptures + pendingHtmlDiscovery, 0)
+        const queuedOrActiveWork = taskQueue
+            + activeTasks
+            + requestQueue
+            + pendingPlans
+            + pendingCaptures
+            + pendingHtmlDiscovery
+        const planning = this.inProgress && queuedOrActiveWork > 0 ? 1 : 0
+        const pipelineRemaining = Math.max(queuedOrActiveWork + planning, 0)
         const remaining = pipelineRemaining
         const isIdle = Boolean(this.isRunning && requestQueue === 0 && taskQueue === 0 && pendingPlans === 0 && activeTasks === 0 && planning === 0 && pendingCaptures === 0 && pendingHtmlDiscovery === 0)
+        const zapManaged = this.settings?.zapManaged === true
+        const isolatedZapAttackWindowAvailable = Boolean(
+            zapManaged
+            && this._zapAttackWindowDisabled !== true
+            && !!browser?.windows?.create
+            && !!browser?.windows?.remove
+            && !!browser?.tabs?.create
+        )
         return {
             planned,
             executed,
@@ -4004,6 +4085,15 @@ export class dastEngine {
             pendingCaptures,
             pendingHtmlDiscovery,
             captureStats,
+            targetWindowRequired: zapManaged ? !isolatedZapAttackWindowAvailable : true,
+            zapAttackWindow: zapManaged
+                ? {
+                    isolated: isolatedZapAttackWindowAvailable,
+                    activeTabs: this._zapAttackTabIds?.size || 0,
+                    windowId: this._zapAttackWindowId || null,
+                    fallback: this._zapAttackWindowDisabled === true
+                }
+                : null,
             isRunning: !!this.isRunning,
             isIdle,
             phase: this.isRunning ? (isIdle ? 'idle' : 'scanning') : 'stopped',
@@ -5991,13 +6081,62 @@ export class dastEngine {
         if (!ready) {
             return { error: 'harness_not_ready' }
         }
+        const timeoutMs = this._browserNavHarnessMessageTimeoutMs(message)
         try {
-            return await browser.tabs.sendMessage(tabId, message)
+            const result = await this._sendBrowserNavHarnessMessageWithTimeout(tabId, message, timeoutMs)
+            if (result?.__ptkTimeout === true) {
+                this._appendTaskRuntimeEvent(task, taskContext, {
+                    type: 'dast_browser_nav_filtered',
+                    phase: 'harness_message',
+                    reason: 'harness_message_timeout',
+                    messageType: message?.type || null,
+                    timeoutMs
+                })
+                return { error: 'harness_message_timeout' }
+            }
+            return result
         } catch (err) {
             const injected = await this._injectBrowserNavHarness(tabId, task, taskContext, 'send_failed')
             if (!injected) throw err
-            return browser.tabs.sendMessage(tabId, message)
+            const result = await this._sendBrowserNavHarnessMessageWithTimeout(tabId, message, timeoutMs)
+            if (result?.__ptkTimeout === true) {
+                this._appendTaskRuntimeEvent(task, taskContext, {
+                    type: 'dast_browser_nav_filtered',
+                    phase: 'harness_message',
+                    reason: 'harness_message_timeout_after_reinject',
+                    messageType: message?.type || null,
+                    timeoutMs
+                })
+                return { error: 'harness_message_timeout' }
+            }
+            return result
         }
+    }
+
+    _browserNavHarnessMessageTimeoutMs(message = {}) {
+        const settleMs = Number(message?.settleMs)
+        if (Number.isFinite(settleMs) && settleMs >= 0) {
+            return Math.max(
+                1500,
+                Math.min(DAST_BROWSER_NAV_MESSAGE_TIMEOUT_MS, settleMs + DAST_BROWSER_NAV_MESSAGE_TIMEOUT_PADDING_MS)
+            )
+        }
+        return DAST_BROWSER_NAV_MESSAGE_TIMEOUT_MS
+    }
+
+    _sendBrowserNavHarnessMessageWithTimeout(tabId, message, timeoutMs) {
+        let timeoutId = null
+        const timeout = new Promise((resolve) => {
+            timeoutId = setTimeout(() => {
+                resolve({ __ptkTimeout: true })
+            }, Math.max(500, Number(timeoutMs) || DAST_BROWSER_NAV_MESSAGE_TIMEOUT_MS))
+        })
+        return Promise.race([
+            browser.tabs.sendMessage(tabId, message),
+            timeout
+        ]).finally(() => {
+            if (timeoutId) clearTimeout(timeoutId)
+        })
     }
 
     async _probeBrowserNavMainWorldWindowName(tabId, markerToken) {
@@ -7110,19 +7249,171 @@ export class dastEngine {
         }
     }
 
+    _shouldUseZapAttackWindow() {
+        return this.settings?.zapManaged === true
+            && this._zapAttackWindowDisabled !== true
+            && !!browser?.windows?.create
+            && !!browser?.windows?.remove
+            && !!browser?.tabs?.create
+    }
+
+    async _ensureZapAttackWindow() {
+        if (!this._shouldUseZapAttackWindow()) return null
+
+        if (this._zapAttackWindowId !== null && this._zapAttackWindowId !== undefined) {
+            try {
+                await browser.windows.get(this._zapAttackWindowId)
+                return this._zapAttackWindowId
+            } catch (_) {
+                this._zapAttackWindowId = null
+                this._zapAttackWindowAnchorTabId = null
+                this._zapAttackTabIds = new Set()
+            }
+        }
+
+        try {
+            const win = await browser.windows.create({
+                url: 'about:blank',
+                focused: false,
+                type: 'normal'
+            })
+            const windowId = Number(win?.id)
+            if (!Number.isInteger(windowId)) {
+                throw new Error('missing_window_id')
+            }
+            this._zapAttackWindowId = windowId
+            const anchorTab = Array.isArray(win?.tabs) ? win.tabs[0] : null
+            const anchorTabId = Number(anchorTab?.id)
+            this._zapAttackWindowAnchorTabId = Number.isInteger(anchorTabId) ? anchorTabId : null
+            return windowId
+        } catch (err) {
+            this._zapAttackWindowDisabled = true
+            if (this._zapAttackWindowWarningShown !== true) {
+                this._zapAttackWindowWarningShown = true
+                console.warn('[PTK DAST] Falling back to current-window attack tabs for ZAP session', {
+                    error: err?.message || String(err)
+                })
+            }
+            return null
+        }
+    }
+
+    async _createDastAttackTab(url) {
+        if (this._shouldUseZapAttackWindow()) {
+            const windowId = await this._ensureZapAttackWindow()
+            if (windowId !== null && windowId !== undefined) {
+                try {
+                    const tab = await browser.tabs.create({ windowId, url, active: false })
+                    const tabId = Number(tab?.id)
+                    if (Number.isInteger(tabId)) {
+                        this._zapAttackTabIds.add(tabId)
+                    }
+                    return tab
+                } catch (err) {
+                    if (this._zapAttackWindowWarningShown !== true) {
+                        this._zapAttackWindowWarningShown = true
+                        console.warn('[PTK DAST] Failed to create isolated ZAP attack tab; using current window', {
+                            error: err?.message || String(err)
+                        })
+                    }
+                }
+            }
+        }
+        return browser.tabs.create({ url, active: false })
+    }
+
+    _isDastAttackTargetInScope(url) {
+        const value = String(url || '').trim()
+        if (!value || value === 'about:blank') return true
+        const hasExplicitScope = !!String(this.host || '').trim()
+            || (Array.isArray(this.domains) && this.domains.length > 0)
+        if (!hasExplicitScope) return true
+        return this.isAllowed({
+            url: value,
+            ui_url: value,
+            method: 'GET',
+            type: 'main_frame'
+        })
+    }
+
+    _skipOutOfScopeDastAttackTab(url, role = 'dast_attack_tab') {
+        this._appendRuntimeEvent({
+            type: 'dast_attack_tab_skipped',
+            phase: 'attack_tab',
+            reason: 'out_of_scope',
+            role,
+            url: String(url || '')
+        })
+        return null
+    }
+
+    async _removeDastAttackTab(tabId) {
+        const normalizedTabId = Number(tabId)
+        if (Number.isInteger(normalizedTabId)) {
+            this._zapAttackTabIds?.delete(normalizedTabId)
+        }
+        try { await browser.tabs.remove(tabId) } catch (_) { }
+    }
+
+    _clearZapAttackWindowState() {
+        this._zapAttackWindowId = null
+        this._zapAttackWindowAnchorTabId = null
+        this._zapAttackTabIds = new Set()
+    }
+
+    async _removeZapAttackWindow(windowId, reason = 'stop') {
+        if (windowId === null || windowId === undefined || !browser?.windows?.remove) {
+            return
+        }
+        try {
+            await browser.windows.remove(windowId)
+        } catch (err) {
+            if (this._zapAttackWindowWarningShown !== true) {
+                this._zapAttackWindowWarningShown = true
+                console.warn('[PTK DAST] Failed to close isolated ZAP attack window', {
+                    reason,
+                    error: err?.message || String(err)
+                })
+            }
+        }
+    }
+
+    async _closeZapAttackWindow(reason = 'stop') {
+        const windowId = this._zapAttackWindowId
+        this._clearZapAttackWindowState()
+        await this._removeZapAttackWindow(windowId, reason)
+    }
+
+    _scheduleCloseZapAttackWindow(reason = 'stop') {
+        const windowId = this._zapAttackWindowId
+        if (windowId === null || windowId === undefined) {
+            return
+        }
+        this._clearZapAttackWindowState()
+        Promise.resolve()
+            .then(() => this._removeZapAttackWindow(windowId, reason))
+            .catch(() => {})
+    }
+
     async _withSpaAttackTab(url, fn) {
         let tabId = null
+        let windowId = null
         let childTabMeta = null
         try {
+            if (!this._isDastAttackTargetInScope(url)) {
+                return this._skipOutOfScopeDastAttackTab(url, 'dast_spa_attack_tab')
+            }
             const isFirefox = typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo
             const markedUrl = this._addSpaDialogMarker(url)
             if (isFirefox) {
-                const tab = await browser.tabs.create({ url: markedUrl, active: false })
+                const tab = await this._createDastAttackTab(markedUrl)
                 tabId = tab.id
+                windowId = tab.windowId
                 await this._markSpaAttackTab(tabId, { runAt: "document_start" })
             } else {
-                const tab = await browser.tabs.create({ url: markedUrl, active: false })
+                const tab = await this._createDastAttackTab(markedUrl)
                 tabId = tab.id
+                windowId = tab.windowId
             }
             await this._waitForTabReady(tabId)
             // Re-apply the marker on the loaded page before messaging the SPA
@@ -7131,6 +7422,7 @@ export class dastEngine {
             await this._markSpaAttackTab(tabId)
             childTabMeta = {
                 tabId,
+                windowId,
                 url,
                 parentTabId: this.tabId,
                 role: 'dast_spa_attack_tab',
@@ -7144,6 +7436,7 @@ export class dastEngine {
             if (tabId !== null) {
                 await this._automationPtkTabClosing(childTabMeta || {
                     tabId,
+                    windowId,
                     url,
                     parentTabId: this.tabId,
                     role: 'dast_spa_attack_tab',
@@ -7151,18 +7444,23 @@ export class dastEngine {
                     sourceEngine: 'DAST'
                 })
                 await this._detachDialogAutoDismiss(tabId)
-                try { await browser.tabs.remove(tabId) } catch (_) { }
+                await this._removeDastAttackTab(tabId)
             }
         }
     }
 
     async _withBrowserNavAttackTab(url, fn) {
         let tabId = null
+        let windowId = null
         let childTabMeta = null
         try {
+            if (!this._isDastAttackTargetInScope(url)) {
+                return this._skipOutOfScopeDastAttackTab(url, 'dast_browser_nav_attack_tab')
+            }
             await this._ensureBrowserNavHarnessScript().catch(() => false)
-            const tab = await browser.tabs.create({ url: 'about:blank', active: false })
+            const tab = await this._createDastAttackTab('about:blank')
             tabId = tab.id
+            windowId = tab.windowId
             await this._markSpaAttackTab(tabId, {
                 marker: DAST_BROWSER_NAV_TAB_MARKER,
                 runAt: 'document_start'
@@ -7178,6 +7476,7 @@ export class dastEngine {
             })
             childTabMeta = {
                 tabId,
+                windowId,
                 url,
                 parentTabId: this.tabId,
                 role: 'dast_browser_nav_attack_tab',
@@ -7190,13 +7489,14 @@ export class dastEngine {
             if (tabId !== null) {
                 await this._automationPtkTabClosing(childTabMeta || {
                     tabId,
+                    windowId,
                     url,
                     parentTabId: this.tabId,
                     role: 'dast_browser_nav_attack_tab',
                     marker: DAST_BROWSER_NAV_TAB_MARKER,
                     sourceEngine: 'DAST'
                 })
-                try { await browser.tabs.remove(tabId) } catch (_) { }
+                await this._removeDastAttackTab(tabId)
             }
         }
     }
@@ -7310,11 +7610,16 @@ export class dastEngine {
 
     async _withBrowserWorkflowAttackTab(url, fn) {
         let tabId = null
+        let windowId = null
         let childTabMeta = null
         try {
+            if (!this._isDastAttackTargetInScope(url)) {
+                return this._skipOutOfScopeDastAttackTab(url, 'dast_browser_workflow_attack_tab')
+            }
             await this._ensureBrowserWorkflowHarnessScript().catch(() => false)
-            const tab = await browser.tabs.create({ url: 'about:blank', active: false })
+            const tab = await this._createDastAttackTab('about:blank')
             tabId = tab.id
+            windowId = tab.windowId
             await this._markSpaAttackTab(tabId, {
                 marker: DAST_BROWSER_WORKFLOW_TAB_MARKER,
                 runAt: 'document_start'
@@ -7326,6 +7631,7 @@ export class dastEngine {
             })
             childTabMeta = {
                 tabId,
+                windowId,
                 url,
                 parentTabId: this.tabId,
                 role: 'dast_browser_workflow_attack_tab',
@@ -7338,13 +7644,14 @@ export class dastEngine {
             if (tabId !== null) {
                 await this._automationPtkTabClosing(childTabMeta || {
                     tabId,
+                    windowId,
                     url,
                     parentTabId: this.tabId,
                     role: 'dast_browser_workflow_attack_tab',
                     marker: DAST_BROWSER_WORKFLOW_TAB_MARKER,
                     sourceEngine: 'DAST'
                 })
-                try { await browser.tabs.remove(tabId) } catch (_) { }
+                await this._removeDastAttackTab(tabId)
             }
         }
     }
