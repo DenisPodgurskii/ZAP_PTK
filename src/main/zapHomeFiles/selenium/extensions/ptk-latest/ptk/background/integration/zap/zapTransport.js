@@ -28,19 +28,10 @@ const QUICKSTART_URL_REGEX = /^https?:\/\/zap\/OTHER\/quickstartlaunch\/other\/s
 const QUICKSTART_PROBE_COOLDOWN_MS = 5000
 const QUICKSTART_SCRIPT_FETCH_LIMIT = 8
 const QUICKSTART_SCRIPT_BODY_MAX = 250000
-const HISTORY_BOOTSTRAP_LOOKBACK_MS = 60 * 1000
-const HISTORY_BOOTSTRAP_MAX_RESULTS = 5
 const STARTUP_BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 2000, 5000]
 const ACTIVE_CALLBACK_RECOVERY_INTERVAL_MS = 1000
 const ACTIVE_CALLBACK_RECOVERY_WINDOW_MS = 10 * 60 * 1000
-const TARGET_BOOTSTRAP_CALLBACK_RECOVERY_LOOKBACK_MS = 2 * 60 * 1000
-const POST_CALLBACK_CANDIDATE_MAX_RESULTS = 30
 const DAST_HISTORY_SEED_MAX_RESULTS = 256
-const DAST_HISTORY_SEED_SEARCH_MAX_RESULTS = Math.max(
-    120,
-    DAST_HISTORY_SEED_MAX_RESULTS * 4,
-    POST_CALLBACK_CANDIDATE_MAX_RESULTS * 4
-) + HISTORY_BOOTSTRAP_MAX_RESULTS
 let ZAP_DEBUG_LOG_ENABLED = false
 const ZAP_ALLOWED_DEBUG_PREFIXES = [
     '[PTK ZAP] ZAP detected!',
@@ -68,34 +59,13 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function scoreZapHistorySeedUrl(url) {
-    let score = 0
-    try {
-        const parsed = new URL(url)
-        const pathAndQuery = `${parsed.pathname || ''}?${parsed.searchParams?.toString?.() || ''}`.toLowerCase()
-        if (parsed.search && parsed.search !== '?') score += 120
-        if (/(?:xss|script|javascript|js[_/-]|eval|attr|attribute|tagname|tag|html|textarea|href|svg|onerror|onload|search|query|(?:^|[?&])q=)/i.test(pathAndQuery)) {
-            score += 160
-        }
-        if (/(?:^|\/)\.(?:git|svn|hg)(?:\/|$)/i.test(parsed.pathname || '')) {
-            score -= 300
-        }
-        if (!parsed.search) {
-            score -= 40
-        }
-    } catch (_) {
-        score -= 20
-    }
-    return score
-}
-
 function debugLog(...args) {
     if (!ZAP_DEBUG_LOG_ENABLED) return
     const prefix = typeof args[0] === 'string' ? args[0] : ''
     if (!ZAP_ALLOWED_DEBUG_PREFIXES.some(allowed => prefix.startsWith(allowed))) {
         return
     }
-    console.log(...args)
+    console.log(...args.map((arg) => redactZapLogValue(arg)))
 }
 
 function summarizeFetchError(err) {
@@ -124,7 +94,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG_DIRECT_FET
 
 function logStructured(prefix, payload) {
     try {
-        debugLog(prefix, JSON.stringify(payload))
+        debugLog(prefix, JSON.stringify(redactZapLogValue(payload)))
     } catch (_) {
         debugLog(prefix, payload)
     }
@@ -138,6 +108,40 @@ function toNonEmptyString(value) {
     if (typeof value !== 'string') return null
     const trimmed = value.trim()
     return trimmed || null
+}
+
+function redactZapCallbackUrlForLog(value) {
+    if (typeof value !== 'string' || !value) return value
+    const redacted = value
+        .replace(/(https?:\/\/[^/?#\s"'<>]+\/zapCallBackUrl\/)[^/?#\s"'<>]+/gi, '$1<redacted>')
+        .replace(/(\/zapCallBackUrl\/)[^/?#\s"'<>]+/gi, '$1<redacted>')
+    if (!redacted.includes('/zapCallBackUrl/')) return redacted
+    return redacted
+        .replace(/([?&]zapid=)[^&#\s"'<>]+/gi, '$1<redacted>')
+        .replace(/(\|)[^\s"'<>]+/g, '$1<redacted>')
+}
+
+function redactZapLogValue(value, key = '') {
+    if (typeof key === 'string' && /(^|_|\b)(secret|callbackSecret)(_|$|\b)/i.test(key)) {
+        return '<redacted>'
+    }
+    if (typeof key === 'string' && /^(zapid|zapSessionKey)$/i.test(key)) {
+        return '<redacted>'
+    }
+    if (typeof value === 'string') {
+        return redactZapCallbackUrlForLog(value)
+    }
+    if (Array.isArray(value)) {
+        return value.map((item) => redactZapLogValue(item))
+    }
+    if (value && typeof value === 'object') {
+        const redacted = {}
+        for (const [entryKey, entryValue] of Object.entries(value)) {
+            redacted[entryKey] = redactZapLogValue(entryValue, entryKey)
+        }
+        return redacted
+    }
+    return value
 }
 
 function createBrowserId() {
@@ -378,11 +382,11 @@ class ZapTransport {
         this._listenerAttached = false
         this._onCommitted = null
         this._onBeforeNavigate = null
+        this._onBeforeRequest = null
         this._onTabUpdated = null
         this._onTabCreated = null
         this._onTabReplaced = null
         this._onCreatedNavigationTarget = null
-        this._onHistoryVisited = null
         this._lastDetectionByTab = new Map()
         this._lastQuickstartProbeByTab = new Map()
         this._callbackRoutesByZapId = new Map()
@@ -407,13 +411,13 @@ class ZapTransport {
                 clearReason: startup.clearReason
             })
         }
-        logZapLifecycle(event, {
+        logZapLifecycle(event, redactZapLogValue({
             pending: startup.pending,
             startupId: startup.startupId,
             armedAt: startup.armedAt,
             expiresAt: startup.expiresAt,
             ...details
-        })
+        }))
     }
 
     _isStartupGateOpen() {
@@ -434,18 +438,8 @@ class ZapTransport {
         return true
     }
 
-    _canProcessHistorySignals(url = '') {
-        if (isDirectZapCallbackUrl(url)) {
-            return true
-        }
-        return this._isStartupGateOpen()
-    }
-
     _shouldObserveUrl(source, url = '') {
         if (!url) return false
-        if (source.startsWith('history.')) {
-            return this._canProcessHistorySignals(url)
-        }
         if (this.active) {
             if (this._activeSessionTerminal) {
                 return isZapBootstrapUrl(url)
@@ -534,7 +528,6 @@ class ZapTransport {
                     runId,
                     delayMs
                 })
-                await this._bootstrapFromHistory()
                 await this._bootstrapFromOpenTabs()
             }
 
@@ -556,6 +549,13 @@ class ZapTransport {
             ...snapshot
         })
         return snapshot
+    }
+
+    _logCallbackSignalSuppressed(reason = 'unknown', details = {}) {
+        this._lifecycleLog('callback_signal_suppressed', {
+            reason,
+            ...details
+        })
     }
 
     _extendActiveCallbackRecoveryWindow(source = 'unknown') {
@@ -607,21 +607,19 @@ class ZapTransport {
         const hasCommitted = !!browser?.webNavigation?.onCommitted
         const hasBeforeNavigate = !!browser?.webNavigation?.onBeforeNavigate
         const hasCreatedNavigationTarget = !!browser?.webNavigation?.onCreatedNavigationTarget
+        const hasBeforeRequest = !!browser?.webRequest?.onBeforeRequest?.addListener
         const hasTabUpdated = !!browser?.tabs?.onUpdated
         const hasTabCreated = !!browser?.tabs?.onCreated
         const hasTabReplaced = !!browser?.tabs?.onReplaced
-        const hasHistoryVisited = !!browser?.history?.onVisited
-        const hasHistorySearch = !!browser?.history?.search
 
         if (
             !hasCommitted
             && !hasBeforeNavigate
             && !hasCreatedNavigationTarget
+            && !hasBeforeRequest
             && !hasTabUpdated
             && !hasTabCreated
             && !hasTabReplaced
-            && !hasHistoryVisited
-            && !hasHistorySearch
         ) {
             console.warn('[PTK ZAP] No navigation APIs available for ZAP detection')
             return
@@ -632,11 +630,10 @@ class ZapTransport {
             hasCommitted,
             hasBeforeNavigate,
             hasCreatedNavigationTarget,
+            hasBeforeRequest,
             hasTabUpdated,
             hasTabCreated,
-            hasTabReplaced,
-            hasHistoryVisited,
-            hasHistorySearch
+            hasTabReplaced
         })
 
         if (hasCommitted) {
@@ -654,6 +651,25 @@ class ZapTransport {
             browser.webNavigation.onCreatedNavigationTarget.addListener(this._onCreatedNavigationTarget)
         }
 
+        if (hasBeforeRequest) {
+            this._onBeforeRequest = this._onBeforeRequest || this._handleWebRequestBefore.bind(this)
+            try {
+                browser.webRequest.onBeforeRequest.addListener(this._onBeforeRequest, {
+                    urls: ['*://zap/zapCallBackUrl/*'],
+                    types: ['main_frame']
+                })
+            } catch (err) {
+                this._logCallbackSignalSuppressed('webrequest_listener_unavailable', {
+                    source: 'webRequest.onBeforeRequest',
+                    error: err?.message || String(err)
+                })
+            }
+        } else {
+            this._logCallbackSignalSuppressed('webrequest_listener_unavailable', {
+                source: 'zapTransport.init'
+            })
+        }
+
         if (hasTabUpdated) {
             this._onTabUpdated = this._onTabUpdated || this._handleTabUpdated.bind(this)
             browser.tabs.onUpdated.addListener(this._onTabUpdated)
@@ -667,11 +683,6 @@ class ZapTransport {
         if (hasTabReplaced) {
             this._onTabReplaced = this._onTabReplaced || this._handleTabReplaced.bind(this)
             browser.tabs.onReplaced.addListener(this._onTabReplaced)
-        }
-
-        if (hasHistoryVisited) {
-            this._onHistoryVisited = this._onHistoryVisited || this._handleHistoryVisited.bind(this)
-            browser.history.onVisited.addListener(this._onHistoryVisited)
         }
 
         this._listenerAttached = true
@@ -771,8 +782,21 @@ class ZapTransport {
 
     processContentObservedZapUrl({ tabId = null, frameId = 0, url = '', targetUrl = null } = {}) {
         if (!isZapBootstrapUrl(url)) {
+            this._logCallbackSignalSuppressed('parse_failed', {
+                source: 'content.zapCallback',
+                tabId,
+                frameId,
+                url
+            })
             return false
         }
+
+        this._lifecycleLog('background_callback_received', {
+            source: 'content.zapCallback',
+            tabId,
+            frameId,
+            url
+        })
 
         this._logCaughtUrl('content.zapCallback', {
             tabId,
@@ -860,66 +884,6 @@ class ZapTransport {
             url: targetUrl
         })
         return true
-    }
-
-    async recoverCallbackFromTargetBootstrap({ tabId = null, frameId = 0, url = '' } = {}) {
-        if (frameId !== 0 || !browser?.history?.search) {
-            return false
-        }
-
-        const targetUrl = safeParseUrl(url)
-        if (!targetUrl || isZapBootstrapUrl(targetUrl)) {
-            return false
-        }
-
-        const detectedPayload = this._lastDetectedPayload || null
-        const existingZapId = this.zapid || detectedPayload?.zapid || null
-        const scopedTargetUrl = safeParseUrl(detectedPayload?.targetUrl)
-        if (this.active && (!scopedTargetUrl || !isSameOriginAndPathScoped(scopedTargetUrl, targetUrl))) {
-            return false
-        }
-
-        try {
-            const items = await browser.history.search({
-                text: 'zapCallBackUrl',
-                startTime: Date.now() - TARGET_BOOTSTRAP_CALLBACK_RECOVERY_LOOKBACK_MS,
-                maxResults: HISTORY_BOOTSTRAP_MAX_RESULTS
-            })
-            if (!Array.isArray(items) || !items.length) {
-                return false
-            }
-
-            const sortedItems = items
-                .slice()
-                .sort((left, right) => Number(right?.lastVisitTime || 0) - Number(left?.lastVisitTime || 0))
-
-            for (const item of sortedItems) {
-                const callbackUrl = typeof item?.url === 'string' ? item.url : ''
-                const callbackInfo = parseCallbackUrl(callbackUrl)
-                if (!callbackInfo?.secret) {
-                    continue
-                }
-                if (this.active && callbackInfo.zapid && callbackInfo.zapid === existingZapId) {
-                    continue
-                }
-
-                this._logCaughtUrl('content.target.historyRecovery', {
-                    tabId,
-                    frameId: 0,
-                    url: callbackUrl
-                })
-                return this._processPotentialZapUrl({
-                    tabId,
-                    url: callbackUrl,
-                    source: 'content.target.historyRecovery',
-                    targetUrl
-                })
-            }
-        } catch (err) {
-            console.warn('[PTK ZAP] Failed to recover ZAP callback from target bootstrap history:', err?.message || String(err))
-        }
-
-        return false
     }
 
     async _postJsonWithRetry(url, obj, errorCode, options = {}) {
@@ -1261,17 +1225,33 @@ class ZapTransport {
         const zapid = toNonEmptyString(options?.zapid) || route?.zapid || this.zapid
         if (!configUrl) {
             debugLog('[PTK ZAP] No callback URL stored, cannot fetch config')
-            return {}
+            return {
+                ptkConfigFetchFailed: true,
+                error: 'zap_config_url_unavailable',
+                elapsedMs: 0,
+                diagnostics: [{ kind: 'missing_config_url' }]
+            }
         }
         if (!zapid) {
             debugLog('[PTK ZAP] No zapid stored, cannot fetch config yet')
-            return {}
+            return {
+                ptkConfigFetchFailed: true,
+                error: 'zapid_unavailable',
+                elapsedMs: 0,
+                diagnostics: [{ kind: 'missing_zapid' }]
+            }
         }
 
         const startedAt = Date.now()
         const diagnostics = []
 
         debugLog('[PTK ZAP] Fetching config from:', configUrl)
+        this._lifecycleLog('config_fetch_started', {
+            zapid,
+            configUrl,
+            baseUrl: route?.baseUrl || this.baseUrl || null,
+            targetUrl: toNonEmptyString(options?.targetUrl) || null
+        })
         debugLog('[PTK ZAP] Config fetch startup delay (ms):', CONFIG_INITIAL_FETCH_DELAY_MS)
         if (CONFIG_INITIAL_FETCH_DELAY_MS > 0) {
             await sleep(CONFIG_INITIAL_FETCH_DELAY_MS)
@@ -1407,8 +1387,13 @@ class ZapTransport {
             strategy: 'background_fetch_only',
             recentDiagnostics: diagnostics.slice(-12)
         })
-        debugLog('[PTK ZAP] Config unavailable, using default PTK engines')
-        return {}
+        debugLog('[PTK ZAP] Config unavailable; ZAP automation config fetch failed')
+        return {
+            ptkConfigFetchFailed: true,
+            error: 'zap_config_unavailable',
+            elapsedMs: Date.now() - startedAt,
+            diagnostics: diagnostics.slice(-12)
+        }
     }
 
     async confirmZap(options = {}) {
@@ -1452,6 +1437,34 @@ class ZapTransport {
             tabId: details.tabId,
             url,
             source: 'webNavigation.onBeforeNavigate'
+        })
+    }
+
+    _handleWebRequestBefore(details = {}) {
+        const url = details?.url || ''
+        if (!isDirectZapCallbackUrl(url)) {
+            return
+        }
+        if (!this._canProcessLiveSignals(url, 'webRequest.onBeforeRequest')) {
+            this._logCallbackSignalSuppressed('startup_gate_closed', {
+                source: 'webRequest.onBeforeRequest',
+                tabId: details.tabId,
+                frameId: details.frameId,
+                url
+            })
+            return
+        }
+
+        this._logCaughtUrl('webRequest.onBeforeRequest', {
+            tabId: details.tabId,
+            frameId: Number.isInteger(details.frameId) ? details.frameId : 0,
+            url
+        })
+
+        this._processPotentialZapUrl({
+            tabId: details.tabId,
+            url,
+            source: 'webRequest.onBeforeRequest'
         })
     }
 
@@ -1558,223 +1571,6 @@ class ZapTransport {
         }
     }
 
-    _handleHistoryVisited(historyItem) {
-        const url = typeof historyItem?.url === 'string' ? historyItem.url : ''
-        if (!url) return
-
-        if (!this._canProcessHistorySignals(url)) {
-            return
-        }
-
-        this._logCaughtUrl('history.onVisited', {
-            tabId: null,
-            frameId: 0,
-            url
-        })
-
-        this._processPotentialZapUrl({
-            tabId: null,
-            url,
-            source: 'history.onVisited'
-        })
-    }
-
-    async _bootstrapFromHistory() {
-        if (!browser?.history?.search || !this._canProcessHistorySignals()) return
-
-        const startTime = Date.now() - HISTORY_BOOTSTRAP_LOOKBACK_MS
-        const seen = new Set()
-
-        const collect = async (text) => {
-            if (seen.size >= HISTORY_BOOTSTRAP_MAX_RESULTS) return
-            try {
-                const items = await browser.history.search({
-                    text,
-                    startTime,
-                    maxResults: HISTORY_BOOTSTRAP_MAX_RESULTS
-                })
-                if (!Array.isArray(items)) return
-                const sortedItems = items
-                    .slice()
-                    .sort((left, right) => Number(right?.lastVisitTime || 0) - Number(left?.lastVisitTime || 0))
-                for (const item of sortedItems) {
-                    if (seen.size >= HISTORY_BOOTSTRAP_MAX_RESULTS) break
-                    const url = typeof item?.url === 'string' ? item.url : ''
-                    if (!url || seen.has(url)) continue
-                    seen.add(url)
-                    this._logCaughtUrl('history.bootstrap', {
-                        tabId: null,
-                        frameId: 0,
-                        url
-                    })
-                    this._processPotentialZapUrl({
-                        tabId: null,
-                        url,
-                        source: 'history.bootstrap'
-                    })
-                }
-            } catch (err) {
-                console.warn('[PTK ZAP] Failed to bootstrap ZAP detection from browser history:', err?.message || String(err))
-            }
-        }
-
-        await collect('zapCallBackUrl')
-        await collect('quickstartlaunch')
-    }
-
-    async collectPostCallbackSeedUrls({
-        pageUrl,
-        baseUrl = null,
-        maxResults = DAST_HISTORY_SEED_MAX_RESULTS,
-        includeMetadata = false
-    } = {}) {
-        const normalizedPageUrl = safeParseUrl(pageUrl)
-        if (!normalizedPageUrl || !browser?.history?.search) {
-            return includeMetadata
-                ? { urls: [], totalAvailable: 0, droppedByCap: 0, searchResultCount: 0 }
-                : []
-        }
-
-        let targetOrigin = null
-        try {
-            targetOrigin = new URL(normalizedPageUrl).origin
-        } catch (_) {
-            return includeMetadata
-                ? { urls: [], totalAvailable: 0, droppedByCap: 0, searchResultCount: 0 }
-                : []
-        }
-
-        const effectiveBaseUrl = toNonEmptyString(baseUrl || this.baseUrl || this._lastDetectedPayload?.baseUrl)
-        const boundedMax = Math.max(0, Math.min(DAST_HISTORY_SEED_MAX_RESULTS, Number(maxResults) || 0))
-        if (!boundedMax) {
-            return includeMetadata
-                ? { urls: [], totalAvailable: 0, droppedByCap: 0, searchResultCount: 0 }
-                : []
-        }
-
-        const buildResult = (seedUrls = [], searchResultCount = 0) => {
-            const prioritizedUrls = seedUrls
-                .map((url, index) => ({ url, index, score: scoreZapHistorySeedUrl(url) }))
-                .sort((left, right) => {
-                    if (right.score !== left.score) return right.score - left.score
-                    return left.index - right.index
-                })
-                .map((entry) => entry.url)
-            const urls = prioritizedUrls.slice(0, boundedMax)
-            return includeMetadata
-                ? {
-                    urls,
-                    totalAvailable: prioritizedUrls.length,
-                    droppedByCap: Math.max(0, prioritizedUrls.length - urls.length),
-                    searchResultCount
-                }
-                : urls
-        }
-
-        try {
-            const items = await browser.history.search({
-                text: '',
-                startTime: Date.now() - HISTORY_BOOTSTRAP_LOOKBACK_MS,
-                maxResults: DAST_HISTORY_SEED_SEARCH_MAX_RESULTS
-            })
-            if (!Array.isArray(items) || !items.length) {
-                return buildResult([], 0)
-            }
-
-            const sortedItems = items
-                .slice()
-                .sort((left, right) => Number(right?.lastVisitTime || 0) - Number(left?.lastVisitTime || 0))
-
-            const callbackIndex = sortedItems.findIndex((item) => {
-                const itemUrl = typeof item?.url === 'string' ? item.url : ''
-                const parsed = parseCallbackUrl(itemUrl)
-                if (!parsed) return false
-                if (!effectiveBaseUrl) return true
-                return this._buildBaseUrl(itemUrl, parsed.secret) === effectiveBaseUrl
-            })
-            if (callbackIndex < 0) {
-                return buildResult([], sortedItems.length)
-            }
-
-            const seen = new Set([normalizedPageUrl])
-            const candidateUrls = []
-            for (const item of sortedItems.slice(0, callbackIndex)) {
-                const candidateUrl = safeParseUrl(item?.url)
-                if (!candidateUrl || CALLBACK_URL_REGEX.test(candidateUrl)) continue
-                try {
-                    const parsedCandidate = new URL(candidateUrl)
-                    if (parsedCandidate.origin !== targetOrigin) continue
-                } catch (_) {
-                    continue
-                }
-                if (seen.has(candidateUrl)) continue
-                seen.add(candidateUrl)
-                candidateUrls.push(candidateUrl)
-            }
-
-            return buildResult(candidateUrls, sortedItems.length)
-        } catch (err) {
-            console.warn('[PTK ZAP] Failed to collect post-callback history seed URLs:', err?.message || String(err))
-            return buildResult([], 0)
-        }
-    }
-
-    async collectPostCallbackCandidateUrls({ baseUrl = null, maxResults = POST_CALLBACK_CANDIDATE_MAX_RESULTS } = {}) {
-        if (!browser?.history?.search) return []
-
-        const effectiveBaseUrl = toNonEmptyString(baseUrl || this.baseUrl || this._lastDetectedPayload?.baseUrl)
-        const boundedMax = Math.max(0, Math.min(POST_CALLBACK_CANDIDATE_MAX_RESULTS, Number(maxResults) || 0))
-        if (!boundedMax) return []
-
-        try {
-            const items = await browser.history.search({
-                text: '',
-                startTime: Date.now() - HISTORY_BOOTSTRAP_LOOKBACK_MS,
-                maxResults: DAST_HISTORY_SEED_SEARCH_MAX_RESULTS
-            })
-            if (!Array.isArray(items) || !items.length) return []
-
-            const sortedItems = items
-                .slice()
-                .sort((left, right) => Number(right?.lastVisitTime || 0) - Number(left?.lastVisitTime || 0))
-
-            const callbackIndex = sortedItems.findIndex((item) => {
-                const itemUrl = typeof item?.url === 'string' ? item.url : ''
-                const parsed = parseCallbackUrl(itemUrl)
-                if (!parsed) return false
-                if (!effectiveBaseUrl) return true
-                return this._buildBaseUrl(itemUrl, parsed.secret) === effectiveBaseUrl
-            })
-            if (callbackIndex < 0) return []
-
-            const seen = new Set()
-            const candidates = []
-            for (const item of sortedItems.slice(0, callbackIndex)) {
-                const candidateUrl = safeParseUrl(item?.url)
-                if (!candidateUrl || CALLBACK_URL_REGEX.test(candidateUrl) || QUICKSTART_URL_REGEX.test(candidateUrl)) {
-                    continue
-                }
-                try {
-                    const parsedCandidate = new URL(candidateUrl)
-                    if (String(parsedCandidate.hostname || '').toLowerCase() === 'zap') {
-                        continue
-                    }
-                } catch (_) {
-                    continue
-                }
-                if (seen.has(candidateUrl)) continue
-                seen.add(candidateUrl)
-                candidates.push(candidateUrl)
-                if (candidates.length >= boundedMax) break
-            }
-
-            return candidates
-        } catch (err) {
-            console.warn('[PTK ZAP] Failed to collect post-callback history candidate URLs:', err?.message || String(err))
-            return []
-        }
-    }
-
     async _bootstrapFromOpenTabs() {
         if (!browser?.tabs?.query || !this._isStartupGateOpen() || this.active) return
 
@@ -1819,6 +1615,10 @@ class ZapTransport {
         }
     }
 
+    async scanOpenTabsForDirectCallbackUrls(source = 'zap.runner') {
+        return this._scanOpenTabsForDirectCallbackUrls(source)
+    }
+
     async _scanOpenTabsForDirectCallbackUrls(source = 'active.callback.recovery') {
         if (!browser?.tabs?.query) return false
 
@@ -1851,9 +1651,18 @@ class ZapTransport {
 
     _processPotentialZapUrl({ tabId, url, source = 'unknown', targetUrl: observedTargetUrl = null } = {}) {
         if (!this._canProcessLiveSignals(url, source)) {
+            this._logCallbackSignalSuppressed('startup_gate_closed', {
+                source,
+                tabId,
+                url
+            })
             return false
         }
         if (typeof url !== 'string') {
+            this._logCallbackSignalSuppressed('parse_failed', {
+                source,
+                tabId
+            })
             return false
         }
 
@@ -1870,6 +1679,11 @@ class ZapTransport {
                     source: `${source}.quickstart.params`
                 })
             }
+            this._logCallbackSignalSuppressed('parse_failed', {
+                source,
+                tabId,
+                url
+            })
             return false
         }
 
@@ -1877,7 +1691,19 @@ class ZapTransport {
         const detectedZapId = callbackInfo?.zapid || null
         if (!secret) {
             debugLog('[PTK ZAP] URL hint observed but no valid callback pattern')
+            this._logCallbackSignalSuppressed('parse_failed', {
+                source,
+                tabId,
+                url
+            })
             return false
+        }
+        if (!detectedZapId) {
+            this._logCallbackSignalSuppressed('missing_zapid', {
+                source,
+                tabId,
+                url
+            })
         }
 
         const baseUrl = this._buildBaseUrl(url, secret)
@@ -1894,6 +1720,14 @@ class ZapTransport {
         const currentTabId = this._lastDetectedPayload?.tabId
         const needsTabRebind = hasLiveTabId && (!Number.isInteger(currentTabId) || currentTabId < 0)
         const needsTargetUrlEnrichment = !!targetUrl && targetUrl !== this._lastDetectedPayload?.targetUrl
+
+        this._lifecycleLog('callback_observed', {
+            source,
+            tabId,
+            baseUrl,
+            zapid: detectedZapId || null,
+            url
+        })
 
         // If we already have the same active ZAP callback, ignore repeated re-checks.
         if (this.active && !changed) {
@@ -1920,12 +1754,19 @@ class ZapTransport {
                 this._extendActiveCallbackRecoveryWindow(source)
                 return true
             }
+            this._logCallbackSignalSuppressed('duplicate_same_zapid', {
+                source,
+                tabId,
+                baseUrl,
+                zapid: detectedZapId || existingZapId || null,
+                url
+            })
             return false
         }
 
         debugLog('[PTK ZAP] Checking ZAP URL:', url)
 
-        const dedupeKey = `${Number.isInteger(tabId) ? tabId : 'na'}|${baseUrl}|${detectedZapId || ''}`
+        const dedupeKey = `${Number.isInteger(tabId) ? tabId : 'na'}|${baseUrl}|${detectedZapId || ''}|${source || ''}`
         const previousDetection = this._lastDetectionByTab.get(dedupeKey)
         if (
             previousDetection
@@ -1936,6 +1777,13 @@ class ZapTransport {
                 tabId,
                 baseUrl,
                 source,
+                ageMs: now - previousDetection.ts
+            })
+            this._logCallbackSignalSuppressed('duplicate_same_zapid', {
+                source,
+                tabId,
+                baseUrl,
+                zapid: detectedZapId || null,
                 ageMs: now - previousDetection.ts
             })
             return false
@@ -1993,6 +1841,13 @@ class ZapTransport {
 
         this._lastDetectedPayload = payload
         this._rememberCallbackRoute(payload)
+        this._lifecycleLog('transport_processed_callback', {
+            source,
+            tabId,
+            baseUrl,
+            zapid: this.zapid,
+            changed
+        })
         this._emitDetected(payload)
         this._extendActiveCallbackRecoveryWindow(source)
         return true
@@ -2129,5 +1984,6 @@ zapTransport.init()
 export default zapTransport
 export {
     DAST_HISTORY_SEED_MAX_RESULTS,
-    POST_CALLBACK_CANDIDATE_MAX_RESULTS
+    redactZapCallbackUrlForLog,
+    redactZapLogValue
 }

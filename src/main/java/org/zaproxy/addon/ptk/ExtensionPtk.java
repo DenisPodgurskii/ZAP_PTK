@@ -7,7 +7,8 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.LinkedHashMap;
@@ -21,12 +22,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 import org.apache.commons.httpclient.URIException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.WebDriver;
-import org.openqa.selenium.WebDriverException;
+import org.openqa.selenium.WindowType;
 import org.openqa.selenium.remote.RemoteWebDriver;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.control.Control;
@@ -43,7 +45,6 @@ import org.parosproxy.paros.model.SiteNode;
 import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMalformedHeaderException;
 import org.parosproxy.paros.network.HttpMessage;
-import org.parosproxy.paros.network.HttpSender;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
 import org.zaproxy.addon.client.ClientCallBackUtils;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
@@ -124,8 +125,10 @@ final class PtkCloseContract {
             int handshakePolls,
             String handshakeMode,
             boolean callbackReloadAttempted,
+            int callbackReloadAttempts,
             String callbackReloadError,
-            boolean interrupted) {
+            boolean interrupted,
+            String handshakeState) {
 
         Map<String, Object> toLogFields() {
             Map<String, Object> fields = new LinkedHashMap<>();
@@ -134,11 +137,15 @@ final class PtkCloseContract {
             fields.put("handshakePolls", handshakePolls);
             fields.put("handshakeMode", handshakeMode);
             fields.put("callbackReloadAttempted", callbackReloadAttempted);
+            fields.put("callbackReloadAttempts", callbackReloadAttempts);
             if (callbackReloadError != null && !callbackReloadError.isBlank()) {
                 fields.put("callbackReloadError", callbackReloadError);
             }
             if (interrupted) {
                 fields.put("interrupted", true);
+            }
+            if (handshakeState != null && !handshakeState.isBlank()) {
+                fields.put("handshakeState", handshakeState);
             }
             return fields;
         }
@@ -151,6 +158,27 @@ final class PtkCloseContract {
             CallbackHandshakeSleeper sleeper) {
         return awaitCallbackBootstrapHandshake(
                 handshakeSeen,
+                () ->
+                        handshakeSeen != null && handshakeSeen.getAsBoolean()
+                                ? "bootstrap_ready"
+                                : "callback_bootstrap_pending",
+                reloadCallback,
+                nowMs,
+                sleeper,
+                BROWSER_CALLBACK_BOOTSTRAP_HANDSHAKE_MS,
+                BROWSER_CALLBACK_BOOTSTRAP_RELOAD_AFTER_MS,
+                BROWSER_CALLBACK_BOOTSTRAP_POLL_MS);
+    }
+
+    static CallbackBootstrapHandshakeResult awaitCallbackBootstrapHandshake(
+            BooleanSupplier handshakeSeen,
+            Supplier<String> handshakeState,
+            Runnable reloadCallback,
+            LongSupplier nowMs,
+            CallbackHandshakeSleeper sleeper) {
+        return awaitCallbackBootstrapHandshake(
+                handshakeSeen,
+                handshakeState,
                 reloadCallback,
                 nowMs,
                 sleeper,
@@ -167,12 +195,35 @@ final class PtkCloseContract {
             long maxWaitMs,
             long reloadAfterMs,
             long pollMs) {
+        return awaitCallbackBootstrapHandshake(
+                handshakeSeen,
+                () ->
+                        handshakeSeen != null && handshakeSeen.getAsBoolean()
+                                ? "bootstrap_ready"
+                                : "callback_bootstrap_pending",
+                reloadCallback,
+                nowMs,
+                sleeper,
+                maxWaitMs,
+                reloadAfterMs,
+                pollMs);
+    }
+
+    static CallbackBootstrapHandshakeResult awaitCallbackBootstrapHandshake(
+            BooleanSupplier handshakeSeen,
+            Supplier<String> handshakeState,
+            Runnable reloadCallback,
+            LongSupplier nowMs,
+            CallbackHandshakeSleeper sleeper,
+            long maxWaitMs,
+            long reloadAfterMs,
+            long pollMs) {
         long start = nowMs.getAsLong();
         long deadline = start + Math.max(0L, maxWaitMs);
         long reloadAt = start + Math.max(0L, reloadAfterMs);
         long effectivePollMs = Math.max(1L, pollMs);
         int polls = 0;
-        boolean reloadAttempted = false;
+        int reloadAttempts = 0;
         String reloadError = null;
         boolean interrupted = false;
 
@@ -183,9 +234,11 @@ final class PtkCloseContract {
                         Math.max(0L, nowMs.getAsLong() - start),
                         polls,
                         "java_callback_wait",
-                        reloadAttempted,
+                        reloadAttempts > 0,
+                        reloadAttempts,
                         reloadError,
-                        interrupted);
+                        interrupted,
+                        resolveHandshakeState(handshakeState, "bootstrap_ready"));
             }
             long now = nowMs.getAsLong();
             if (now >= deadline || interrupted) {
@@ -194,12 +247,14 @@ final class PtkCloseContract {
                         Math.max(0L, now - start),
                         polls,
                         "java_callback_wait",
-                        reloadAttempted,
+                        reloadAttempts > 0,
+                        reloadAttempts,
                         reloadError,
-                        interrupted);
+                        interrupted,
+                        resolveHandshakeState(handshakeState, "callback_bootstrap_failed"));
             }
-            if (!reloadAttempted && reloadCallback != null && now >= reloadAt) {
-                reloadAttempted = true;
+            if (reloadAttempts == 0 && reloadCallback != null && now >= reloadAt) {
+                reloadAttempts++;
                 try {
                     reloadCallback.run();
                 } catch (RuntimeException e) {
@@ -211,9 +266,11 @@ final class PtkCloseContract {
                             Math.max(0L, nowMs.getAsLong() - start),
                             polls,
                             "java_callback_wait",
-                            reloadAttempted,
+                            true,
+                            reloadAttempts,
                             reloadError,
-                            interrupted);
+                            interrupted,
+                            resolveHandshakeState(handshakeState, "bootstrap_ready"));
                 }
             }
             long sleepMs = Math.min(effectivePollMs, Math.max(1L, deadline - now));
@@ -224,6 +281,18 @@ final class PtkCloseContract {
                 Thread.currentThread().interrupt();
                 interrupted = true;
             }
+        }
+    }
+
+    private static String resolveHandshakeState(Supplier<String> stateSupplier, String fallback) {
+        if (stateSupplier == null) {
+            return fallback;
+        }
+        try {
+            String state = stateSupplier.get();
+            return state != null && !state.isBlank() ? state : fallback;
+        } catch (RuntimeException e) {
+            return fallback;
         }
     }
 
@@ -597,12 +666,47 @@ public class ExtensionPtk extends ExtensionAdaptor
     private static final String PREFIX = "ptk";
     private static final Gson GSON = new Gson();
 
+    private static String redactZapCallbackUrlForLog(String value) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        String redacted =
+                value.replaceAll(
+                                "(https?://[^/?#\\s\"'<>]+/zapCallBackUrl/)[^/?#\\s\"'<>]+",
+                                "$1<redacted>")
+                        .replaceAll("(/zapCallBackUrl/)[^/?#\\s\"'<>]+", "$1<redacted>");
+        if (redacted.contains("/zapCallBackUrl/")) {
+            redacted =
+                    redacted.replaceAll("([?&]zapid=)[^&#\\s\"'<>]+", "$1<redacted>")
+                            .replaceAll("(\\|)[^\\s\"'<>]+", "$1<redacted>");
+        }
+        return redacted;
+    }
+
+    private static Object redactZapCallbackValueForLog(Object value) {
+        if (value instanceof String text) {
+            return redactZapCallbackUrlForLog(text);
+        }
+        return value;
+    }
+
+    private static Map<String, Object> redactZapCallbackMapForLog(Map<String, Object> values) {
+        if (values == null || values.isEmpty()) {
+            return values;
+        }
+        Map<String, Object> redacted = new LinkedHashMap<>();
+        values.forEach((key, value) -> redacted.put(key, redactZapCallbackValueForLog(value)));
+        return redacted;
+    }
+
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
             List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
     private static final List<Browser> PTK_CHROMIUM_BROWSERS =
             List.of(Browser.CHROME, Browser.CHROME_HEADLESS, Browser.EDGE, Browser.EDGE_HEADLESS);
     private static final List<Browser> PTK_FIREFOX_BROWSERS =
             List.of(Browser.FIREFOX, Browser.FIREFOX_HEADLESS);
+    private static final char[] CHROMIUM_EXTENSION_ID_ALPHABET = "abcdefghijklmnop".toCharArray();
+    private static final String PTK_ZAP_RUNNER_PATH = "/ptk/internal/zap-runner.html";
     private static final List<String> PTK_CHROMIUM_BACKGROUND_ARGS =
             List.of(
                     "--disable-background-networking",
@@ -654,6 +758,7 @@ public class ExtensionPtk extends ExtensionAdaptor
     private final Map<String, Integer> scanProgress = new ConcurrentHashMap<>();
     private final Map<String, String> scanStatus = new ConcurrentHashMap<>();
     private final Map<String, Long> callbackFirstSeenAtMs = new ConcurrentHashMap<>();
+    private final Map<String, Long> configServedAtMsByZapId = new ConcurrentHashMap<>();
     private final Map<String, String> browserIdByZapId = new ConcurrentHashMap<>();
     private final Map<String, Integer> alertsRaisedByZapId = new ConcurrentHashMap<>();
     private final Map<String, Long> firstAlertSeenAtMs = new ConcurrentHashMap<>();
@@ -809,7 +914,7 @@ public class ExtensionPtk extends ExtensionAdaptor
 
     private void seedActiveClientSpiderTasksForPtkTarget(
             String zapid, String targetUrl, List<String> seedUrls) {
-        if (!getParam().isAutomatedScanningEnabled()
+        if (!getParam().isZapAutomationEnabled()
                 || targetUrl == null
                 || targetUrl.isBlank()
                 || seedUrls == null
@@ -857,6 +962,14 @@ public class ExtensionPtk extends ExtensionAdaptor
             }
             seedClientSpiderTasks(scan, zapid, targetUrl, seedUrls);
         }
+    }
+
+    public void seedActiveScanClientSpiderTasks(String targetUrl) {
+        if (targetUrl == null || targetUrl.isBlank()) {
+            return;
+        }
+        List<String> urls = getCachedZapHistorySeedUrls(targetUrl, ZAP_HISTORY_SEED_MAX_URLS);
+        seedActiveClientSpiderTasksForPtkTarget(null, targetUrl, urls);
     }
 
     private void seedClientSpiderTasks(
@@ -916,7 +1029,7 @@ public class ExtensionPtk extends ExtensionAdaptor
             } catch (ReflectiveOperationException | RuntimeException e) {
                 LOGGER.debug(
                         "PTK failed to seed Client Spider URL task url={} reason={}",
-                        normalized,
+                        redactZapCallbackUrlForLog(normalized),
                         e.getMessage());
             }
             if (seeded >= seedLimit) {
@@ -1260,11 +1373,66 @@ public class ExtensionPtk extends ExtensionAdaptor
         return PtkExampleAlerts.getExampleAlerts(getLoadedResources());
     }
 
+    static Path getPtkChromiumExtensionPath() {
+        return Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest");
+    }
+
+    static String chromiumExtensionIdForPath(Path extensionPath) {
+        if (extensionPath == null) {
+            return "";
+        }
+        String normalizedPath = extensionPath.toAbsolutePath().normalize().toString();
+        byte[] digest;
+        try {
+            digest =
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(normalizedPath.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 digest unavailable", e);
+        }
+
+        StringBuilder id = new StringBuilder(32);
+        for (int i = 0; i < 16 && i < digest.length; i++) {
+            int value = digest[i] & 0xff;
+            id.append(CHROMIUM_EXTENSION_ID_ALPHABET[value >>> 4]);
+            id.append(CHROMIUM_EXTENSION_ID_ALPHABET[value & 0x0f]);
+        }
+        return id.toString();
+    }
+
+    static String buildChromiumZapRunnerUrl(Path extensionPath) {
+        String extensionId = chromiumExtensionIdForPath(extensionPath);
+        if (extensionId.isBlank()) {
+            return "";
+        }
+        return "chrome-extension://" + extensionId + PTK_ZAP_RUNNER_PATH;
+    }
+
+    static String zapCallbackRunnerSkipReason(
+            boolean zapAutomationEnabled, String browserid, String callbackUrl) {
+        if (callbackUrl == null
+                || !callbackUrl.contains("zapCallBackUrl")
+                || !callbackUrl.contains("zapenable=true")) {
+            return "not_zap_callback";
+        }
+        if (!zapAutomationEnabled) {
+            return "zap_automation_disabled";
+        }
+        if (browserid == null || browserid.isBlank()) {
+            return "non_chromium_browser";
+        }
+        String normalized = browserid.toLowerCase();
+        if (!normalized.contains("chrome") && !normalized.contains("edge")) {
+            return "non_chromium_browser";
+        }
+        return "";
+    }
+
     private static void ensurePtkSeleniumExtensionsConfigured(ExtensionSelenium extensionSelenium) {
         if (extensionSelenium == null) {
             return;
         }
-        Path chromiumPath = Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest");
+        Path chromiumPath = getPtkChromiumExtensionPath();
         Path xpiPath = Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest.xpi");
 
         try {
@@ -1479,17 +1647,14 @@ public class ExtensionPtk extends ExtensionAdaptor
                 LOGGER.debug("PTK /ptk/config cache hit after lock");
                 return cachedConfigJson;
             }
-            String mode = "manual";
-            if (param.isAutomatedScanningEnabled()
-                    || (cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
-                            && param.isActiveScanRuleEnabled())) {
-                mode = "auto";
-            }
+            boolean zapAutomationEnabled = param.isZapAutomationEnabled();
+            String mode = zapAutomationEnabled ? "auto" : "manual";
             LOGGER.info(
-                    "PTK mode {} auto={} active={}",
+                    "PTK mode {} auto={} active={} effective={}",
                     mode,
                     param.isAutomatedScanningEnabled(),
-                    param.isActiveScanRuleEnabled());
+                    param.isActiveScanRuleEnabled(),
+                    zapAutomationEnabled);
 
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("mode", mode);
@@ -1747,7 +1912,10 @@ public class ExtensionPtk extends ExtensionAdaptor
         BrowserCoverageEvidence evidence =
                 browserCoverageByUrl.computeIfAbsent(key, ignored -> new BrowserCoverageEvidence());
         evidence.scheduled(attempt);
-        LOGGER.info("PTK_BROWSER_COVERAGE url={} event=scheduled attempt={}", key, attempt);
+        LOGGER.info(
+                "PTK_BROWSER_COVERAGE url={} event=scheduled attempt={}",
+                redactZapCallbackUrlForLog(key),
+                attempt);
     }
 
     void logBrowserCoverageResult(
@@ -1764,7 +1932,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                 snapshot != null ? snapshot : BrowserCoverageSnapshot.empty(key);
         LOGGER.info(
                 "PTK_BROWSER_COVERAGE url={} event=result attempts={} finalState={} terminal={} browserLoaded={} ptkSessionEstablished={} ptkAnalysisReady={} browserSessionInvalid={} webdriverScriptFailed={} forcedClose={} noPtkProgress={}",
-                key,
+                redactZapCallbackUrlForLog(key),
                 attempts,
                 finalState,
                 terminal,
@@ -1797,13 +1965,14 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (zapid != null && !zapid.isBlank()) {
             summary.append(" zapid=").append(zapid);
         }
-        summary.append(" event=browser_loaded url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
+        summary.append(" event=browser_loaded url=").append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
         LOGGER.info(summary.toString());
     }
 
@@ -1890,13 +2059,15 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (browserId != null && !browserId.isBlank()) {
             summary.append(" browserid=").append(browserId);
         }
-        summary.append(" event=ptk_session_established url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
+        summary.append(" event=ptk_session_established url=")
+                .append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
         LOGGER.info(summary.toString());
     }
 
@@ -1932,13 +2103,14 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (browserId != null && !browserId.isBlank()) {
             summary.append(" browserid=").append(browserId);
         }
-        summary.append(" event=ptk_analysis_ready url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
+        summary.append(" event=ptk_analysis_ready url=").append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
         LOGGER.info(summary.toString());
     }
 
@@ -1962,13 +2134,14 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (zapid != null && !zapid.isBlank()) {
             summary.append(" zapid=").append(zapid);
         }
-        summary.append(" event=browser_loaded url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
+        summary.append(" event=browser_loaded url=").append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
         LOGGER.info(summary.toString());
     }
 
@@ -1988,13 +2161,15 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (zapid != null && !zapid.isBlank()) {
             summary.append(" zapid=").append(zapid);
         }
-        summary.append(" event=browser_session_invalid url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
+        summary.append(" event=browser_session_invalid url=")
+                .append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
         LOGGER.info(summary.toString());
     }
 
@@ -2586,11 +2761,11 @@ public class ExtensionPtk extends ExtensionAdaptor
             }
         }
 
-        private void rememberConfigMode(String zapid, boolean automatedScanningEnabled) {
+        private void rememberConfigMode(String zapid, boolean zapAutomationEnabled) {
             if (zapid == null || zapid.isBlank()) {
                 return;
             }
-            if (automatedScanningEnabled) {
+            if (zapAutomationEnabled) {
                 manualModeConfigZapIds.remove(zapid);
             } else {
                 manualModeConfigZapIds.add(zapid);
@@ -2806,6 +2981,7 @@ public class ExtensionPtk extends ExtensionAdaptor
             scanProgress.remove(zapid);
             scanStatus.remove(zapid);
             callbackFirstSeenAtMs.remove(zapid);
+            configServedAtMsByZapId.remove(zapid);
             browserIdByZapId.remove(zapid);
             alertsRaisedByZapId.remove(zapid);
             firstAlertSeenAtMs.remove(zapid);
@@ -2944,7 +3120,8 @@ public class ExtensionPtk extends ExtensionAdaptor
             fallback.put("participant", "ptk");
             fallback.put("decision", "not_applicable");
             fallback.put("scanState", "unknown");
-            fallback.put("reason", "webdriver_unavailable");
+            fallback.put("reason", "callback_progress_unavailable");
+            fallback.put("source", "callback_progress");
 
             long remainingMs = remainingCloseBudgetMs(closeDeadlineMs);
             if (remainingMs < 2_500L) {
@@ -2952,777 +3129,102 @@ public class ExtensionPtk extends ExtensionAdaptor
                 fallback.put("remainingMs", remainingMs);
                 return fallback;
             }
-            long scriptTimeoutMs =
-                    Math.min(PtkCloseContract.BROWSER_CLOSE_SCRIPT_TIMEOUT_MS, remainingMs);
-            long ptkBridgeTimeoutMs =
-                    Math.min(PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS, scriptTimeoutMs);
 
-            if (ccbutils == null) {
-                return fallback;
+            Map<String, Object> callbackDecision = buildCallbackCloseDecisionFromState(zapid);
+            if (callbackDecision != null) {
+                return callbackDecision;
             }
 
-            WebDriver driver;
-            try {
-                driver = ccbutils.getWebDriver();
-            } catch (RuntimeException e) {
-                fallback.put("reason", "webdriver_lookup_failed");
-                fallback.put("error", e.getMessage());
-                return fallback;
-            }
-
-            if (!(driver instanceof JavascriptExecutor js)) {
-                fallback.put("reason", "javascript_executor_unavailable");
-                return fallback;
-            }
-
-            try {
-                driver.manage()
-                        .timeouts()
-                        .scriptTimeout(Duration.ofMillis(Math.max(2_500L, scriptTimeoutMs)));
-            } catch (RuntimeException e) {
-                LOGGER.debug("PTK closeContract could not set script timeout: {}", e.getMessage());
-            }
-
-            /*
-             * The source value lets PTK distinguish ZAP's browser-close path from
-             * user-driven automation calls. It is trusted only in combination with
-             * the ZAP callback URL/zapid and the WebDriver-controlled tab; PTK
-             * background/session lookup still decides whether the session is
-             * terminal and safe to close.
-             */
-            String script =
-                    """
-                    const done = arguments[arguments.length - 1];
-                    const bridgeTimeoutMs = arguments[0] || 10000;
-                    const explicitSessionId = arguments[1] || null;
-                    const explicitZapId = arguments[2] || null;
-                    const explicitCloseRequestId = arguments[3] || null;
-                    const callTimeoutMs = Math.max(2000, bridgeTimeoutMs);
-                    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-                    const timeoutAfter = (label, ms) => new Promise((resolve) => setTimeout(() => {
-                      resolve({ ok: false, code: label + '_timeout', status: 'unknown' });
-                    }, Math.max(500, ms || 3000)));
-                    const terminal = new Set(['none', 'completed', 'error', 'timeout', 'cancelled', 'engine_incomplete']);
-                    const statusOf = (value) => {
-                      const status = String(value && (value.status || value.completionStatus || value.summary && value.summary.status) || '').toLowerCase();
-                      return status;
-                    };
-                    const withCloseProof = (result, snapshot, requestAck) => {
-                      const proof = snapshot && typeof snapshot === 'object' ? snapshot : {};
-                      const publisherProof = proof.publisher && typeof proof.publisher === 'object'
-                        ? proof.publisher
-                        : (proof.zapPublisherDrain && typeof proof.zapPublisherDrain === 'object' ? proof.zapPublisherDrain : null);
-                      result.contractVersion = proof.contractVersion || null;
-                      if (!result.contractVersion && publisherProof) {
-                        result.contractVersion = 2;
-                      }
-                      const resultStatus = statusOf(result);
-                      const proofStatus = statusOf(proof);
-                      result.terminalSeen = proof.terminalSeen === true || terminal.has(resultStatus) || terminal.has(proofStatus);
-                      if (publisherProof) {
-                        result.publisher = publisherProof;
-                      }
-                      if (proof.closeReadiness && typeof proof.closeReadiness === 'object') {
-                        result.closeReadiness = proof.closeReadiness;
-                      } else if (publisherProof) {
-                        const publisherDrained = publisherProof.drained === true;
-                        result.closeReadiness = {
-                          safeToClose: result.terminalSeen === true && publisherDrained,
-                          reason: result.terminalSeen === true
-                            ? (publisherDrained ? 'terminal_publisher_drained' : 'publisher_not_drained')
-                            : 'not_terminal',
-                          terminal: result.terminalSeen === true,
-                          publisherDrained
-                        };
-                      }
-                      if (proof.closeRequestId) {
-                        result.closeRequestId = proof.closeRequestId;
-                      } else if (explicitCloseRequestId) {
-                        result.closeRequestId = explicitCloseRequestId;
-                      }
-                      result.closeRequestAck = proof.closeRequestAck === true || requestAck === true;
-                      return result;
-                    };
-                    const currentCloseUrl = String(location && location.href || '');
-                    const shouldStopForClose = (snapshot) => {
-                      const context = snapshot && snapshot.zapCloseContext && typeof snapshot.zapCloseContext === 'object'
-                        ? snapshot.zapCloseContext
-                        : {};
-                      return context.shouldStopSession === true;
-                    };
-                    const numberOf = (value) => {
-                      const parsed = Number(value);
-                      return Number.isFinite(parsed) ? parsed : 0;
-                    };
-                    const concreteEngineWork = (engine) => {
-                      if (!engine || typeof engine !== 'object') return false;
-                      const telemetry = engine.telemetry && typeof engine.telemetry === 'object'
-                        ? engine.telemetry
-                        : engine;
-                      const progress = telemetry.progress && typeof telemetry.progress === 'object'
-                        ? telemetry.progress
-                        : (engine.progress && typeof engine.progress === 'object' ? engine.progress : {});
-                      const state = String(telemetry.status || engine.state || '').toLowerCase();
-                      const phase = String(telemetry.phase || progress.phase || '').toLowerCase();
-                      const workCounters = [
-                        telemetry.activeTasks,
-                        telemetry.taskQueue,
-                        telemetry.requestQueue,
-                        telemetry.pendingPlans,
-                        telemetry.planning,
-                        telemetry.pendingCaptures,
-                        telemetry.pendingAutomationSeeds,
-                        telemetry.pendingHtmlDiscovery,
-                        telemetry.remaining,
-                        progress.remaining
-                      ];
-                      if (workCounters.some((value) => numberOf(value) > 0)) return true;
-                      const hasExplicitWorkCounters = workCounters.some((value) => value !== undefined && value !== null);
-                      const idle =
-                        telemetry.idle === true
-                        || telemetry.isIdle === true
-                        || progress.idle === true
-                        || progress.isIdle === true
-                        || state === 'idle'
-                        || phase === 'idle';
-                      if (idle && hasExplicitWorkCounters) return false;
-                      return telemetry.isRunning === true
-                        || telemetry.isScanRunning === true
-                        || state === 'running'
-                        || state === 'scanning';
-                    };
-                    const requiresTargetWindow = (engine) => {
-                      return engine
-                        && typeof engine === 'object'
-                        && engine.targetWindowRequired === true;
-                    };
-                    const hasConcreteBrowserWork = (snapshot) => {
-                      if (!snapshot || snapshot.ok !== true || !snapshot.engines || typeof snapshot.engines !== 'object') return true;
-                      return Object.values(snapshot.engines).some((engine) => {
-                        if (!requiresTargetWindow(engine)) return false;
-                        if (!concreteEngineWork(engine)) return false;
-                        return true;
-                      });
-                    };
-                    const hasAnyEngineWork = (snapshot) => {
-                      if (!snapshot || snapshot.ok !== true || !snapshot.engines || typeof snapshot.engines !== 'object') return true;
-                      return Object.values(snapshot.engines).some((engine) => concreteEngineWork(engine));
-                    };
-                    const withTimeout = (promise, label, ms) => Promise.race([
-                      Promise.resolve(promise),
-                      timeoutAfter(label, ms)
-                    ]);
-                    const refreshAutomationStatus = async () => {
-                      try {
-                        const nonce = document.getElementById('__ptk_automation_nonce__')?.dataset?.nonce || '';
-                        if (!nonce) return false;
-                        window.postMessage({
-                          source: 'ptk-extension',
-                          type: 'automation-status',
-                          enabled: true,
-                          nonce
-                        }, '*');
-                        await sleep(25);
-                        return true;
-                      } catch (_) {
-                        return false;
-                      }
-                    };
-                    const sendZapCloseMessage = (type, payload = {}, timeoutMs = 3000) => new Promise((resolve) => {
-                      try {
-                        const nonce = document.getElementById('__ptk_automation_nonce__')?.dataset?.nonce || '';
-                        if (!nonce) {
-                          resolve({ ok: false, error: 'zap_close_bridge_unavailable' });
-                          return;
-                        }
-                        const requestId = 'ptk-zap-close-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-                        let settled = false;
-                        let disabledFallback = null;
-                        const finish = (value) => {
-                          if (settled) return;
-                          settled = true;
-                          try { window.removeEventListener('message', onMessage); } catch (_) {}
-                          resolve(value || null);
-                        };
-                        const onMessage = (event) => {
-                          if (event.source !== window) return;
-                          const data = event.data || {};
-                          if (data.source !== 'ptk-extension') return;
-                          if (data.requestId !== requestId) return;
-                          if (data.nonce !== nonce) return;
-                          if (data.error === 'automation_disabled') {
-                            disabledFallback = data;
-                            return;
-                          }
-                          finish(data);
-                        };
-                        window.addEventListener('message', onMessage);
-                        window.postMessage({
-                          source: 'ptk-automation',
-                          nonce,
-                          requestId,
-                          type,
-                          sessionId: explicitSessionId,
-                          options: Object.assign({}, payload.options || {}, {
-                            sessionId: explicitSessionId,
-                            source: 'zap_browser_close',
-                            zapid: explicitZapId,
-                            currentUrl: currentCloseUrl
-                          }),
-                          wait: payload.wait,
-                          includeFindings: payload.includeFindings === true,
-                          limit: payload.limit
-                        }, '*');
-                        setTimeout(() => finish(disabledFallback || { ok: false, error: type + '_direct_timeout' }), Math.max(500, timeoutMs || 3000));
-                      } catch (error) {
-                        resolve({ ok: false, error: error && error.message || String(error) });
-                      }
-                    });
-                    const readProgressDirect = () => sendZapCloseMessage(
-                      'get-session-progress',
-                      { options: { sessionId: explicitSessionId, source: 'zap_browser_close', currentUrl: currentCloseUrl } },
-                      3000
-                    );
-                    const requestGracefulStopDirect = () => {
-                      if (!explicitCloseRequestId) {
-                        return Promise.resolve(null);
-                      }
-                      return sendZapCloseMessage(
-                        'session-end',
-                        {
-                          wait: false,
-                          options: {
-                            sessionId: explicitSessionId,
-                            source: 'zap_browser_close',
-                            zapid: explicitZapId,
-                            currentUrl: currentCloseUrl,
-                            closeRequestId: explicitCloseRequestId,
-                            closeRequestMode: 'graceful_stop_and_drain',
-                            closeRequestReason: 'browser_close_requested',
-                            stopTimeoutMs: bridgeTimeoutMs
-                          }
-                        },
-                        Math.max(3000, callTimeoutMs - 500)
-                      );
-                    };
-                    const buildAgentZapCloseOptions = () => ({
-                      sessionId: explicitSessionId,
-                      source: 'zap_browser_close',
-                      zapid: explicitZapId,
-                      currentUrl: currentCloseUrl,
-                      closeRequestId: explicitCloseRequestId,
-                      closeRequestMode: 'graceful_stop_and_drain',
-                      closeRequestReason: 'browser_close_requested',
-                      stopTimeoutMs: bridgeTimeoutMs,
-                      wait: false
-                    });
-                    const readAgentProgress = (agent) => Promise.race([
-                      Promise.resolve(agent.scanStatus(buildAgentZapCloseOptions())),
-                      timeoutAfter('agent_scan_status', 3000)
-                    ]);
-                    const requestAgentGracefulStop = (agent) => {
-                      if (!explicitCloseRequestId || !agent || typeof agent.stopScan !== 'function') {
-                        return Promise.resolve(null);
-                      }
-                      return Promise.race([
-                        Promise.resolve(agent.stopScan(buildAgentZapCloseOptions())),
-                        timeoutAfter('agent_session_end', Math.max(3000, callTimeoutMs - 500))
-                      ]);
-                    };
-                    (async () => {
-                      try {
-                        await refreshAutomationStatus();
-                        const automation = window.PTK_AUTOMATION;
-                        const trustedAutomation = automation && automation.bridgeId === 'ptk-automation-bridge'
-                          ? automation
-                          : null;
-                        if (trustedAutomation && typeof trustedAutomation.getSessionProgress === 'function') {
-                          const readProgress = () => typeof trustedAutomation.getSessionProgress === 'function'
-                            ? withTimeout(trustedAutomation.getSessionProgress({
-                                sessionId: explicitSessionId,
-                                source: 'zap_browser_close',
-                                zapid: explicitZapId,
-                                currentUrl: currentCloseUrl
-                              }), 'scan_status', 3000)
-                            : Promise.resolve(null);
-                          const requestGracefulStop = () => {
-                            if (!explicitCloseRequestId || typeof trustedAutomation.endSession !== 'function') {
-                              return Promise.resolve(null);
-                            }
-                            return withTimeout(trustedAutomation.endSession({
-                              sessionId: explicitSessionId,
-                              source: 'zap_browser_close',
-                              zapid: explicitZapId,
-                              currentUrl: currentCloseUrl,
-                              closeRequestId: explicitCloseRequestId,
-                              closeRequestMode: 'graceful_stop_and_drain',
-                              closeRequestReason: 'browser_close_requested',
-                              stopTimeoutMs: bridgeTimeoutMs,
-                              wait: false
-                            }), 'session_end', Math.max(3000, callTimeoutMs - 500));
-                          };
-                          const waitForTerminal = async (maxMs) => {
-                            const deadline = Date.now() + Math.max(0, maxMs || 0);
-                            let latest = null;
-                            while (Date.now() < deadline) {
-                              latest = await readProgress();
-                              const latestStatus = statusOf(latest);
-                              if (latest && latest.ok === true && terminal.has(latestStatus)) {
-                                return latest;
-                              }
-                              await sleep(500);
-                            }
-                            return latest;
-                          };
-                          const before = typeof automation.getSessionProgress === 'function'
-                            ? await readProgress()
-                            : null;
-                          if (before && before.error === 'automation_disabled') {
-                            await refreshAutomationStatus();
-                            const directBefore = await readProgressDirect();
-                            if (directBefore && directBefore.ok !== false) {
-                              Object.assign(before, directBefore);
-                            }
-                          }
-                          const statusBefore = statusOf(before);
-                          if (before && before.ok === true && terminal.has(statusBefore)) {
-                            done(withCloseProof({
-                              ok: true,
-                              participant: 'ptk',
-                              decision: 'safe_to_close',
-                              scanState: statusBefore,
-                              statusBefore,
-                              sessionId: explicitSessionId,
-                              reason: 'already_terminal',
-                              stopVia: 'automation_bridge'
-                            }, before, false));
-                            return;
-                          }
-                          if (before && before.ok === true) {
-                            const ownerClose = shouldStopForClose(before);
-                            const concreteWork = hasConcreteBrowserWork(before);
-                            const anyEngineWork = hasAnyEngineWork(before);
-                            if (!ownerClose) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'browser_tab_safe_to_close',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                reason: concreteWork ? 'non_owner_active_work' : 'no_active_browser_work',
-                                stopVia: 'automation_bridge'
-                              });
-                              return;
-                            }
-                            if (anyEngineWork && !explicitCloseRequestId) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'wait',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                stopVia: 'automation_bridge',
-                                reason: 'active_browser_work'
-                              });
-                              return;
-                            }
-                          }
-                          if (explicitCloseRequestId) {
-                            const stopResult = await requestGracefulStop();
-                            const after = await readProgress();
-                            const afterStatus = statusOf(after);
-                            if (after && after.ok === true && terminal.has(afterStatus)) {
-                              done(withCloseProof({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'safe_to_close',
-                                scanState: afterStatus,
-                                statusBefore,
-                                statusAfter: afterStatus,
-                                sessionId: explicitSessionId,
-                                reason: 'close_requested',
-                                stopRequested: true,
-                                closeRequestId: explicitCloseRequestId,
-                                closeRequestAck: true,
-                                stopVia: 'automation_bridge',
-                                stopResult
-                              }, after, true));
-                              return;
-                            }
-                            done({
-                              ok: true,
-                              participant: 'ptk',
-                              decision: 'wait',
-                              scanState: afterStatus || statusBefore || 'stopping',
-                              statusBefore,
-                              statusAfter: afterStatus || null,
-                              sessionId: explicitSessionId,
-                              stopRequested: true,
-                              closeRequestId: explicitCloseRequestId,
-                              closeRequestAck: true,
-                              stopVia: 'automation_bridge',
-                              reason: 'graceful_stop_requested',
-                              stopResult
-                            });
-                            return;
-                          }
-                          done({
-                            ok: true,
-                            participant: 'ptk',
-                            decision: 'wait',
-                            scanState: statusBefore || 'running',
-                            statusBefore,
-                            sessionId: explicitSessionId,
-                            stopRequested: false,
-                            stopVia: 'automation_bridge',
-                            reason: concreteWork ? 'active_browser_work' : 'owner_waiting_for_terminal'
-                          });
-                          return;
-                        }
-                        }
-                        {
-                          const before = await readProgressDirect();
-                          const statusBefore = statusOf(before);
-                          if (before && before.ok === true && terminal.has(statusBefore)) {
-                            done(withCloseProof({
-                              ok: true,
-                              participant: 'ptk',
-                              decision: 'safe_to_close',
-                              scanState: statusBefore,
-                              statusBefore,
-                              sessionId: explicitSessionId,
-                              reason: 'already_terminal',
-                              stopVia: 'direct_zap_close'
-                            }, before, false));
-                            return;
-                          }
-                          if (before && before.ok === true) {
-                            const ownerClose = shouldStopForClose(before);
-                            const concreteWork = hasConcreteBrowserWork(before);
-                            const anyEngineWork = hasAnyEngineWork(before);
-                            if (!ownerClose && !concreteWork) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'browser_tab_safe_to_close',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                stopVia: 'direct_zap_close',
-                                reason: 'no_active_browser_work'
-                              });
-                              return;
-                            }
-                            if (!ownerClose) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'browser_tab_safe_to_close',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                stopVia: 'direct_zap_close',
-                                reason: 'non_owner_active_work'
-                              });
-                              return;
-                            }
-                            if (ownerClose && anyEngineWork && !explicitCloseRequestId) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'wait',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                stopVia: 'direct_zap_close',
-                                reason: 'active_browser_work'
-                              });
-                              return;
-                            }
-                            if (explicitCloseRequestId) {
-                              const stopResult = await requestGracefulStopDirect();
-                              const after = await readProgressDirect();
-                              const afterStatus = statusOf(after);
-                              if (after && after.ok === true && terminal.has(afterStatus)) {
-                                done(withCloseProof({
-                                  ok: true,
-                                  participant: 'ptk',
-                                  decision: 'safe_to_close',
-                                  scanState: afterStatus,
-                                  statusBefore,
-                                  statusAfter: afterStatus,
-                                  sessionId: explicitSessionId,
-                                  stopRequested: true,
-                                  reason: 'close_requested',
-                                  closeRequestId: explicitCloseRequestId,
-                                  closeRequestAck: true,
-                                  stopVia: 'direct_zap_close',
-                                  stopResult
-                                }, after, true));
-                                return;
-                              }
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'wait',
-                                scanState: afterStatus || statusBefore || 'stopping',
-                                statusBefore,
-                                statusAfter: afterStatus || null,
-                                sessionId: explicitSessionId,
-                                stopRequested: true,
-                                stopVia: 'direct_zap_close',
-                                reason: 'graceful_stop_requested',
-                                closeRequestId: explicitCloseRequestId,
-                                closeRequestAck: true,
-                                stopResult
-                              });
-                              return;
-                            }
-                          }
-                          if (before && before.ok === true) {
-                            done({
-                              ok: true,
-                              participant: 'ptk',
-                              decision: 'wait',
-                              scanState: statusBefore || 'running',
-                              statusBefore,
-                              sessionId: explicitSessionId,
-                              stopRequested: false,
-                              stopVia: 'direct_zap_close',
-                              reason: hasConcreteBrowserWork(before) ? 'active_browser_work' : 'owner_waiting_for_terminal'
-                            });
-                            return;
-                          }
-                        }
-                        const agent = window.PTK_AGENT;
-                        if (!agent || typeof agent.scanStatus !== 'function') {
-                          done({
-                            participant: 'ptk',
-                            decision: 'not_applicable',
-                            scanState: 'unknown',
-                            reason: automation && !trustedAutomation ? 'ptk_automation_untrusted' : automation ? 'ptk_agent_unavailable' : 'ptk_automation_unavailable'
-                          });
-                          return;
-                        }
-                        const before = await Promise.race([
-                          readAgentProgress(agent),
-                          timeoutAfter('scan_status', 3000)
-                        ]);
-                        const statusBefore = String(before && before.status || '').toLowerCase();
-                        if (before && before.ok === true && terminal.has(statusBefore)) {
-                          done(withCloseProof({
-                            ok: true,
-                            participant: 'ptk',
-                            decision: 'safe_to_close',
-                            scanState: statusBefore,
-                            statusBefore,
-                            sessionId: before.sessionId || null,
-                            reason: 'already_terminal'
-                          }, before, false));
-                          return;
-                        }
-                        if (explicitCloseRequestId) {
-                          const stopResult = await requestAgentGracefulStop(agent);
-                          const after = await readAgentProgress(agent);
-                          const afterStatus = String(after && after.status || '').toLowerCase();
-                          if (after && after.ok === true && terminal.has(afterStatus)) {
-                            done(withCloseProof({
-                              ok: true,
-                              participant: 'ptk',
-                              decision: 'safe_to_close',
-                              scanState: afterStatus,
-                              statusBefore,
-                              statusAfter: afterStatus,
-                              sessionId: after.sessionId || before && before.sessionId || explicitSessionId,
-                              reason: 'close_requested',
-                              stopRequested: true,
-                              closeRequestId: explicitCloseRequestId,
-                              closeRequestAck: true,
-                              stopVia: 'ptk_agent',
-                              stopResult
-                            }, after, true));
-                            return;
-                          }
-                          done({
-                            ok: after && after.ok !== false,
-                            participant: 'ptk',
-                            decision: 'wait',
-                            scanState: afterStatus || statusBefore || 'stopping',
-                            statusBefore,
-                            statusAfter: afterStatus || null,
-                            sessionId: after && after.sessionId || before && before.sessionId || explicitSessionId,
-                            stopRequested: true,
-                            reason: 'graceful_stop_requested',
-                            closeRequestId: explicitCloseRequestId,
-                            closeRequestAck: true,
-                            stopVia: 'ptk_agent',
-                            stopResult
-                          });
-                          return;
-                        }
-                        done({
-                          ok: before && before.ok !== false,
-                          participant: 'ptk',
-                          decision: 'wait',
-                          scanState: statusBefore || 'running',
-                          statusBefore,
-                          sessionId: before && before.sessionId || null,
-                          stopRequested: false,
-                          reason: 'agent_running_without_terminal'
-                        });
-                      } catch (error) {
-                        done({
-                          ok: false,
-                          participant: 'ptk',
-                          decision: 'failed',
-                          scanState: 'unknown',
-                          reason: error && error.message || String(error)
-                        });
-                      }
-                    })();
-                    """;
-
-            String originalWindow = null;
-            List<String> windowHandles = new ArrayList<>();
-            String sessionId = sessionIdByZapId.get(zapid);
-            try {
-                originalWindow = driver.getWindowHandle();
-                windowHandles.addAll(driver.getWindowHandles());
-            } catch (RuntimeException e) {
-                LOGGER.debug("PTK closeContract could not enumerate windows: {}", e.getMessage());
-            }
-            if (windowHandles.isEmpty()) {
-                try {
-                    Object rawResult =
-                            js.executeAsyncScript(
-                                    script,
-                                    ptkBridgeTimeoutMs,
-                                    sessionId,
-                                    zapid,
-                                    closeRequestIdByZapId.get(zapid));
-                    return normalizeCloseScriptResult(rawResult, fallback, 0, null);
-                } catch (WebDriverException e) {
-                    fallback.put("reason", "webdriver_script_failed");
-                    fallback.put("error", e.getMessage());
-                    return fallback;
-                }
-            }
-
-            Map<String, Object> bestUnavailable = null;
-            for (int i = 0; i < windowHandles.size(); i++) {
-                String handle = windowHandles.get(i);
-                String currentUrl = null;
-                try {
-                    driver.switchTo().window(handle);
-                    currentUrl = driver.getCurrentUrl();
-                    Object rawResult =
-                            js.executeAsyncScript(
-                                    script,
-                                    ptkBridgeTimeoutMs,
-                                    sessionId,
-                                    zapid,
-                                    closeRequestIdByZapId.get(zapid));
-                    Map<String, Object> result =
-                            normalizeCloseScriptResult(rawResult, fallback, i, currentUrl);
-                    String decision = getStringField(result, "decision");
-                    String reason = getStringField(result, "reason");
-                    if (!"not_applicable".equals(decision)
-                            || (!"ptk_agent_unavailable".equals(reason)
-                                    && !"ptk_automation_unavailable".equals(reason))) {
-                        return result;
-                    }
-                    bestUnavailable = result;
-                } catch (WebDriverException e) {
-                    Map<String, Object> failed = new LinkedHashMap<>(fallback);
-                    failed.put("reason", "webdriver_script_failed");
-                    failed.put("error", e.getMessage());
-                    failed.put("windowIndex", i);
-                    if (currentUrl != null) {
-                        failed.put("windowUrl", currentUrl);
-                    }
-                    bestUnavailable = failed;
-                }
-            }
-            String targetUrl = targetUrlByZapId.get(zapid);
-            if (targetUrl != null) {
-                try {
-                    driver.switchTo().window(windowHandles.get(0));
-                    driver.navigate().to(targetUrl);
-                    Object rawResult =
-                            js.executeAsyncScript(
-                                    script,
-                                    ptkBridgeTimeoutMs,
-                                    sessionId,
-                                    zapid,
-                                    closeRequestIdByZapId.get(zapid));
-                    Map<String, Object> result =
-                            normalizeCloseScriptResult(
-                                    rawResult, fallback, windowHandles.size(), targetUrl);
-                    result.put("navigatedForClose", true);
-                    String decision = getStringField(result, "decision");
-                    String reason = getStringField(result, "reason");
-                    if (!"not_applicable".equals(decision)
-                            || (!"ptk_agent_unavailable".equals(reason)
-                                    && !"ptk_automation_unavailable".equals(reason))) {
-                        return result;
-                    }
-                    bestUnavailable = result;
-                } catch (WebDriverException e) {
-                    Map<String, Object> failed = new LinkedHashMap<>(fallback);
-                    failed.put("reason", "webdriver_navigation_for_close_failed");
-                    failed.put("error", e.getMessage());
-                    failed.put("windowUrl", targetUrl);
-                    bestUnavailable = failed;
-                }
-            }
-            if (originalWindow != null) {
-                try {
-                    driver.switchTo().window(originalWindow);
-                } catch (RuntimeException e) {
-                    LOGGER.debug("PTK closeContract could not restore window: {}", e.getMessage());
-                }
-            }
-            return bestUnavailable != null ? bestUnavailable : fallback;
+            fallback.put("reason", "page_visible_close_bridge_disabled");
+            fallback.put("remainingMs", remainingMs);
+            return fallback;
         }
 
-        private Map<String, Object> normalizeCloseScriptResult(
-                Object rawResult, Map<String, Object> fallback, int windowIndex, String windowUrl) {
-            if (rawResult instanceof Map<?, ?> rawMap) {
-                Map<String, Object> result = new LinkedHashMap<>();
-                rawMap.forEach(
-                        (key, value) -> {
-                            if (key != null) {
-                                result.put(String.valueOf(key), value);
-                            }
-                        });
-                result.put("windowIndex", windowIndex);
-                if (windowUrl != null && !windowUrl.isBlank()) {
-                    result.put("windowUrl", windowUrl);
-                }
-                if ("automation_disabled".equals(getStringField(result, "error"))
-                        || "automation_disabled".equals(getStringField(result, "reason"))) {
-                    result.put("ok", false);
-                    result.put("decision", "not_applicable");
-                    result.putIfAbsent("scanState", "callback");
-                    result.putIfAbsent("reason", "automation_disabled");
-                }
-                return result;
+        private Map<String, Object> buildCallbackCloseDecisionFromState(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return null;
             }
-            Map<String, Object> result = new LinkedHashMap<>(fallback);
-            result.put("reason", "unexpected_script_result");
-            result.put("resultType", rawResult != null ? rawResult.getClass().getName() : "null");
-            result.put("windowIndex", windowIndex);
-            if (windowUrl != null && !windowUrl.isBlank()) {
-                result.put("windowUrl", windowUrl);
+
+            boolean hasProgress = scanProgress.containsKey(zapid);
+            boolean hasSession = hasSessionId(zapid);
+            boolean hasCallback =
+                    callbackFirstSeenAtMs.containsKey(zapid)
+                            || configServedAtMsByZapId.containsKey(zapid)
+                            || hasProgress
+                            || hasSession
+                            || sessionSnapshot(zapid) != null;
+            if (!hasCallback) {
+                return null;
             }
-            return result;
+
+            Integer progress = scanProgress.get(zapid);
+            String status = scanStatus.get(zapid);
+            String scanState = status != null && !status.isBlank() ? status : "callback";
+            if (isSafeToClose(zapid)) {
+                Map<String, Object> decision = new LinkedHashMap<>();
+                decision.put("ok", true);
+                decision.put("participant", "ptk");
+                decision.put("decision", "safe_to_close");
+                decision.put("scanState", scanState);
+                decision.put("statusBefore", scanState);
+                decision.put("progress", progress != null ? progress : 0);
+                decision.put("stopRequested", false);
+                decision.put("reason", "already_terminal");
+                decision.put("source", "callback_progress");
+                String sessionId = sessionIdByZapId.get(zapid);
+                if (sessionId != null && !sessionId.isBlank()) {
+                    decision.put("sessionId", sessionId);
+                }
+                decision.put(
+                        "terminalSeen",
+                        terminalProgressLogged.contains(zapid)
+                                || isTerminalProgressValue(progress, scanState));
+                Boolean publisherDrained = publisherDrainedByZapId.get(zapid);
+                if (publisherDrained != null) {
+                    decision.put("publisher", Map.of("drained", publisherDrained));
+                }
+                PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+                if (snapshot != null) {
+                    if (snapshot.contractVersion() > 0) {
+                        decision.put("contractVersion", snapshot.contractVersion());
+                    }
+                    if (snapshot.completionStatus() != null
+                            && !snapshot.completionStatus().isBlank()) {
+                        decision.put("completionStatus", snapshot.completionStatus());
+                    }
+                    if (snapshot.releaseStatus() != null && !snapshot.releaseStatus().isBlank()) {
+                        decision.put("releaseStatus", snapshot.releaseStatus());
+                    }
+                    if (snapshot.closeRequest() != null) {
+                        decision.put("closeRequestId", snapshot.closeRequest().id());
+                        decision.put("closeRequestAck", snapshot.closeRequest().acknowledged());
+                    }
+                    decision.put(
+                            "closeReadiness",
+                            Map.of(
+                                    "safeToClose", snapshot.isV2PhysicallySafeToClose(),
+                                    "terminal", snapshot.terminalProgressSeen(),
+                                    "publisherDrained", snapshot.publisherDrained(),
+                                    "reason",
+                                            snapshot.isV2PhysicallySafeToClose()
+                                                    ? "terminal_publisher_drained"
+                                                    : "callback_state_not_drained"));
+                } else {
+                    String activeCloseRequestId = activeCloseRequestId(zapid);
+                    if (activeCloseRequestId != null && !activeCloseRequestId.isBlank()) {
+                        decision.put("closeRequestId", activeCloseRequestId);
+                        decision.put(
+                                "closeRequestAck",
+                                Boolean.TRUE.equals(closeRequestAckByZapId.get(zapid)));
+                    }
+                }
+                return decision;
+            }
+
+            if (hasSession || hasProgress) {
+                return buildCallbackProgressWaitDecision(zapid, "active_browser_work");
+            }
+            return buildCallbackProgressWaitDecision(zapid, "callback_acquired_no_session");
         }
 
         private void logCloseContractDecision(
@@ -3769,7 +3271,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                 }
                 Object windowUrl = diagnostics.get("windowUrl");
                 if (windowUrl != null) {
-                    summary.append(" windowUrl=").append(windowUrl);
+                    summary.append(" windowUrl=").append(redactZapCallbackValueForLog(windowUrl));
                 }
             }
 
@@ -3839,7 +3341,11 @@ public class ExtensionPtk extends ExtensionAdaptor
                     .append(" method=")
                     .append(msg.getRequestHeader().getMethod())
                     .append(" uri=")
-                    .append(msg.getRequestHeader().getURI())
+                    .append(
+                            redactZapCallbackValueForLog(
+                                    msg.getRequestHeader().getURI() != null
+                                            ? msg.getRequestHeader().getURI().toString()
+                                            : ""))
                     .append(" zapid=")
                     .append(zapid)
                     .append(" browserid=")
@@ -3891,13 +3397,14 @@ public class ExtensionPtk extends ExtensionAdaptor
                 summary.append(" elapsedMs=").append(elapsedMs);
             }
             if (extra != null) {
-                extra.forEach(
-                        (key, value) -> {
-                            if (key == null || key.isBlank() || value == null) {
-                                return;
-                            }
-                            summary.append(" ").append(key).append("=").append(value);
-                        });
+                redactZapCallbackMapForLog(extra)
+                        .forEach(
+                                (key, value) -> {
+                                    if (key == null || key.isBlank() || value == null) {
+                                        return;
+                                    }
+                                    summary.append(" ").append(key).append("=").append(value);
+                                });
             }
             LOGGER.debug(summary.toString());
         }
@@ -3919,16 +3426,17 @@ public class ExtensionPtk extends ExtensionAdaptor
             }
             summary.append(" event=").append(event != null && !event.isBlank() ? event : "unknown");
             if (url != null && !url.isBlank()) {
-                summary.append(" url=").append(url);
+                summary.append(" url=").append(redactZapCallbackUrlForLog(url));
             }
             if (extra != null) {
-                extra.forEach(
-                        (key, value) -> {
-                            if (key == null || key.isBlank() || value == null) {
-                                return;
-                            }
-                            summary.append(" ").append(key).append("=").append(value);
-                        });
+                redactZapCallbackMapForLog(extra)
+                        .forEach(
+                                (key, value) -> {
+                                    if (key == null || key.isBlank() || value == null) {
+                                        return;
+                                    }
+                                    summary.append(" ").append(key).append("=").append(value);
+                                });
             }
             LOGGER.info(summary.toString());
         }
@@ -4027,16 +3535,17 @@ public class ExtensionPtk extends ExtensionAdaptor
                 summary.append(" browserid=").append(browserid);
             }
             if (url != null && !url.isBlank()) {
-                summary.append(" url=").append(url);
+                summary.append(" url=").append(redactZapCallbackUrlForLog(url));
             }
             if (extra != null) {
-                extra.forEach(
-                        (key, value) -> {
-                            if (key == null || key.isBlank() || value == null) {
-                                return;
-                            }
-                            summary.append(" ").append(key).append("=").append(value);
-                        });
+                redactZapCallbackMapForLog(extra)
+                        .forEach(
+                                (key, value) -> {
+                                    if (key == null || key.isBlank() || value == null) {
+                                        return;
+                                    }
+                                    summary.append(" ").append(key).append("=").append(value);
+                                });
             }
             LOGGER.info(summary.toString());
         }
@@ -4071,13 +3580,14 @@ public class ExtensionPtk extends ExtensionAdaptor
                 summary.append(" browserid=").append(browserid);
             }
             if (extra != null) {
-                extra.forEach(
-                        (key, value) -> {
-                            if (key == null || key.isBlank() || value == null) {
-                                return;
-                            }
-                            summary.append(" ").append(key).append("=").append(value);
-                        });
+                redactZapCallbackMapForLog(extra)
+                        .forEach(
+                                (key, value) -> {
+                                    if (key == null || key.isBlank() || value == null) {
+                                        return;
+                                    }
+                                    summary.append(" ").append(key).append("=").append(value);
+                                });
             }
             LOGGER.info(summary.toString());
         }
@@ -4107,7 +3617,8 @@ public class ExtensionPtk extends ExtensionAdaptor
                 String zapid = getStringField(requestData, "zapid");
                 String browserid = getStringField(requestData, "browserid");
                 rememberBrowserId(zapid, browserid);
-                rememberConfigMode(zapid, getParam().isAutomatedScanningEnabled());
+                boolean zapAutomationEnabled = getParam().isZapAutomationEnabled();
+                rememberConfigMode(zapid, zapAutomationEnabled);
                 markCallbackStart(zapid);
                 logBrowserEvidence(zapid, browserid, "config_callback", null, null);
                 if (zapid != null && contractCallbackLogged.add(zapid + ":config")) {
@@ -4119,9 +3630,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                                     "path",
                                     "config",
                                     "mode",
-                                    getParam().isAutomatedScanningEnabled()
-                                            ? "automated"
-                                            : "manual"));
+                                    zapAutomationEnabled ? "automated" : "manual"));
                 }
                 String configJson = getConfigJsonForRequest(requestData, cbContext);
                 msg.getResponseBody().setBody(configJson);
@@ -4129,7 +3638,8 @@ public class ExtensionPtk extends ExtensionAdaptor
                 Map<String, Object> configResponse = parseRequestBody(configJson);
                 Map<String, Object> configServedFields = new LinkedHashMap<>();
                 configServedFields.put("durationMs", finishedAt - startedAt);
-                configServedFields.put("automated", getParam().isAutomatedScanningEnabled());
+                configServedFields.put("automated", zapAutomationEnabled);
+                configServedFields.put("activeScanRule", getParam().isActiveScanRuleEnabled());
                 String targetUrl = getStringField(requestData, "targetUrl");
                 if (targetUrl != null && !targetUrl.isBlank()) {
                     configServedFields.put("targetUrl", targetUrl);
@@ -4141,6 +3651,9 @@ public class ExtensionPtk extends ExtensionAdaptor
                 String seedScope = getStringField(configResponse, "zapHistorySeedScope");
                 if (seedScope != null && !seedScope.isBlank()) {
                     configServedFields.put("zapHistorySeedScope", seedScope);
+                }
+                if (zapid != null && !zapid.isBlank()) {
+                    configServedAtMsByZapId.put(zapid, finishedAt);
                 }
                 logContractPhase("config_served", zapid, browserid, configServedFields);
                 Long sinceFirstMs = getElapsedSinceFirst(zapid, finishedAt);
@@ -4619,7 +4132,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                 LOGGER.debug(
                         "PTK browserLaunched without zapid browserid={} url={}",
                         browserid,
-                        currentUrl);
+                        redactZapCallbackUrlForLog(currentUrl));
                 return;
             }
 
@@ -4647,37 +4160,351 @@ public class ExtensionPtk extends ExtensionAdaptor
                     Map.of("source", "browserLaunched"));
             long start = System.currentTimeMillis();
             logTimingSummary(zapid, browserid, "browser_launch.begin", null, Map.of());
+            Map<String, Object> runner =
+                    openZapCallbackRunner(ssutils.getWebDriver(), browserid, zapid, currentUrl);
+            if (!runner.isEmpty()) {
+                logContractPhase("browser_launch_runner", zapid, browserid, runner);
+            }
             Map<String, Object> handshake =
-                    awaitCallbackBootstrapHandshake(ssutils.getWebDriver(), zapid, currentUrl);
+                    awaitCallbackBootstrapHandshake(
+                            ssutils.getWebDriver(),
+                            zapid,
+                            currentUrl,
+                            Boolean.TRUE.equals(runner.get("opened")));
             long waitedMs = System.currentTimeMillis() - start;
-            boolean callbackSeen = Boolean.TRUE.equals(handshake.get("handshakeSeen"));
+            boolean bootstrapReady = Boolean.TRUE.equals(handshake.get("handshakeSeen"));
+            boolean callbackSeen = hasCallbackAcquired(zapid);
             Map<String, Object> extra = new LinkedHashMap<>();
             extra.put("waitedMs", waitedMs);
             extra.put("callbackSeen", callbackSeen);
+            extra.put("bootstrapReady", bootstrapReady);
+            extra.putAll(runner);
             extra.putAll(handshake);
             logContractPhase("browser_launch_callback_handshake", zapid, browserid, handshake);
+            if (!bootstrapReady && !isDeferredCallbackBootstrap(handshake)) {
+                String state = String.valueOf(handshake.getOrDefault("handshakeState", ""));
+                String phase =
+                        "callback_acquired_no_config".equals(state)
+                                ? "callback_acquired_no_config"
+                                : "callback_bootstrap_failed";
+                Map<String, Object> failure = new LinkedHashMap<>();
+                failure.put("state", state != null && !state.isBlank() ? state : "unknown");
+                failure.put("waitedMs", waitedMs);
+                failure.put(
+                        "callbackReloadAttempts",
+                        handshake.getOrDefault("callbackReloadAttempts", 0));
+                logContractPhase(phase, zapid, browserid, failure);
+            }
             logTimingSummary(zapid, browserid, "browser_launch.end", null, extra);
         }
 
         private Map<String, Object> awaitCallbackBootstrapHandshake(
-                WebDriver driver, String zapid, String callbackUrl) {
+                WebDriver driver, String zapid, String callbackUrl, boolean runnerOpened) {
             if (!isZapCallbackBootstrapUrl(callbackUrl)) {
                 return new PtkCloseContract.CallbackBootstrapHandshakeResult(
-                                hasCallbackHandshake(zapid),
+                                hasCallbackBootstrapReady(zapid),
                                 0L,
                                 0,
                                 "java_callback_not_applicable",
                                 false,
+                                0,
                                 null,
-                                false)
+                                false,
+                                callbackBootstrapState(zapid))
                         .toLogFields();
             }
-            return PtkCloseContract.awaitCallbackBootstrapHandshake(
-                            () -> hasCallbackHandshake(zapid),
-                            () -> reloadZapCallbackBootstrapPage(driver, callbackUrl),
-                            System::currentTimeMillis,
-                            Thread::sleep)
+            return new PtkCloseContract.CallbackBootstrapHandshakeResult(
+                            hasCallbackBootstrapReady(zapid),
+                            0L,
+                            0,
+                            runnerOpened
+                                    ? "java_callback_runner_deferred"
+                                    : "java_callback_deferred",
+                            false,
+                            0,
+                            null,
+                            false,
+                            callbackBootstrapState(zapid))
                     .toLogFields();
+        }
+
+        private boolean isDeferredCallbackBootstrap(Map<String, Object> handshake) {
+            if (handshake == null) {
+                return false;
+            }
+            String mode = String.valueOf(handshake.get("handshakeMode"));
+            return "java_callback_deferred".equals(mode)
+                    || "java_callback_runner_deferred".equals(mode);
+        }
+
+        private Map<String, Object> openZapCallbackRunner(
+                WebDriver driver, String browserid, String zapid, String callbackUrl) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            String skipReason =
+                    ExtensionPtk.zapCallbackRunnerSkipReason(
+                            getParam().isZapAutomationEnabled(), browserid, callbackUrl);
+            if ("not_zap_callback".equals(skipReason)) {
+                return result;
+            }
+            result.put("runnerAttempted", false);
+            if (!skipReason.isBlank()) {
+                result.put("runnerSkipped", skipReason);
+                return result;
+            }
+            if (!(driver instanceof JavascriptExecutor js)) {
+                result.put("runnerSkipped", "javascript_executor_unavailable");
+                return result;
+            }
+
+            Path chromiumPath = getPtkChromiumExtensionPath();
+            if (!Files.isDirectory(chromiumPath)) {
+                result.put("runnerSkipped", "chromium_extension_path_missing");
+                return result;
+            }
+
+            String runnerUrl = buildChromiumZapRunnerUrl(chromiumPath);
+            if (runnerUrl.isBlank()) {
+                result.put("runnerSkipped", "runner_url_unavailable");
+                return result;
+            }
+
+            result.put("runnerAttempted", true);
+            result.put("runnerExtensionId", chromiumExtensionIdForPath(chromiumPath));
+            String originalWindow = null;
+            Set<String> windowsBefore = Set.of();
+            try {
+                originalWindow = driver.getWindowHandle();
+                windowsBefore = new LinkedHashSet<>(driver.getWindowHandles());
+            } catch (RuntimeException e) {
+                LOGGER.debug("PTK runner could not read current window: {}", e.getMessage());
+            }
+
+            try {
+                driver.switchTo().newWindow(WindowType.TAB);
+                driver.navigate().to(runnerUrl);
+                result.put("opened", true);
+                result.put("runnerOpenMode", "webdriver_new_window");
+                String runnerWindow = driver.getWindowHandle();
+                if (runnerWindow == null || runnerWindow.isBlank()) {
+                    runnerWindow = findNewWebDriverWindow(driver, windowsBefore, originalWindow);
+                }
+                if (runnerWindow != null && !runnerWindow.isBlank()) {
+                    result.put("runnerWindowObserved", true);
+                    driver.switchTo().window(runnerWindow);
+                    Object runnerResponse = invokeZapRunnerScan(js);
+                    addRunnerInvocationResult(result, runnerResponse);
+                    boolean callbackReloaded = false;
+                    if (!Boolean.TRUE.equals(result.get("runnerMessageOk"))
+                            && originalWindow != null
+                            && !originalWindow.isBlank()) {
+                        driver.switchTo().window(originalWindow);
+                        reloadZapCallbackBootstrapPage(driver, callbackUrl);
+                        result.put("runnerCallbackReloaded", true);
+                        callbackReloaded = true;
+                    }
+                    result.putAll(
+                            closeZapCallbackRunnerWindow(
+                                    driver,
+                                    runnerWindow,
+                                    originalWindow,
+                                    callbackReloaded
+                                            ? "runner_message_failed_after_callback_reload"
+                                            : "runner_message_completed"));
+                } else {
+                    result.put("runnerWindowObserved", false);
+                }
+            } catch (RuntimeException e) {
+                result.put("opened", false);
+                result.put("runnerError", e.getMessage());
+            } finally {
+                if (originalWindow != null) {
+                    try {
+                        driver.switchTo().window(originalWindow);
+                    } catch (RuntimeException e) {
+                        LOGGER.debug(
+                                "PTK runner could not restore callback window: {}", e.getMessage());
+                    }
+                }
+            }
+            return result;
+        }
+
+        private Map<String, Object> closeZapCallbackRunnerWindow(
+                WebDriver driver, String runnerWindow, String restoreWindow, String reason) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            if (driver == null || runnerWindow == null || runnerWindow.isBlank()) {
+                return result;
+            }
+
+            result.put("runnerCloseAttempted", true);
+            result.put(
+                    "runnerCloseReason",
+                    reason != null && !reason.isBlank() ? reason : "runner_message_completed");
+            String currentWindow = null;
+            try {
+                currentWindow = driver.getWindowHandle();
+            } catch (RuntimeException e) {
+                LOGGER.debug(
+                        "PTK runner could not read active window before close: {}", e.getMessage());
+            }
+
+            try {
+                if (!webDriverWindowExists(driver, runnerWindow)) {
+                    result.put("runnerClosed", true);
+                    result.put("runnerCloseAlreadyClosed", true);
+                    return result;
+                }
+                driver.switchTo().window(runnerWindow);
+                driver.close();
+                result.put("runnerClosed", true);
+            } catch (RuntimeException e) {
+                result.put("runnerClosed", false);
+                result.put("runnerCloseError", redactZapCallbackUrlForLog(e.getMessage()));
+            } finally {
+                restoreWebDriverWindow(driver, restoreWindow, currentWindow);
+            }
+            return result;
+        }
+
+        private boolean webDriverWindowExists(WebDriver driver, String windowHandle) {
+            if (driver == null || windowHandle == null || windowHandle.isBlank()) {
+                return false;
+            }
+            try {
+                for (String handle : driver.getWindowHandles()) {
+                    if (windowHandle.equals(handle)) {
+                        return true;
+                    }
+                }
+            } catch (RuntimeException e) {
+                LOGGER.debug(
+                        "PTK runner could not inspect windows before close: {}", e.getMessage());
+            }
+            return false;
+        }
+
+        private void restoreWebDriverWindow(
+                WebDriver driver, String preferredWindow, String fallbackWindow) {
+            if (driver == null) {
+                return;
+            }
+            String window = firstNonBlank(preferredWindow, fallbackWindow);
+            if (window == null || window.isBlank()) {
+                return;
+            }
+            try {
+                if (webDriverWindowExists(driver, window)) {
+                    driver.switchTo().window(window);
+                }
+            } catch (RuntimeException e) {
+                LOGGER.debug("PTK runner could not restore window after close: {}", e.getMessage());
+            }
+        }
+
+        private String firstNonBlank(String first, String second) {
+            if (first != null && !first.isBlank()) {
+                return first;
+            }
+            if (second != null && !second.isBlank()) {
+                return second;
+            }
+            return null;
+        }
+
+        private String findNewWebDriverWindow(
+                WebDriver driver, Set<String> windowsBefore, String originalWindow) {
+            if (driver == null) {
+                return null;
+            }
+            Set<String> before = windowsBefore != null ? windowsBefore : Set.of();
+            try {
+                for (String handle : driver.getWindowHandles()) {
+                    if (handle == null || handle.isBlank()) {
+                        continue;
+                    }
+                    if (!before.contains(handle)) {
+                        return handle;
+                    }
+                }
+                for (String handle : driver.getWindowHandles()) {
+                    if (handle != null && !handle.isBlank() && !handle.equals(originalWindow)) {
+                        return handle;
+                    }
+                }
+            } catch (RuntimeException e) {
+                LOGGER.debug("PTK runner could not inspect WebDriver windows: {}", e.getMessage());
+            }
+            return null;
+        }
+
+        private Object invokeZapRunnerScan(JavascriptExecutor js) {
+            String script =
+                    """
+                    const done = arguments[arguments.length - 1];
+                    const timeoutMs = Math.max(500, Number(arguments[0]) || 2000);
+                    let settled = false;
+                    const finish = (value) => {
+                      if (settled) return;
+                      settled = true;
+                      done(value || null);
+                    };
+                    try {
+                      const chromeRuntime = globalThis.chrome && globalThis.chrome.runtime;
+                      const browserRuntime = globalThis.browser && globalThis.browser.runtime;
+                      const runtime = chromeRuntime || browserRuntime || null;
+                      if (!runtime || typeof runtime.sendMessage !== 'function') {
+                        finish({ ok: false, observed: false, reason: 'runtime_unavailable' });
+                        return;
+                      }
+                      const payload = {
+                        channel: 'ptk_extension_zap_runner',
+                        type: 'scan_callback_tabs',
+                        reason: 'webdriver_runner',
+                        requestId: 'zap-runner-webdriver-' + Date.now()
+                      };
+                      if (chromeRuntime && typeof chromeRuntime.sendMessage === 'function') {
+                        chromeRuntime.sendMessage(payload, (response) => {
+                          const lastError = chromeRuntime.lastError && chromeRuntime.lastError.message;
+                          finish(response || { ok: false, observed: false, reason: lastError || 'empty_response' });
+                        });
+                      } else {
+                        Promise.resolve(browserRuntime.sendMessage(payload)).then(
+                          (response) => finish(response),
+                          (error) => finish({ ok: false, observed: false, reason: error && error.message || String(error) })
+                        );
+                      }
+                      setTimeout(() => finish({ ok: false, observed: false, reason: 'runner_message_timeout' }), timeoutMs);
+                    } catch (error) {
+                      finish({ ok: false, observed: false, reason: error && error.message || String(error) });
+                    }
+                    """;
+            return js.executeAsyncScript(script, 8000);
+        }
+
+        private void addRunnerInvocationResult(Map<String, Object> result, Object runnerResponse) {
+            if (result == null) {
+                return;
+            }
+            if (!(runnerResponse instanceof Map<?, ?> response)) {
+                result.put("runnerMessageOk", false);
+                result.put("runnerObserved", false);
+                result.put("runnerMessageReason", "empty_response");
+                return;
+            }
+            result.put("runnerMessageOk", Boolean.TRUE.equals(response.get("ok")));
+            result.put("runnerObserved", Boolean.TRUE.equals(response.get("observed")));
+            Object reason = response.get("reason");
+            if (reason instanceof String text && !text.isBlank()) {
+                result.put("runnerMessageReason", text);
+            }
+        }
+
+        private boolean isChromiumBrowserId(String browserid) {
+            if (browserid == null || browserid.isBlank()) {
+                return false;
+            }
+            String normalized = browserid.toLowerCase();
+            return normalized.contains("chrome") || normalized.contains("edge");
         }
 
         private boolean isZapCallbackBootstrapUrl(String url) {
@@ -4693,11 +4520,35 @@ public class ExtensionPtk extends ExtensionAdaptor
             driver.navigate().to(callbackUrl);
         }
 
-        private boolean hasCallbackHandshake(String zapid) {
+        private boolean hasCallbackBootstrapReady(String zapid) {
+            return zapid != null
+                    && !zapid.isBlank()
+                    && (configServedAtMsByZapId.containsKey(zapid)
+                            || sessionIdByZapId.containsKey(zapid));
+        }
+
+        private boolean hasCallbackAcquired(String zapid) {
             return zapid != null
                     && !zapid.isBlank()
                     && (callbackFirstSeenAtMs.containsKey(zapid)
-                            || scanProgress.containsKey(zapid));
+                            || scanProgress.containsKey(zapid)
+                            || configAppliedLogged.contains(zapid));
+        }
+
+        private String callbackBootstrapState(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return "callback_not_seen";
+            }
+            if (sessionIdByZapId.containsKey(zapid)) {
+                return "session_started";
+            }
+            if (configServedAtMsByZapId.containsKey(zapid)) {
+                return "config_served";
+            }
+            if (hasCallbackAcquired(zapid)) {
+                return "callback_acquired_no_config";
+            }
+            return "callback_not_seen";
         }
 
         @Override
@@ -4879,7 +4730,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                 LOGGER.warn(
                         "PTK browserExiting: no progress for UUID {} url={}",
                         ccbutils.getUuid(),
-                        currentUrl);
+                        redactZapCallbackUrlForLog(currentUrl));
                 return;
             }
             if (!hasSessionId(zapid) && isWaitingForSessionStart(zapid)) {

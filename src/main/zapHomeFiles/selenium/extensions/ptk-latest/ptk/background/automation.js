@@ -1070,6 +1070,18 @@ export class ptk_automation {
         return this._isActiveSessionStatus(session.status)
     }
 
+    _getFetchedZapConfigMode() {
+        const resolved = this.zap?._resolvedConfig || null
+        if (!resolved || resolved.fetchedAt == null || !Number.isFinite(Number(resolved.fetchedAt))) {
+            return null
+        }
+        const mode = String(resolved.mode || '').trim().toLowerCase()
+        if (mode === 'auto' || mode === 'manual') {
+            return mode
+        }
+        return null
+    }
+
     _getContentRuntimeProfile({ tabId = null, frameId = 0, url = '', zapTargetObserved = false } = {}) {
         const safeUrl = typeof url === 'string' ? url : ''
         const isTopFrame = frameId === 0
@@ -1082,10 +1094,12 @@ export class ptk_automation {
         const hasActiveSession = !!activeSession && this._isActiveSessionStatus(activeSession.status)
         const activeSessionInScope = !hasActiveSession || isBootstrapUrl || this._sessionUrlInScope(activeSession, safeUrl)
         const hasZapSession = hasActiveSession && activeSession.source === 'zap' && activeSessionInScope
+        const fetchedZapConfigMode = this._getFetchedZapConfigMode()
+        const zapAutomationRuntimeAllowed = fetchedZapConfigMode !== 'manual' || hasZapSession
         const isDetectedAutomationTab = Number.isInteger(tabId) && Number.isInteger(detectedTabId) && tabId === detectedTabId
         const detectedAutomationTabInScope = isDetectedAutomationTab
             && (isBootstrapUrl || this._detectedZapTabUrlInScope(detectedPayload, safeUrl))
-        const isZapAutomationTab = hasZapSession || detectedAutomationTabInScope
+        const isZapAutomationTab = zapAutomationRuntimeAllowed && (hasZapSession || detectedAutomationTabInScope)
         const isPtkChildTab = this._isPtkChildTab(tabId)
         const ptkChildTabInScope = !isPtkChildTab || isBootstrapUrl || this._ptkChildTabUrlInScope(tabId, safeUrl)
         const isZapActive = transport?.isActive?.() === true
@@ -1120,7 +1134,7 @@ export class ptk_automation {
         }
 
         if (!isTopFrame) {
-            if (isZapAutomationTab || isBootstrapUrl) {
+            if (zapAutomationRuntimeAllowed && (isZapAutomationTab || isBootstrapUrl)) {
                 return {
                     mode: isZapActive || isZapAutomationTab ? CONTENT_RUNTIME_MODE_AUTOMATION : CONTENT_RUNTIME_MODE_PENDING,
                     script: CONTENT_RUNTIME_SCRIPT_NONE,
@@ -1134,7 +1148,7 @@ export class ptk_automation {
             }
         }
 
-        if (isZapActive && (isZapAutomationTab || isBootstrapUrl)) {
+        if (isZapActive && (isZapAutomationTab || (zapAutomationRuntimeAllowed && isBootstrapUrl))) {
             return {
                 mode: CONTENT_RUNTIME_MODE_AUTOMATION,
                 script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
@@ -1142,7 +1156,7 @@ export class ptk_automation {
             }
         }
 
-        if (isZapActive && isTopFrame && zapTargetObserved) {
+        if (isZapActive && isTopFrame && zapAutomationRuntimeAllowed && zapTargetObserved) {
             return {
                 mode: CONTENT_RUNTIME_MODE_AUTOMATION,
                 script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
@@ -1166,10 +1180,18 @@ export class ptk_automation {
             }
         }
 
+        if (isTopFrame && isZapActive && fetchedZapConfigMode === 'manual') {
+            return {
+                mode: CONTENT_RUNTIME_MODE_MANUAL,
+                script: CONTENT_RUNTIME_SCRIPT_MANUAL,
+                reason: 'zap_manual_config'
+            }
+        }
+
         if (
             isTopFrame
             && (
-                isZapActive
+                (isZapActive && zapAutomationRuntimeAllowed)
                 || this._hasActiveSessionInAnyTab()
                 || this._hasBrowserEngineScanRunningInAnyTab()
             )
@@ -1272,20 +1294,6 @@ export class ptk_automation {
         }
         let zapTargetObserved = false
         if (currentTargetUrl) {
-            try {
-                await this.zap?.transport?.recoverCallbackFromTargetBootstrap?.({
-                    tabId,
-                    frameId,
-                    url: currentTargetUrl
-                })
-            } catch (error) {
-                console.warn('[PTK Automation] Failed to recover ZAP callback from target bootstrap', {
-                    tabId,
-                    frameId,
-                    url,
-                    error: error?.message || String(error)
-                })
-            }
             try {
                 zapTargetObserved = this.zap?.transport?.processContentObservedTargetUrl?.({
                     tabId,

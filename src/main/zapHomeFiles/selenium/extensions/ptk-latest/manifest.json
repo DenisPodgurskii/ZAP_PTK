@@ -51,7 +51,6 @@
         "storage",
         "unlimitedStorage",
         "tabs",
-        "history",
         "webNavigation",
         "webRequest",
         "background",

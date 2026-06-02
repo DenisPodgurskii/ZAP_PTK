@@ -36,6 +36,61 @@ logZapLifecycle('background.module.evaluated', {
     manifestVersion: browser?.runtime?.getManifest?.()?.manifest_version || null
 })
 
+const ZAP_RUNNER_PATH = '/ptk/internal/zap-runner.html'
+
+function parseExtensionUrl(value) {
+    if (typeof value !== 'string' || !value) return null
+    try {
+        const parsed = new URL(value)
+        if (parsed.protocol !== 'chrome-extension:' && parsed.protocol !== 'moz-extension:') {
+            return null
+        }
+        if (parsed.pathname !== ZAP_RUNNER_PATH || parsed.search || parsed.hash) {
+            return null
+        }
+        return parsed
+    } catch (_) {
+        return null
+    }
+}
+
+function zapRunnerSenderMetadata(sender = {}) {
+    const senderUrl = parseExtensionUrl(sender?.url)
+    const tabUrl = parseExtensionUrl(sender?.tab?.url)
+    return {
+        senderIdMatches: Boolean(browser?.runtime?.id && sender?.id === browser.runtime.id),
+        frameId: Number.isInteger(sender?.frameId) ? sender.frameId : null,
+        senderProtocol: senderUrl?.protocol || null,
+        senderPath: senderUrl?.pathname || null,
+        hasTab: Boolean(sender?.tab),
+        tabId: Number.isInteger(sender?.tab?.id) ? sender.tab.id : null,
+        tabProtocol: tabUrl?.protocol || null,
+        tabPath: tabUrl?.pathname || null,
+        tabUrlAvailable: typeof sender?.tab?.url === 'string'
+    }
+}
+
+function isTrustedZapRunnerSender(sender = {}) {
+    if (!browser?.runtime?.id || sender?.id !== browser.runtime.id) return false
+    if (sender?.frameId !== 0) return false
+
+    const parsed = parseExtensionUrl(sender?.url)
+    if (!parsed) return false
+    if (parsed.protocol === 'chrome-extension:' && parsed.hostname !== browser.runtime.id) {
+        return false
+    }
+
+    if (typeof sender?.tab?.url === 'string' && sender.tab.url) {
+        const tabUrl = parseExtensionUrl(sender.tab.url)
+        if (!tabUrl) return false
+        if (tabUrl.protocol !== parsed.protocol || tabUrl.hostname !== parsed.hostname) {
+            return false
+        }
+    }
+
+    return true
+}
+
 browser.runtime.onStartup.addListener(() => {
     const snapshot = armZapStartupPending(worker, { reason: 'runtime.onStartup' })
 
@@ -159,6 +214,41 @@ export class ptk_app {
     }
 
     onMessage(message, sender, sendResponse) {
+        if (message?.channel === "ptk_extension_zap_runner" && message?.type === "scan_callback_tabs") {
+            if (!isTrustedZapRunnerSender(sender)) {
+                const metadata = zapRunnerSenderMetadata(sender)
+                console.warn(
+                    '[PTK ZAP] PTK_CONTRACT phase=runner_message_rejected reason=not_top_level_extension_page',
+                    metadata
+                )
+                logZapLifecycle('runner_message_rejected', {
+                    reason: 'not_top_level_extension_page',
+                    ...metadata
+                })
+                return Promise.resolve({
+                    ok: false,
+                    observed: false,
+                    reason: 'untrusted_runner_sender',
+                    requestId: message.requestId
+                })
+            }
+
+            return this.ready.then(async () => {
+                const transport = this.automation?.zap?.transport
+                const observed = await transport?.scanOpenTabsForDirectCallbackUrls?.('zap.runner')
+                return {
+                    ok: true,
+                    observed: observed === true,
+                    requestId: message.requestId
+                }
+            }).catch((error) => ({
+                ok: false,
+                observed: false,
+                reason: error?.message || String(error),
+                requestId: message.requestId
+            }))
+        }
+
         if (message?.channel === "ptk_content2background_zap" && message?.type === "zap_callback_url") {
             const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
             const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0

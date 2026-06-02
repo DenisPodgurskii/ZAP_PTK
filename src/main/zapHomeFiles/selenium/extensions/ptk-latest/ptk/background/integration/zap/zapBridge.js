@@ -2,10 +2,11 @@
 
 import zapTransport, {
     DAST_HISTORY_SEED_MAX_RESULTS,
-    POST_CALLBACK_CANDIDATE_MAX_RESULTS,
-    isSameOriginAndPathScoped
+    isSameOriginAndPathScoped,
+    redactZapLogValue
 } from './zapTransport.js'
 import ZapPublisher from './zapPublisher.js'
+import ZapAutomationController from './zapAutomationController.js'
 
 const SOURCE = 'ptk'
 const TYPE_ALERTS_BATCH = 'alerts_batch'
@@ -60,8 +61,6 @@ const AUTO_START_NAV_SOURCES = new Set([
     'tabs.onUpdated',
     'tabs.onReplaced',
     'bootstrap.tabs.query',
-    'history.bootstrap',
-    'history.onVisited',
     'content.zapTarget'
 ])
 const TERMINAL_BLOCKING_TARGET_SOURCES = new Set([
@@ -69,9 +68,7 @@ const TERMINAL_BLOCKING_TARGET_SOURCES = new Set([
     'webNavigation.onBeforeNavigate',
     'tabs.onUpdated',
     'tabs.onReplaced',
-    'bootstrap.tabs.query',
-    'history.bootstrap',
-    'history.onVisited'
+    'bootstrap.tabs.query'
 ])
 const AUTO_START_OBSERVED_MAX_AGE_MS = 120000
 const ZAP_ALLOWED_DEBUG_PREFIXES = [
@@ -93,6 +90,7 @@ const ZAP_ALLOWED_DEBUG_PREFIXES = [
     '[PTK ZAP] Target URL not available',
     '[PTK ZAP] Target URL resolved but tabId',
     '[PTK ZAP] Pending auto-start',
+    '[PTK ZAP] Controller state:',
     '[PTK ZAP] Using cached target navigation',
     '[PTK ZAP] Starting ZAP-driven automation:',
     '[PTK ZAP] Duplicate ZAP-driven automation start suppressed:',
@@ -101,7 +99,8 @@ const ZAP_ALLOWED_DEBUG_PREFIXES = [
     '[PTK ZAP] Progress monitor unavailable:',
     '[PTK ZAP] Progress monitor switched zapid:',
     '[PTK ZAP] Progress monitor completed:',
-    '[PTK ZAP] No enabled PTK engines'
+    '[PTK ZAP] No enabled PTK engines',
+    '[PTK ZAP] ZAP config fetch failed'
 ]
 
 function createBatchId() {
@@ -247,6 +246,11 @@ class ZapBridge {
         this._timingStateByKey = new Map()
         this._pendingTargetRecoveryTimer = null
         this._pendingTargetRecoveryUntil = 0
+        this.zapAutomationRewriteEnabled = true
+        this._automationController = new ZapAutomationController({
+            bridge: this,
+            transport: this.transport
+        })
         this._resolvedConfig = {
             mode: ZAP_MODE_MANUAL,
             engineConfigs: {},
@@ -358,7 +362,7 @@ class ZapBridge {
         if (!ZAP_ALLOWED_DEBUG_PREFIXES.some(allowed => prefix.startsWith(allowed))) {
             return
         }
-        console.log(...args)
+        console.log(...args.map((arg) => redactZapLogValue(arg)))
     }
 
     _buildZapSessionKey(baseUrl, zapid) {
@@ -566,7 +570,7 @@ class ZapBridge {
         if (typeof value === 'number' || typeof value === 'boolean') {
             return `${name}=${value}`
         }
-        return `${name}=${JSON.stringify(String(value))}`
+        return `${name}=${JSON.stringify(String(redactZapLogValue(value, name)))}`
     }
 
     recordTiming({
@@ -2733,6 +2737,17 @@ class ZapBridge {
     }
 
     async _handleZapDetectedAsync(payload = {}) {
+        if (this.zapAutomationRewriteEnabled !== false) {
+            this._automationController?.setDependencies?.({
+                bridge: this,
+                transport: this.transport
+            })
+            return this._automationController.handleZapDetected(payload)
+        }
+        return this._handleZapDetectedLegacyAsync(payload)
+    }
+
+    async _handleZapDetectedLegacyAsync(payload = {}) {
         this._syncDebugFlagFromApp()
         this._debugLog('[PTK ZAP] Handling ZAP detection:', payload)
 
@@ -2825,6 +2840,22 @@ class ZapBridge {
                     durationMs: Date.now() - configFetchStartedAt
                 }
             })
+            if (rawConfig?.ptkConfigFetchFailed === true) {
+                this._clearPendingStart(sessionKey)
+                this._debugLog('[PTK ZAP] ZAP config fetch failed; automatic scan start aborted:', {
+                    zapid,
+                    sessionKey,
+                    error: rawConfig?.error || 'zap_config_unavailable'
+                })
+                this._scheduleTerminalProgress({
+                    sessionKey,
+                    zapid,
+                    requiredEngines: [],
+                    status: ZAP_PROGRESS_STATUS_ERROR,
+                    message: 'ZAP automation config fetch failed'
+                })
+                return
+            }
             const parsedConfig = this._parseConfig(rawConfig)
             this._resolvedConfig = {
                 mode: parsedConfig.mode,
@@ -3013,6 +3044,18 @@ class ZapBridge {
                 engines: {}
             })
             this.recordTiming({
+                phase: 'callback.acquired',
+                zapid: effectiveZapId,
+                browserid: this.transport.getBrowserId?.() || null,
+                zapSessionKey: progressKey,
+                tabId,
+                targetUrl,
+                onceKey: 'callback.acquired',
+                extra: {
+                    source: source || ''
+                }
+            })
+            this.recordTiming({
                 phase: 'progress.post.first',
                 zapid: effectiveZapId,
                 browserid: this.transport.getBrowserId?.() || null,
@@ -3142,20 +3185,6 @@ class ZapBridge {
             }
         }
         if (safeEngines.includes('DAST') || safeEngines.includes('SAST')) {
-            let historySeedMetadata = {
-                urls: [],
-                totalAvailable: 0,
-                droppedByCap: 0
-            }
-            if (typeof this.transport.collectPostCallbackSeedUrls === 'function') {
-                historySeedMetadata = await this.transport.collectPostCallbackSeedUrls({
-                    pageUrl: targetUrl,
-                    baseUrl,
-                    maxResults: DAST_HISTORY_SEED_MAX_RESULTS,
-                    includeMetadata: true
-                })
-            }
-            const rawHistorySeedUrls = Array.isArray(historySeedMetadata?.urls) ? historySeedMetadata.urls : []
             const configuredSeedUrls = normalizeHttpUrlList([
                 ...(Array.isArray(seedSourceEngineConfigs?.DAST?.zapHistorySeedUrls) ? seedSourceEngineConfigs.DAST.zapHistorySeedUrls : []),
                 ...(Array.isArray(seedSourceEngineConfigs?.SAST?.zapHistorySeedUrls) ? seedSourceEngineConfigs.SAST.zapHistorySeedUrls : []),
@@ -3176,24 +3205,15 @@ class ZapBridge {
                 appendSeedUrl(rawSeedUrl)
                 if (seedUrls.length >= DAST_HISTORY_SEED_MAX_RESULTS) break
             }
-            for (const rawSeedUrl of rawHistorySeedUrls) {
-                appendSeedUrl(rawSeedUrl)
-                if (seedUrls.length >= DAST_HISTORY_SEED_MAX_RESULTS) break
-            }
-            const historySeedTotalAvailable = Number(historySeedMetadata?.totalAvailable || 0)
-            const targetSeedAdded = currentTargetSeedUrl && !rawHistorySeedUrls.includes(currentTargetSeedUrl)
-                && !configuredSeedUrls.includes(currentTargetSeedUrl)
+            const targetSeedAdded = currentTargetSeedUrl && !configuredSeedUrls.includes(currentTargetSeedUrl)
             const configuredSeedDroppedByCap = Math.max(0, configuredSeedUrls.length - configuredSeedUrls.filter(seedUrl => seenSeedUrls.has(seedUrl)).length)
-            const historySeedDroppedByCap = Number(historySeedMetadata?.droppedByCap || 0)
-                + configuredSeedDroppedByCap
-                + Math.max(0, rawHistorySeedUrls.length + (targetSeedAdded ? 1 : 0) - seedUrls.length)
             effectiveEngineConfigs = Object.assign({}, seedSourceEngineConfigs || {})
             const seedConfig = {
                 zapCallbackDetectedAt: callbackDetectedAt,
                 zapHistorySeedUrls: seedUrls,
                 zapHistorySeedCount: seedUrls.length,
-                zapHistorySeedTotalAvailable: historySeedTotalAvailable + configuredSeedUrls.length + (targetSeedAdded ? 1 : 0),
-                zapHistorySeedDroppedByCap: historySeedDroppedByCap,
+                zapHistorySeedTotalAvailable: configuredSeedUrls.length + (targetSeedAdded ? 1 : 0),
+                zapHistorySeedDroppedByCap: configuredSeedDroppedByCap,
                 zapCurrentTargetSeeded: Boolean(currentTargetSeedUrl)
             }
             if (safeEngines.includes('DAST')) {
@@ -3556,9 +3576,6 @@ class ZapBridge {
         const fromLatestDetection = resolveFromLatestDetection()
         if (fromLatestDetection) return fromLatestDetection
 
-        const historyResolved = await this._resolveTargetUrlFromPostCallbackHistory(payload)
-        if (historyResolved && isAllowedBySeed(historyResolved)) return historyResolved
-
         const tabId = Number.isInteger(payload.tabId) ? payload.tabId : null
         if (tabId == null || !browser?.tabs?.get) {
             return null
@@ -3589,8 +3606,6 @@ class ZapBridge {
             await sleep(500)
             const nextFromLatestDetection = resolveFromLatestDetection()
             if (nextFromLatestDetection) return nextFromLatestDetection
-            const nextHistoryResolved = await this._resolveTargetUrlFromPostCallbackHistory(payload)
-            if (nextHistoryResolved && isAllowedBySeed(nextHistoryResolved)) return nextHistoryResolved
             const nextObserved = this._getFreshObservedTargetForPending({ tabId })
             if (nextObserved?.targetUrl) return nextObserved.targetUrl
             const resolved = await resolveFromTab()
@@ -3606,24 +3621,6 @@ class ZapBridge {
         const targetUrl = this._selectPostCallbackTargetUrl(candidates)
         if (targetUrl) {
             this._debugLog('[PTK ZAP] Resolved target URL from ZAP config seed URLs:', {
-                targetUrl,
-                candidates: candidates.length
-            })
-        }
-        return targetUrl
-    }
-
-    async _resolveTargetUrlFromPostCallbackHistory(payload = {}) {
-        if (typeof this.transport.collectPostCallbackCandidateUrls !== 'function') {
-            return null
-        }
-        const candidates = await this.transport.collectPostCallbackCandidateUrls({
-            baseUrl: payload?.baseUrl || this.transport.getBaseUrl?.() || null,
-            maxResults: POST_CALLBACK_CANDIDATE_MAX_RESULTS
-        })
-        const targetUrl = this._selectPostCallbackTargetUrl(candidates)
-        if (targetUrl) {
-            this._debugLog('[PTK ZAP] Resolved target URL from post-callback history:', {
                 targetUrl,
                 candidates: candidates.length
             })
@@ -3647,7 +3644,7 @@ class ZapBridge {
                     search: parsedUrl.search || ''
                 })
             } catch (_) {
-                // Ignore malformed history records.
+                // Ignore malformed seed records.
             }
         }
         if (!parsed.length) return null

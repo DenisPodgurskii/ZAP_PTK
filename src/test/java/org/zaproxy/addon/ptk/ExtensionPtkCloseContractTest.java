@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,8 +35,7 @@ class ExtensionPtkCloseContractTest {
                         > PtkCloseContract.BROWSER_CLOSE_WAIT_SLICE_MS);
         assertTrue(
                 PtkCloseContract.BROWSER_CALLBACK_BOOTSTRAP_HANDSHAKE_MS
-                        >= PtkCloseContract.BROWSER_CALLBACK_BOOTSTRAP_RELOAD_AFTER_MS
-                                + 9000L);
+                        >= PtkCloseContract.BROWSER_CALLBACK_BOOTSTRAP_RELOAD_AFTER_MS + 9000L);
         assertEquals(
                 PtkCloseContract.BROWSER_CLOSE_MAX_ATTEMPTS
                         / PtkCloseContract.BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS,
@@ -117,6 +117,76 @@ class ExtensionPtkCloseContractTest {
         assertEquals(true, result.callbackReloadAttempted());
         assertEquals(1, reloads.get());
         assertEquals(300, result.handshakeWaitedMs());
+    }
+
+    @Test
+    void callbackBootstrapHandshakeReloadsOnceAndReturnsPreciseStateOnTimeout() {
+        AtomicLong now = new AtomicLong(1000L);
+        AtomicInteger reloads = new AtomicInteger();
+
+        PtkCloseContract.CallbackBootstrapHandshakeResult result =
+                PtkCloseContract.awaitCallbackBootstrapHandshake(
+                        () -> false,
+                        () -> "callback_acquired_no_config",
+                        reloads::incrementAndGet,
+                        now::get,
+                        now::addAndGet,
+                        750,
+                        200,
+                        100);
+
+        assertEquals(false, result.handshakeSeen());
+        assertEquals(750, result.handshakeWaitedMs());
+        assertEquals(true, result.callbackReloadAttempted());
+        assertEquals(1, result.callbackReloadAttempts());
+        assertEquals(1, reloads.get());
+        assertEquals("callback_acquired_no_config", result.handshakeState());
+    }
+
+    @Test
+    void chromiumExtensionIdUsesNormalizedUnpackedExtensionPath() {
+        Path path =
+                Path.of(
+                        "/Users/ptk/dev/ptk_pro/ZAP_PTK/src/main/zapHomeFiles/selenium/extensions/ptk-latest");
+
+        assertEquals(
+                "cghijnohgofbonplhadglampeljmepgd", ExtensionPtk.chromiumExtensionIdForPath(path));
+        assertEquals(
+                "chrome-extension://cghijnohgofbonplhadglampeljmepgd/ptk/internal/zap-runner.html",
+                ExtensionPtk.buildChromiumZapRunnerUrl(path));
+    }
+
+    @Test
+    void callbackRunnerRequiresEffectiveZapAutomationAndChromiumBrowser() {
+        String callbackUrl = "https://zap/zapCallBackUrl/secret?zapenable=true&zapid=zap-1";
+
+        assertEquals(
+                "zap_automation_disabled",
+                ExtensionPtk.zapCallbackRunnerSkipReason(false, "edge", callbackUrl));
+        assertEquals(
+                "non_chromium_browser",
+                ExtensionPtk.zapCallbackRunnerSkipReason(true, "firefox", callbackUrl));
+        assertEquals(
+                "not_zap_callback",
+                ExtensionPtk.zapCallbackRunnerSkipReason(true, "edge", "https://example.test/"));
+        assertEquals("", ExtensionPtk.zapCallbackRunnerSkipReason(true, "edge", callbackUrl));
+        assertEquals("", ExtensionPtk.zapCallbackRunnerSkipReason(true, "chrome-headless", callbackUrl));
+    }
+
+    @Test
+    void browserTaskStateRedactsCallbackLoadedUrlInLogFields() {
+        PtkBrowserTaskState state =
+                PtkBrowserTaskState.loaded(
+                        "zap-1",
+                        "browser-1",
+                        "https://zap/zapCallBackUrl/raw-secret?zapenable=true&zapid=zap-1",
+                        1000L);
+
+        Map<String, Object> fields = state.toLogFields(1250L);
+
+        assertEquals(
+                "https://zap/zapCallBackUrl/<redacted>?zapenable=true&zapid=<redacted>",
+                fields.get("loadedUrl"));
     }
 
     @Test

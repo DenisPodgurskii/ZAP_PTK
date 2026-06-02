@@ -2,30 +2,39 @@
 
 This document describes how PTK is expected to work inside production ZAP automation plans and how to validate results.
 
-The important rule is simple: do not hide instability by changing scan strategy, rulepacks, seed URLs, or `spiderClient` behavior. First prove where the loss happens.
+The important rule is simple: do not hide instability by changing scan strategy, rulepacks, seed URLs, active-scan-rule settings, or legacy `spiderClient` behavior. First prove where the loss happens.
 
 For the full callback, progress, finding-publish, Client Spider, and browser-close lifecycle contract, see [ptk-zap-lifecycle-contract.md](ptk-zap-lifecycle-contract.md).
 
 ## Standard Flow
 
-A normal PTK/ZAP browser automation run should keep the ZAP exploration path intact:
+A normal active-scan-rule PTK/ZAP browser automation run should keep the ZAP exploration path intact:
 
 1. ZAP `spider` discovers URLs.
-2. ZAP `spiderClient` loads in-scope URLs in real browsers.
-3. The bundled PTK extension starts a PTK automation session in each ZAP-managed browser.
-4. PTK publishes findings back to ZAP through the PTK callback endpoints.
-5. ZAP stores and reports the imported PTK alerts.
+2. ZAP `activeScan` runs the PTK active scan rule.
+3. The PTK active scan rule starts Client Spider with the configured browser id and thread count.
+4. The bundled PTK extension starts a PTK automation session in each ZAP-managed browser.
+5. PTK publishes findings back to ZAP through the PTK callback endpoints.
+6. ZAP stores and reports the imported PTK alerts.
 
-The canonical Firing Range release-style plans are the project-level `plan_range_edge.yaml` and `plan_range_ff.yaml`. They are the templates for release validation. Local runs may override browser id, browser count, or headed/headless mode for capacity testing, but that must be reported as a different test case.
+The canonical Firing Range release-style plans live under `zap_plans/active_scan_rule`. Legacy `spiderClient` compatibility plans live under `zap_plans/spider_client`. The low-level release runner rejects mixed mode/plan families before ZAP starts, so active-scan-rule mode must use active-scan-rule plans and legacy automated-scanning mode must use spiderClient plans. Local runs may override browser id, browser count, or headed/headless mode for capacity testing, but that must be reported as a different test case.
 
 Do not compare a diagnostic plan with fewer browsers, diagnostic-only jobs, or explicit URL lists as if it were the same release plan.
 
 ## Required ZAP Configuration
 
-The add-on expects PTK automation to be enabled when ZAP starts:
+The default release mode enables the PTK active scan rule and disables deprecated automated scanning:
+
+```text
+-config ptk.activescan.rule.enabled=true
+-config ptk.automatedScanning.enabled=false
+```
+
+For legacy `spiderClient` compatibility only, invert those flags:
 
 ```text
 -config ptk.automatedScanning.enabled=true
+-config ptk.activescan.rule.enabled=false
 ```
 
 The PTK extension is bundled into the ZAP add-on under:

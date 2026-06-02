@@ -47,10 +47,27 @@ final class PtkBrowserTaskState {
             fields.put("reason", closeReason);
         }
         if (loadedUrl != null && !loadedUrl.isBlank()) {
-            fields.put("loadedUrl", loadedUrl);
+            fields.put("loadedUrl", redactZapCallbackUrlForLog(loadedUrl));
         }
         fields.put("zapid", zapid);
         fields.put("browserid", browserId);
         return fields;
+    }
+
+    private static String redactZapCallbackUrlForLog(String value) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        String redacted =
+                value.replaceAll(
+                                "(https?://[^/?#\\s\"'<>]+/zapCallBackUrl/)[^/?#\\s\"'<>]+",
+                                "$1<redacted>")
+                        .replaceAll("(/zapCallBackUrl/)[^/?#\\s\"'<>]+", "$1<redacted>");
+        if (redacted.contains("/zapCallBackUrl/")) {
+            redacted =
+                    redacted.replaceAll("([?&]zapid=)[^&#\\s\"'<>]+", "$1<redacted>")
+                            .replaceAll("(\\|)[^\\s\"'<>]+", "$1<redacted>");
+        }
+        return redacted;
     }
 }
