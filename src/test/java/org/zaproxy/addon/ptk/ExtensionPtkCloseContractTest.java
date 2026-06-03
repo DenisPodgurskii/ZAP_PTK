@@ -170,7 +170,8 @@ class ExtensionPtkCloseContractTest {
                 "not_zap_callback",
                 ExtensionPtk.zapCallbackRunnerSkipReason(true, "edge", "https://example.test/"));
         assertEquals("", ExtensionPtk.zapCallbackRunnerSkipReason(true, "edge", callbackUrl));
-        assertEquals("", ExtensionPtk.zapCallbackRunnerSkipReason(true, "chrome-headless", callbackUrl));
+        assertEquals(
+                "", ExtensionPtk.zapCallbackRunnerSkipReason(true, "chrome-headless", callbackUrl));
     }
 
     @Test

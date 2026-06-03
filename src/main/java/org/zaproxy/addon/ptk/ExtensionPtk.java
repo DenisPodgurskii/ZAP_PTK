@@ -765,6 +765,7 @@ public class ExtensionPtk extends ExtensionAdaptor
     private final Map<String, String> lastProgressSummaryByZapId = new ConcurrentHashMap<>();
     private final Map<String, String> lastEngineEvidenceSummaryByZapIdAndEngine =
             new ConcurrentHashMap<>();
+    private final Set<String> engineEvidenceInfoLogged = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> lastProgressChangedAtMsByZapId = new ConcurrentHashMap<>();
     private final Map<String, Long> lastAlertChangedAtMsByZapId = new ConcurrentHashMap<>();
     private final Map<String, Integer> progressContractVersionByZapId = new ConcurrentHashMap<>();
@@ -1038,7 +1039,7 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
 
         if (seeded > 0) {
-            LOGGER.info(
+            LOGGER.debug(
                     "PTK_CONTRACT phase=client_spider_seed_tasks zapid={} seeded={} attempted={} threadCount={} targetUrl={}",
                     zapid,
                     seeded,
@@ -1649,7 +1650,7 @@ public class ExtensionPtk extends ExtensionAdaptor
             }
             boolean zapAutomationEnabled = param.isZapAutomationEnabled();
             String mode = zapAutomationEnabled ? "auto" : "manual";
-            LOGGER.info(
+            LOGGER.debug(
                     "PTK mode {} auto={} active={} effective={}",
                     mode,
                     param.isAutomatedScanningEnabled(),
@@ -1912,7 +1913,7 @@ public class ExtensionPtk extends ExtensionAdaptor
         BrowserCoverageEvidence evidence =
                 browserCoverageByUrl.computeIfAbsent(key, ignored -> new BrowserCoverageEvidence());
         evidence.scheduled(attempt);
-        LOGGER.info(
+        LOGGER.debug(
                 "PTK_BROWSER_COVERAGE url={} event=scheduled attempt={}",
                 redactZapCallbackUrlForLog(key),
                 attempt);
@@ -1930,7 +1931,7 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
         BrowserCoverageSnapshot effective =
                 snapshot != null ? snapshot : BrowserCoverageSnapshot.empty(key);
-        LOGGER.info(
+        LOGGER.debug(
                 "PTK_BROWSER_COVERAGE url={} event=result attempts={} finalState={} terminal={} browserLoaded={} ptkSessionEstablished={} ptkAnalysisReady={} browserSessionInvalid={} webdriverScriptFailed={} forcedClose={} noPtkProgress={}",
                 redactZapCallbackUrlForLog(key),
                 attempts,
@@ -1973,7 +1974,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                                 summary.append(" ").append(name).append("=").append(value);
                             }
                         });
-        LOGGER.info(summary.toString());
+        LOGGER.debug(summary.toString());
     }
 
     void rememberBrowserCoverageTarget(String zapid, String targetUrl) {
@@ -2068,7 +2069,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                                 summary.append(" ").append(name).append("=").append(value);
                             }
                         });
-        LOGGER.info(summary.toString());
+        LOGGER.debug(summary.toString());
     }
 
     void recordBrowserCoverageAnalysisReady(
@@ -2170,7 +2171,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                                 summary.append(" ").append(name).append("=").append(value);
                             }
                         });
-        LOGGER.info(summary.toString());
+        LOGGER.warn(summary.toString());
     }
 
     void rememberWebDriverZapId(WebDriver driver, String zapid) {
@@ -2395,7 +2396,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                     state.setSafeToClose(true);
                     state.markTerminalProgressSeen();
                 }
-                LOGGER.info(
+                LOGGER.debug(
                         "PTK_CONTRACT phase=legacy_inferred_clean_close zapid={} closeRequestId={} alertIdleMs={}",
                         zapid,
                         closeRequest.id(),
@@ -2560,7 +2561,7 @@ public class ExtensionPtk extends ExtensionAdaptor
             closeRequestAckByZapId.putIfAbsent(zapid, closeRequest.acknowledged());
             closeRequestCreatedAtMsByZapId.putIfAbsent(zapid, closeRequest.createdAtMs());
             if (newRequest) {
-                LOGGER.info(
+                LOGGER.debug(
                         "PTK_CONTRACT phase=graceful_stop_requested zapid={} closeRequestId={} reason={}",
                         zapid,
                         closeRequestId,
@@ -3311,8 +3312,10 @@ public class ExtensionPtk extends ExtensionAdaptor
                     evidenceExtra);
             if ("forced_closed".equals(decision) || "failed".equals(decision)) {
                 LOGGER.warn(summary.toString());
-            } else {
+            } else if ("safe_to_close".equals(decision)) {
                 LOGGER.info(summary.toString());
+            } else {
+                LOGGER.debug(summary.toString());
             }
         }
 
@@ -3438,7 +3441,24 @@ public class ExtensionPtk extends ExtensionAdaptor
                                     summary.append(" ").append(key).append("=").append(value);
                                 });
             }
-            LOGGER.info(summary.toString());
+            logBrowserEvidenceAtSelectedLevel(event, summary.toString());
+        }
+
+        private void logBrowserEvidenceAtSelectedLevel(String event, String summary) {
+            String normalizedEvent = event != null ? event : "";
+            if ("browser_session_invalid".equals(normalizedEvent)) {
+                LOGGER.warn(summary);
+            } else if (isInfoBrowserEvidenceEvent(normalizedEvent)) {
+                LOGGER.info(summary);
+            } else {
+                LOGGER.debug(summary);
+            }
+        }
+
+        private boolean isInfoBrowserEvidenceEvent(String event) {
+            return "browser_loaded".equals(event)
+                    || "ptk_session_established".equals(event)
+                    || "ptk_session_terminal".equals(event);
         }
 
         @SuppressWarnings("unchecked")
@@ -3547,7 +3567,61 @@ public class ExtensionPtk extends ExtensionAdaptor
                                     summary.append(" ").append(key).append("=").append(value);
                                 });
             }
-            LOGGER.info(summary.toString());
+            logEngineEvidenceAtSelectedLevel(zapid, extra, summary.toString());
+        }
+
+        private void logEngineEvidenceAtSelectedLevel(
+                String zapid, Map<String, Object> extra, String summary) {
+            String engine = getStringField(extra, "engine");
+            String status = getStringField(extra, "status");
+            String completionStatus = getStringField(extra, "completionStatus");
+            boolean failed = isFailedEngineEvidence(status, completionStatus);
+            boolean execution = isConcreteEngineExecutionEvidence(extra, status, completionStatus);
+
+            if (failed) {
+                LOGGER.warn(summary);
+                return;
+            }
+
+            String key =
+                    (zapid != null && !zapid.isBlank() ? zapid : "unknown")
+                            + "|"
+                            + (engine != null && !engine.isBlank() ? engine : "unknown");
+            if (execution && engineEvidenceInfoLogged.add(key)) {
+                LOGGER.info(summary);
+            } else {
+                LOGGER.debug(summary);
+            }
+        }
+
+        private boolean isFailedEngineEvidence(String status, String completionStatus) {
+            return "error".equalsIgnoreCase(status)
+                    || "cancelled".equalsIgnoreCase(status)
+                    || "engine_incomplete".equalsIgnoreCase(completionStatus)
+                    || "publisher_incomplete".equalsIgnoreCase(completionStatus);
+        }
+
+        private boolean isConcreteEngineExecutionEvidence(
+                Map<String, Object> extra, String status, String completionStatus) {
+            if ("running".equalsIgnoreCase(status)
+                    || "completed".equalsIgnoreCase(completionStatus)
+                    || Boolean.TRUE.equals(extra != null ? extra.get("terminal") : null)) {
+                return true;
+            }
+            return hasPositiveInteger(extra, "findingsCount")
+                    || hasPositiveInteger(extra, "runtimeSignalsAccepted")
+                    || hasPositiveInteger(extra, "findingReportsAccepted")
+                    || hasPositiveInteger(extra, "agentReady")
+                    || hasPositiveInteger(extra, "completedFiles")
+                    || hasPositiveInteger(extra, "totalFiles");
+        }
+
+        private boolean hasPositiveInteger(Map<String, Object> values, String key) {
+            if (values == null || key == null || key.isBlank()) {
+                return false;
+            }
+            Object value = values.get(key);
+            return value instanceof Number && ((Number) value).intValue() > 0;
         }
 
         private void copyEngineDetail(
@@ -3589,7 +3663,31 @@ public class ExtensionPtk extends ExtensionAdaptor
                                     summary.append(" ").append(key).append("=").append(value);
                                 });
             }
-            LOGGER.info(summary.toString());
+            logContractPhaseAtSelectedLevel(phase, summary.toString());
+        }
+
+        private void logContractPhaseAtSelectedLevel(String phase, String summary) {
+            if (isWarnContractPhase(phase)) {
+                LOGGER.warn(summary);
+            } else if (isInfoContractPhase(phase)) {
+                LOGGER.info(summary);
+            } else {
+                LOGGER.debug(summary);
+            }
+        }
+
+        private boolean isWarnContractPhase(String phase) {
+            return "forced_close".equals(phase)
+                    || "incomplete_close".equals(phase)
+                    || "callback_bootstrap_failed".equals(phase)
+                    || "callback_acquired_no_config".equals(phase);
+        }
+
+        private boolean isInfoContractPhase(String phase) {
+            return "session_started".equals(phase)
+                    || "terminal_progress_seen".equals(phase)
+                    || "publisher_drained".equals(phase)
+                    || "clean_close".equals(phase);
         }
 
         @Override
@@ -3941,7 +4039,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                                 && !zapid.isBlank()
                                 && !progressSummary.isBlank()) {
                             lastProgressChangedAtMsByZapId.put(zapid, finishedAt);
-                            LOGGER.info(
+                            LOGGER.debug(
                                     "PTK_CONTRACT phase=progress_activity_changed zapid={} browserid={} sessionId={} contractVersion={} activitySeq={} progress={} status={}",
                                     zapid,
                                     browserid,
@@ -4647,7 +4745,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                     safeToCloseByZapId.put(zapid, true);
                 }
                 if (!isAutomationDisabledCloseDecision(closeDecision)) {
-                    LOGGER.info(
+                    LOGGER.debug(
                             "PTK browserClosing uuid={} recovered after {} session-start close retries",
                             ccbutils.getUuid(),
                             retry);
@@ -4701,7 +4799,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                     }
                 }
                 if (scanProgress.containsKey(zapid)) {
-                    LOGGER.info(
+                    LOGGER.debug(
                             "PTK browserClosing uuid={} received delayed progress after {} no-progress close retries",
                             ccbutils.getUuid(),
                             retry);
@@ -4940,7 +5038,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                     if (closeRequestId != null && !closeRequestId.isBlank()) {
                         staleExtra.put("closeRequestId", closeRequestId);
                     }
-                    LOGGER.info(
+                    LOGGER.debug(
                             "PTK_CONTRACT phase=close_wait_stale zapid={} browserid={} waitedMs={} progress={} status={}",
                             zapid,
                             browserid,
