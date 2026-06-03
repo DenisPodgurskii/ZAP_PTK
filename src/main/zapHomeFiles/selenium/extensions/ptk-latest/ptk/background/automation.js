@@ -5341,6 +5341,10 @@ export class ptk_automation {
         const total = toFiniteNumber(progress.progress?.total, null)
         const finiteComplete = total !== null && done !== null && done >= total
         const queueEmpty = remaining <= 0 && activeTasks <= 0 && taskQueue <= 0 && requestQueue <= 0 && pendingPlans <= 0 && planning <= 0 && pendingCaptures <= 0
+        const collectionState = String(progress.collectionState ?? engineState.collectionState ?? '').toLowerCase()
+        const analysisState = String(progress.analysisState ?? engineState.analysisState ?? '').toLowerCase()
+        const activeCollectionCount = toFiniteNumber(progress.activeCollectionCount ?? engineState.activeCollectionCount, 0)
+        const pendingCollectionCount = toFiniteNumber(progress.pendingCollectionCount ?? engineState.pendingCollectionCount, 0)
         const hasExplicitWorkCounters = [
             progress.remaining,
             progress.progress?.remaining,
@@ -5356,7 +5360,17 @@ export class ptk_automation {
             && (finiteComplete || progress.totalFiles > 0 && progress.completedFiles >= progress.totalFiles)
             && !progress.currentFile
             && !progress.currentModule
-            && !/collection_pending|payload_received|analyzing|running/i.test(`${progress.collectionState || ''} ${progress.analysisState || ''}`)
+            && !/collection_pending|payload_received|analyzing|running/i.test(`${collectionState} ${analysisState}`)
+        const terminalSastSettled = engineUpper === 'SAST'
+            && requireStop
+            && session.stopRequestedAt
+            && (state === 'stopped' || state === 'cancelled' || state === 'completed'
+                || status === 'stopped' || status === 'cancelled' || status === 'completed')
+            && /complete|completed/.test(collectionState)
+            && /complete|completed/.test(analysisState)
+            && activeCollectionCount <= 0
+            && pendingCollectionCount <= 0
+            && !/collection_pending|payload_received|analyzing/.test(`${collectionState} ${analysisState}`)
         const passiveComplete = ['IAST', 'SCA'].includes(engineUpper) && queueEmpty && !hasExplicitWorkCounters
         const stoppedNoRemaining = (state === 'stopped'
             || state === 'cancelled'
@@ -5369,7 +5383,7 @@ export class ptk_automation {
             && (hasExplicitWorkCounters || progress.idle === true || status === 'idle' || phase === 'idle')
             && queueEmpty
         if (requireStop && !session.stopRequestedAt) return false
-        return idleComplete || stoppedNoRemaining || finiteComplete && queueEmpty || sastComplete || passiveComplete
+        return idleComplete || stoppedNoRemaining || finiteComplete && queueEmpty || sastComplete || terminalSastSettled || passiveComplete
     }
 
     /**

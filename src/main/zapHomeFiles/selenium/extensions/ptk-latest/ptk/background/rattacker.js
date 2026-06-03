@@ -754,17 +754,51 @@ export class ptk_rattacker {
             }
 
             if (message.type == 'spa_url_changed' && sender?.tab?.id) {
-                if (worker?.ptk_app?.proxy?.tabUrlMap) {
-                    worker.ptk_app.proxy.tabUrlMap.set(sender.tab.id, message.url)
+                const tabId = sender.tab.id
+                const uiUrl = typeof message.url === 'string' ? message.url : ''
+                const contentDiagnostic = message.diagnostic && typeof message.diagnostic === 'object'
+                    ? message.diagnostic
+                    : {}
+                const appendSpaUrlDiagnostic = (patch = {}) => {
+                    try {
+                        this.engine?._appendRuntimeEvent?.(Object.assign({
+                            type: 'dast_spa_url_changed',
+                            tabId,
+                            url: uiUrl || null,
+                            uiUrl: uiUrl || null,
+                            hasHash: uiUrl.includes('#'),
+                            hasHashQuery: /#.*\?/.test(uiUrl),
+                            contentReason: contentDiagnostic.reason || null,
+                            contentSourceScript: contentDiagnostic.sourceScript || null,
+                            contentSentAt: contentDiagnostic.sentAt || null,
+                            contentReadyState: contentDiagnostic.readyState || null,
+                            contentVisibilityState: contentDiagnostic.visibilityState || null
+                        }, patch))
+                    } catch (_) { }
                 }
-                if (this.sessionCoordinator.isRunningForTab(sender.tab.id)) {
+                if (worker?.ptk_app?.proxy?.tabUrlMap) {
+                    worker.ptk_app.proxy.tabUrlMap.set(tabId, uiUrl)
+                }
+                const sessionRunning = this.sessionCoordinator.isRunningForTab(tabId)
+                appendSpaUrlDiagnostic({
+                    phase: 'received',
+                    sessionRunning
+                })
+                if (sessionRunning) {
                     if (this.sessionCoordinator.isCaptureBlockedByInteraction()) {
+                        appendSpaUrlDiagnostic({
+                            phase: 'gated',
+                            reason: 'capture_blocked_by_interaction'
+                        })
                         return Promise.resolve({ ok: true, gated: true })
                     }
                     try {
-                        const uiUrl = message.url
                         if (!uiUrl.includes('#')) {
-                            return Promise.resolve({ ok: true })
+                            appendSpaUrlDiagnostic({
+                                phase: 'ignored',
+                                reason: 'no_hash'
+                            })
+                            return Promise.resolve({ ok: true, ignored: 'no_hash' })
                         }
                         const parsed = new URL(uiUrl)
                         const cleanedUrl = uiUrl.split('#')[0] || (parsed.origin + parsed.pathname + (parsed.search || ''))
@@ -777,7 +811,24 @@ export class ptk_rattacker {
                             tabId: sender.tab.id
                         }
                         this.engine.enqueue({ raw: rawRequest, ui_url: uiUrl, responseType: 'main_frame', fingerprint: `spa:${uiUrl}` }, response)
-                    } catch (e) { }
+                        appendSpaUrlDiagnostic({
+                            phase: 'enqueued',
+                            cleanedUrl,
+                            fingerprint: `spa:${uiUrl}`
+                        })
+                        return Promise.resolve({ ok: true, enqueued: true })
+                    } catch (e) {
+                        appendSpaUrlDiagnostic({
+                            phase: 'error',
+                            reason: 'enqueue_failed',
+                            error: e?.message || String(e || 'enqueue_failed')
+                        })
+                    }
+                } else {
+                    appendSpaUrlDiagnostic({
+                        phase: 'ignored',
+                        reason: 'session_not_running'
+                    })
                 }
                 return Promise.resolve({ ok: true })
             }

@@ -111,6 +111,7 @@ const SAST_EARLY_SCRIPT_KEYS_KEY = '__PTK_SAST_EARLY_SCRIPT_KEYS__';
 const SAST_EARLY_SCRIPT_CAPTURE_INSTALLED_KEY = '__PTK_SAST_EARLY_SCRIPT_CAPTURE_INSTALLED__';
 const SAST_EARLY_SCRIPT_MAX_ENTRIES = 250;
 const SAST_EARLY_SCRIPT_MAX_CODE_CHARS = 512 * 1024;
+const PTK_SPA_URL_NOTIFIER_KEY = '__PTK_SPA_URL_NOTIFIER_INSTALLED__';
 
 function getPtkEarlySastScriptRegistry() {
     try {
@@ -370,6 +371,75 @@ async function collectSastPayload() {
         html: collectSastInlineHandlers(),
         file: document.URL
     };
+}
+
+function isHttpTopFrameUrl(href) {
+    if (!isTopFrame() || typeof href !== 'string' || !href) return false;
+    try {
+        const parsed = new URL(href);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch (_) {
+        return false;
+    }
+}
+
+function installPtkSpaUrlNotifier(sourceScript = 'content.js') {
+    if (!isTopFrame()) return false;
+    if (window[PTK_SPA_URL_NOTIFIER_KEY]) return false;
+    window[PTK_SPA_URL_NOTIFIER_KEY] = sourceScript;
+
+    let lastHref = null;
+    const notify = (reason = 'unknown') => {
+        const href = getCurrentHref();
+        if (!isHttpTopFrameUrl(href) || isZapCallbackPageUrl(href)) return;
+        if (href === lastHref) return;
+        const previousHref = lastHref;
+        lastHref = href;
+        const diagnostic = {
+            phase: 'content.notify',
+            sourceScript,
+            reason,
+            url: href,
+            previousUrl: previousHref || null,
+            readyState: document.readyState || null,
+            visibilityState: document.visibilityState || null,
+            hasHash: href.includes('#'),
+            hasHashQuery: /#.*\?/.test(href),
+            sentAt: Date.now()
+        };
+        sendRuntimeMessage({
+            channel: 'ptk_content2rattacker',
+            type: 'spa_url_changed',
+            url: href,
+            diagnostic
+        }).catch(() => { });
+        collectSastPayload().then((sastPayload) => {
+            sendRuntimeMessage({
+                channel: 'ptk_content_sast2background_sast',
+                type: 'spa_url_changed',
+                url: href,
+                diagnostic,
+                sastPayload
+            }).catch(() => { });
+        }).catch(() => { });
+    };
+
+    const wrapHistory = (fn) => function () {
+        const ret = fn.apply(this, arguments);
+        notify(`history.${fn?.name || 'state'}`);
+        return ret;
+    };
+
+    try {
+        history.pushState = wrapHistory(history.pushState);
+        history.replaceState = wrapHistory(history.replaceState);
+    } catch (_) { }
+
+    window.addEventListener('hashchange', () => notify('hashchange'), false);
+    window.addEventListener('popstate', () => notify('popstate'), false);
+    setInterval(() => notify('poll'), 500);
+    setTimeout(() => notify('initial'), 0);
+    return true;
 }
 
 const zapCallbackNotifyState = {
@@ -632,6 +702,7 @@ if (runtime?.onMessage) {
 
 installEarlySastScriptCapture();
 installSharedIastBridge();
+installPtkSpaUrlNotifier('content.js');
 
 scheduleZapCallbackNotifications();
 void requestRuntimeProfile();

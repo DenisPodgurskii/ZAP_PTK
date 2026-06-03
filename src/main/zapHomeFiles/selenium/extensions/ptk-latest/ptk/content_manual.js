@@ -19,6 +19,8 @@ const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
 const PTK_SPA_ATTACK_TAB_MARKER = 'ptk_spa_attack_tab';
 const PTK_SPA_DIALOG_PARAM = 'ptk_dast=1';
 const PTK_AGENT_AUTOMATION_SCRIPT_ID = 'ptk-agent-automation-layer';
+const PTK_SPA_URL_NOTIFIER_KEY = '__PTK_SPA_URL_NOTIFIER_INSTALLED__';
+const ZAP_CALLBACK_PATH_REGEX = /^\/zapCallBackUrl\/[^/?#]+/i;
 
 function shouldSuppressSpaDialogs() {
     if (typeof window === 'undefined') return false
@@ -57,6 +59,17 @@ function runtimeGetURL(path) {
         return runtime.getURL(path);
     } catch (_) {
         return null;
+    }
+}
+
+function isZapCallbackPageUrl(rawUrl) {
+    if (typeof rawUrl !== 'string' || !rawUrl) return false;
+    try {
+        const parsed = new URL(rawUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+        return ZAP_CALLBACK_PATH_REGEX.test(parsed.pathname);
+    } catch (_) {
+        return false;
     }
 }
 
@@ -313,27 +326,41 @@ setInterval(function () {
     try {
         if (window.top !== window.self) return
     } catch (_) { }
+    if (window[PTK_SPA_URL_NOTIFIER_KEY]) return
+    const sourceScript = 'content_manual.js'
+    window[PTK_SPA_URL_NOTIFIER_KEY] = sourceScript
 
     let lastHref = null
-    const notify = () => {
+    const notify = (reason = 'unknown') => {
         const href = location.href
+        if (isZapCallbackPageUrl(href)) return
         if (href === lastHref) return
+        const previousHref = lastHref
         lastHref = href
-        // try {
-        //     console.log('[PTK][SPA][content] hash/history change detected', href)
-        // } catch (_) { }
+        const diagnostic = {
+            phase: 'content.notify',
+            sourceScript,
+            reason,
+            url: href,
+            previousUrl: previousHref || null,
+            readyState: document.readyState || null,
+            visibilityState: document.visibilityState || null,
+            hasHash: href.includes('#'),
+            hasHashQuery: /#.*\?/.test(href),
+            sentAt: Date.now()
+        }
         sendRuntimeMessage({
             channel: "ptk_content2rattacker",
             type: "spa_url_changed",
-            url: href
-        }).catch(e => {
-            //try { console.warn('[PTK][SPA][content] failed to send spa_url_changed', e) } catch (_) { }
-        })
+            url: href,
+            diagnostic
+        }).catch(() => { })
         collectSastPayload().then((sastPayload) => {
             sendRuntimeMessage({
                 channel: "ptk_content_sast2background_sast",
                 type: "spa_url_changed",
                 url: href,
+                diagnostic,
                 sastPayload
             }).catch(e => {
                 // try { console.warn('[PTK][SPA][content] failed to send spa_url_changed to SAST', e) } catch (_) { }
@@ -343,7 +370,7 @@ setInterval(function () {
 
     const wrapHistory = (fn) => function () {
         const ret = fn.apply(this, arguments)
-        notify()
+        notify(`history.${fn?.name || 'state'}`)
         return ret
     }
 
@@ -352,13 +379,13 @@ setInterval(function () {
         history.replaceState = wrapHistory(history.replaceState)
     } catch (e) { }
 
-    window.addEventListener('hashchange', notify, false)
-    window.addEventListener('popstate', notify, false)
+    window.addEventListener('hashchange', () => notify('hashchange'), false)
+    window.addEventListener('popstate', () => notify('popstate'), false)
 
     // poll as a safety net in case events are missed
-    setInterval(notify, 500)
+    setInterval(() => notify('poll'), 500)
 
-    setTimeout(notify, 0)
+    setTimeout(() => notify('initial'), 0)
 })();
 
 
