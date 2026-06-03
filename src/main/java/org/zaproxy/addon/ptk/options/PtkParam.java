@@ -222,6 +222,10 @@ public class PtkParam extends VersionedAbstractParam {
         getConfig().setProperty(AUTOMATED_SCANNING_ENABLED_KEY, this.automatedScanningEnabled);
     }
 
+    public boolean isZapAutomationEnabled() {
+        return automatedScanningEnabled || activeScanRuleEnabled;
+    }
+
     public boolean isActiveScanRuleEnabled() {
         return activeScanRuleEnabled;
     }
@@ -264,7 +268,9 @@ public class PtkParam extends VersionedAbstractParam {
      */
     public String buildConfigCacheKey(LoadedPtkResources resources) {
         StringBuilder key = new StringBuilder(512);
-        key.append(automatedScanningEnabled ? "mode:auto" : "mode:manual");
+        key.append(isZapAutomationEnabled() ? "mode:auto" : "mode:manual");
+        key.append("|automatedScanning:").append(automatedScanningEnabled);
+        key.append("|activeScanRule:").append(activeScanRuleEnabled);
         appendDefinitionCacheKey(key, resources != null ? resources.getSastModules() : null);
         appendDefinitionCacheKey(key, resources != null ? resources.getIastModules() : null);
         appendDefinitionCacheKey(key, resources != null ? resources.getDastModules() : null);

@@ -191,6 +191,29 @@ class PtkParamTest {
         assertTrue(reloaded.isAutomatedScanningEnabled());
     }
 
+    @Test
+    void zapAutomationEnabled_whenDeprecatedAutomatedScanningEnabled() {
+        param.setAutomatedScanningEnabled(true);
+        assertTrue(param.isZapAutomationEnabled());
+    }
+
+    @Test
+    void zapAutomationEnabled_whenActiveScanRuleEnabled() {
+        param.setActiveScanRuleEnabled(true);
+        assertTrue(param.isZapAutomationEnabled());
+    }
+
+    @Test
+    void configCacheKey_changesWhenActiveScanRuleModeChanges() {
+        String manualKey = param.buildConfigCacheKey(null);
+
+        param.setActiveScanRuleEnabled(true);
+        String activeRuleKey = param.buildConfigCacheKey(null);
+
+        assertFalse(activeRuleKey.equals(manualKey));
+        assertTrue(activeRuleKey.startsWith("mode:auto"));
+    }
+
     // --- migration: v1 → v2 ---
 
     @Test

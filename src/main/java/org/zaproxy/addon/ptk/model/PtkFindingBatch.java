@@ -21,6 +21,9 @@ public class PtkFindingBatch {
     private String schema;
     private Long ts;
     private String batchId;
+    private Integer batchSeq;
+    private String zapid;
+    private String browserid;
     private PtkFindingPayload payload;
 
     public boolean isSastBatch() {

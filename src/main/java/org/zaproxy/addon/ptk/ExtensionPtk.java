@@ -1,12 +1,14 @@
 package org.zaproxy.addon.ptk;
 
 import com.google.gson.Gson;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.LinkedHashMap;
@@ -16,15 +18,21 @@ import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
+import org.apache.commons.httpclient.URIException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.WebDriver;
-import org.openqa.selenium.WebDriverException;
+import org.openqa.selenium.WindowType;
 import org.openqa.selenium.remote.RemoteWebDriver;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.control.Control;
+import org.parosproxy.paros.core.proxy.OverrideMessageProxyListener;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.extension.Extension;
 import org.parosproxy.paros.extension.ExtensionAdaptor;
@@ -35,8 +43,8 @@ import org.parosproxy.paros.model.Model;
 import org.parosproxy.paros.model.OptionsParam;
 import org.parosproxy.paros.model.SiteNode;
 import org.parosproxy.paros.network.HttpHeader;
+import org.parosproxy.paros.network.HttpMalformedHeaderException;
 import org.parosproxy.paros.network.HttpMessage;
-import org.parosproxy.paros.network.HttpSender;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
 import org.zaproxy.addon.client.ClientCallBackUtils;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
@@ -57,12 +65,11 @@ import org.zaproxy.zap.model.Context;
  *   close decision has returned. ZAP waits this long for progress callbacks to
  *   report terminal state or safeToClose before forcing the browser closed.
  * - BROWSER_CLOSE_SCRIPT_TIMEOUT_MS is the Selenium async-script budget for a
- *   single close-decision call. It must be greater than the PTK stop budget so
- *   WebDriver can receive PTK's callback rather than timing out first.
- * - BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS is the stopTimeoutMs value sent to the
- *   injected PTK close-decision script when it needs to stop a session.
- * - The injected script derives its internal call timeout directly from that
- *   stopTimeoutMs value; there is no separate JavaScript cap to keep in sync.
+ *   single close-decision call.
+ * - BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS is the close-decision bridge call timeout.
+ *   The close-decision script must not stop PTK merely because this or any other
+ *   close budget elapsed. Stale activity is logged as degraded waiting evidence,
+ *   not as permission to stop a running PTK scan.
  * - Follow-up WebDriver decisions are attempted every
  *   BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS slices while the Java polling
  *   budget remains open. The worst-case wall-clock bound is therefore
@@ -71,18 +78,23 @@ import org.zaproxy.zap.model.Context;
  *   startup grace. This avoids closing a valid page too early when many
  *   WebDriver browsers are started concurrently and the PTK content/background
  *   handshake is delayed.
+ * - Hard timeout means forced/incomplete. It is not clean close evidence.
  */
 final class PtkCloseContract {
     static final int BROWSER_CLOSE_MAX_ATTEMPTS = 120;
     static final long BROWSER_CLOSE_WAIT_SLICE_MS = 1000;
     static final long BROWSER_CLOSE_NO_PROGRESS_GRACE_MS = 25000;
     static final long BROWSER_CLOSE_AUTOMATION_DISABLED_GRACE_MS = 2500;
+    static final long BROWSER_CALLBACK_BOOTSTRAP_HANDSHAKE_MS = 12000;
+    static final long BROWSER_CALLBACK_BOOTSTRAP_RELOAD_AFTER_MS = 1250;
+    static final long BROWSER_CALLBACK_BOOTSTRAP_POLL_MS = 100;
     static final long CLOSED_ZAPID_RETENTION_MS = 60_000L;
     static final int CLOSED_ZAPID_MAX_ENTRIES = 1024;
     static final long BROWSER_CLOSE_TOTAL_WAIT_MS =
             BROWSER_CLOSE_MAX_ATTEMPTS * BROWSER_CLOSE_WAIT_SLICE_MS;
     static final long BROWSER_CLOSE_SCRIPT_TIMEOUT_MS = 30000;
     static final int BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS = 25000;
+    static final long BROWSER_CLOSE_ACTIVITY_STALE_MS = 30_000L;
     static final int BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS = 15;
     static final int BROWSER_CLOSE_MAX_FOLLOW_UP_DECISIONS =
             BROWSER_CLOSE_MAX_ATTEMPTS / BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS;
@@ -96,11 +108,193 @@ final class PtkCloseContract {
     static {
         if (BROWSER_CLOSE_SCRIPT_TIMEOUT_MS < BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS) {
             throw new IllegalStateException(
-                    "PTK browser close script timeout must cover PTK stop timeout");
+                    "PTK browser close script timeout must cover PTK bridge timeout");
         }
     }
 
     private PtkCloseContract() {}
+
+    @FunctionalInterface
+    interface CallbackHandshakeSleeper {
+        void sleep(long sleepMs) throws InterruptedException;
+    }
+
+    record CallbackBootstrapHandshakeResult(
+            boolean handshakeSeen,
+            long handshakeWaitedMs,
+            int handshakePolls,
+            String handshakeMode,
+            boolean callbackReloadAttempted,
+            int callbackReloadAttempts,
+            String callbackReloadError,
+            boolean interrupted,
+            String handshakeState) {
+
+        Map<String, Object> toLogFields() {
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("handshakeSeen", handshakeSeen);
+            fields.put("handshakeWaitedMs", handshakeWaitedMs);
+            fields.put("handshakePolls", handshakePolls);
+            fields.put("handshakeMode", handshakeMode);
+            fields.put("callbackReloadAttempted", callbackReloadAttempted);
+            fields.put("callbackReloadAttempts", callbackReloadAttempts);
+            if (callbackReloadError != null && !callbackReloadError.isBlank()) {
+                fields.put("callbackReloadError", callbackReloadError);
+            }
+            if (interrupted) {
+                fields.put("interrupted", true);
+            }
+            if (handshakeState != null && !handshakeState.isBlank()) {
+                fields.put("handshakeState", handshakeState);
+            }
+            return fields;
+        }
+    }
+
+    static CallbackBootstrapHandshakeResult awaitCallbackBootstrapHandshake(
+            BooleanSupplier handshakeSeen,
+            Runnable reloadCallback,
+            LongSupplier nowMs,
+            CallbackHandshakeSleeper sleeper) {
+        return awaitCallbackBootstrapHandshake(
+                handshakeSeen,
+                () ->
+                        handshakeSeen != null && handshakeSeen.getAsBoolean()
+                                ? "bootstrap_ready"
+                                : "callback_bootstrap_pending",
+                reloadCallback,
+                nowMs,
+                sleeper,
+                BROWSER_CALLBACK_BOOTSTRAP_HANDSHAKE_MS,
+                BROWSER_CALLBACK_BOOTSTRAP_RELOAD_AFTER_MS,
+                BROWSER_CALLBACK_BOOTSTRAP_POLL_MS);
+    }
+
+    static CallbackBootstrapHandshakeResult awaitCallbackBootstrapHandshake(
+            BooleanSupplier handshakeSeen,
+            Supplier<String> handshakeState,
+            Runnable reloadCallback,
+            LongSupplier nowMs,
+            CallbackHandshakeSleeper sleeper) {
+        return awaitCallbackBootstrapHandshake(
+                handshakeSeen,
+                handshakeState,
+                reloadCallback,
+                nowMs,
+                sleeper,
+                BROWSER_CALLBACK_BOOTSTRAP_HANDSHAKE_MS,
+                BROWSER_CALLBACK_BOOTSTRAP_RELOAD_AFTER_MS,
+                BROWSER_CALLBACK_BOOTSTRAP_POLL_MS);
+    }
+
+    static CallbackBootstrapHandshakeResult awaitCallbackBootstrapHandshake(
+            BooleanSupplier handshakeSeen,
+            Runnable reloadCallback,
+            LongSupplier nowMs,
+            CallbackHandshakeSleeper sleeper,
+            long maxWaitMs,
+            long reloadAfterMs,
+            long pollMs) {
+        return awaitCallbackBootstrapHandshake(
+                handshakeSeen,
+                () ->
+                        handshakeSeen != null && handshakeSeen.getAsBoolean()
+                                ? "bootstrap_ready"
+                                : "callback_bootstrap_pending",
+                reloadCallback,
+                nowMs,
+                sleeper,
+                maxWaitMs,
+                reloadAfterMs,
+                pollMs);
+    }
+
+    static CallbackBootstrapHandshakeResult awaitCallbackBootstrapHandshake(
+            BooleanSupplier handshakeSeen,
+            Supplier<String> handshakeState,
+            Runnable reloadCallback,
+            LongSupplier nowMs,
+            CallbackHandshakeSleeper sleeper,
+            long maxWaitMs,
+            long reloadAfterMs,
+            long pollMs) {
+        long start = nowMs.getAsLong();
+        long deadline = start + Math.max(0L, maxWaitMs);
+        long reloadAt = start + Math.max(0L, reloadAfterMs);
+        long effectivePollMs = Math.max(1L, pollMs);
+        int polls = 0;
+        int reloadAttempts = 0;
+        String reloadError = null;
+        boolean interrupted = false;
+
+        while (true) {
+            if (handshakeSeen != null && handshakeSeen.getAsBoolean()) {
+                return new CallbackBootstrapHandshakeResult(
+                        true,
+                        Math.max(0L, nowMs.getAsLong() - start),
+                        polls,
+                        "java_callback_wait",
+                        reloadAttempts > 0,
+                        reloadAttempts,
+                        reloadError,
+                        interrupted,
+                        resolveHandshakeState(handshakeState, "bootstrap_ready"));
+            }
+            long now = nowMs.getAsLong();
+            if (now >= deadline || interrupted) {
+                return new CallbackBootstrapHandshakeResult(
+                        false,
+                        Math.max(0L, now - start),
+                        polls,
+                        "java_callback_wait",
+                        reloadAttempts > 0,
+                        reloadAttempts,
+                        reloadError,
+                        interrupted,
+                        resolveHandshakeState(handshakeState, "callback_bootstrap_failed"));
+            }
+            if (reloadAttempts == 0 && reloadCallback != null && now >= reloadAt) {
+                reloadAttempts++;
+                try {
+                    reloadCallback.run();
+                } catch (RuntimeException e) {
+                    reloadError = e.getMessage() != null ? e.getMessage() : e.toString();
+                }
+                if (handshakeSeen != null && handshakeSeen.getAsBoolean()) {
+                    return new CallbackBootstrapHandshakeResult(
+                            true,
+                            Math.max(0L, nowMs.getAsLong() - start),
+                            polls,
+                            "java_callback_wait",
+                            true,
+                            reloadAttempts,
+                            reloadError,
+                            interrupted,
+                            resolveHandshakeState(handshakeState, "bootstrap_ready"));
+                }
+            }
+            long sleepMs = Math.min(effectivePollMs, Math.max(1L, deadline - now));
+            polls++;
+            try {
+                sleeper.sleep(sleepMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                interrupted = true;
+            }
+        }
+    }
+
+    private static String resolveHandshakeState(Supplier<String> stateSupplier, String fallback) {
+        if (stateSupplier == null) {
+            return fallback;
+        }
+        try {
+            String state = stateSupplier.get();
+            return state != null && !state.isBlank() ? state : fallback;
+        } catch (RuntimeException e) {
+            return fallback;
+        }
+    }
 
     static Long getCloseDecisionAttemptedAtMs(
             Map<String, Long> closeDecisionAttemptedByZapId, String zapid) {
@@ -270,6 +464,159 @@ final class PtkCloseContract {
         return "no_active_browser_work".equals(reason) || "non_owner_active_work".equals(reason);
     }
 
+    static boolean isActiveBrowserWorkCloseDecision(Map<String, Object> closeDecision) {
+        String decision = getString(closeDecision, "decision");
+        if (!"wait".equals(decision)) {
+            return false;
+        }
+        if (Boolean.TRUE.equals(closeDecision.get("stopRequested"))) {
+            return false;
+        }
+        return "active_browser_work".equals(getString(closeDecision, "reason"));
+    }
+
+    @SuppressWarnings("unchecked")
+    static String canonicalProgressSummary(Map<String, Object> progressData) {
+        if (progressData == null || progressData.isEmpty()) {
+            return "";
+        }
+        StringBuilder summary = new StringBuilder();
+        appendSummaryField(summary, "sid", getString(progressData, "sessionId"));
+        // Build the close-readiness activity signal on the Java side. Extension-provided
+        // activitySeq/activityFingerprint may include heartbeat or module-delivery counters,
+        // which would keep browser close alive even when engines are no longer making
+        // meaningful scan progress.
+        Object safeToClose = progressData.get("safeToClose");
+        if (safeToClose instanceof Boolean) {
+            appendSummaryField(summary, "safe", safeToClose);
+        }
+        String status = getString(progressData, "status");
+        Integer progress = getInteger(progressData, "progress");
+        if ((status != null && !status.isBlank()) || progress != null) {
+            appendSummaryField(
+                    summary,
+                    "top",
+                    (status != null ? status : "") + ":" + (progress != null ? progress : 0));
+        }
+        Object publisherValue = progressData.get("publisher");
+        if (publisherValue instanceof Map<?, ?> rawPublisher) {
+            Map<String, Object> publisher = (Map<String, Object>) rawPublisher;
+            appendSummaryField(summary, "pf", getInteger(publisher, "pendingFindings"));
+            appendSummaryField(summary, "ifb", getInteger(publisher, "inFlightBatches"));
+            Object drained = publisher.get("drained");
+            if (drained instanceof Boolean) {
+                appendSummaryField(summary, "pdr", drained);
+            }
+            appendSummaryField(summary, "lab", getInteger(publisher, "lastAckedBatchSeq"));
+        }
+        Object enginesValue = progressData.get("engines");
+        if (!(enginesValue instanceof Map<?, ?> engines) || engines.isEmpty()) {
+            return summary.toString();
+        }
+        engines.forEach(
+                (engineName, engineValue) -> {
+                    if (!(engineName instanceof String) || !(engineValue instanceof Map<?, ?>)) {
+                        return;
+                    }
+                    Map<String, Object> engine = (Map<String, Object>) engineValue;
+                    if (!summary.isEmpty()) {
+                        summary.append(',');
+                    }
+                    Integer engineProgress = getInteger(engine, "progress");
+                    summary.append(engineName)
+                            .append(':')
+                            .append(getString(engine, "status"))
+                            .append(':')
+                            .append(engineProgress != null ? engineProgress : 0);
+                    Object detailsValue = engine.get("details");
+                    if (detailsValue instanceof Map<?, ?> rawDetails) {
+                        Map<String, Object> details = (Map<String, Object>) rawDetails;
+                        summary.append('[');
+                        appendDetailField(summary, details, "planned", "p");
+                        appendDetailField(summary, details, "executed", "e");
+                        appendDetailField(summary, details, "remaining", "rem");
+                        appendDetailField(summary, details, "requestQueue", "rq");
+                        appendDetailField(summary, details, "taskQueue", "tq");
+                        appendDetailField(summary, details, "activeTasks", "at");
+                        appendDetailField(summary, details, "planning", "pl");
+                        appendDetailField(summary, details, "pendingCaptures", "pcap");
+                        appendDetailField(summary, details, "findingsCount", "f");
+                        appendDetailField(summary, details, "seededRequests", "seed");
+                        appendDetailField(summary, details, "agentReady", "iar");
+                        appendDetailField(summary, details, "findingReportsAccepted", "ifa");
+                        appendDetailField(
+                                summary, details, "findingReportsDroppedInactive", "ifdi");
+                        appendDetailField(
+                                summary, details, "findingReportsDroppedTabMismatch", "ifdt");
+                        appendDetailField(summary, details, "pendingFindings", "pf");
+                        appendDetailField(summary, details, "inFlightBatches", "ifb");
+                        summary.append(']');
+                    }
+                });
+        return summary.toString();
+    }
+
+    static Long newestActivityAt(Long progressChangedAtMs, Long alertChangedAtMs) {
+        if (progressChangedAtMs == null) {
+            return alertChangedAtMs;
+        }
+        if (alertChangedAtMs == null) {
+            return progressChangedAtMs;
+        }
+        return Math.max(progressChangedAtMs, alertChangedAtMs);
+    }
+
+    static boolean isActivityFresh(Long lastActivityAtMs, long nowMs) {
+        return lastActivityAtMs != null
+                && nowMs - lastActivityAtMs <= BROWSER_CLOSE_ACTIVITY_STALE_MS;
+    }
+
+    static boolean shouldCreateAdaptiveStaleCloseRequest(
+            PtkZapSessionSnapshot snapshot,
+            String requestedSessionId,
+            String requestedBrowserId,
+            long nowMs) {
+        if (snapshot == null || snapshot.closeRequest() != null) {
+            return false;
+        }
+        if (snapshot.contractVersion() < 2 || snapshot.isV2PhysicallySafeToClose()) {
+            return false;
+        }
+        String sessionId = snapshot.sessionId();
+        if (sessionId == null || sessionId.isBlank()) {
+            return false;
+        }
+        if (requestedSessionId != null
+                && !requestedSessionId.isBlank()
+                && !requestedSessionId.equals(sessionId)) {
+            return false;
+        }
+        String browserId = snapshot.browserId();
+        if (browserId != null
+                && !browserId.isBlank()
+                && requestedBrowserId != null
+                && !requestedBrowserId.isBlank()
+                && !requestedBrowserId.equals(browserId)) {
+            return false;
+        }
+        Integer progress = snapshot.progress();
+        if (progress == null || progress < 99) {
+            return false;
+        }
+        String status = snapshot.status();
+        if (status == null || isTerminalProgressValue(progress, status)) {
+            return false;
+        }
+        return !isActivityFresh(snapshot.newestActivityAt(), nowMs);
+    }
+
+    static long activityIdleMs(Long lastActivityAtMs, long nowMs) {
+        if (lastActivityAtMs == null) {
+            return -1L;
+        }
+        return Math.max(0L, nowMs - lastActivityAtMs);
+    }
+
     private static boolean isBrowserLocalNonParticipantReason(String reason) {
         return "automation_disabled".equals(reason)
                 || "manual_mode".equals(reason)
@@ -282,6 +629,34 @@ final class PtkCloseContract {
         Object value = map != null ? map.get(key) : null;
         return value == null ? null : String.valueOf(value);
     }
+
+    private static Integer getInteger(Map<String, Object> map, String key) {
+        Object value = map != null ? map.get(key) : null;
+        return value instanceof Number ? ((Number) value).intValue() : null;
+    }
+
+    private static void appendDetailField(
+            StringBuilder summary, Map<String, Object> details, String key, String label) {
+        Object value = details.get(key);
+        if (!(value instanceof Number)) {
+            return;
+        }
+        summary.append(';').append(label).append('=').append(((Number) value).intValue());
+    }
+
+    private static void appendSummaryField(StringBuilder summary, String label, Object value) {
+        if (value == null) {
+            return;
+        }
+        String text = String.valueOf(value);
+        if (text.isBlank()) {
+            return;
+        }
+        if (!summary.isEmpty()) {
+            summary.append(',');
+        }
+        summary.append(label).append('=').append(text);
+    }
 }
 
 public class ExtensionPtk extends ExtensionAdaptor
@@ -291,10 +666,47 @@ public class ExtensionPtk extends ExtensionAdaptor
     private static final String PREFIX = "ptk";
     private static final Gson GSON = new Gson();
 
+    private static String redactZapCallbackUrlForLog(String value) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        String redacted =
+                value.replaceAll(
+                                "(https?://[^/?#\\s\"'<>]+/zapCallBackUrl/)[^/?#\\s\"'<>]+",
+                                "$1<redacted>")
+                        .replaceAll("(/zapCallBackUrl/)[^/?#\\s\"'<>]+", "$1<redacted>");
+        if (redacted.contains("/zapCallBackUrl/")) {
+            redacted =
+                    redacted.replaceAll("([?&]zapid=)[^&#\\s\"'<>]+", "$1<redacted>")
+                            .replaceAll("(\\|)[^\\s\"'<>]+", "$1<redacted>");
+        }
+        return redacted;
+    }
+
+    private static Object redactZapCallbackValueForLog(Object value) {
+        if (value instanceof String text) {
+            return redactZapCallbackUrlForLog(text);
+        }
+        return value;
+    }
+
+    private static Map<String, Object> redactZapCallbackMapForLog(Map<String, Object> values) {
+        if (values == null || values.isEmpty()) {
+            return values;
+        }
+        Map<String, Object> redacted = new LinkedHashMap<>();
+        values.forEach((key, value) -> redacted.put(key, redactZapCallbackValueForLog(value)));
+        return redacted;
+    }
+
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
             List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
     private static final List<Browser> PTK_CHROMIUM_BROWSERS =
-            List.of(Browser.CHROME, Browser.EDGE);
+            List.of(Browser.CHROME, Browser.CHROME_HEADLESS, Browser.EDGE, Browser.EDGE_HEADLESS);
+    private static final List<Browser> PTK_FIREFOX_BROWSERS =
+            List.of(Browser.FIREFOX, Browser.FIREFOX_HEADLESS);
+    private static final char[] CHROMIUM_EXTENSION_ID_ALPHABET = "abcdefghijklmnop".toCharArray();
+    private static final String PTK_ZAP_RUNNER_PATH = "/ptk/internal/zap-runner.html";
     private static final List<String> PTK_CHROMIUM_BACKGROUND_ARGS =
             List.of(
                     "--disable-background-networking",
@@ -302,15 +714,26 @@ public class ExtensionPtk extends ExtensionAdaptor
                     "--disable-domain-reliability",
                     "--disable-default-apps",
                     "--disable-features=AutofillServerCommunication,OptimizationHints,OptimizationHintsFetching,OptimizationTargetPrediction,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn",
+                    "--proxy-bypass-list=edge.microsoft.com;*.dl.delivery.mp.microsoft.com;update.googleapis.com;dl.google.com;*.gvt1.com",
                     "--disable-sync",
                     "--no-default-browser-check",
                     "--no-first-run");
+    private static final int PTK_BROWSER_BACKGROUND_PROXY_LISTENER_ORDER = 0;
+    private static final String PTK_BACKGROUND_TRAFFIC_EMPTY_RESPONSE =
+            "HTTP/1.1 204 No Content\r\n"
+                    + "Content-Length: 0\r\n"
+                    + "Cache-Control: no-store\r\n"
+                    + "Connection: close\r\n\r\n";
     private static final int ZAP_HISTORY_SEED_MAX_URLS = 500;
     private static final int ZAP_HISTORY_SEED_MAX_SITE_NODES = 10_000;
     private static final long ZAP_HISTORY_SEED_CACHE_TTL_MS = 2_000L;
     private static final long ZAP_HISTORY_SEED_FAILURE_LOG_INTERVAL_MS = 60_000L;
+    private static final long PTK_CLIENT_SPIDER_ACTIVITY_TOUCH_MIN_INTERVAL_MS = 500L;
+    private static final int PTK_CLIENT_SPIDER_SEED_URL_CAP = 24;
 
     private ClientCallBackImplementor callBackImplementor;
+    private final OverrideMessageProxyListener browserBackgroundTrafficProxyListener =
+            new BrowserBackgroundTrafficProxyListener();
     private PtkOptionsPanel optionsPanel;
     private PtkParam ptkParam;
     private final List<PtkDiagnosticExtension> diagnosticExtensions = new ArrayList<>();
@@ -322,14 +745,38 @@ public class ExtensionPtk extends ExtensionAdaptor
     private final Map<String, ZapHistorySeedCacheEntry> zapHistorySeedCache =
             new ConcurrentHashMap<>();
     private final AtomicLong lastZapHistorySeedFailureLogAtMs = new AtomicLong(0L);
+    private final AtomicBoolean clientSpiderActivityTouchWarned = new AtomicBoolean(false);
+    private final Map<String, Long> clientSpiderActivityTouchAtMsByZapId =
+            new ConcurrentHashMap<>();
+    private final Set<String> clientSpiderSeededScanKeys = ConcurrentHashMap.newKeySet();
+    private volatile Field clientSpiderLastEventReceivedTimeField;
+    private volatile Field clientSpiderOptionsField;
+    private volatile Method clientSpiderAddOpenUrlTaskMethod;
+    private volatile Method clientOptionsGetThreadCountMethod;
+    private volatile Method clientOptionsGetPageLoadTimeMethod;
 
     private final Map<String, Integer> scanProgress = new ConcurrentHashMap<>();
     private final Map<String, String> scanStatus = new ConcurrentHashMap<>();
     private final Map<String, Long> callbackFirstSeenAtMs = new ConcurrentHashMap<>();
+    private final Map<String, Long> configServedAtMsByZapId = new ConcurrentHashMap<>();
     private final Map<String, String> browserIdByZapId = new ConcurrentHashMap<>();
     private final Map<String, Integer> alertsRaisedByZapId = new ConcurrentHashMap<>();
     private final Map<String, Long> firstAlertSeenAtMs = new ConcurrentHashMap<>();
     private final Map<String, String> lastProgressSummaryByZapId = new ConcurrentHashMap<>();
+    private final Map<String, String> lastEngineEvidenceSummaryByZapIdAndEngine =
+            new ConcurrentHashMap<>();
+    private final Set<String> engineEvidenceInfoLogged = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> lastProgressChangedAtMsByZapId = new ConcurrentHashMap<>();
+    private final Map<String, Long> lastAlertChangedAtMsByZapId = new ConcurrentHashMap<>();
+    private final Map<String, Integer> progressContractVersionByZapId = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> publisherDrainedByZapId = new ConcurrentHashMap<>();
+    private final Map<String, String> closeRequestIdByZapId = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> closeRequestAckByZapId = new ConcurrentHashMap<>();
+    private final Map<String, Long> closeRequestCreatedAtMsByZapId = new ConcurrentHashMap<>();
+    private final Set<String> staleCloseLogged = ConcurrentHashMap.newKeySet();
+    private final Map<String, PtkZapSessionState> sessionStateByZapId = new ConcurrentHashMap<>();
+    private final Map<String, PtkBrowserTaskState> browserTaskStateByZapIdAndBrowserId =
+            new ConcurrentHashMap<>();
     /*
      * safeToClose is advisory state accepted only through the ZAP callback flow for
      * the current zapid/WebDriver-controlled browser. Page scripts can observe the
@@ -350,6 +797,10 @@ public class ExtensionPtk extends ExtensionAdaptor
     private final Set<String> firstAlertLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> terminalProgressLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> sessionEstablishedLogged = ConcurrentHashMap.newKeySet();
+    private final Set<String> contractCallbackLogged = ConcurrentHashMap.newKeySet();
+    private final Set<String> configAppliedLogged = ConcurrentHashMap.newKeySet();
+    private final Set<String> targetResolvedLogged = ConcurrentHashMap.newKeySet();
+    private final Set<String> closeWaitActiveLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> manualModeConfigZapIds = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> closedZapIds = new ConcurrentHashMap<>();
 
@@ -367,9 +818,459 @@ public class ExtensionPtk extends ExtensionAdaptor
         super("ExtensionPtk");
     }
 
+    private Field getClientSpiderLastEventReceivedTimeField() {
+        Field existing = clientSpiderLastEventReceivedTimeField;
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            Class<?> clientSpiderClass =
+                    Class.forName("org.zaproxy.addon.client.spider.ClientSpider");
+            Field field = clientSpiderClass.getDeclaredField("lastEventReceivedtime");
+            field.setAccessible(true);
+            clientSpiderLastEventReceivedTimeField = field;
+            return field;
+        } catch (LinkageError | ReflectiveOperationException | RuntimeException e) {
+            LOGGER.debug(
+                    "PTK could not access Client Spider activity timestamp field: {}",
+                    e.getMessage());
+            return null;
+        }
+    }
+
+    private Field getClientSpiderOptionsField() {
+        Field existing = clientSpiderOptionsField;
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            Class<?> clientSpiderClass =
+                    Class.forName("org.zaproxy.addon.client.spider.ClientSpider");
+            Field field = clientSpiderClass.getDeclaredField("options");
+            field.setAccessible(true);
+            clientSpiderOptionsField = field;
+            return field;
+        } catch (LinkageError | ReflectiveOperationException | RuntimeException e) {
+            LOGGER.debug("PTK could not access Client Spider options field: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private Method getClientSpiderAddOpenUrlTaskMethod() {
+        Method existing = clientSpiderAddOpenUrlTaskMethod;
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            Class<?> clientSpiderClass =
+                    Class.forName("org.zaproxy.addon.client.spider.ClientSpider");
+            Method method =
+                    clientSpiderClass.getDeclaredMethod("addOpenUrlTask", String.class, int.class);
+            method.setAccessible(true);
+            clientSpiderAddOpenUrlTaskMethod = method;
+            return method;
+        } catch (LinkageError | ReflectiveOperationException | RuntimeException e) {
+            LOGGER.debug(
+                    "PTK could not access Client Spider addOpenUrlTask method: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private Method getClientOptionsGetThreadCountMethod(Object options) {
+        if (options == null) {
+            return null;
+        }
+        Method existing = clientOptionsGetThreadCountMethod;
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            Method method = options.getClass().getMethod("getThreadCount");
+            clientOptionsGetThreadCountMethod = method;
+            return method;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            LOGGER.debug("PTK could not access ClientOptions.getThreadCount: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private Method getClientOptionsGetPageLoadTimeMethod(Object options) {
+        if (options == null) {
+            return null;
+        }
+        Method existing = clientOptionsGetPageLoadTimeMethod;
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            Method method = options.getClass().getMethod("getPageLoadTimeInSecs");
+            clientOptionsGetPageLoadTimeMethod = method;
+            return method;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            LOGGER.debug(
+                    "PTK could not access ClientOptions.getPageLoadTimeInSecs: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private void seedActiveClientSpiderTasksForPtkTarget(
+            String zapid, String targetUrl, List<String> seedUrls) {
+        if (!getParam().isZapAutomationEnabled()
+                || targetUrl == null
+                || targetUrl.isBlank()
+                || seedUrls == null
+                || seedUrls.isEmpty()) {
+            return;
+        }
+
+        ExtensionClientIntegration clientExtension =
+                Control.getSingleton()
+                        .getExtensionLoader()
+                        .getExtension(ExtensionClientIntegration.class);
+        if (clientExtension == null) {
+            return;
+        }
+
+        List<?> activeScans;
+        try {
+            activeScans = clientExtension.getActiveScans();
+        } catch (RuntimeException e) {
+            LOGGER.debug(
+                    "PTK failed to read active Client Spider scans for seeding: {}",
+                    e.getMessage());
+            return;
+        }
+        if (activeScans == null || activeScans.isEmpty()) {
+            return;
+        }
+
+        String normalizedTarget = PtkUrlUtils.normalizeHttpUrlWithoutFragment(targetUrl);
+        for (Object scan : activeScans) {
+            if (scan == null) {
+                continue;
+            }
+            String scanTarget = getClientSpiderTargetUrl(scan);
+            String normalizedScanTarget = PtkUrlUtils.normalizeHttpUrlWithoutFragment(scanTarget);
+            if (normalizedTarget == null || !normalizedTarget.equals(normalizedScanTarget)) {
+                continue;
+            }
+            String scanKey =
+                    System.identityHashCode(scan)
+                            + ":"
+                            + (normalizedTarget != null ? normalizedTarget : targetUrl);
+            if (!clientSpiderSeededScanKeys.add(scanKey)) {
+                continue;
+            }
+            seedClientSpiderTasks(scan, zapid, targetUrl, seedUrls);
+        }
+    }
+
+    public void seedActiveScanClientSpiderTasks(String targetUrl) {
+        if (targetUrl == null || targetUrl.isBlank()) {
+            return;
+        }
+        List<String> urls = getCachedZapHistorySeedUrls(targetUrl, ZAP_HISTORY_SEED_MAX_URLS);
+        seedActiveClientSpiderTasksForPtkTarget(null, targetUrl, urls);
+    }
+
+    private void seedClientSpiderTasks(
+            Object scan, String zapid, String targetUrl, List<String> seedUrls) {
+        Method addOpenUrlTask = getClientSpiderAddOpenUrlTaskMethod();
+        Field optionsField = getClientSpiderOptionsField();
+        if (addOpenUrlTask == null || optionsField == null) {
+            return;
+        }
+
+        Object options;
+        try {
+            options = optionsField.get(scan);
+        } catch (IllegalAccessException | RuntimeException e) {
+            LOGGER.debug(
+                    "PTK failed to read Client Spider options for seeding: {}", e.getMessage());
+            return;
+        }
+
+        int threadCount = getClientSpiderThreadCount(options);
+        if (threadCount <= 1) {
+            return;
+        }
+        int pageLoadTime = getClientSpiderPageLoadTime(options);
+        /*
+         * Client Spider serialises WebDriver creation through its WebDriver pool. With fast pages,
+         * a task can finish and return its browser to the pool before later queued tasks acquire
+         * the creation lock, causing those tasks to reuse an existing browser instead of starting
+         * the requested browser concurrency. Queue a bounded batch of real in-scope URLs so the
+         * worker pool has enough work to keep creating browsers while the first tasks are active.
+         */
+        int seedLimit =
+                Math.min(
+                        Math.max(threadCount * 3, threadCount - 1), PTK_CLIENT_SPIDER_SEED_URL_CAP);
+        if (seedLimit <= 0) {
+            return;
+        }
+
+        int attempted = 0;
+        int seeded = 0;
+        Set<String> unique = new LinkedHashSet<>();
+        String normalizedTarget = PtkUrlUtils.normalizeHttpUrlWithoutFragment(targetUrl);
+        for (String seedUrl : seedUrls) {
+            String normalized = PtkUrlUtils.normalizeHttpUrlWithoutFragment(seedUrl);
+            if (normalized == null
+                    || normalized.equals(normalizedTarget)
+                    || !PtkUrlUtils.isSameOriginAndPathScoped(targetUrl, normalized)
+                    || !unique.add(normalized)) {
+                continue;
+            }
+            attempted++;
+            try {
+                Object task = addOpenUrlTask.invoke(scan, normalized, pageLoadTime);
+                if (task != null) {
+                    seeded++;
+                }
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                LOGGER.debug(
+                        "PTK failed to seed Client Spider URL task url={} reason={}",
+                        redactZapCallbackUrlForLog(normalized),
+                        e.getMessage());
+            }
+            if (seeded >= seedLimit) {
+                break;
+            }
+        }
+
+        if (seeded > 0) {
+            LOGGER.debug(
+                    "PTK_CONTRACT phase=client_spider_seed_tasks zapid={} seeded={} attempted={} threadCount={} targetUrl={}",
+                    zapid,
+                    seeded,
+                    attempted,
+                    threadCount,
+                    targetUrl);
+        }
+    }
+
+    private int getClientSpiderThreadCount(Object options) {
+        Method method = getClientOptionsGetThreadCountMethod(options);
+        if (method == null) {
+            return 1;
+        }
+        try {
+            Object value = method.invoke(options);
+            return value instanceof Number ? ((Number) value).intValue() : 1;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            LOGGER.debug("PTK failed to read Client Spider thread count: {}", e.getMessage());
+            return 1;
+        }
+    }
+
+    private int getClientSpiderPageLoadTime(Object options) {
+        Method method = getClientOptionsGetPageLoadTimeMethod(options);
+        if (method == null) {
+            return 5;
+        }
+        try {
+            Object value = method.invoke(options);
+            return value instanceof Number ? ((Number) value).intValue() : 5;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            LOGGER.debug("PTK failed to read Client Spider page-load time: {}", e.getMessage());
+            return 5;
+        }
+    }
+
+    private void touchActiveClientSpidersForPtkActivity(
+            String zapid, String targetUrl, String reason, long nowMs) {
+        if (zapid == null || zapid.isBlank() || nowMs <= 0) {
+            return;
+        }
+        Long previousTouch = clientSpiderActivityTouchAtMsByZapId.get(zapid);
+        if (previousTouch != null
+                && nowMs - previousTouch < PTK_CLIENT_SPIDER_ACTIVITY_TOUCH_MIN_INTERVAL_MS) {
+            return;
+        }
+
+        String activityTarget = firstNonBlank(targetUrl, targetUrlByZapId.get(zapid));
+        if (activityTarget == null || activityTarget.isBlank()) {
+            activityTarget = browserCoverageTargetUrlByZapId.get(zapid);
+        }
+        if (activityTarget == null || activityTarget.isBlank()) {
+            return;
+        }
+
+        ExtensionClientIntegration clientExtension =
+                Control.getSingleton()
+                        .getExtensionLoader()
+                        .getExtension(ExtensionClientIntegration.class);
+        if (clientExtension == null) {
+            return;
+        }
+
+        List<?> activeScans;
+        try {
+            activeScans = clientExtension.getActiveScans();
+        } catch (RuntimeException e) {
+            LOGGER.debug("PTK failed to read active Client Spider scans: {}", e.getMessage());
+            return;
+        }
+        if (activeScans == null || activeScans.isEmpty()) {
+            return;
+        }
+
+        int touched = 0;
+        for (Object scan : activeScans) {
+            if (scan == null || !isPtkActivityInClientSpiderScope(scan, activityTarget)) {
+                continue;
+            }
+            if (touchClientSpiderActivity(scan, nowMs)) {
+                touched++;
+            }
+        }
+
+        if (touched > 0) {
+            clientSpiderActivityTouchAtMsByZapId.put(zapid, nowMs);
+            LOGGER.debug(
+                    "PTK touched Client Spider activity zapid={} touched={} reason={} target={}",
+                    zapid,
+                    touched,
+                    reason,
+                    activityTarget);
+        }
+    }
+
+    private boolean isPtkActivityInClientSpiderScope(Object scan, String activityTarget) {
+        String scanTarget = getClientSpiderTargetUrl(scan);
+        if (scanTarget == null || scanTarget.isBlank()) {
+            return false;
+        }
+        return PtkUrlUtils.isSameOriginAndPathScoped(scanTarget, activityTarget)
+                || PtkUrlUtils.isSameOriginAndPathScoped(activityTarget, scanTarget);
+    }
+
+    private String getClientSpiderTargetUrl(Object scan) {
+        if (scan == null) {
+            return null;
+        }
+        try {
+            Method getTargetUrl = scan.getClass().getMethod("getTargetUrl");
+            Object value = getTargetUrl.invoke(scan);
+            return value != null ? String.valueOf(value) : null;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private boolean touchClientSpiderActivity(Object scan, long nowMs) {
+        Field field = getClientSpiderLastEventReceivedTimeField();
+        if (field == null) {
+            if (clientSpiderActivityTouchWarned.compareAndSet(false, true)) {
+                LOGGER.warn(
+                        "PTK cannot extend Client Spider quiet-window activity; field unavailable");
+            }
+            return false;
+        }
+        try {
+            field.setLong(scan, nowMs);
+            return true;
+        } catch (IllegalAccessException | RuntimeException e) {
+            if (clientSpiderActivityTouchWarned.compareAndSet(false, true)) {
+                LOGGER.warn(
+                        "PTK failed to extend Client Spider quiet-window activity: {}",
+                        e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    private static String firstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        if (second != null && !second.isBlank()) {
+            return second;
+        }
+        return null;
+    }
+
+    static boolean isBrowserBackgroundRequestToSuppress(String host, String path) {
+        if (host == null || host.isBlank()) {
+            return false;
+        }
+        String normalizedHost = host.toLowerCase().strip();
+        while (normalizedHost.endsWith(".")) {
+            normalizedHost = normalizedHost.substring(0, normalizedHost.length() - 1);
+        }
+        String normalizedPath = path == null || path.isBlank() ? "/" : path.toLowerCase();
+
+        if ("edge.microsoft.com".equals(normalizedHost)
+                && normalizedPath.startsWith("/componentupdater/")) {
+            return true;
+        }
+        if ("firefox.settings.services.mozilla.com".equals(normalizedHost)
+                && normalizedPath.startsWith("/v1/")) {
+            return true;
+        }
+        return normalizedHost.endsWith(".dl.delivery.mp.microsoft.com")
+                && normalizedPath.startsWith("/filestreamingservice/");
+    }
+
+    private static boolean isBrowserBackgroundRequestToSuppress(HttpMessage message) {
+        if (message == null || message.getRequestHeader() == null) {
+            return false;
+        }
+        try {
+            org.apache.commons.httpclient.URI uri = message.getRequestHeader().getURI();
+            if (uri == null) {
+                return false;
+            }
+            return isBrowserBackgroundRequestToSuppress(uri.getHost(), uri.getPath());
+        } catch (URIException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    private static boolean applyBrowserBackgroundTrafficResponse(HttpMessage message) {
+        if (!isBrowserBackgroundRequestToSuppress(message)) {
+            return false;
+        }
+        try {
+            message.setResponseHeader(PTK_BACKGROUND_TRAFFIC_EMPTY_RESPONSE);
+            message.setResponseBody("");
+            message.setResponseFromTargetHost(false);
+            if (LOGGER.isDebugEnabled()) {
+                org.apache.commons.httpclient.URI uri = message.getRequestHeader().getURI();
+                LOGGER.debug(
+                        "PTK_CONTRACT phase=browser_background_request_suppressed host={} path={}",
+                        uri.getHost(),
+                        uri.getPath());
+            }
+            return true;
+        } catch (HttpMalformedHeaderException | URIException | RuntimeException e) {
+            LOGGER.debug("PTK failed to suppress browser background request: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private static final class BrowserBackgroundTrafficProxyListener
+            implements OverrideMessageProxyListener {
+        @Override
+        public int getArrangeableListenerOrder() {
+            return PTK_BROWSER_BACKGROUND_PROXY_LISTENER_ORDER;
+        }
+
+        @Override
+        public boolean onHttpRequestSend(HttpMessage message) {
+            return applyBrowserBackgroundTrafficResponse(message);
+        }
+
+        @Override
+        public boolean onHttpResponseReceived(HttpMessage message) {
+            return isBrowserBackgroundRequestToSuppress(message);
+        }
+    }
+
     @Override
     public void hook(ExtensionHook extensionHook) {
         super.hook(extensionHook);
+        extensionHook.addOverrideMessageProxyListener(browserBackgroundTrafficProxyListener);
         callBackImplementor = new CallBackImplementor();
         Control.getSingleton()
                 .getExtensionLoader()
@@ -473,11 +1374,66 @@ public class ExtensionPtk extends ExtensionAdaptor
         return PtkExampleAlerts.getExampleAlerts(getLoadedResources());
     }
 
+    static Path getPtkChromiumExtensionPath() {
+        return Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest");
+    }
+
+    static String chromiumExtensionIdForPath(Path extensionPath) {
+        if (extensionPath == null) {
+            return "";
+        }
+        String normalizedPath = extensionPath.toAbsolutePath().normalize().toString();
+        byte[] digest;
+        try {
+            digest =
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(normalizedPath.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 digest unavailable", e);
+        }
+
+        StringBuilder id = new StringBuilder(32);
+        for (int i = 0; i < 16 && i < digest.length; i++) {
+            int value = digest[i] & 0xff;
+            id.append(CHROMIUM_EXTENSION_ID_ALPHABET[value >>> 4]);
+            id.append(CHROMIUM_EXTENSION_ID_ALPHABET[value & 0x0f]);
+        }
+        return id.toString();
+    }
+
+    static String buildChromiumZapRunnerUrl(Path extensionPath) {
+        String extensionId = chromiumExtensionIdForPath(extensionPath);
+        if (extensionId.isBlank()) {
+            return "";
+        }
+        return "chrome-extension://" + extensionId + PTK_ZAP_RUNNER_PATH;
+    }
+
+    static String zapCallbackRunnerSkipReason(
+            boolean zapAutomationEnabled, String browserid, String callbackUrl) {
+        if (callbackUrl == null
+                || !callbackUrl.contains("zapCallBackUrl")
+                || !callbackUrl.contains("zapenable=true")) {
+            return "not_zap_callback";
+        }
+        if (!zapAutomationEnabled) {
+            return "zap_automation_disabled";
+        }
+        if (browserid == null || browserid.isBlank()) {
+            return "non_chromium_browser";
+        }
+        String normalized = browserid.toLowerCase();
+        if (!normalized.contains("chrome") && !normalized.contains("edge")) {
+            return "non_chromium_browser";
+        }
+        return "";
+    }
+
     private static void ensurePtkSeleniumExtensionsConfigured(ExtensionSelenium extensionSelenium) {
         if (extensionSelenium == null) {
             return;
         }
-        Path chromiumPath = Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest");
+        Path chromiumPath = getPtkChromiumExtensionPath();
         Path xpiPath = Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest.xpi");
 
         try {
@@ -489,8 +1445,13 @@ public class ExtensionPtk extends ExtensionAdaptor
             ensurePtkSeleniumBrowserArguments(options);
             List<BrowserExtension> extensions = new ArrayList<>(options.getBrowserExtensions());
             boolean changed = false;
-            changed |= ensureBrowserExtension(extensions, chromiumPath, Browser.CHROME, "Chromium");
-            changed |= ensureBrowserExtension(extensions, xpiPath, Browser.FIREFOX, "Firefox");
+            for (Browser browser : PTK_CHROMIUM_BROWSERS) {
+                changed |=
+                        ensureBrowserExtension(extensions, chromiumPath, browser, browser.getId());
+            }
+            for (Browser browser : PTK_FIREFOX_BROWSERS) {
+                changed |= ensureBrowserExtension(extensions, xpiPath, browser, browser.getId());
+            }
             if (changed) {
                 options.setBrowserExtensions(extensions);
             }
@@ -681,24 +1642,26 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
 
         synchronized (configCacheLock) {
-            if (cachedConfigJson != null && configKey.equals(cachedConfigKey)) {
+            if (cachedConfigJson != null
+                    && configKey.equals(cachedConfigKey)
+                    && cbContext.initiator() == cachedInitiator) {
                 LOGGER.debug("PTK /ptk/config cache hit after lock");
                 return cachedConfigJson;
             }
-            String mode = "manual";
-            if (param.isAutomatedScanningEnabled()
-                    || (cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
-                            && param.isActiveScanRuleEnabled())) {
-                mode = "auto";
-            }
-            LOGGER.info(
-                    "PTK mode {} auto={} active={}",
+            boolean zapAutomationEnabled = param.isZapAutomationEnabled();
+            String mode = zapAutomationEnabled ? "auto" : "manual";
+            LOGGER.debug(
+                    "PTK mode {} auto={} active={} effective={}",
                     mode,
                     param.isAutomatedScanningEnabled(),
-                    param.isActiveScanRuleEnabled());
+                    param.isActiveScanRuleEnabled(),
+                    zapAutomationEnabled);
 
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("mode", mode);
+            response.put("contractVersion", 2);
+            response.put("ptkControlSupported", true);
+            response.put("controlPath", "/ptk/control");
             Map<String, PtkModulesDefinition> config = PtkConfigFilter.filter(resources, param);
             response.put("sast", config.get("sast") != null ? config.get("sast") : Map.of());
             response.put("iast", config.get("iast") != null ? config.get("iast") : Map.of());
@@ -749,6 +1712,7 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
         LOGGER.debug(
                 "PTK /ptk/config returning {} ZAP history seed URLs scope={}", urls.size(), scope);
+        seedActiveClientSpiderTasksForPtkTarget(zapid, targetUrl, urls);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("zapHistorySeedUrls", urls);
         result.put("zapHistorySeedCount", urls.size());
@@ -949,7 +1913,10 @@ public class ExtensionPtk extends ExtensionAdaptor
         BrowserCoverageEvidence evidence =
                 browserCoverageByUrl.computeIfAbsent(key, ignored -> new BrowserCoverageEvidence());
         evidence.scheduled(attempt);
-        LOGGER.info("PTK_BROWSER_COVERAGE url={} event=scheduled attempt={}", key, attempt);
+        LOGGER.debug(
+                "PTK_BROWSER_COVERAGE url={} event=scheduled attempt={}",
+                redactZapCallbackUrlForLog(key),
+                attempt);
     }
 
     void logBrowserCoverageResult(
@@ -964,9 +1931,9 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
         BrowserCoverageSnapshot effective =
                 snapshot != null ? snapshot : BrowserCoverageSnapshot.empty(key);
-        LOGGER.info(
+        LOGGER.debug(
                 "PTK_BROWSER_COVERAGE url={} event=result attempts={} finalState={} terminal={} browserLoaded={} ptkSessionEstablished={} ptkAnalysisReady={} browserSessionInvalid={} webdriverScriptFailed={} forcedClose={} noPtkProgress={}",
-                key,
+                redactZapCallbackUrlForLog(key),
                 attempts,
                 finalState,
                 terminal,
@@ -999,14 +1966,15 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (zapid != null && !zapid.isBlank()) {
             summary.append(" zapid=").append(zapid);
         }
-        summary.append(" event=browser_loaded url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
-        LOGGER.info(summary.toString());
+        summary.append(" event=browser_loaded url=").append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
+        LOGGER.debug(summary.toString());
     }
 
     void rememberBrowserCoverageTarget(String zapid, String targetUrl) {
@@ -1092,14 +2060,16 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (browserId != null && !browserId.isBlank()) {
             summary.append(" browserid=").append(browserId);
         }
-        summary.append(" event=ptk_session_established url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
-        LOGGER.info(summary.toString());
+        summary.append(" event=ptk_session_established url=")
+                .append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
+        LOGGER.debug(summary.toString());
     }
 
     void recordBrowserCoverageAnalysisReady(
@@ -1134,13 +2104,14 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (browserId != null && !browserId.isBlank()) {
             summary.append(" browserid=").append(browserId);
         }
-        summary.append(" event=ptk_analysis_ready url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
+        summary.append(" event=ptk_analysis_ready url=").append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
         LOGGER.info(summary.toString());
     }
 
@@ -1164,13 +2135,14 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (zapid != null && !zapid.isBlank()) {
             summary.append(" zapid=").append(zapid);
         }
-        summary.append(" event=browser_loaded url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
+        summary.append(" event=browser_loaded url=").append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
         LOGGER.info(summary.toString());
     }
 
@@ -1190,14 +2162,16 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (zapid != null && !zapid.isBlank()) {
             summary.append(" zapid=").append(zapid);
         }
-        summary.append(" event=browser_session_invalid url=").append(key);
-        extra.forEach(
-                (name, value) -> {
-                    if (name != null && !name.isBlank() && value != null) {
-                        summary.append(" ").append(name).append("=").append(value);
-                    }
-                });
-        LOGGER.info(summary.toString());
+        summary.append(" event=browser_session_invalid url=")
+                .append(redactZapCallbackUrlForLog(key));
+        redactZapCallbackMapForLog(extra)
+                .forEach(
+                        (name, value) -> {
+                            if (name != null && !name.isBlank() && value != null) {
+                                summary.append(" ").append(name).append("=").append(value);
+                            }
+                        });
+        LOGGER.warn(summary.toString());
     }
 
     void rememberWebDriverZapId(WebDriver driver, String zapid) {
@@ -1239,6 +2213,7 @@ public class ExtensionPtk extends ExtensionAdaptor
 
         private static final String PTK_ALERT_PATH = "/ptk/alert";
         private static final String PTK_CONFIG_PATH = "/ptk/config";
+        private static final String PTK_CONTROL_PATH = "/ptk/control";
         private static final String PTK_PING_PATH = "/ptk/ping";
         private static final String PTK_PROGRESS_PATH = "/ptk/progress";
 
@@ -1291,6 +2266,444 @@ public class ExtensionPtk extends ExtensionAdaptor
             return value instanceof Boolean ? (Boolean) value : null;
         }
 
+        @SuppressWarnings("unchecked")
+        private Map<String, Object> getMapField(Map<String, Object> body, String key) {
+            Object value = body != null ? body.get(key) : null;
+            return value instanceof Map<?, ?> ? (Map<String, Object>) value : Map.of();
+        }
+
+        private boolean isV2Progress(Map<String, Object> progressData) {
+            Integer version = getIntegerField(progressData, "contractVersion");
+            return version != null && version.intValue() >= 2;
+        }
+
+        private boolean isV2ProgressSafeToClose(String zapid, Map<String, Object> progressData) {
+            if (!isV2ProgressPhysicallySafeToClose(zapid, progressData)) {
+                return false;
+            }
+            Map<String, Object> publisher = getPublisherStateField(progressData);
+            Boolean publisherDrained = getBooleanField(publisher, "drained");
+            String completionStatus = getStringField(progressData, "completionStatus");
+            String releaseStatus = getStringField(progressData, "releaseStatus");
+            return Boolean.TRUE.equals(publisherDrained)
+                    && "completed".equals(completionStatus)
+                    && (releaseStatus == null
+                            || releaseStatus.isBlank()
+                            || "clean".equals(releaseStatus));
+        }
+
+        private boolean isV2ProgressPhysicallySafeToClose(
+                String zapid, Map<String, Object> progressData) {
+            if (!isV2ProgressTerminalEvidence(progressData)) {
+                return false;
+            }
+            String activeCloseRequestId = activeCloseRequestId(zapid);
+            if (activeCloseRequestId == null || activeCloseRequestId.isBlank()) {
+                return true;
+            }
+            String progressCloseRequestId = getStringField(progressData, "closeRequestId");
+            Boolean closeRequestAck = getBooleanField(progressData, "closeRequestAck");
+            return activeCloseRequestId.equals(progressCloseRequestId)
+                    && Boolean.TRUE.equals(closeRequestAck);
+        }
+
+        private boolean isV2ProgressTerminalEvidence(Map<String, Object> progressData) {
+            Boolean terminalSeen = getBooleanField(progressData, "terminalSeen");
+            if (Boolean.TRUE.equals(terminalSeen)) {
+                return true;
+            }
+            return isTerminalProgressValue(
+                    getIntegerField(progressData, "progress"),
+                    getStringField(progressData, "status"));
+        }
+
+        private Map<String, Object> getPublisherStateField(Map<String, Object> body) {
+            Map<String, Object> publisher = getMapField(body, "publisher");
+            return publisher.isEmpty() ? getMapField(body, "zapPublisherDrain") : publisher;
+        }
+
+        private boolean canAcceptCloseDecisionSafeToClose(
+                String zapid, Map<String, Object> closeDecision, Integer progress, String status) {
+            if (!PtkCloseContract.canAcceptCloseDecisionSafeToClose(
+                    closeDecision, progress, status)) {
+                return false;
+            }
+            Integer closeDecisionContractVersion =
+                    getIntegerField(closeDecision, "contractVersion");
+            if (closeDecisionContractVersion != null
+                    && closeDecisionContractVersion.intValue() >= 2) {
+                return canAcceptObservedV2SafeToClose(zapid);
+            }
+            if (progressContractVersionByZapId.getOrDefault(zapid, 0) < 2) {
+                return true;
+            }
+            PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+            if (snapshot == null) {
+                return false;
+            }
+            PtkCloseRequestState closeRequest = snapshot.closeRequest();
+            if (closeRequest == null || closeRequest.id().isBlank()) {
+                return snapshot.isV2PhysicallySafeToClose();
+            }
+            String closeDecisionRequestId = getStringField(closeDecision, "closeRequestId");
+            Boolean closeDecisionAck = getBooleanField(closeDecision, "closeRequestAck");
+            boolean explicitCloseRequestTerminalDecision =
+                    isExplicitCloseRequestTerminalDecision(closeDecision);
+            if (explicitCloseRequestTerminalDecision
+                    && closeRequest.id().equals(closeDecisionRequestId)
+                    && Boolean.TRUE.equals(closeDecisionAck)) {
+                PtkZapSessionState state = sessionStateByZapId.get(zapid);
+                if (state != null) {
+                    state.acknowledgeCloseRequest(closeRequest.id());
+                }
+                closeRequestAckByZapId.put(zapid, true);
+                PtkZapSessionSnapshot refreshedSnapshot = sessionSnapshot(zapid);
+                if (refreshedSnapshot != null && refreshedSnapshot.closeRequest() != null) {
+                    closeRequest = refreshedSnapshot.closeRequest();
+                }
+            }
+            boolean closeRequestMatchedAndAcked =
+                    (closeRequest.id().equals(closeDecisionRequestId)
+                                    && Boolean.TRUE.equals(closeDecisionAck))
+                            || closeRequest.acknowledged();
+            if (!closeRequestMatchedAndAcked) {
+                return false;
+            }
+            if (snapshot.isV2PhysicallySafeToClose()) {
+                return true;
+            }
+            if (snapshot.contractVersion() >= 2) {
+                return canAcceptObservedV2SafeToClose(zapid);
+            }
+            String scanState = getStringField(closeDecision, "scanState");
+            boolean terminalDecision =
+                    snapshot.publisherDrained() && isTerminalProgressValue(null, scanState);
+            if (terminalDecision) {
+                PtkZapSessionState state = sessionStateByZapId.get(zapid);
+                if (state != null) {
+                    state.setSafeToClose(true);
+                    state.markTerminalProgressSeen();
+                }
+            }
+            if (terminalDecision) {
+                return true;
+            }
+            boolean inferredClean =
+                    explicitCloseRequestTerminalDecision && hasStaleAlertActivity(zapid);
+            if (inferredClean) {
+                PtkZapSessionState state = sessionStateByZapId.get(zapid);
+                if (state != null) {
+                    state.setSafeToClose(true);
+                    state.markTerminalProgressSeen();
+                }
+                LOGGER.debug(
+                        "PTK_CONTRACT phase=legacy_inferred_clean_close zapid={} closeRequestId={} alertIdleMs={}",
+                        zapid,
+                        closeRequest.id(),
+                        alertIdleMs(zapid));
+            }
+            return inferredClean;
+        }
+
+        private boolean canAcceptObservedV2SafeToClose(String zapid) {
+            PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+            if (snapshot == null || !snapshot.isV2PhysicallySafeToClose()) {
+                return false;
+            }
+            PtkCloseRequestState closeRequest = snapshot.closeRequest();
+            return closeRequest == null
+                    || closeRequest.id().isBlank()
+                    || closeRequest.acknowledged()
+                    || Boolean.TRUE.equals(closeRequestAckByZapId.get(zapid));
+        }
+
+        private boolean isExplicitCloseRequestTerminalDecision(Map<String, Object> closeDecision) {
+            if (closeDecision == null || closeDecision.isEmpty()) {
+                return false;
+            }
+            if (!"safe_to_close".equals(getStringField(closeDecision, "decision"))) {
+                return false;
+            }
+            String reason = getStringField(closeDecision, "reason");
+            if (!"close_requested".equals(reason) && !"already_terminal".equals(reason)) {
+                return false;
+            }
+            return isTerminalProgressValue(null, getStringField(closeDecision, "scanState"));
+        }
+
+        private Long alertIdleMs(String zapid) {
+            Long alertAt = zapid != null ? lastAlertChangedAtMsByZapId.get(zapid) : null;
+            return alertAt != null ? Math.max(0L, System.currentTimeMillis() - alertAt) : null;
+        }
+
+        private boolean hasStaleAlertActivity(String zapid) {
+            Long idleMs = alertIdleMs(zapid);
+            return idleMs == null || idleMs >= PtkCloseContract.BROWSER_CLOSE_ACTIVITY_STALE_MS;
+        }
+
+        private String activeCloseRequestId(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return null;
+            }
+            PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+            if (snapshot != null && snapshot.closeRequest() != null) {
+                return snapshot.closeRequest().id();
+            }
+            return closeRequestIdByZapId.get(zapid);
+        }
+
+        private void rememberV2ProgressState(String zapid, Map<String, Object> progressData) {
+            if (zapid == null || zapid.isBlank() || !isV2Progress(progressData)) {
+                return;
+            }
+            Integer version = getIntegerField(progressData, "contractVersion");
+            if (version != null) {
+                progressContractVersionByZapId.put(zapid, version);
+            }
+            Map<String, Object> publisher = getPublisherStateField(progressData);
+            Boolean publisherDrained = getBooleanField(publisher, "drained");
+            if (publisherDrained != null) {
+                publisherDrainedByZapId.put(zapid, publisherDrained);
+            }
+            PtkZapSessionState state = sessionState(zapid);
+            if (state != null) {
+                state.rememberReleaseState(
+                        getStringField(progressData, "completionStatus"),
+                        getStringField(progressData, "releaseStatus"));
+            }
+            acknowledgeCloseRequestFromBody(
+                    zapid,
+                    getStringField(progressData, "sessionId"),
+                    getStringField(progressData, "browserid"),
+                    progressData,
+                    "progress");
+        }
+
+        private boolean acknowledgeCloseRequestFromBody(
+                String zapid,
+                String sessionId,
+                String browserid,
+                Map<String, Object> body,
+                String source) {
+            String bodyCloseRequestId = getStringField(body, "closeRequestId");
+            Boolean closeRequestAck = getBooleanField(body, "closeRequestAck");
+            if (zapid == null
+                    || zapid.isBlank()
+                    || bodyCloseRequestId == null
+                    || bodyCloseRequestId.isBlank()
+                    || !Boolean.TRUE.equals(closeRequestAck)) {
+                return false;
+            }
+            PtkZapSessionState state = sessionStateByZapId.get(zapid);
+            PtkZapSessionSnapshot snapshot = state != null ? state.snapshot() : null;
+            PtkCloseRequestState closeRequest = snapshot != null ? snapshot.closeRequest() : null;
+            String activeCloseRequestId =
+                    closeRequest != null ? closeRequest.id() : closeRequestIdByZapId.get(zapid);
+            if (!bodyCloseRequestId.equals(activeCloseRequestId)) {
+                LOGGER.debug(
+                        "PTK ignored closeRequestAck for non-active request zapid={} requestId={} activeRequestId={} source={}",
+                        zapid,
+                        bodyCloseRequestId,
+                        activeCloseRequestId,
+                        source);
+                return false;
+            }
+            if (state != null
+                    && !state.isCloseRequestForSession(closeRequest, sessionId, browserid)) {
+                LOGGER.debug(
+                        "PTK ignored closeRequestAck for mismatched session zapid={} requestId={} sessionId={} browserid={} source={}",
+                        zapid,
+                        bodyCloseRequestId,
+                        sessionId,
+                        browserid,
+                        source);
+                return false;
+            }
+            closeRequestAckByZapId.put(zapid, true);
+            if (state != null) {
+                state.acknowledgeCloseRequest(bodyCloseRequestId);
+                PtkZapSessionSnapshot ackSnapshot = state.snapshot();
+                if (ackSnapshot.hasV2CleanTerminalEvidence()) {
+                    state.setSafeToClose(true);
+                    safeToCloseByZapId.put(zapid, true);
+                }
+            }
+            logContractPhase(
+                    "control_close_request_acknowledged",
+                    zapid,
+                    browserid,
+                    Map.of(
+                            "sessionId",
+                            sessionId != null ? sessionId : "",
+                            "closeRequestId",
+                            bodyCloseRequestId,
+                            "source",
+                            source != null ? source : ""));
+            return true;
+        }
+
+        private String ensureCloseRequest(String zapid, String reason) {
+            if (zapid == null || zapid.isBlank()) {
+                return null;
+            }
+            PtkZapSessionState state = sessionState(zapid);
+            String existingMapValue = closeRequestIdByZapId.get(zapid);
+            long nowMs = System.currentTimeMillis();
+            PtkCloseRequestState closeRequest =
+                    existingMapValue != null && !existingMapValue.isBlank()
+                            ? state.ensureCloseRequest(
+                                    existingMapValue,
+                                    reason,
+                                    closeRequestCreatedAtMsByZapId.getOrDefault(zapid, nowMs))
+                            : state.ensureCloseRequest(reason, nowMs);
+            String closeRequestId = closeRequest.id();
+            boolean newRequest = closeRequestIdByZapId.putIfAbsent(zapid, closeRequestId) == null;
+            closeRequestAckByZapId.putIfAbsent(zapid, closeRequest.acknowledged());
+            closeRequestCreatedAtMsByZapId.putIfAbsent(zapid, closeRequest.createdAtMs());
+            if (newRequest) {
+                LOGGER.debug(
+                        "PTK_CONTRACT phase=graceful_stop_requested zapid={} closeRequestId={} reason={}",
+                        zapid,
+                        closeRequestId,
+                        reason);
+            }
+            return closeRequestId;
+        }
+
+        private void addCloseControlResponse(Map<String, Object> response, String zapid) {
+            addCloseControlResponse(response, zapid, null, null);
+        }
+
+        private void addCloseControlResponse(
+                Map<String, Object> response, String zapid, String sessionId, String browserid) {
+            if (response == null || zapid == null || zapid.isBlank()) {
+                return;
+            }
+            PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+            PtkCloseRequestState closeRequest = snapshot != null ? snapshot.closeRequest() : null;
+            String closeRequestId =
+                    closeRequest != null ? closeRequest.id() : closeRequestIdByZapId.get(zapid);
+            if (closeRequestId == null || closeRequestId.isBlank()) {
+                return;
+            }
+            PtkZapSessionState state = sessionStateByZapId.get(zapid);
+            if (state != null
+                    && !state.isCloseRequestForSession(closeRequest, sessionId, browserid)) {
+                LOGGER.debug(
+                        "PTK ignored control poll for mismatched session zapid={} closeRequestId={} sessionId={} browserid={}",
+                        zapid,
+                        closeRequestId,
+                        sessionId,
+                        browserid);
+                return;
+            }
+            boolean closeAcked =
+                    closeRequest != null
+                            ? closeRequest.acknowledged()
+                            : Boolean.TRUE.equals(closeRequestAckByZapId.get(zapid));
+            if (closeAcked) {
+                return;
+            }
+            response.put("closeRequested", true);
+            response.put("closeRequestId", closeRequestId);
+            response.put("mode", "graceful_stop_and_drain");
+            String reason = closeRequest != null ? closeRequest.reason() : null;
+            response.put(
+                    "reason",
+                    reason != null && !reason.isBlank()
+                            ? reason
+                            : "activity_stale_after_close_request");
+            response.put("stopTimeoutMs", PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS);
+            response.put("drainTimeoutMs", PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS);
+        }
+
+        private Map<String, Object> buildControlPollResponse(Map<String, Object> controlData) {
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("result", "OK");
+            response.put("closeRequested", false);
+            String zapid = getStringField(controlData, "zapid");
+            String browserid = getStringField(controlData, "browserid");
+            String sessionId = getStringField(controlData, "sessionId");
+            if (zapid == null || zapid.isBlank()) {
+                return response;
+            }
+            PtkZapSessionState state = sessionStateByZapId.get(zapid);
+            if (state != null && browserid != null && !browserid.isBlank()) {
+                browserIdByZapId.put(zapid, browserid);
+            }
+            if (state != null && state.matchesActiveSession(sessionId, browserid)) {
+                state.rememberSessionContext(browserid, sessionId);
+            } else if (state != null) {
+                LOGGER.debug(
+                        "PTK ignored control poll session context for mismatched session zapid={} sessionId={} browserid={}",
+                        zapid,
+                        sessionId,
+                        browserid);
+            }
+            Map<String, Object> pollFields = new LinkedHashMap<>();
+            pollFields.put("sessionId", sessionId != null ? sessionId : "");
+            Integer activitySeq = getIntegerField(controlData, "activitySeq");
+            if (activitySeq != null) {
+                pollFields.put("activitySeq", activitySeq);
+            }
+            logContractPhase("control_poll", zapid, browserid, pollFields);
+            acknowledgeCloseRequestFromBody(zapid, sessionId, browserid, controlData, "control");
+            if (state != null
+                    && PtkCloseContract.shouldCreateAdaptiveStaleCloseRequest(
+                            state.snapshot(), sessionId, browserid, System.currentTimeMillis())) {
+                ensureCloseRequest(zapid, "activity_stale_before_browser_close");
+            }
+            addCloseControlResponse(response, zapid, sessionId, browserid);
+            if (Boolean.TRUE.equals(response.get("closeRequested"))) {
+                logContractPhase(
+                        "control_close_request_returned",
+                        zapid,
+                        browserid,
+                        Map.of(
+                                "sessionId",
+                                sessionId != null ? sessionId : "",
+                                "closeRequestId",
+                                String.valueOf(response.get("closeRequestId"))));
+            }
+            return response;
+        }
+
+        private boolean isCurrentBrowserWithinScheduledTargetScope(
+                ClientCallBackUtils ccbutils, String zapid) {
+            if (ccbutils == null || zapid == null || zapid.isBlank()) {
+                return false;
+            }
+            String targetUrl = targetUrlByZapId.get(zapid);
+            if (targetUrl == null || targetUrl.isBlank()) {
+                return false;
+            }
+            try {
+                WebDriver driver = ccbutils.getWebDriver();
+                String currentUrl = driver != null ? driver.getCurrentUrl() : null;
+                return PtkUrlUtils.isSameOriginAndPathScoped(targetUrl, currentUrl);
+            } catch (RuntimeException e) {
+                LOGGER.debug(
+                        "PTK closeContract could not pre-classify close target for zapid {}: {}",
+                        zapid,
+                        e.getMessage());
+                return false;
+            }
+        }
+
+        private Map<String, Object> buildCallbackOwnerWaitDecision(String zapid) {
+            Map<String, Object> decision = new LinkedHashMap<>();
+            decision.put("ok", true);
+            decision.put("participant", "ptk");
+            decision.put("decision", "wait");
+            decision.put("scanState", scanStatus.getOrDefault(zapid, "running"));
+            decision.put("statusBefore", scanStatus.getOrDefault(zapid, "running"));
+            decision.put("sessionId", sessionIdByZapId.get(zapid));
+            decision.put("stopRequested", false);
+            decision.put("source", "callback_progress");
+            decision.put("reason", "active_browser_work");
+            return decision;
+        }
+
         private String extractZapIdFromUrl(String rawUrl) {
             if (rawUrl == null || rawUrl.isBlank()) {
                 return null;
@@ -1326,13 +2739,16 @@ public class ExtensionPtk extends ExtensionAdaptor
             return value instanceof Number ? ((Number) value).intValue() : null;
         }
 
-        private void appendDetailField(
-                StringBuilder summary, Map<String, Object> details, String key, String label) {
-            Object value = details.get(key);
-            if (!(value instanceof Number)) {
-                return;
+        private PtkZapSessionState sessionState(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return null;
             }
-            summary.append(';').append(label).append('=').append(((Number) value).intValue());
+            return sessionStateByZapId.computeIfAbsent(zapid, PtkZapSessionState::new);
+        }
+
+        private PtkZapSessionSnapshot sessionSnapshot(String zapid) {
+            PtkZapSessionState state = sessionStateByZapId.get(zapid);
+            return state != null ? state.snapshot() : null;
         }
 
         private void rememberBrowserId(String zapid, String browserid) {
@@ -1340,13 +2756,17 @@ public class ExtensionPtk extends ExtensionAdaptor
                 return;
             }
             browserIdByZapId.put(zapid, browserid);
+            PtkZapSessionState state = sessionState(zapid);
+            if (state != null) {
+                state.rememberBrowserId(browserid);
+            }
         }
 
-        private void rememberConfigMode(String zapid, boolean automatedScanningEnabled) {
+        private void rememberConfigMode(String zapid, boolean zapAutomationEnabled) {
             if (zapid == null || zapid.isBlank()) {
                 return;
             }
-            if (automatedScanningEnabled) {
+            if (zapAutomationEnabled) {
                 manualModeConfigZapIds.remove(zapid);
             } else {
                 manualModeConfigZapIds.add(zapid);
@@ -1392,7 +2812,12 @@ public class ExtensionPtk extends ExtensionAdaptor
             if (zapid == null || zapid.isBlank()) {
                 return -1L;
             }
-            return callbackFirstSeenAtMs.computeIfAbsent(zapid, key -> System.currentTimeMillis());
+            long nowMs = System.currentTimeMillis();
+            PtkZapSessionState state = sessionState(zapid);
+            if (state != null) {
+                state.markCallbackStart(nowMs);
+            }
+            return callbackFirstSeenAtMs.computeIfAbsent(zapid, key -> nowMs);
         }
 
         private Long getElapsedSinceFirst(String zapid, long nowMs) {
@@ -1410,12 +2835,25 @@ public class ExtensionPtk extends ExtensionAdaptor
             if (zapid == null || zapid.isBlank()) {
                 return Math.max(0, raised);
             }
-            return alertsRaisedByZapId.merge(zapid, Math.max(0, raised), Integer::sum);
+            PtkZapSessionState state = sessionState(zapid);
+            int stateTotal =
+                    state != null ? state.addAlerts(raised, System.currentTimeMillis()) : 0;
+            int previous = alertsRaisedByZapId.getOrDefault(zapid, 0);
+            int total = alertsRaisedByZapId.merge(zapid, Math.max(0, raised), Integer::sum);
+            if (total != previous) {
+                lastAlertChangedAtMsByZapId.put(zapid, System.currentTimeMillis());
+            }
+            return Math.max(total, stateTotal);
         }
 
         private int getAlertsRaisedTotal(String zapid) {
             if (zapid == null || zapid.isBlank()) {
                 return 0;
+            }
+            PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+            if (snapshot != null) {
+                return Math.max(
+                        snapshot.alertsRaisedTotal(), alertsRaisedByZapId.getOrDefault(zapid, 0));
             }
             return alertsRaisedByZapId.getOrDefault(zapid, 0);
         }
@@ -1425,6 +2863,10 @@ public class ExtensionPtk extends ExtensionAdaptor
                 return;
             }
             firstAlertSeenAtMs.putIfAbsent(zapid, seenAtMs);
+            PtkZapSessionState state = sessionState(zapid);
+            if (state != null) {
+                state.markFirstAlertSeen(seenAtMs);
+            }
         }
 
         private Long getFirstAlertElapsed(String zapid) {
@@ -1436,6 +2878,73 @@ public class ExtensionPtk extends ExtensionAdaptor
                 return null;
             }
             return getElapsedSinceFirst(zapid, firstAlertAt);
+        }
+
+        private Long getLastMeaningfulActivityAtMs(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return null;
+            }
+            PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+            if (snapshot != null && snapshot.newestActivityAt() != null) {
+                return snapshot.newestActivityAt();
+            }
+            return PtkCloseContract.newestActivityAt(
+                    lastProgressChangedAtMsByZapId.get(zapid),
+                    lastAlertChangedAtMsByZapId.get(zapid));
+        }
+
+        private boolean hasRecentMeaningfulActivity(String zapid, long nowMs) {
+            return PtkCloseContract.isActivityFresh(getLastMeaningfulActivityAtMs(zapid), nowMs);
+        }
+
+        private void putActivitySummaryFields(Map<String, Object> extra, String zapid, long nowMs) {
+            if (extra == null) {
+                return;
+            }
+            Long activityAt = getLastMeaningfulActivityAtMs(zapid);
+            long idleMs = PtkCloseContract.activityIdleMs(activityAt, nowMs);
+            if (idleMs >= 0L) {
+                extra.put("activityIdleMs", idleMs);
+                extra.put("activityFresh", PtkCloseContract.isActivityFresh(activityAt, nowMs));
+            }
+            PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+            if (snapshot != null) {
+                if (snapshot.contractVersion() > 0) {
+                    extra.put("contractVersion", snapshot.contractVersion());
+                }
+                if (snapshot.completionStatus() != null && !snapshot.completionStatus().isBlank()) {
+                    extra.put("completionStatus", snapshot.completionStatus());
+                }
+                if (snapshot.releaseStatus() != null && !snapshot.releaseStatus().isBlank()) {
+                    extra.put("releaseStatus", snapshot.releaseStatus());
+                }
+                if (snapshot.closeRequest() != null) {
+                    extra.put("closeRequestId", snapshot.closeRequest().id());
+                    extra.put("closeRequestAck", snapshot.closeRequest().acknowledged());
+                }
+            }
+            Long progressChangedAt =
+                    zapid != null ? lastProgressChangedAtMsByZapId.get(zapid) : null;
+            if (progressChangedAt != null) {
+                extra.put("progressIdleMs", Math.max(0L, nowMs - progressChangedAt));
+            }
+            Long alertChangedAt = zapid != null ? lastAlertChangedAtMsByZapId.get(zapid) : null;
+            if (alertChangedAt != null) {
+                extra.put("alertIdleMs", Math.max(0L, nowMs - alertChangedAt));
+            }
+        }
+
+        private void markBrowserTaskClosed(
+                String zapid, String browserid, String decision, String reason, long closedAtMs) {
+            if (zapid == null || zapid.isBlank() || browserid == null || browserid.isBlank()) {
+                return;
+            }
+            PtkBrowserTaskState task =
+                    browserTaskStateByZapIdAndBrowserId.get(
+                            PtkBrowserTaskState.key(zapid, browserid));
+            if (task != null) {
+                task.close(decision, reason, closedAtMs);
+            }
         }
 
         private Map<String, Object> buildSessionSummaryExtra(
@@ -1461,6 +2970,7 @@ public class ExtensionPtk extends ExtensionAdaptor
             if (firstAlertMs != null) {
                 extra.put("firstAlertMs", firstAlertMs);
             }
+            putActivitySummaryFields(extra, zapid, System.currentTimeMillis());
             return extra;
         }
 
@@ -1472,10 +2982,23 @@ public class ExtensionPtk extends ExtensionAdaptor
             scanProgress.remove(zapid);
             scanStatus.remove(zapid);
             callbackFirstSeenAtMs.remove(zapid);
+            configServedAtMsByZapId.remove(zapid);
             browserIdByZapId.remove(zapid);
             alertsRaisedByZapId.remove(zapid);
             firstAlertSeenAtMs.remove(zapid);
             lastProgressSummaryByZapId.remove(zapid);
+            lastEngineEvidenceSummaryByZapIdAndEngine
+                    .entrySet()
+                    .removeIf(entry -> entry.getKey().startsWith(zapid + "|"));
+            lastProgressChangedAtMsByZapId.remove(zapid);
+            lastAlertChangedAtMsByZapId.remove(zapid);
+            progressContractVersionByZapId.remove(zapid);
+            publisherDrainedByZapId.remove(zapid);
+            closeRequestIdByZapId.remove(zapid);
+            closeRequestAckByZapId.remove(zapid);
+            closeRequestCreatedAtMsByZapId.remove(zapid);
+            clientSpiderActivityTouchAtMsByZapId.remove(zapid);
+            staleCloseLogged.remove(zapid);
             safeToCloseByZapId.remove(zapid);
             lastCloseDecisionByZapId.remove(zapid);
             closeDecisionAttemptedByZapId.remove(zapid);
@@ -1487,6 +3010,15 @@ public class ExtensionPtk extends ExtensionAdaptor
             firstAlertLogged.remove(zapid);
             terminalProgressLogged.remove(zapid);
             manualModeConfigZapIds.remove(zapid);
+            sessionStateByZapId.remove(zapid);
+            browserTaskStateByZapIdAndBrowserId
+                    .entrySet()
+                    .removeIf(entry -> entry.getKey().startsWith(zapid + "|"));
+            contractCallbackLogged.remove(zapid + ":config");
+            contractCallbackLogged.remove(zapid + ":progress");
+            configAppliedLogged.remove(zapid);
+            targetResolvedLogged.remove(zapid);
+            closeWaitActiveLogged.remove(zapid);
         }
 
         private boolean isTerminalProgressValue(Integer progress, String status) {
@@ -1498,6 +3030,23 @@ public class ExtensionPtk extends ExtensionAdaptor
                 return true;
             }
             return isTerminalProgress(zapid);
+        }
+
+        private Map<String, Object> buildCallbackProgressWaitDecision(String zapid, String reason) {
+            Map<String, Object> decision = new LinkedHashMap<>();
+            decision.put("participant", "ptk");
+            decision.put("decision", "wait");
+            decision.put("scanState", scanStatus.getOrDefault(zapid, "running"));
+            decision.put("statusBefore", scanStatus.getOrDefault(zapid, "running"));
+            decision.put("progress", scanProgress.getOrDefault(zapid, 0));
+            decision.put("stopRequested", false);
+            decision.put("reason", reason);
+            decision.put("source", "callback_progress");
+            String sessionId = sessionIdByZapId.get(zapid);
+            if (sessionId != null && !sessionId.isBlank()) {
+                decision.put("sessionId", sessionId);
+            }
+            return decision;
         }
 
         private boolean hasSessionId(String zapid) {
@@ -1541,11 +3090,19 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
 
         Long getCloseDecisionAttemptedAtMs(String zapid) {
+            PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+            if (snapshot != null && snapshot.closeDecisionAttemptedAtMs() != null) {
+                return snapshot.closeDecisionAttemptedAtMs();
+            }
             return PtkCloseContract.getCloseDecisionAttemptedAtMs(
                     closeDecisionAttemptedByZapId, zapid);
         }
 
         void markCloseDecisionAttempted(String zapid, long decidedAtMs) {
+            PtkZapSessionState state = sessionState(zapid);
+            if (state != null) {
+                state.markCloseDecisionAttempted(decidedAtMs);
+            }
             PtkCloseContract.markCloseDecisionAttempted(
                     closeDecisionAttemptedByZapId, zapid, decidedAtMs);
         }
@@ -1564,7 +3121,8 @@ public class ExtensionPtk extends ExtensionAdaptor
             fallback.put("participant", "ptk");
             fallback.put("decision", "not_applicable");
             fallback.put("scanState", "unknown");
-            fallback.put("reason", "webdriver_unavailable");
+            fallback.put("reason", "callback_progress_unavailable");
+            fallback.put("source", "callback_progress");
 
             long remainingMs = remainingCloseBudgetMs(closeDeadlineMs);
             if (remainingMs < 2_500L) {
@@ -1572,599 +3130,102 @@ public class ExtensionPtk extends ExtensionAdaptor
                 fallback.put("remainingMs", remainingMs);
                 return fallback;
             }
-            long scriptTimeoutMs =
-                    Math.min(PtkCloseContract.BROWSER_CLOSE_SCRIPT_TIMEOUT_MS, remainingMs);
-            long ptkStopTimeoutMs =
-                    Math.min(PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS, scriptTimeoutMs);
 
-            if (ccbutils == null) {
-                return fallback;
+            Map<String, Object> callbackDecision = buildCallbackCloseDecisionFromState(zapid);
+            if (callbackDecision != null) {
+                return callbackDecision;
             }
 
-            WebDriver driver;
-            try {
-                driver = ccbutils.getWebDriver();
-            } catch (RuntimeException e) {
-                fallback.put("reason", "webdriver_lookup_failed");
-                fallback.put("error", e.getMessage());
-                return fallback;
-            }
-
-            if (!(driver instanceof JavascriptExecutor js)) {
-                fallback.put("reason", "javascript_executor_unavailable");
-                return fallback;
-            }
-
-            try {
-                driver.manage()
-                        .timeouts()
-                        .scriptTimeout(Duration.ofMillis(Math.max(2_500L, scriptTimeoutMs)));
-            } catch (RuntimeException e) {
-                LOGGER.debug("PTK closeContract could not set script timeout: {}", e.getMessage());
-            }
-
-            /*
-             * The source value lets PTK distinguish ZAP's browser-close path from
-             * user-driven automation calls. It is trusted only in combination with
-             * the ZAP callback URL/zapid and the WebDriver-controlled tab; PTK
-             * background/session lookup still decides whether the session is
-             * terminal and safe to close.
-             */
-            String script =
-                    """
-                    const done = arguments[arguments.length - 1];
-                    const stopTimeoutMs = arguments[0] || 10000;
-                    const explicitSessionId = arguments[1] || null;
-                    const explicitZapId = arguments[2] || null;
-                    const callTimeoutMs = Math.max(2000, stopTimeoutMs);
-                    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-                    const timeoutAfter = (label, ms) => new Promise((resolve) => setTimeout(() => {
-                      resolve({ ok: false, code: label + '_timeout', status: 'unknown' });
-                    }, Math.max(500, ms || 3000)));
-                    const terminal = new Set(['none', 'completed', 'error', 'timeout', 'cancelled', 'engine_incomplete']);
-                    const statusOf = (value) => {
-                      const status = String(value && (value.status || value.completionStatus || value.summary && value.summary.status) || '').toLowerCase();
-                      return status;
-                    };
-                    const currentCloseUrl = String(location && location.href || '');
-                    const shouldStopForClose = (snapshot) => {
-                      const context = snapshot && snapshot.zapCloseContext && typeof snapshot.zapCloseContext === 'object'
-                        ? snapshot.zapCloseContext
-                        : {};
-                      return context.shouldStopSession === true;
-                    };
-                    const numberOf = (value) => {
-                      const parsed = Number(value);
-                      return Number.isFinite(parsed) ? parsed : 0;
-                    };
-                    const concreteEngineWork = (engine) => {
-                      if (!engine || typeof engine !== 'object') return false;
-                      const telemetry = engine.telemetry && typeof engine.telemetry === 'object'
-                        ? engine.telemetry
-                        : engine;
-                      const progress = telemetry.progress && typeof telemetry.progress === 'object'
-                        ? telemetry.progress
-                        : (engine.progress && typeof engine.progress === 'object' ? engine.progress : {});
-                      const state = String(engine.state || telemetry.status || '').toLowerCase();
-                      return [
-                        telemetry.activeTasks,
-                        telemetry.taskQueue,
-                        telemetry.requestQueue,
-                        telemetry.pendingPlans,
-                        telemetry.planning,
-                        telemetry.pendingCaptures,
-                        telemetry.pendingAutomationSeeds,
-                        telemetry.pendingHtmlDiscovery,
-                        telemetry.remaining,
-                        progress.remaining
-                      ].some((value) => numberOf(value) > 0)
-                        || telemetry.isRunning === true
-                        || telemetry.isScanRunning === true
-                        || state === 'running'
-                        || state === 'scanning';
-                    };
-                    const hasConcreteBrowserWork = (snapshot) => {
-                      if (!snapshot || snapshot.ok !== true || !snapshot.engines || typeof snapshot.engines !== 'object') return true;
-                      return Object.values(snapshot.engines).some(concreteEngineWork);
-                    };
-                    const withTimeout = (promise, label, ms) => Promise.race([
-                      Promise.resolve(promise),
-                      timeoutAfter(label, ms)
-                    ]);
-                    const refreshAutomationStatus = async () => {
-                      try {
-                        const nonce = document.getElementById('__ptk_automation_nonce__')?.dataset?.nonce || '';
-                        if (!nonce) return false;
-                        window.postMessage({
-                          source: 'ptk-extension',
-                          type: 'automation-status',
-                          enabled: true,
-                          nonce
-                        }, '*');
-                        await sleep(25);
-                        return true;
-                      } catch (_) {
-                        return false;
-                      }
-                    };
-                    const sendZapCloseMessage = (type, payload = {}, timeoutMs = 3000) => new Promise((resolve) => {
-                      try {
-                        const nonce = document.getElementById('__ptk_automation_nonce__')?.dataset?.nonce || '';
-                        if (!nonce) {
-                          resolve({ ok: false, error: 'zap_close_bridge_unavailable' });
-                          return;
-                        }
-                        const requestId = 'ptk-zap-close-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-                        let settled = false;
-                        let disabledFallback = null;
-                        const finish = (value) => {
-                          if (settled) return;
-                          settled = true;
-                          try { window.removeEventListener('message', onMessage); } catch (_) {}
-                          resolve(value || null);
-                        };
-                        const onMessage = (event) => {
-                          if (event.source !== window) return;
-                          const data = event.data || {};
-                          if (data.source !== 'ptk-extension') return;
-                          if (data.requestId !== requestId) return;
-                          if (data.nonce !== nonce) return;
-                          if (data.error === 'automation_disabled') {
-                            disabledFallback = data;
-                            return;
-                          }
-                          finish(data);
-                        };
-                        window.addEventListener('message', onMessage);
-                        window.postMessage({
-                          source: 'ptk-automation',
-                          nonce,
-                          requestId,
-                          type,
-                          sessionId: explicitSessionId,
-                          options: Object.assign({}, payload.options || {}, {
-                            sessionId: explicitSessionId,
-                            source: 'zap_browser_close',
-                            zapid: explicitZapId,
-                            currentUrl: currentCloseUrl
-                          }),
-                          wait: payload.wait,
-                          includeFindings: payload.includeFindings === true,
-                          limit: payload.limit
-                        }, '*');
-                        setTimeout(() => finish(disabledFallback || { ok: false, error: type + '_direct_timeout' }), Math.max(500, timeoutMs || 3000));
-                      } catch (error) {
-                        resolve({ ok: false, error: error && error.message || String(error) });
-                      }
-                    });
-                    const readProgressDirect = () => sendZapCloseMessage(
-                      'get-session-progress',
-                      { options: { sessionId: explicitSessionId, source: 'zap_browser_close', currentUrl: currentCloseUrl } },
-                      3000
-                    );
-                    const stopDirect = () => sendZapCloseMessage(
-                      'session-end',
-                      {
-                        wait: false,
-                        options: {
-                          sessionId: explicitSessionId,
-                          source: 'zap_browser_close',
-                          stopTimeoutMs,
-                          currentUrl: currentCloseUrl
-                        }
-                      },
-                      Math.min(5000, callTimeoutMs)
-                    );
-                    (async () => {
-                      try {
-                        await refreshAutomationStatus();
-                        const automation = window.PTK_AUTOMATION;
-                        const trustedAutomation = automation && automation.bridgeId === 'ptk-automation-bridge'
-                          ? automation
-                          : null;
-                        if (trustedAutomation && typeof trustedAutomation.endSession === 'function') {
-                          const readProgress = () => typeof trustedAutomation.getSessionProgress === 'function'
-                            ? withTimeout(trustedAutomation.getSessionProgress({
-                                sessionId: explicitSessionId,
-                                source: 'zap_browser_close',
-                                zapid: explicitZapId,
-                                currentUrl: currentCloseUrl
-                              }), 'scan_status', 3000)
-                            : Promise.resolve(null);
-                          const waitForTerminal = async (maxMs) => {
-                            const deadline = Date.now() + Math.max(0, maxMs || 0);
-                            let latest = null;
-                            while (Date.now() < deadline) {
-                              latest = await readProgress();
-                              const latestStatus = statusOf(latest);
-                              if (latest && latest.ok === true && terminal.has(latestStatus)) {
-                                return latest;
-                              }
-                              await sleep(500);
-                            }
-                            return latest;
-                          };
-                          const before = typeof automation.getSessionProgress === 'function'
-                            ? await readProgress()
-                            : null;
-                          if (before && before.error === 'automation_disabled') {
-                            await refreshAutomationStatus();
-                            const directBefore = await readProgressDirect();
-                            if (directBefore && directBefore.ok !== false) {
-                              Object.assign(before, directBefore);
-                            }
-                          }
-                          const statusBefore = statusOf(before);
-                          if (before && before.ok === true && terminal.has(statusBefore)) {
-                            done({
-                              ok: true,
-                              participant: 'ptk',
-                              decision: 'safe_to_close',
-                              scanState: statusBefore,
-                              statusBefore,
-                              sessionId: explicitSessionId,
-                              reason: 'already_terminal',
-                              stopVia: 'automation_bridge'
-                            });
-                            return;
-                          }
-                          if (before && before.ok === true) {
-                            if (!hasConcreteBrowserWork(before)) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'browser_tab_safe_to_close',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                reason: 'no_active_browser_work',
-                                stopVia: 'automation_bridge'
-                              });
-                              return;
-                            }
-                            if (!shouldStopForClose(before)) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'browser_tab_safe_to_close',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                reason: 'non_owner_active_work',
-                                stopVia: 'automation_bridge'
-                              });
-                              return;
-                            }
-                            // Closing the ZAP-owned target tab is the end of the client
-                            // spider browser lifecycle, so ask PTK to stop and publish
-                            // terminal progress. Child attack tabs are handled above.
-                            // This preserves child-tab safety without leaving the primary
-                            // ZAP session stuck at running until force-close.
-                          }
-                          const stop = await withTimeout(
-                            trustedAutomation.endSession({
-                              sessionId: explicitSessionId,
-                              wait: false,
-                              source: 'zap_browser_close',
-                              zapid: explicitZapId,
-                              stopTimeoutMs,
-                              currentUrl: currentCloseUrl
-                            }),
-                            'stop_scan',
-                            Math.min(5000, callTimeoutMs)
-                          );
-                          if (stop && stop.error === 'automation_disabled') {
-                            await refreshAutomationStatus();
-                            const retryStop = await withTimeout(
-                              trustedAutomation.endSession({
-                                sessionId: explicitSessionId,
-                                wait: false,
-                                source: 'zap_browser_close',
-                                zapid: explicitZapId,
-                                stopTimeoutMs,
-                                currentUrl: currentCloseUrl
-                              }),
-                              'stop_scan_retry',
-                              Math.min(5000, callTimeoutMs)
-                            );
-                            if (retryStop && retryStop.ok !== false) {
-                              Object.assign(stop, retryStop);
-                            }
-                            if (stop && stop.error === 'automation_disabled') {
-                              const directStop = await stopDirect();
-                              if (directStop && directStop.ok !== false) {
-                                directStop.stopVia = 'direct_zap_close';
-                                Object.assign(stop, directStop);
-                              }
-                            }
-                          }
-                          let after = await waitForTerminal(Math.max(1000, callTimeoutMs - 5000));
-                          const directAfter = after && after.error === 'automation_disabled'
-                            ? await readProgressDirect()
-                            : null;
-                          if (directAfter && directAfter.ok !== false) {
-                            after = Object.assign(after || {}, directAfter);
-                          }
-                          const stopStatus = statusOf(stop);
-                          const finalStatus = statusOf(after) || stopStatus || statusBefore || 'stopping';
-                          const finalCompletionStatus = String(after && (after.completionStatus || after.summary && after.summary.status) || stop && (stop.completionStatus || stop.summary && stop.summary.status) || '').toLowerCase();
-                          const terminalPosted = Boolean(after && after.zapProgressTerminalPosted === true || stop && stop.zapProgressTerminalPosted === true);
-                          done({
-                            ok: stop && stop.ok !== false,
-                            participant: 'ptk',
-                            decision: terminal.has(finalStatus) ? 'safe_to_close' : 'wait',
-                            scanState: finalStatus,
-                            completionStatus: finalCompletionStatus || null,
-                            zapProgressTerminalPosted: terminalPosted,
-                            zapTerminalPost: after && after.zapTerminalPost || stop && stop.zapTerminalPost || null,
-                            statusBefore,
-                            sessionId: explicitSessionId,
-                            stopRequested: true,
-                            stopVia: stop && stop.stopVia ? stop.stopVia : 'automation_bridge',
-                            reason: terminal.has(finalStatus) ? 'terminal_after_stop' : stop && stop.error || 'close_requested'
-                          });
-                          return;
-                        }
-                        {
-                          const before = await readProgressDirect();
-                          const statusBefore = statusOf(before);
-                          if (before && before.ok === true && terminal.has(statusBefore)) {
-                            done({
-                              ok: true,
-                              participant: 'ptk',
-                              decision: 'safe_to_close',
-                              scanState: statusBefore,
-                              statusBefore,
-                              sessionId: explicitSessionId,
-                              reason: 'already_terminal',
-                              stopVia: 'direct_zap_close'
-                            });
-                            return;
-                          }
-                          if (before && before.ok === true) {
-                            if (!hasConcreteBrowserWork(before)) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'browser_tab_safe_to_close',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                stopVia: 'direct_zap_close',
-                                reason: 'no_active_browser_work'
-                              });
-                              return;
-                            }
-                            if (!shouldStopForClose(before)) {
-                              done({
-                                ok: true,
-                                participant: 'ptk',
-                                decision: 'browser_tab_safe_to_close',
-                                scanState: statusBefore || 'running',
-                                statusBefore,
-                                sessionId: explicitSessionId,
-                                stopRequested: false,
-                                stopVia: 'direct_zap_close',
-                                reason: 'non_owner_active_work'
-                              });
-                              return;
-                            }
-                          }
-                          const stop = await stopDirect();
-                          const after = await readProgressDirect();
-                          const stopStatus = statusOf(stop);
-                          const finalStatus = statusOf(after) || stopStatus || statusBefore || 'stopping';
-                          const finalCompletionStatus = String(after && (after.completionStatus || after.summary && after.summary.status) || stop && (stop.completionStatus || stop.summary && stop.summary.status) || '').toLowerCase();
-                          const terminalPosted = Boolean(after && after.zapProgressTerminalPosted === true || stop && stop.zapProgressTerminalPosted === true);
-                          if (stop && stop.ok !== false) {
-                            done({
-                              ok: true,
-                              participant: 'ptk',
-                              decision: terminal.has(finalStatus) ? 'safe_to_close' : 'wait',
-                              scanState: finalStatus,
-                              completionStatus: finalCompletionStatus || null,
-                              zapProgressTerminalPosted: terminalPosted,
-                              zapTerminalPost: after && after.zapTerminalPost || stop && stop.zapTerminalPost || null,
-                              statusBefore,
-                              sessionId: explicitSessionId,
-                              stopRequested: true,
-                              stopVia: 'direct_zap_close',
-                              reason: terminal.has(finalStatus) ? 'terminal_after_stop' : stop.error || 'close_requested'
-                            });
-                            return;
-                          }
-                        }
-                        const agent = window.PTK_AGENT;
-                        if (!agent || typeof agent.scanStatus !== 'function') {
-                          done({
-                            participant: 'ptk',
-                            decision: 'not_applicable',
-                            scanState: 'unknown',
-                            reason: automation && !trustedAutomation ? 'ptk_automation_untrusted' : automation ? 'ptk_agent_unavailable' : 'ptk_automation_unavailable'
-                          });
-                          return;
-                        }
-                        const before = await Promise.race([
-                          Promise.resolve(agent.scanStatus({})),
-                          timeoutAfter('scan_status', 3000)
-                        ]);
-                        const statusBefore = String(before && before.status || '').toLowerCase();
-                        if (before && before.ok === true && terminal.has(statusBefore)) {
-                          done({
-                            ok: true,
-                            participant: 'ptk',
-                            decision: 'safe_to_close',
-                            scanState: statusBefore,
-                            statusBefore,
-                            sessionId: before.sessionId || null,
-                            reason: 'already_terminal'
-                          });
-                          return;
-                        }
-                        if (typeof agent.stopScan !== 'function') {
-                          done({
-                            ok: false,
-                            participant: 'ptk',
-                            decision: 'wait',
-                            scanState: statusBefore || 'running',
-                            statusBefore,
-                            sessionId: before && before.sessionId || null,
-                            reason: 'stop_scan_unavailable'
-                          });
-                          return;
-                        }
-                        const stop = await Promise.race([
-                          Promise.resolve(agent.stopScan({
-                            wait: false,
-                            stopTimeoutMs
-                          })),
-                          timeoutAfter('stop_scan', Math.min(5000, callTimeoutMs))
-                        ]);
-                        const stopStatus = String(stop && stop.status || stop && stop.summary && stop.summary.status || '').toLowerCase();
-                        done({
-                          ok: stop && stop.ok !== false,
-                          participant: 'ptk',
-                          decision: terminal.has(stopStatus) ? 'safe_to_close' : 'wait',
-                          scanState: stopStatus || statusBefore || 'stopping',
-                          statusBefore,
-                          sessionId: before && before.sessionId || null,
-                          stopRequested: true,
-                          reason: stop && stop.code || stop && stop.error || 'close_requested'
-                        });
-                      } catch (error) {
-                        done({
-                          ok: false,
-                          participant: 'ptk',
-                          decision: 'failed',
-                          scanState: 'unknown',
-                          reason: error && error.message || String(error)
-                        });
-                      }
-                    })();
-                    """;
-
-            String originalWindow = null;
-            List<String> windowHandles = new ArrayList<>();
-            String sessionId = sessionIdByZapId.get(zapid);
-            try {
-                originalWindow = driver.getWindowHandle();
-                windowHandles.addAll(driver.getWindowHandles());
-            } catch (RuntimeException e) {
-                LOGGER.debug("PTK closeContract could not enumerate windows: {}", e.getMessage());
-            }
-            if (windowHandles.isEmpty()) {
-                try {
-                    Object rawResult =
-                            js.executeAsyncScript(script, ptkStopTimeoutMs, sessionId, zapid);
-                    return normalizeCloseScriptResult(rawResult, fallback, 0, null);
-                } catch (WebDriverException e) {
-                    fallback.put("reason", "webdriver_script_failed");
-                    fallback.put("error", e.getMessage());
-                    return fallback;
-                }
-            }
-
-            Map<String, Object> bestUnavailable = null;
-            for (int i = 0; i < windowHandles.size(); i++) {
-                String handle = windowHandles.get(i);
-                String currentUrl = null;
-                try {
-                    driver.switchTo().window(handle);
-                    currentUrl = driver.getCurrentUrl();
-                    Object rawResult =
-                            js.executeAsyncScript(script, ptkStopTimeoutMs, sessionId, zapid);
-                    Map<String, Object> result =
-                            normalizeCloseScriptResult(rawResult, fallback, i, currentUrl);
-                    String decision = getStringField(result, "decision");
-                    String reason = getStringField(result, "reason");
-                    if (!"not_applicable".equals(decision)
-                            || (!"ptk_agent_unavailable".equals(reason)
-                                    && !"ptk_automation_unavailable".equals(reason))) {
-                        return result;
-                    }
-                    bestUnavailable = result;
-                } catch (WebDriverException e) {
-                    Map<String, Object> failed = new LinkedHashMap<>(fallback);
-                    failed.put("reason", "webdriver_script_failed");
-                    failed.put("error", e.getMessage());
-                    failed.put("windowIndex", i);
-                    if (currentUrl != null) {
-                        failed.put("windowUrl", currentUrl);
-                    }
-                    bestUnavailable = failed;
-                }
-            }
-            String targetUrl = targetUrlByZapId.get(zapid);
-            if (targetUrl != null) {
-                try {
-                    driver.switchTo().window(windowHandles.get(0));
-                    driver.navigate().to(targetUrl);
-                    Object rawResult =
-                            js.executeAsyncScript(script, ptkStopTimeoutMs, sessionId, zapid);
-                    Map<String, Object> result =
-                            normalizeCloseScriptResult(
-                                    rawResult, fallback, windowHandles.size(), targetUrl);
-                    result.put("navigatedForClose", true);
-                    String decision = getStringField(result, "decision");
-                    String reason = getStringField(result, "reason");
-                    if (!"not_applicable".equals(decision)
-                            || (!"ptk_agent_unavailable".equals(reason)
-                                    && !"ptk_automation_unavailable".equals(reason))) {
-                        return result;
-                    }
-                    bestUnavailable = result;
-                } catch (WebDriverException e) {
-                    Map<String, Object> failed = new LinkedHashMap<>(fallback);
-                    failed.put("reason", "webdriver_navigation_for_close_failed");
-                    failed.put("error", e.getMessage());
-                    failed.put("windowUrl", targetUrl);
-                    bestUnavailable = failed;
-                }
-            }
-            if (originalWindow != null) {
-                try {
-                    driver.switchTo().window(originalWindow);
-                } catch (RuntimeException e) {
-                    LOGGER.debug("PTK closeContract could not restore window: {}", e.getMessage());
-                }
-            }
-            return bestUnavailable != null ? bestUnavailable : fallback;
+            fallback.put("reason", "page_visible_close_bridge_disabled");
+            fallback.put("remainingMs", remainingMs);
+            return fallback;
         }
 
-        private Map<String, Object> normalizeCloseScriptResult(
-                Object rawResult, Map<String, Object> fallback, int windowIndex, String windowUrl) {
-            if (rawResult instanceof Map<?, ?> rawMap) {
-                Map<String, Object> result = new LinkedHashMap<>();
-                rawMap.forEach(
-                        (key, value) -> {
-                            if (key != null) {
-                                result.put(String.valueOf(key), value);
-                            }
-                        });
-                result.put("windowIndex", windowIndex);
-                if (windowUrl != null && !windowUrl.isBlank()) {
-                    result.put("windowUrl", windowUrl);
-                }
-                if ("automation_disabled".equals(getStringField(result, "error"))
-                        || "automation_disabled".equals(getStringField(result, "reason"))) {
-                    result.put("ok", false);
-                    result.put("decision", "not_applicable");
-                    result.putIfAbsent("scanState", "callback");
-                    result.putIfAbsent("reason", "automation_disabled");
-                }
-                return result;
+        private Map<String, Object> buildCallbackCloseDecisionFromState(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return null;
             }
-            Map<String, Object> result = new LinkedHashMap<>(fallback);
-            result.put("reason", "unexpected_script_result");
-            result.put("resultType", rawResult != null ? rawResult.getClass().getName() : "null");
-            result.put("windowIndex", windowIndex);
-            if (windowUrl != null && !windowUrl.isBlank()) {
-                result.put("windowUrl", windowUrl);
+
+            boolean hasProgress = scanProgress.containsKey(zapid);
+            boolean hasSession = hasSessionId(zapid);
+            boolean hasCallback =
+                    callbackFirstSeenAtMs.containsKey(zapid)
+                            || configServedAtMsByZapId.containsKey(zapid)
+                            || hasProgress
+                            || hasSession
+                            || sessionSnapshot(zapid) != null;
+            if (!hasCallback) {
+                return null;
             }
-            return result;
+
+            Integer progress = scanProgress.get(zapid);
+            String status = scanStatus.get(zapid);
+            String scanState = status != null && !status.isBlank() ? status : "callback";
+            if (isSafeToClose(zapid)) {
+                Map<String, Object> decision = new LinkedHashMap<>();
+                decision.put("ok", true);
+                decision.put("participant", "ptk");
+                decision.put("decision", "safe_to_close");
+                decision.put("scanState", scanState);
+                decision.put("statusBefore", scanState);
+                decision.put("progress", progress != null ? progress : 0);
+                decision.put("stopRequested", false);
+                decision.put("reason", "already_terminal");
+                decision.put("source", "callback_progress");
+                String sessionId = sessionIdByZapId.get(zapid);
+                if (sessionId != null && !sessionId.isBlank()) {
+                    decision.put("sessionId", sessionId);
+                }
+                decision.put(
+                        "terminalSeen",
+                        terminalProgressLogged.contains(zapid)
+                                || isTerminalProgressValue(progress, scanState));
+                Boolean publisherDrained = publisherDrainedByZapId.get(zapid);
+                if (publisherDrained != null) {
+                    decision.put("publisher", Map.of("drained", publisherDrained));
+                }
+                PtkZapSessionSnapshot snapshot = sessionSnapshot(zapid);
+                if (snapshot != null) {
+                    if (snapshot.contractVersion() > 0) {
+                        decision.put("contractVersion", snapshot.contractVersion());
+                    }
+                    if (snapshot.completionStatus() != null
+                            && !snapshot.completionStatus().isBlank()) {
+                        decision.put("completionStatus", snapshot.completionStatus());
+                    }
+                    if (snapshot.releaseStatus() != null && !snapshot.releaseStatus().isBlank()) {
+                        decision.put("releaseStatus", snapshot.releaseStatus());
+                    }
+                    if (snapshot.closeRequest() != null) {
+                        decision.put("closeRequestId", snapshot.closeRequest().id());
+                        decision.put("closeRequestAck", snapshot.closeRequest().acknowledged());
+                    }
+                    decision.put(
+                            "closeReadiness",
+                            Map.of(
+                                    "safeToClose", snapshot.isV2PhysicallySafeToClose(),
+                                    "terminal", snapshot.terminalProgressSeen(),
+                                    "publisherDrained", snapshot.publisherDrained(),
+                                    "reason",
+                                            snapshot.isV2PhysicallySafeToClose()
+                                                    ? "terminal_publisher_drained"
+                                                    : "callback_state_not_drained"));
+                } else {
+                    String activeCloseRequestId = activeCloseRequestId(zapid);
+                    if (activeCloseRequestId != null && !activeCloseRequestId.isBlank()) {
+                        decision.put("closeRequestId", activeCloseRequestId);
+                        decision.put(
+                                "closeRequestAck",
+                                Boolean.TRUE.equals(closeRequestAckByZapId.get(zapid)));
+                    }
+                }
+                return decision;
+            }
+
+            if (hasSession || hasProgress) {
+                return buildCallbackProgressWaitDecision(zapid, "active_browser_work");
+            }
+            return buildCallbackProgressWaitDecision(zapid, "callback_acquired_no_session");
         }
 
         private void logCloseContractDecision(
@@ -2211,7 +3272,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                 }
                 Object windowUrl = diagnostics.get("windowUrl");
                 if (windowUrl != null) {
-                    summary.append(" windowUrl=").append(windowUrl);
+                    summary.append(" windowUrl=").append(redactZapCallbackValueForLog(windowUrl));
                 }
             }
 
@@ -2251,68 +3312,15 @@ public class ExtensionPtk extends ExtensionAdaptor
                     evidenceExtra);
             if ("forced_closed".equals(decision) || "failed".equals(decision)) {
                 LOGGER.warn(summary.toString());
-            } else {
+            } else if ("safe_to_close".equals(decision)) {
                 LOGGER.info(summary.toString());
+            } else {
+                LOGGER.debug(summary.toString());
             }
         }
 
-        @SuppressWarnings("unchecked")
         private String summarizeProgressPayload(Map<String, Object> progressData) {
-            StringBuilder summary = new StringBuilder();
-            Object enginesValue = progressData.get("engines");
-            if (!(enginesValue instanceof Map<?, ?> engines) || engines.isEmpty()) {
-                return "";
-            }
-            engines.forEach(
-                    (engineName, engineValue) -> {
-                        if (!(engineName instanceof String)
-                                || !(engineValue instanceof Map<?, ?>)) {
-                            return;
-                        }
-                        Map<String, Object> engine = (Map<String, Object>) engineValue;
-                        if (!summary.isEmpty()) {
-                            summary.append(',');
-                        }
-                        summary.append(engineName)
-                                .append(':')
-                                .append(getStringField(engine, "status"))
-                                .append(':');
-                        Object progress = engine.get("progress");
-                        if (progress instanceof Number) {
-                            summary.append(((Number) progress).intValue());
-                        } else {
-                            summary.append('0');
-                        }
-                        Object detailsValue = engine.get("details");
-                        if (detailsValue instanceof Map<?, ?> rawDetails) {
-                            Map<String, Object> details = (Map<String, Object>) rawDetails;
-                            summary.append('[');
-                            appendDetailField(summary, details, "planned", "p");
-                            appendDetailField(summary, details, "executed", "e");
-                            appendDetailField(summary, details, "remaining", "rem");
-                            appendDetailField(summary, details, "requestQueue", "rq");
-                            appendDetailField(summary, details, "taskQueue", "tq");
-                            appendDetailField(summary, details, "activeTasks", "at");
-                            appendDetailField(summary, details, "planning", "pl");
-                            appendDetailField(summary, details, "pendingCaptures", "pcap");
-                            appendDetailField(summary, details, "findingsCount", "f");
-                            appendDetailField(summary, details, "seededRequests", "seed");
-                            appendDetailField(summary, details, "agentReady", "iar");
-                            appendDetailField(summary, details, "requestsCount", "ireq");
-                            appendDetailField(summary, details, "runtimeEventsCount", "irt");
-                            appendDetailField(summary, details, "findingReportsAccepted", "ifa");
-                            appendDetailField(
-                                    summary, details, "findingReportsDroppedInactive", "ifdi");
-                            appendDetailField(
-                                    summary, details, "findingReportsDroppedTabMismatch", "ifdt");
-                            appendDetailField(summary, details, "runtimeSignalsAccepted", "irsa");
-                            appendDetailField(summary, details, "modulesSentOk", "imok");
-                            appendDetailField(summary, details, "modulesSentSkipped", "imsk");
-                            appendDetailField(summary, details, "modulesSentError", "imerr");
-                            summary.append(']');
-                        }
-                    });
-            return summary.toString();
+            return PtkCloseContract.canonicalProgressSummary(progressData);
         }
 
         private void logCallbackSummary(
@@ -2336,7 +3344,11 @@ public class ExtensionPtk extends ExtensionAdaptor
                     .append(" method=")
                     .append(msg.getRequestHeader().getMethod())
                     .append(" uri=")
-                    .append(msg.getRequestHeader().getURI())
+                    .append(
+                            redactZapCallbackValueForLog(
+                                    msg.getRequestHeader().getURI() != null
+                                            ? msg.getRequestHeader().getURI().toString()
+                                            : ""))
                     .append(" zapid=")
                     .append(zapid)
                     .append(" browserid=")
@@ -2388,13 +3400,14 @@ public class ExtensionPtk extends ExtensionAdaptor
                 summary.append(" elapsedMs=").append(elapsedMs);
             }
             if (extra != null) {
-                extra.forEach(
-                        (key, value) -> {
-                            if (key == null || key.isBlank() || value == null) {
-                                return;
-                            }
-                            summary.append(" ").append(key).append("=").append(value);
-                        });
+                redactZapCallbackMapForLog(extra)
+                        .forEach(
+                                (key, value) -> {
+                                    if (key == null || key.isBlank() || value == null) {
+                                        return;
+                                    }
+                                    summary.append(" ").append(key).append("=").append(value);
+                                });
             }
             LOGGER.debug(summary.toString());
         }
@@ -2416,18 +3429,265 @@ public class ExtensionPtk extends ExtensionAdaptor
             }
             summary.append(" event=").append(event != null && !event.isBlank() ? event : "unknown");
             if (url != null && !url.isBlank()) {
-                summary.append(" url=").append(url);
+                summary.append(" url=").append(redactZapCallbackUrlForLog(url));
             }
             if (extra != null) {
-                extra.forEach(
-                        (key, value) -> {
-                            if (key == null || key.isBlank() || value == null) {
-                                return;
-                            }
-                            summary.append(" ").append(key).append("=").append(value);
-                        });
+                redactZapCallbackMapForLog(extra)
+                        .forEach(
+                                (key, value) -> {
+                                    if (key == null || key.isBlank() || value == null) {
+                                        return;
+                                    }
+                                    summary.append(" ").append(key).append("=").append(value);
+                                });
             }
-            LOGGER.info(summary.toString());
+            logBrowserEvidenceAtSelectedLevel(event, summary.toString());
+        }
+
+        private void logBrowserEvidenceAtSelectedLevel(String event, String summary) {
+            String normalizedEvent = event != null ? event : "";
+            if ("browser_session_invalid".equals(normalizedEvent)) {
+                LOGGER.warn(summary);
+            } else if (isInfoBrowserEvidenceEvent(normalizedEvent)) {
+                LOGGER.info(summary);
+            } else {
+                LOGGER.debug(summary);
+            }
+        }
+
+        private boolean isInfoBrowserEvidenceEvent(String event) {
+            return "browser_loaded".equals(event)
+                    || "ptk_session_established".equals(event)
+                    || "ptk_session_terminal".equals(event);
+        }
+
+        @SuppressWarnings("unchecked")
+        private void logEngineEvidenceIfChanged(
+                String zapid,
+                String browserid,
+                String sessionId,
+                String url,
+                Map<String, Object> progressData,
+                boolean terminalProgress) {
+            if (zapid == null || zapid.isBlank() || progressData == null) {
+                return;
+            }
+            Object enginesValue = progressData.get("engines");
+            if (!(enginesValue instanceof Map<?, ?> rawEngines) || rawEngines.isEmpty()) {
+                return;
+            }
+            rawEngines.forEach(
+                    (engineNameValue, engineValue) -> {
+                        if (!(engineNameValue instanceof String engineName)
+                                || !(engineValue instanceof Map<?, ?> rawEngine)) {
+                            return;
+                        }
+                        String engine = engineName.trim().toUpperCase();
+                        if (engine.isBlank()) {
+                            return;
+                        }
+                        Map<String, Object> engineData = (Map<String, Object>) rawEngine;
+                        String status = getStringField(engineData, "status");
+                        if (status == null || status.isBlank()) {
+                            status = "unknown";
+                        }
+                        Integer progress = getIntegerField(engineData, "progress");
+                        if (progress == null) {
+                            progress = 0;
+                        }
+                        String completionStatus = getStringField(engineData, "completionStatus");
+                        Map<String, Object> details = getMapField(engineData, "details");
+                        String engineError = getStringField(details, "error");
+                        String engineMessage = getStringField(details, "message");
+                        String summary =
+                                status
+                                        + ":"
+                                        + progress
+                                        + ":"
+                                        + (completionStatus != null ? completionStatus : "")
+                                        + ":"
+                                        + terminalProgress
+                                        + ":"
+                                        + (engineError != null ? engineError : "")
+                                        + ":"
+                                        + (engineMessage != null ? engineMessage : "")
+                                        + ":"
+                                        + getOptionalIntegerField(details, "agentReady")
+                                        + ":"
+                                        + getOptionalIntegerField(details, "findingsCount");
+                        String evidenceKey = zapid + "|" + engine;
+                        String previous =
+                                lastEngineEvidenceSummaryByZapIdAndEngine.put(evidenceKey, summary);
+                        if (summary.equals(previous)) {
+                            return;
+                        }
+                        Map<String, Object> extra = new LinkedHashMap<>();
+                        if (sessionId != null && !sessionId.isBlank()) {
+                            extra.put("sessionId", sessionId);
+                        }
+                        extra.put("engine", engine);
+                        extra.put("status", status);
+                        extra.put("progress", progress);
+                        if (completionStatus != null && !completionStatus.isBlank()) {
+                            extra.put("completionStatus", completionStatus);
+                        }
+                        extra.put("terminal", terminalProgress);
+                        copyEngineDetail(extra, details, "agentReady");
+                        copyEngineDetail(extra, details, "findingsCount");
+                        copyEngineDetail(extra, details, "runtimeSignalsAccepted");
+                        copyEngineDetail(extra, details, "findingReportsAccepted");
+                        copyEngineDetail(extra, details, "totalFiles");
+                        copyEngineDetail(extra, details, "completedFiles");
+                        copyEngineDetail(extra, details, "error");
+                        copyEngineDetail(extra, details, "message");
+                        logEngineEvidence(zapid, browserid, url, extra);
+                    });
+        }
+
+        private void logEngineEvidence(
+                String zapid, String browserid, String url, Map<String, Object> extra) {
+            StringBuilder summary = new StringBuilder();
+            summary.append("PTK_ENGINE_EVIDENCE");
+            if (zapid != null && !zapid.isBlank()) {
+                summary.append(" zapid=").append(zapid);
+            }
+            if (browserid != null && !browserid.isBlank()) {
+                summary.append(" browserid=").append(browserid);
+            }
+            if (url != null && !url.isBlank()) {
+                summary.append(" url=").append(redactZapCallbackUrlForLog(url));
+            }
+            if (extra != null) {
+                redactZapCallbackMapForLog(extra)
+                        .forEach(
+                                (key, value) -> {
+                                    if (key == null || key.isBlank() || value == null) {
+                                        return;
+                                    }
+                                    summary.append(" ").append(key).append("=").append(value);
+                                });
+            }
+            logEngineEvidenceAtSelectedLevel(zapid, extra, summary.toString());
+        }
+
+        private void logEngineEvidenceAtSelectedLevel(
+                String zapid, Map<String, Object> extra, String summary) {
+            String engine = getStringField(extra, "engine");
+            String status = getStringField(extra, "status");
+            String completionStatus = getStringField(extra, "completionStatus");
+            boolean failed = isFailedEngineEvidence(status, completionStatus);
+            boolean execution = isConcreteEngineExecutionEvidence(extra, status, completionStatus);
+
+            if (failed) {
+                LOGGER.warn(summary);
+                return;
+            }
+
+            String key =
+                    (zapid != null && !zapid.isBlank() ? zapid : "unknown")
+                            + "|"
+                            + (engine != null && !engine.isBlank() ? engine : "unknown");
+            if (execution && engineEvidenceInfoLogged.add(key)) {
+                LOGGER.info(summary);
+            } else {
+                LOGGER.debug(summary);
+            }
+        }
+
+        private boolean isFailedEngineEvidence(String status, String completionStatus) {
+            return "error".equalsIgnoreCase(status)
+                    || "cancelled".equalsIgnoreCase(status)
+                    || "engine_incomplete".equalsIgnoreCase(completionStatus)
+                    || "publisher_incomplete".equalsIgnoreCase(completionStatus);
+        }
+
+        private boolean isConcreteEngineExecutionEvidence(
+                Map<String, Object> extra, String status, String completionStatus) {
+            if ("running".equalsIgnoreCase(status)
+                    || "completed".equalsIgnoreCase(completionStatus)
+                    || Boolean.TRUE.equals(extra != null ? extra.get("terminal") : null)) {
+                return true;
+            }
+            return hasPositiveInteger(extra, "findingsCount")
+                    || hasPositiveInteger(extra, "runtimeSignalsAccepted")
+                    || hasPositiveInteger(extra, "findingReportsAccepted")
+                    || hasPositiveInteger(extra, "agentReady")
+                    || hasPositiveInteger(extra, "completedFiles")
+                    || hasPositiveInteger(extra, "totalFiles");
+        }
+
+        private boolean hasPositiveInteger(Map<String, Object> values, String key) {
+            if (values == null || key == null || key.isBlank()) {
+                return false;
+            }
+            Object value = values.get(key);
+            return value instanceof Number && ((Number) value).intValue() > 0;
+        }
+
+        private void copyEngineDetail(
+                Map<String, Object> target, Map<String, Object> details, String key) {
+            if (target == null || details == null || key == null || key.isBlank()) {
+                return;
+            }
+            Object value = details.get(key);
+            if (value instanceof Number || value instanceof Boolean) {
+                target.put(key, value);
+            } else if (value instanceof String text && !text.isBlank() && !text.contains(" ")) {
+                target.put(key, text);
+            }
+        }
+
+        private Integer getOptionalIntegerField(Map<String, Object> body, String key) {
+            return body != null ? getIntegerField(body, key) : null;
+        }
+
+        private void logContractPhase(
+                String phase, String zapid, String browserid, Map<String, Object> extra) {
+            if (phase == null || phase.isBlank()) {
+                return;
+            }
+            StringBuilder summary = new StringBuilder("PTK_CONTRACT phase=").append(phase);
+            if (zapid != null && !zapid.isBlank()) {
+                summary.append(" zapid=").append(zapid);
+            }
+            if (browserid != null && !browserid.isBlank()) {
+                summary.append(" browserid=").append(browserid);
+            }
+            if (extra != null) {
+                redactZapCallbackMapForLog(extra)
+                        .forEach(
+                                (key, value) -> {
+                                    if (key == null || key.isBlank() || value == null) {
+                                        return;
+                                    }
+                                    summary.append(" ").append(key).append("=").append(value);
+                                });
+            }
+            logContractPhaseAtSelectedLevel(phase, summary.toString());
+        }
+
+        private void logContractPhaseAtSelectedLevel(String phase, String summary) {
+            if (isWarnContractPhase(phase)) {
+                LOGGER.warn(summary);
+            } else if (isInfoContractPhase(phase)) {
+                LOGGER.info(summary);
+            } else {
+                LOGGER.debug(summary);
+            }
+        }
+
+        private boolean isWarnContractPhase(String phase) {
+            return "forced_close".equals(phase)
+                    || "incomplete_close".equals(phase)
+                    || "callback_bootstrap_failed".equals(phase)
+                    || "callback_acquired_no_config".equals(phase);
+        }
+
+        private boolean isInfoContractPhase(String phase) {
+            return "session_started".equals(phase)
+                    || "terminal_progress_seen".equals(phase)
+                    || "publisher_drained".equals(phase)
+                    || "clean_close".equals(phase);
         }
 
         @Override
@@ -2455,11 +3715,45 @@ public class ExtensionPtk extends ExtensionAdaptor
                 String zapid = getStringField(requestData, "zapid");
                 String browserid = getStringField(requestData, "browserid");
                 rememberBrowserId(zapid, browserid);
-                rememberConfigMode(zapid, getParam().isAutomatedScanningEnabled());
+                boolean zapAutomationEnabled = getParam().isZapAutomationEnabled();
+                rememberConfigMode(zapid, zapAutomationEnabled);
                 markCallbackStart(zapid);
                 logBrowserEvidence(zapid, browserid, "config_callback", null, null);
-                msg.getResponseBody().setBody(getConfigJsonForRequest(requestData, cbContext));
+                if (zapid != null && contractCallbackLogged.add(zapid + ":config")) {
+                    logContractPhase(
+                            "callback_detected",
+                            zapid,
+                            browserid,
+                            Map.of(
+                                    "path",
+                                    "config",
+                                    "mode",
+                                    zapAutomationEnabled ? "automated" : "manual"));
+                }
+                String configJson = getConfigJsonForRequest(requestData, cbContext);
+                msg.getResponseBody().setBody(configJson);
                 long finishedAt = System.currentTimeMillis();
+                Map<String, Object> configResponse = parseRequestBody(configJson);
+                Map<String, Object> configServedFields = new LinkedHashMap<>();
+                configServedFields.put("durationMs", finishedAt - startedAt);
+                configServedFields.put("automated", zapAutomationEnabled);
+                configServedFields.put("activeScanRule", getParam().isActiveScanRuleEnabled());
+                String targetUrl = getStringField(requestData, "targetUrl");
+                if (targetUrl != null && !targetUrl.isBlank()) {
+                    configServedFields.put("targetUrl", targetUrl);
+                }
+                Integer seedCount = getIntegerField(configResponse, "zapHistorySeedCount");
+                if (seedCount != null) {
+                    configServedFields.put("zapHistorySeedCount", seedCount);
+                }
+                String seedScope = getStringField(configResponse, "zapHistorySeedScope");
+                if (seedScope != null && !seedScope.isBlank()) {
+                    configServedFields.put("zapHistorySeedScope", seedScope);
+                }
+                if (zapid != null && !zapid.isBlank()) {
+                    configServedAtMsByZapId.put(zapid, finishedAt);
+                }
+                logContractPhase("config_served", zapid, browserid, configServedFields);
                 Long sinceFirstMs = getElapsedSinceFirst(zapid, finishedAt);
                 logCallbackSummary(
                         msg,
@@ -2482,20 +3776,38 @@ public class ExtensionPtk extends ExtensionAdaptor
             } else if (uri.contains(PTK_ALERT_PATH)) {
                 long startedAt = System.currentTimeMillis();
                 String requestBody = msg.getRequestBody().toString();
-                int raised = PtkAlertHandler.processAlertBatch(requestBody);
                 Map<String, Object> requestData = parseRequestBody(requestBody);
                 String zapid = getStringField(requestData, "zapid");
                 String browserid = getStringField(requestData, "browserid");
+                Map<String, Object> alertReceivedFields = new LinkedHashMap<>();
+                alertReceivedFields.put("batchId", requestData.get("batchId"));
+                alertReceivedFields.put("batchSeq", requestData.get("batchSeq"));
+                logContractPhase("alert_batch_received", zapid, browserid, alertReceivedFields);
+                PtkAlertHandler.AlertBatchAck ack =
+                        PtkAlertHandler.processAlertBatchWithAck(requestBody);
+                int raised = ack.alertsRaised;
+                Map<String, Object> alertAckFields = new LinkedHashMap<>();
+                alertAckFields.put("batchId", ack.batchId);
+                alertAckFields.put("batchSeq", ack.batchSeq);
+                alertAckFields.put("received", ack.received);
+                alertAckFields.put("accepted", ack.accepted);
+                alertAckFields.put("alertsRaised", ack.alertsRaised);
+                alertAckFields.put("reasonCounts", ack.reasonCounts);
+                logContractPhase("alert_batch_acknowledged", zapid, browserid, alertAckFields);
                 rememberBrowserId(zapid, browserid);
                 boolean firstAlert = zapid != null && firstAlertLogged.add(zapid);
                 markCallbackStart(zapid);
-                Map<String, Object> response = new LinkedHashMap<>();
-                response.put("result", "OK");
-                response.put("alertsRaised", raised);
-                msg.getResponseBody().setBody(GSON.toJson(response));
+                msg.getResponseBody().setBody(GSON.toJson(ack));
                 long finishedAt = System.currentTimeMillis();
                 Long sinceFirstMs = getElapsedSinceFirst(zapid, finishedAt);
                 int totalAlerts = rememberAlertsRaised(zapid, raised);
+                if (ack.accepted > 0) {
+                    touchActiveClientSpidersForPtkActivity(
+                            zapid,
+                            getEvidenceTargetUrl(zapid, null),
+                            "alert_batch_acknowledged",
+                            finishedAt);
+                }
                 if (firstAlert) {
                     markFirstAlertSeen(zapid, finishedAt);
                 }
@@ -2526,6 +3838,16 @@ public class ExtensionPtk extends ExtensionAdaptor
                         msg.getRequestHeader().getMethod(),
                         msg.getRequestHeader().getURI(),
                         msg.getRequestBody());
+            } else if (uri.contains(PTK_CONTROL_PATH)) {
+                String requestBody = msg.getRequestBody().toString();
+                try {
+                    Map<String, Object> controlData = parseRequestBody(requestBody);
+                    msg.getResponseBody()
+                            .setBody(GSON.toJson(buildControlPollResponse(controlData)));
+                } catch (Exception e) {
+                    LOGGER.warn("PTK failed to parse control body: {}", requestBody, e);
+                    msg.getResponseBody().setBody("{\"result\":\"FAIL\",\"closeRequested\":false}");
+                }
             } else if (uri.contains(PTK_PROGRESS_PATH)) {
                 long startedAt = System.currentTimeMillis();
                 String requestBody = msg.getRequestBody().toString();
@@ -2541,6 +3863,13 @@ public class ExtensionPtk extends ExtensionAdaptor
                     String status = getStringField(progressData, "status");
                     Boolean safeToClose = getBooleanField(progressData, "safeToClose");
                     if (zapid != null && progress != null) {
+                        if (contractCallbackLogged.add(zapid + ":progress")) {
+                            logContractPhase(
+                                    "callback_detected",
+                                    zapid,
+                                    browserid,
+                                    Map.of("path", "progress"));
+                        }
                         if (PtkCloseContract.isRecentlyClosedZapId(
                                 closedZapIds, zapid, System.currentTimeMillis())) {
                             LOGGER.debug("PTK ignored late progress for closed zapid={}", zapid);
@@ -2551,11 +3880,26 @@ public class ExtensionPtk extends ExtensionAdaptor
                                     .setContentLength(msg.getResponseBody().length());
                             return "";
                         }
+                        boolean v2Progress = isV2Progress(progressData);
+                        rememberV2ProgressState(zapid, progressData);
                         rememberBrowserId(zapid, browserid);
                         boolean sessionEstablished = false;
                         if (sessionId != null && !sessionId.isBlank()) {
                             sessionIdByZapId.put(zapid, sessionId);
                             sessionEstablished = sessionEstablishedLogged.add(zapid);
+                        }
+                        if (configAppliedLogged.add(zapid)) {
+                            logContractPhase(
+                                    "config_applied",
+                                    zapid,
+                                    browserid,
+                                    Map.of(
+                                            "sessionId",
+                                            sessionId != null ? sessionId : "",
+                                            "progress",
+                                            progress.intValue(),
+                                            "status",
+                                            status != null ? status : ""));
                         }
                         String evidenceTargetUrl = getEvidenceTargetUrl(zapid, targetUrl);
                         if (targetUrl != null && !targetUrl.isBlank()) {
@@ -2567,23 +3911,33 @@ public class ExtensionPtk extends ExtensionAdaptor
                                         "PTK ignored progress targetUrl update zapid={} value={}",
                                         zapid,
                                         targetUrl);
+                            } else if (targetResolvedLogged.add(zapid)) {
+                                logContractPhase(
+                                        "target_resolved",
+                                        zapid,
+                                        browserid,
+                                        Map.of("targetUrl", evidenceTargetUrl));
                             }
                         } else {
                             evidenceTargetUrl = getEvidenceTargetUrl(zapid, null);
-                        }
-                        scanProgress.put(zapid, progress.intValue());
-                        if (status != null && !status.isBlank()) {
-                            scanStatus.put(zapid, status);
                         }
                         // safeToClose is accepted only after ZAP has explicitly asked the
                         // WebDriver-controlled tab for a PTK close decision. This prevents
                         // ordinary page/progress callbacks from pre-setting close readiness.
                         boolean acceptedSafeToClose = false;
                         if (safeToClose != null) {
-                            if (PtkCloseContract.canAcceptSafeToClose(
-                                    closeDecisionAttemptedByZapId, zapid)) {
+                            boolean v2PhysicalSafeToClose =
+                                    v2Progress
+                                            && isV2ProgressPhysicallySafeToClose(
+                                                    zapid, progressData);
+                            if (v2PhysicalSafeToClose
+                                    || PtkCloseContract.canAcceptSafeToClose(
+                                            closeDecisionAttemptedByZapId, zapid)) {
                                 safeToCloseByZapId.put(zapid, safeToClose);
-                                acceptedSafeToClose = Boolean.TRUE.equals(safeToClose);
+                                acceptedSafeToClose =
+                                        v2Progress
+                                                ? v2PhysicalSafeToClose
+                                                : Boolean.TRUE.equals(safeToClose);
                             } else {
                                 LOGGER.debug(
                                         "PTK ignored safeToClose before close request zapid={} value={}",
@@ -2596,22 +3950,116 @@ public class ExtensionPtk extends ExtensionAdaptor
                         markCallbackStart(zapid);
                         Long sinceFirstMs = getElapsedSinceFirst(zapid, finishedAt);
                         boolean terminalProgress =
-                                acceptedSafeToClose
-                                        || isTerminalProgressValue(progress.intValue(), status);
-                        if (terminalProgress && zapid != null && !zapid.isBlank()) {
-                            terminalProgressLogged.add(zapid);
-                        }
+                                v2Progress
+                                        ? isV2ProgressTerminalEvidence(progressData)
+                                        : (acceptedSafeToClose
+                                                || isTerminalProgressValue(
+                                                        progress.intValue(), status));
                         boolean manualModeCallbackOnly =
                                 isManualModeCallbackProgress(
                                         zapid, progress.intValue(), status, sessionId);
                         String progressSummary = summarizeProgressPayload(progressData);
+                        Integer contractVersion = getIntegerField(progressData, "contractVersion");
+                        Integer activitySeq = getIntegerField(progressData, "activitySeq");
+                        Map<String, Object> publisher = getMapField(progressData, "publisher");
+                        Boolean publisherDrained = getBooleanField(publisher, "drained");
+                        PtkZapSessionState state = sessionState(zapid);
+                        PtkZapSessionState.ProgressActivity stateProgress =
+                                state != null
+                                        ? state.recordProgress(
+                                                browserid,
+                                                sessionId,
+                                                progress.intValue(),
+                                                status,
+                                                progressSummary,
+                                                terminalProgress,
+                                                contractVersion,
+                                                publisherDrained,
+                                                activitySeq,
+                                                finishedAt)
+                                        : null;
+                        boolean outOfOrderProgress =
+                                stateProgress != null && stateProgress.outOfOrder();
+                        boolean ignoredAfterTerminal =
+                                stateProgress != null && stateProgress.ignoredAfterTerminal();
+                        if (outOfOrderProgress) {
+                            terminalProgress = false;
+                            if (v2Progress) {
+                                safeToCloseByZapId.remove(zapid);
+                            }
+                            LOGGER.debug(
+                                    "PTK ignored out-of-order progress zapid={} activitySeq={}",
+                                    zapid,
+                                    activitySeq);
+                        } else if (ignoredAfterTerminal) {
+                            LOGGER.debug(
+                                    "PTK ignored non-terminal progress after terminal evidence zapid={} activitySeq={} progress={} status={}",
+                                    zapid,
+                                    activitySeq,
+                                    progress.intValue(),
+                                    status);
+                        } else {
+                            logEngineEvidenceIfChanged(
+                                    zapid,
+                                    browserid,
+                                    sessionId,
+                                    evidenceTargetUrl,
+                                    progressData,
+                                    terminalProgress);
+                            scanProgress.put(zapid, progress.intValue());
+                            if (status != null && !status.isBlank()) {
+                                scanStatus.put(zapid, status);
+                            }
+                            if (terminalProgress && zapid != null && !zapid.isBlank()) {
+                                terminalProgressLogged.add(zapid);
+                                if (v2Progress && canAcceptObservedV2SafeToClose(zapid)) {
+                                    safeToCloseByZapId.put(zapid, true);
+                                } else if (!v2Progress) {
+                                    safeToCloseByZapId.put(zapid, true);
+                                }
+                            }
+                        }
+                        String previousProgressSummary =
+                                !outOfOrderProgress
+                                                && !ignoredAfterTerminal
+                                                && zapid != null
+                                                && !zapid.isBlank()
+                                                && !progressSummary.isBlank()
+                                        ? lastProgressSummaryByZapId.put(zapid, progressSummary)
+                                        : null;
                         boolean progressChanged =
-                                zapid != null
+                                !outOfOrderProgress
+                                        && !ignoredAfterTerminal
+                                        && zapid != null
                                         && !zapid.isBlank()
                                         && !progressSummary.isBlank()
-                                        && !progressSummary.equals(
-                                                lastProgressSummaryByZapId.put(
-                                                        zapid, progressSummary));
+                                        && !progressSummary.equals(previousProgressSummary);
+                        if ((firstProgress || progressChanged)
+                                && zapid != null
+                                && !zapid.isBlank()
+                                && !progressSummary.isBlank()) {
+                            lastProgressChangedAtMsByZapId.put(zapid, finishedAt);
+                            LOGGER.debug(
+                                    "PTK_CONTRACT phase=progress_activity_changed zapid={} browserid={} sessionId={} contractVersion={} activitySeq={} progress={} status={}",
+                                    zapid,
+                                    browserid,
+                                    sessionId,
+                                    getIntegerField(progressData, "contractVersion"),
+                                    getIntegerField(progressData, "activitySeq"),
+                                    progress.intValue(),
+                                    status != null ? status : "");
+                        }
+                        if (!terminalProgress
+                                && !manualModeCallbackOnly
+                                && (progressChanged
+                                        || sessionEstablished
+                                        || hasRecentMeaningfulActivity(zapid, finishedAt))) {
+                            touchActiveClientSpidersForPtkActivity(
+                                    zapid,
+                                    evidenceTargetUrl,
+                                    "progress_activity_changed",
+                                    finishedAt);
+                        }
                         if ((firstProgress || sessionEstablished || terminalProgress)
                                 && !manualModeCallbackOnly) {
                             Map<String, Object> evidenceExtra = new LinkedHashMap<>();
@@ -2631,6 +4079,17 @@ public class ExtensionPtk extends ExtensionAdaptor
                                         evidenceExtra);
                             }
                             if (sessionEstablished) {
+                                logContractPhase(
+                                        "session_started",
+                                        zapid,
+                                        browserid,
+                                        Map.of(
+                                                "sessionId",
+                                                sessionId,
+                                                "progress",
+                                                progress.intValue(),
+                                                "status",
+                                                status != null ? status : ""));
                                 logBrowserEvidence(
                                         zapid,
                                         browserid,
@@ -2639,6 +4098,17 @@ public class ExtensionPtk extends ExtensionAdaptor
                                         evidenceExtra);
                             }
                             if (terminalProgress) {
+                                logContractPhase(
+                                        "terminal_progress_seen",
+                                        zapid,
+                                        browserid,
+                                        Map.of(
+                                                "sessionId",
+                                                sessionId != null ? sessionId : "",
+                                                "progress",
+                                                progress.intValue(),
+                                                "status",
+                                                status != null ? status : ""));
                                 logBrowserEvidence(
                                         zapid,
                                         browserid,
@@ -2681,6 +4151,31 @@ public class ExtensionPtk extends ExtensionAdaptor
                             logTimingSummary(
                                     zapid, browserid, "progress.update", sinceFirstMs, extra);
                         }
+                        if (v2Progress
+                                && terminalProgress
+                                && Boolean.TRUE.equals(getBooleanField(publisher, "drained"))) {
+                            Map<String, Object> publisherDrainedFields = new LinkedHashMap<>();
+                            publisherDrainedFields.put(
+                                    "sessionId", sessionId != null ? sessionId : "");
+                            publisherDrainedFields.put(
+                                    "contractVersion",
+                                    getIntegerField(progressData, "contractVersion"));
+                            publisherDrainedFields.put(
+                                    "activitySeq", getIntegerField(progressData, "activitySeq"));
+                            publisherDrainedFields.put(
+                                    "closeRequestId",
+                                    getStringField(progressData, "closeRequestId") != null
+                                            ? getStringField(progressData, "closeRequestId")
+                                            : "");
+                            publisherDrainedFields.put(
+                                    "closeRequestAck",
+                                    Boolean.TRUE.equals(
+                                            getBooleanField(progressData, "closeRequestAck")));
+                            publisherDrainedFields.put("progress", progress.intValue());
+                            publisherDrainedFields.put("status", status != null ? status : "");
+                            logContractPhase(
+                                    "publisher_drained", zapid, browserid, publisherDrainedFields);
+                        }
                         if (terminalProgress) {
                             Map<String, Object> extra = new LinkedHashMap<>();
                             extra.put("progress", progress.intValue());
@@ -2694,6 +4189,11 @@ public class ExtensionPtk extends ExtensionAdaptor
                     } else {
                         LOGGER.warn("PTK progress missing zapid or progress: {}", requestBody);
                     }
+                    addCloseControlResponse(
+                            response,
+                            getStringField(progressData, "zapid"),
+                            getStringField(progressData, "sessionId"),
+                            getStringField(progressData, "browserid"));
                 } catch (Exception e) {
                     LOGGER.warn("PTK failed to parse progress body: {}", requestBody, e);
                 }
@@ -2730,15 +4230,26 @@ public class ExtensionPtk extends ExtensionAdaptor
                 LOGGER.debug(
                         "PTK browserLaunched without zapid browserid={} url={}",
                         browserid,
-                        currentUrl);
+                        redactZapCallbackUrlForLog(currentUrl));
                 return;
             }
 
             rememberWebDriverZapId(ssutils.getWebDriver(), zapid);
             rememberBrowserId(zapid, browserid);
+            if (browserid != null && !browserid.isBlank()) {
+                browserTaskStateByZapIdAndBrowserId.put(
+                        PtkBrowserTaskState.key(zapid, browserid),
+                        PtkBrowserTaskState.loaded(
+                                zapid, browserid, currentUrl, System.currentTimeMillis()));
+            }
             closedZapIds.remove(zapid);
             browserCoverageTargetUrlByZapId.remove(zapid);
             sessionEstablishedLogged.remove(zapid);
+            logContractPhase(
+                    "browser_loaded",
+                    zapid,
+                    browserid,
+                    Map.of("url", currentUrl, "source", "browserLaunched"));
             logBrowserEvidence(
                     zapid,
                     browserid,
@@ -2747,13 +4258,395 @@ public class ExtensionPtk extends ExtensionAdaptor
                     Map.of("source", "browserLaunched"));
             long start = System.currentTimeMillis();
             logTimingSummary(zapid, browserid, "browser_launch.begin", null, Map.of());
+            Map<String, Object> runner =
+                    openZapCallbackRunner(ssutils.getWebDriver(), browserid, zapid, currentUrl);
+            if (!runner.isEmpty()) {
+                logContractPhase("browser_launch_runner", zapid, browserid, runner);
+            }
+            Map<String, Object> handshake =
+                    awaitCallbackBootstrapHandshake(
+                            ssutils.getWebDriver(),
+                            zapid,
+                            currentUrl,
+                            Boolean.TRUE.equals(runner.get("opened")));
             long waitedMs = System.currentTimeMillis() - start;
-            boolean callbackSeen =
-                    callbackFirstSeenAtMs.containsKey(zapid) || scanProgress.containsKey(zapid);
+            boolean bootstrapReady = Boolean.TRUE.equals(handshake.get("handshakeSeen"));
+            boolean callbackSeen = hasCallbackAcquired(zapid);
             Map<String, Object> extra = new LinkedHashMap<>();
             extra.put("waitedMs", waitedMs);
             extra.put("callbackSeen", callbackSeen);
+            extra.put("bootstrapReady", bootstrapReady);
+            extra.putAll(runner);
+            extra.putAll(handshake);
+            logContractPhase("browser_launch_callback_handshake", zapid, browserid, handshake);
+            if (!bootstrapReady && !isDeferredCallbackBootstrap(handshake)) {
+                String state = String.valueOf(handshake.getOrDefault("handshakeState", ""));
+                String phase =
+                        "callback_acquired_no_config".equals(state)
+                                ? "callback_acquired_no_config"
+                                : "callback_bootstrap_failed";
+                Map<String, Object> failure = new LinkedHashMap<>();
+                failure.put("state", state != null && !state.isBlank() ? state : "unknown");
+                failure.put("waitedMs", waitedMs);
+                failure.put(
+                        "callbackReloadAttempts",
+                        handshake.getOrDefault("callbackReloadAttempts", 0));
+                logContractPhase(phase, zapid, browserid, failure);
+            }
             logTimingSummary(zapid, browserid, "browser_launch.end", null, extra);
+        }
+
+        private Map<String, Object> awaitCallbackBootstrapHandshake(
+                WebDriver driver, String zapid, String callbackUrl, boolean runnerOpened) {
+            if (!isZapCallbackBootstrapUrl(callbackUrl)) {
+                return new PtkCloseContract.CallbackBootstrapHandshakeResult(
+                                hasCallbackBootstrapReady(zapid),
+                                0L,
+                                0,
+                                "java_callback_not_applicable",
+                                false,
+                                0,
+                                null,
+                                false,
+                                callbackBootstrapState(zapid))
+                        .toLogFields();
+            }
+            return new PtkCloseContract.CallbackBootstrapHandshakeResult(
+                            hasCallbackBootstrapReady(zapid),
+                            0L,
+                            0,
+                            runnerOpened
+                                    ? "java_callback_runner_deferred"
+                                    : "java_callback_deferred",
+                            false,
+                            0,
+                            null,
+                            false,
+                            callbackBootstrapState(zapid))
+                    .toLogFields();
+        }
+
+        private boolean isDeferredCallbackBootstrap(Map<String, Object> handshake) {
+            if (handshake == null) {
+                return false;
+            }
+            String mode = String.valueOf(handshake.get("handshakeMode"));
+            return "java_callback_deferred".equals(mode)
+                    || "java_callback_runner_deferred".equals(mode);
+        }
+
+        private Map<String, Object> openZapCallbackRunner(
+                WebDriver driver, String browserid, String zapid, String callbackUrl) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            String skipReason =
+                    ExtensionPtk.zapCallbackRunnerSkipReason(
+                            getParam().isZapAutomationEnabled(), browserid, callbackUrl);
+            if ("not_zap_callback".equals(skipReason)) {
+                return result;
+            }
+            result.put("runnerAttempted", false);
+            if (!skipReason.isBlank()) {
+                result.put("runnerSkipped", skipReason);
+                return result;
+            }
+            if (!(driver instanceof JavascriptExecutor js)) {
+                result.put("runnerSkipped", "javascript_executor_unavailable");
+                return result;
+            }
+
+            Path chromiumPath = getPtkChromiumExtensionPath();
+            if (!Files.isDirectory(chromiumPath)) {
+                result.put("runnerSkipped", "chromium_extension_path_missing");
+                return result;
+            }
+
+            String runnerUrl = buildChromiumZapRunnerUrl(chromiumPath);
+            if (runnerUrl.isBlank()) {
+                result.put("runnerSkipped", "runner_url_unavailable");
+                return result;
+            }
+
+            result.put("runnerAttempted", true);
+            result.put("runnerExtensionId", chromiumExtensionIdForPath(chromiumPath));
+            String originalWindow = null;
+            Set<String> windowsBefore = Set.of();
+            try {
+                originalWindow = driver.getWindowHandle();
+                windowsBefore = new LinkedHashSet<>(driver.getWindowHandles());
+            } catch (RuntimeException e) {
+                LOGGER.debug("PTK runner could not read current window: {}", e.getMessage());
+            }
+
+            try {
+                driver.switchTo().newWindow(WindowType.TAB);
+                driver.navigate().to(runnerUrl);
+                result.put("opened", true);
+                result.put("runnerOpenMode", "webdriver_new_window");
+                String runnerWindow = driver.getWindowHandle();
+                if (runnerWindow == null || runnerWindow.isBlank()) {
+                    runnerWindow = findNewWebDriverWindow(driver, windowsBefore, originalWindow);
+                }
+                if (runnerWindow != null && !runnerWindow.isBlank()) {
+                    result.put("runnerWindowObserved", true);
+                    driver.switchTo().window(runnerWindow);
+                    Object runnerResponse = invokeZapRunnerScan(js);
+                    addRunnerInvocationResult(result, runnerResponse);
+                    boolean callbackReloaded = false;
+                    if (!Boolean.TRUE.equals(result.get("runnerMessageOk"))
+                            && originalWindow != null
+                            && !originalWindow.isBlank()) {
+                        driver.switchTo().window(originalWindow);
+                        reloadZapCallbackBootstrapPage(driver, callbackUrl);
+                        result.put("runnerCallbackReloaded", true);
+                        callbackReloaded = true;
+                    }
+                    result.putAll(
+                            closeZapCallbackRunnerWindow(
+                                    driver,
+                                    runnerWindow,
+                                    originalWindow,
+                                    callbackReloaded
+                                            ? "runner_message_failed_after_callback_reload"
+                                            : "runner_message_completed"));
+                } else {
+                    result.put("runnerWindowObserved", false);
+                }
+            } catch (RuntimeException e) {
+                result.put("opened", false);
+                result.put("runnerError", e.getMessage());
+            } finally {
+                if (originalWindow != null) {
+                    try {
+                        driver.switchTo().window(originalWindow);
+                    } catch (RuntimeException e) {
+                        LOGGER.debug(
+                                "PTK runner could not restore callback window: {}", e.getMessage());
+                    }
+                }
+            }
+            return result;
+        }
+
+        private Map<String, Object> closeZapCallbackRunnerWindow(
+                WebDriver driver, String runnerWindow, String restoreWindow, String reason) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            if (driver == null || runnerWindow == null || runnerWindow.isBlank()) {
+                return result;
+            }
+
+            result.put("runnerCloseAttempted", true);
+            result.put(
+                    "runnerCloseReason",
+                    reason != null && !reason.isBlank() ? reason : "runner_message_completed");
+            String currentWindow = null;
+            try {
+                currentWindow = driver.getWindowHandle();
+            } catch (RuntimeException e) {
+                LOGGER.debug(
+                        "PTK runner could not read active window before close: {}", e.getMessage());
+            }
+
+            try {
+                if (!webDriverWindowExists(driver, runnerWindow)) {
+                    result.put("runnerClosed", true);
+                    result.put("runnerCloseAlreadyClosed", true);
+                    return result;
+                }
+                driver.switchTo().window(runnerWindow);
+                driver.close();
+                result.put("runnerClosed", true);
+            } catch (RuntimeException e) {
+                result.put("runnerClosed", false);
+                result.put("runnerCloseError", redactZapCallbackUrlForLog(e.getMessage()));
+            } finally {
+                restoreWebDriverWindow(driver, restoreWindow, currentWindow);
+            }
+            return result;
+        }
+
+        private boolean webDriverWindowExists(WebDriver driver, String windowHandle) {
+            if (driver == null || windowHandle == null || windowHandle.isBlank()) {
+                return false;
+            }
+            try {
+                for (String handle : driver.getWindowHandles()) {
+                    if (windowHandle.equals(handle)) {
+                        return true;
+                    }
+                }
+            } catch (RuntimeException e) {
+                LOGGER.debug(
+                        "PTK runner could not inspect windows before close: {}", e.getMessage());
+            }
+            return false;
+        }
+
+        private void restoreWebDriverWindow(
+                WebDriver driver, String preferredWindow, String fallbackWindow) {
+            if (driver == null) {
+                return;
+            }
+            String window = firstNonBlank(preferredWindow, fallbackWindow);
+            if (window == null || window.isBlank()) {
+                return;
+            }
+            try {
+                if (webDriverWindowExists(driver, window)) {
+                    driver.switchTo().window(window);
+                }
+            } catch (RuntimeException e) {
+                LOGGER.debug("PTK runner could not restore window after close: {}", e.getMessage());
+            }
+        }
+
+        private String firstNonBlank(String first, String second) {
+            if (first != null && !first.isBlank()) {
+                return first;
+            }
+            if (second != null && !second.isBlank()) {
+                return second;
+            }
+            return null;
+        }
+
+        private String findNewWebDriverWindow(
+                WebDriver driver, Set<String> windowsBefore, String originalWindow) {
+            if (driver == null) {
+                return null;
+            }
+            Set<String> before = windowsBefore != null ? windowsBefore : Set.of();
+            try {
+                for (String handle : driver.getWindowHandles()) {
+                    if (handle == null || handle.isBlank()) {
+                        continue;
+                    }
+                    if (!before.contains(handle)) {
+                        return handle;
+                    }
+                }
+                for (String handle : driver.getWindowHandles()) {
+                    if (handle != null && !handle.isBlank() && !handle.equals(originalWindow)) {
+                        return handle;
+                    }
+                }
+            } catch (RuntimeException e) {
+                LOGGER.debug("PTK runner could not inspect WebDriver windows: {}", e.getMessage());
+            }
+            return null;
+        }
+
+        private Object invokeZapRunnerScan(JavascriptExecutor js) {
+            String script =
+                    """
+                    const done = arguments[arguments.length - 1];
+                    const timeoutMs = Math.max(500, Number(arguments[0]) || 2000);
+                    let settled = false;
+                    const finish = (value) => {
+                      if (settled) return;
+                      settled = true;
+                      done(value || null);
+                    };
+                    try {
+                      const chromeRuntime = globalThis.chrome && globalThis.chrome.runtime;
+                      const browserRuntime = globalThis.browser && globalThis.browser.runtime;
+                      const runtime = chromeRuntime || browserRuntime || null;
+                      if (!runtime || typeof runtime.sendMessage !== 'function') {
+                        finish({ ok: false, observed: false, reason: 'runtime_unavailable' });
+                        return;
+                      }
+                      const payload = {
+                        channel: 'ptk_extension_zap_runner',
+                        type: 'scan_callback_tabs',
+                        reason: 'webdriver_runner',
+                        requestId: 'zap-runner-webdriver-' + Date.now()
+                      };
+                      if (chromeRuntime && typeof chromeRuntime.sendMessage === 'function') {
+                        chromeRuntime.sendMessage(payload, (response) => {
+                          const lastError = chromeRuntime.lastError && chromeRuntime.lastError.message;
+                          finish(response || { ok: false, observed: false, reason: lastError || 'empty_response' });
+                        });
+                      } else {
+                        Promise.resolve(browserRuntime.sendMessage(payload)).then(
+                          (response) => finish(response),
+                          (error) => finish({ ok: false, observed: false, reason: error && error.message || String(error) })
+                        );
+                      }
+                      setTimeout(() => finish({ ok: false, observed: false, reason: 'runner_message_timeout' }), timeoutMs);
+                    } catch (error) {
+                      finish({ ok: false, observed: false, reason: error && error.message || String(error) });
+                    }
+                    """;
+            return js.executeAsyncScript(script, 8000);
+        }
+
+        private void addRunnerInvocationResult(Map<String, Object> result, Object runnerResponse) {
+            if (result == null) {
+                return;
+            }
+            if (!(runnerResponse instanceof Map<?, ?> response)) {
+                result.put("runnerMessageOk", false);
+                result.put("runnerObserved", false);
+                result.put("runnerMessageReason", "empty_response");
+                return;
+            }
+            result.put("runnerMessageOk", Boolean.TRUE.equals(response.get("ok")));
+            result.put("runnerObserved", Boolean.TRUE.equals(response.get("observed")));
+            Object reason = response.get("reason");
+            if (reason instanceof String text && !text.isBlank()) {
+                result.put("runnerMessageReason", text);
+            }
+        }
+
+        private boolean isChromiumBrowserId(String browserid) {
+            if (browserid == null || browserid.isBlank()) {
+                return false;
+            }
+            String normalized = browserid.toLowerCase();
+            return normalized.contains("chrome") || normalized.contains("edge");
+        }
+
+        private boolean isZapCallbackBootstrapUrl(String url) {
+            return url != null
+                    && url.contains("zapCallBackUrl")
+                    && extractZapIdFromUrl(url) != null;
+        }
+
+        private void reloadZapCallbackBootstrapPage(WebDriver driver, String callbackUrl) {
+            if (driver == null || !isZapCallbackBootstrapUrl(callbackUrl)) {
+                return;
+            }
+            driver.navigate().to(callbackUrl);
+        }
+
+        private boolean hasCallbackBootstrapReady(String zapid) {
+            return zapid != null
+                    && !zapid.isBlank()
+                    && (configServedAtMsByZapId.containsKey(zapid)
+                            || sessionIdByZapId.containsKey(zapid));
+        }
+
+        private boolean hasCallbackAcquired(String zapid) {
+            return zapid != null
+                    && !zapid.isBlank()
+                    && (callbackFirstSeenAtMs.containsKey(zapid)
+                            || scanProgress.containsKey(zapid)
+                            || configAppliedLogged.contains(zapid));
+        }
+
+        private String callbackBootstrapState(String zapid) {
+            if (zapid == null || zapid.isBlank()) {
+                return "callback_not_seen";
+            }
+            if (sessionIdByZapId.containsKey(zapid)) {
+                return "session_started";
+            }
+            if (configServedAtMsByZapId.containsKey(zapid)) {
+                return "config_served";
+            }
+            if (hasCallbackAcquired(zapid)) {
+                return "callback_acquired_no_config";
+            }
+            return "callback_not_seen";
         }
 
         @Override
@@ -2768,6 +4661,11 @@ public class ExtensionPtk extends ExtensionAdaptor
             long start = System.currentTimeMillis();
             long closeDeadlineMs = start + PtkCloseContract.BROWSER_CLOSE_MAX_WALL_CLOCK_MS;
             String browserid = browserIdByZapId.get(zapid);
+            logContractPhase(
+                    "browser_close_requested",
+                    zapid,
+                    browserid,
+                    Map.of("maxWallClockMs", PtkCloseContract.BROWSER_CLOSE_MAX_WALL_CLOCK_MS));
             if (isManualModeConfigOnlyClose(zapid)) {
                 Map<String, Object> closeDecision = buildManualModeCloseDecision();
                 long waitedMs = System.currentTimeMillis() - start;
@@ -2798,13 +4696,21 @@ public class ExtensionPtk extends ExtensionAdaptor
                 return;
             }
             waitForSessionStartBeforeClose(zapid, closeDeadlineMs);
+            boolean ownerTargetClose = isCurrentBrowserWithinScheduledTargetScope(ccbutils, zapid);
             boolean hadProgressBeforeClose = scanProgress.containsKey(zapid);
+            boolean callbackObservedOwnerSession =
+                    ownerTargetClose && hadProgressBeforeClose && hasSessionId(zapid);
             Map<String, Object> closeDecision =
-                    requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
-            markCloseDecisionAttempted(zapid, System.currentTimeMillis());
+                    callbackObservedOwnerSession && !isSafeToClose(zapid)
+                            ? buildCallbackOwnerWaitDecision(zapid)
+                            : requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
+            if (!"callback_progress".equals(getStringField(closeDecision, "source"))) {
+                markCloseDecisionAttempted(zapid, System.currentTimeMillis());
+            }
             String initialDecision = getStringField(closeDecision, "decision");
             String initialScanState = getStringField(closeDecision, "scanState");
-            if (PtkCloseContract.canAcceptCloseDecisionSafeToClose(
+            if (canAcceptCloseDecisionSafeToClose(
+                    zapid,
                     closeDecision,
                     scanProgress.getOrDefault(zapid, 0),
                     scanStatus.getOrDefault(zapid, ""))) {
@@ -2828,16 +4734,18 @@ public class ExtensionPtk extends ExtensionAdaptor
                     retry++;
                 }
                 closeDecision = requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
+                markCloseDecisionAttempted(zapid, System.currentTimeMillis());
                 initialDecision = getStringField(closeDecision, "decision");
                 initialScanState = getStringField(closeDecision, "scanState");
-                if (PtkCloseContract.canAcceptCloseDecisionSafeToClose(
+                if (canAcceptCloseDecisionSafeToClose(
+                        zapid,
                         closeDecision,
                         scanProgress.getOrDefault(zapid, 0),
                         scanStatus.getOrDefault(zapid, ""))) {
                     safeToCloseByZapId.put(zapid, true);
                 }
                 if (!isAutomationDisabledCloseDecision(closeDecision)) {
-                    LOGGER.info(
+                    LOGGER.debug(
                             "PTK browserClosing uuid={} recovered after {} session-start close retries",
                             ccbutils.getUuid(),
                             retry);
@@ -2879,9 +4787,11 @@ public class ExtensionPtk extends ExtensionAdaptor
                         && !isCloseDecisionActionable(closeDecision)
                         && hasCloseBudget(closeDeadlineMs, 2_500L)) {
                     closeDecision = requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
+                    markCloseDecisionAttempted(zapid, System.currentTimeMillis());
                     initialDecision = getStringField(closeDecision, "decision");
                     initialScanState = getStringField(closeDecision, "scanState");
-                    if (PtkCloseContract.canAcceptCloseDecisionSafeToClose(
+                    if (canAcceptCloseDecisionSafeToClose(
+                            zapid,
                             closeDecision,
                             scanProgress.getOrDefault(zapid, 0),
                             scanStatus.getOrDefault(zapid, ""))) {
@@ -2889,7 +4799,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                     }
                 }
                 if (scanProgress.containsKey(zapid)) {
-                    LOGGER.info(
+                    LOGGER.debug(
                             "PTK browserClosing uuid={} received delayed progress after {} no-progress close retries",
                             ccbutils.getUuid(),
                             retry);
@@ -2918,10 +4828,56 @@ public class ExtensionPtk extends ExtensionAdaptor
                 LOGGER.warn(
                         "PTK browserExiting: no progress for UUID {} url={}",
                         ccbutils.getUuid(),
-                        currentUrl);
+                        redactZapCallbackUrlForLog(currentUrl));
+                return;
+            }
+            if (!hasSessionId(zapid) && isWaitingForSessionStart(zapid)) {
+                String currentUrl = null;
+                try {
+                    currentUrl = ccbutils.getWebDriver().getCurrentUrl();
+                } catch (RuntimeException e) {
+                    LOGGER.debug(
+                            "PTK browserExiting failed to read current URL for UUID {}: {}",
+                            ccbutils.getUuid(),
+                            e.getMessage());
+                }
+                Map<String, Object> extra = new LinkedHashMap<>();
+                extra.put("reason", "no_ptk_session_after_startup_grace");
+                extra.put("progress", scanProgress.getOrDefault(zapid, 0));
+                String status = scanStatus.get(zapid);
+                if (status != null && !status.isBlank()) {
+                    extra.put("status", status);
+                }
+                putActivitySummaryFields(extra, zapid, System.currentTimeMillis());
+                logBrowserEvidence(zapid, browserid, "browser_session_invalid", currentUrl, extra);
+                logCloseContractDecision(
+                        zapid,
+                        browserid,
+                        "browser_session_invalid",
+                        status,
+                        System.currentTimeMillis() - start,
+                        scanProgress.getOrDefault(zapid, 0),
+                        status,
+                        extra);
                 return;
             }
             if (PtkCloseContract.isBrowserLocalNonParticipantCloseDecision(closeDecision)) {
+                String reason = getStringField(closeDecision, "reason");
+                markBrowserTaskClosed(
+                        zapid,
+                        browserid,
+                        initialDecision != null ? initialDecision : "not_applicable",
+                        reason,
+                        System.currentTimeMillis());
+                logContractPhase(
+                        "local_tab_close",
+                        zapid,
+                        browserid,
+                        Map.of(
+                                "decision",
+                                initialDecision != null ? initialDecision : "not_applicable",
+                                "reason",
+                                reason != null ? reason : ""));
                 logCloseContractDecision(
                         zapid,
                         browserid,
@@ -2937,6 +4893,24 @@ public class ExtensionPtk extends ExtensionAdaptor
                 long waitedMs = System.currentTimeMillis() - start;
                 int progress = scanProgress.getOrDefault(zapid, 0);
                 String status = scanStatus.getOrDefault(zapid, "");
+                String reason = getStringField(closeDecision, "reason");
+                markBrowserTaskClosed(
+                        zapid,
+                        browserid,
+                        "browser_tab_safe_to_close",
+                        reason,
+                        System.currentTimeMillis());
+                logContractPhase(
+                        "local_tab_close",
+                        zapid,
+                        browserid,
+                        Map.of(
+                                "decision",
+                                "browser_tab_safe_to_close",
+                                "reason",
+                                reason != null ? reason : "",
+                                "waitedMs",
+                                waitedMs));
                 logCloseContractDecision(
                         zapid,
                         browserid,
@@ -2957,13 +4931,16 @@ public class ExtensionPtk extends ExtensionAdaptor
                 closeExtra.put("alertsTotal", getAlertsRaisedTotal(zapid));
                 closeExtra.put("terminalSeen", terminalProgressLogged.contains(zapid));
                 closeExtra.put("reason", getStringField(closeDecision, "reason"));
+                putActivitySummaryFields(closeExtra, zapid, System.currentTimeMillis());
                 logTimingSummary(
                         zapid,
                         browserid,
                         "browser_close.end",
                         getElapsedSinceFirst(zapid, System.currentTimeMillis()),
                         closeExtra);
-                clearTrackingState(zapid);
+                // This is a browser-tab/local close decision, not a PTK/ZAP session-terminal
+                // decision. Keep zapid tracking alive so sibling/owner browser work can still
+                // publish progress and findings for the same ZAP session.
                 return;
             }
             logCloseContractDecision(
@@ -2975,9 +4952,165 @@ public class ExtensionPtk extends ExtensionAdaptor
                     scanProgress.getOrDefault(zapid, 0),
                     scanStatus.getOrDefault(zapid, ""),
                     closeDecision);
-
             int count = 0;
             while (!isSafeToClose(zapid)) {
+                long nowMs = System.currentTimeMillis();
+                boolean recentActivity = hasRecentMeaningfulActivity(zapid, nowMs);
+                if (recentActivity && closeWaitActiveLogged.add(zapid)) {
+                    Map<String, Object> activeExtra = new LinkedHashMap<>();
+                    activeExtra.put("waitedMs", nowMs - start);
+                    activeExtra.put("progress", scanProgress.getOrDefault(zapid, 0));
+                    activeExtra.put("status", scanStatus.getOrDefault(zapid, ""));
+                    putActivitySummaryFields(activeExtra, zapid, nowMs);
+                    logContractPhase("close_wait_active", zapid, browserid, activeExtra);
+                }
+                if (!recentActivity
+                        && !ownerTargetClose
+                        && activeCloseRequestId(zapid) == null
+                        && hasCloseBudget(closeDeadlineMs, 2_500L)) {
+                    closeDecision = requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
+                    if (!"callback_progress".equals(getStringField(closeDecision, "source"))) {
+                        markCloseDecisionAttempted(zapid, System.currentTimeMillis());
+                    }
+                    if (PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision)) {
+                        long waitedMs = System.currentTimeMillis() - start;
+                        String reason = getStringField(closeDecision, "reason");
+                        markBrowserTaskClosed(
+                                zapid,
+                                browserid,
+                                "browser_tab_safe_to_close",
+                                reason,
+                                System.currentTimeMillis());
+                        logContractPhase(
+                                "local_tab_close",
+                                zapid,
+                                browserid,
+                                Map.of(
+                                        "decision",
+                                        "browser_tab_safe_to_close",
+                                        "reason",
+                                        reason != null ? reason : "",
+                                        "waitedMs",
+                                        waitedMs));
+                        logCloseContractDecision(
+                                zapid,
+                                browserid,
+                                getStringField(closeDecision, "decision"),
+                                getStringField(closeDecision, "scanState"),
+                                waitedMs,
+                                scanProgress.getOrDefault(zapid, 0),
+                                scanStatus.getOrDefault(zapid, ""),
+                                closeDecision);
+                        return;
+                    }
+                    if (PtkCloseContract.isActiveBrowserWorkCloseDecision(closeDecision)) {
+                        recentActivity = true;
+                        Map<String, Object> activeExtra = new LinkedHashMap<>();
+                        activeExtra.put("waitedMs", System.currentTimeMillis() - start);
+                        activeExtra.put("progress", scanProgress.getOrDefault(zapid, 0));
+                        activeExtra.put("status", scanStatus.getOrDefault(zapid, ""));
+                        activeExtra.put("reason", "active_browser_work");
+                        putActivitySummaryFields(activeExtra, zapid, System.currentTimeMillis());
+                        logContractPhase("close_wait_active", zapid, browserid, activeExtra);
+                        logCloseContractDecision(
+                                zapid,
+                                browserid,
+                                getStringField(closeDecision, "decision"),
+                                getStringField(closeDecision, "scanState"),
+                                System.currentTimeMillis() - start,
+                                scanProgress.getOrDefault(zapid, 0),
+                                scanStatus.getOrDefault(zapid, ""),
+                                closeDecision);
+                    } else if (canAcceptCloseDecisionSafeToClose(
+                            zapid,
+                            closeDecision,
+                            scanProgress.getOrDefault(zapid, 0),
+                            scanStatus.getOrDefault(zapid, ""))) {
+                        safeToCloseByZapId.put(zapid, true);
+                    }
+                }
+                if (!recentActivity && staleCloseLogged.add(zapid)) {
+                    String closeRequestId =
+                            ensureCloseRequest(zapid, "activity_stale_after_close_request");
+                    Map<String, Object> staleExtra = new LinkedHashMap<>();
+                    staleExtra.put("reason", "activity_stale_waiting_for_terminal");
+                    staleExtra.put("stopRequested", true);
+                    if (closeRequestId != null && !closeRequestId.isBlank()) {
+                        staleExtra.put("closeRequestId", closeRequestId);
+                    }
+                    LOGGER.debug(
+                            "PTK_CONTRACT phase=close_wait_stale zapid={} browserid={} waitedMs={} progress={} status={}",
+                            zapid,
+                            browserid,
+                            nowMs - start,
+                            scanProgress.getOrDefault(zapid, 0),
+                            scanStatus.getOrDefault(zapid, ""));
+                    putActivitySummaryFields(staleExtra, zapid, nowMs);
+                    logCloseContractDecision(
+                            zapid,
+                            browserid,
+                            "wait",
+                            scanStatus.getOrDefault(zapid, ""),
+                            nowMs - start,
+                            scanProgress.getOrDefault(zapid, 0),
+                            scanStatus.getOrDefault(zapid, ""),
+                            staleExtra);
+                    if (hasCloseBudget(closeDeadlineMs, 2_500L)) {
+                        closeDecision = requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
+                        if (!"callback_progress".equals(getStringField(closeDecision, "source"))) {
+                            markCloseDecisionAttempted(zapid, System.currentTimeMillis());
+                        }
+                        if (PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision)) {
+                            long waitedMs = System.currentTimeMillis() - start;
+                            String reason = getStringField(closeDecision, "reason");
+                            markBrowserTaskClosed(
+                                    zapid,
+                                    browserid,
+                                    "browser_tab_safe_to_close",
+                                    reason,
+                                    System.currentTimeMillis());
+                            logContractPhase(
+                                    "local_tab_close",
+                                    zapid,
+                                    browserid,
+                                    Map.of(
+                                            "decision",
+                                            "browser_tab_safe_to_close",
+                                            "reason",
+                                            reason != null ? reason : "",
+                                            "waitedMs",
+                                            waitedMs));
+                            logCloseContractDecision(
+                                    zapid,
+                                    browserid,
+                                    getStringField(closeDecision, "decision"),
+                                    getStringField(closeDecision, "scanState"),
+                                    waitedMs,
+                                    scanProgress.getOrDefault(zapid, 0),
+                                    scanStatus.getOrDefault(zapid, ""),
+                                    closeDecision);
+                            return;
+                        }
+                        if (canAcceptCloseDecisionSafeToClose(
+                                zapid,
+                                closeDecision,
+                                scanProgress.getOrDefault(zapid, 0),
+                                scanStatus.getOrDefault(zapid, ""))) {
+                            safeToCloseByZapId.put(zapid, true);
+                        }
+                        logCloseContractDecision(
+                                zapid,
+                                browserid,
+                                getStringField(closeDecision, "decision") != null
+                                        ? getStringField(closeDecision, "decision")
+                                        : "wait",
+                                getStringField(closeDecision, "scanState"),
+                                System.currentTimeMillis() - start,
+                                scanProgress.getOrDefault(zapid, 0),
+                                scanStatus.getOrDefault(zapid, ""),
+                                closeDecision);
+                    }
+                }
                 if (count >= PtkCloseContract.BROWSER_CLOSE_MAX_ATTEMPTS
                         || !hasCloseBudget(closeDeadlineMs, 250L)) {
                     Map<String, Object> summaryExtra =
@@ -2987,12 +5120,35 @@ public class ExtensionPtk extends ExtensionAdaptor
                                     (System.currentTimeMillis() - start),
                                     scanProgress.getOrDefault(zapid, 0),
                                     scanStatus.getOrDefault(zapid, ""));
+                    if (!hasRecentMeaningfulActivity(zapid, System.currentTimeMillis())) {
+                        summaryExtra.put("reason", "activity_stale_forced_close");
+                    }
+                    PtkZapSessionSnapshot forcedSnapshot = sessionSnapshot(zapid);
+                    if (forcedSnapshot != null) {
+                        summaryExtra.put("contractVersion", forcedSnapshot.contractVersion());
+                        summaryExtra.put("publisherDrained", forcedSnapshot.publisherDrained());
+                        summaryExtra.put(
+                                "terminalProgressSeen", forcedSnapshot.terminalProgressSeen());
+                        if (forcedSnapshot.closeRequest() != null) {
+                            summaryExtra.put("closeRequestId", forcedSnapshot.closeRequest().id());
+                            summaryExtra.put(
+                                    "closeRequestAck",
+                                    forcedSnapshot.closeRequest().acknowledged());
+                        }
+                    }
+                    markBrowserTaskClosed(
+                            zapid,
+                            browserid,
+                            "forced_closed",
+                            String.valueOf(summaryExtra.get("reason")),
+                            System.currentTimeMillis());
                     LOGGER.warn(
                             "PTK browserClosing uuid={} forced=true waitedMs={} progress={} status={}",
                             ccbutils.getUuid(),
                             (System.currentTimeMillis() - start),
                             scanProgress.get(zapid),
                             scanStatus.getOrDefault(zapid, ""));
+                    logContractPhase("forced_close", zapid, browserid, summaryExtra);
                     logCloseContractDecision(
                             zapid,
                             browserid,
@@ -3026,11 +5182,49 @@ public class ExtensionPtk extends ExtensionAdaptor
                 }
                 if (count % PtkCloseContract.BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS == 0
                         && !isSafeToClose(zapid)
+                        && !hasRecentMeaningfulActivity(zapid, System.currentTimeMillis())
                         && hasCloseBudget(closeDeadlineMs, 2_500L)) {
                     closeDecision = requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
+                    if (!"callback_progress".equals(getStringField(closeDecision, "source"))) {
+                        markCloseDecisionAttempted(zapid, System.currentTimeMillis());
+                    }
                     String followUpDecision = getStringField(closeDecision, "decision");
                     String followUpScanState = getStringField(closeDecision, "scanState");
-                    if (PtkCloseContract.canAcceptCloseDecisionSafeToClose(
+                    if (PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision)) {
+                        long waitedMs = System.currentTimeMillis() - start;
+                        String reason = getStringField(closeDecision, "reason");
+                        markBrowserTaskClosed(
+                                zapid,
+                                browserid,
+                                "browser_tab_safe_to_close",
+                                reason,
+                                System.currentTimeMillis());
+                        logContractPhase(
+                                "local_tab_close",
+                                zapid,
+                                browserid,
+                                Map.of(
+                                        "decision",
+                                        "browser_tab_safe_to_close",
+                                        "reason",
+                                        reason != null ? reason : "",
+                                        "waitedMs",
+                                        waitedMs));
+                        logCloseContractDecision(
+                                zapid,
+                                browserid,
+                                followUpDecision != null
+                                        ? followUpDecision
+                                        : "browser_tab_safe_to_close",
+                                followUpScanState,
+                                waitedMs,
+                                scanProgress.getOrDefault(zapid, 0),
+                                scanStatus.getOrDefault(zapid, ""),
+                                closeDecision);
+                        return;
+                    }
+                    if (canAcceptCloseDecisionSafeToClose(
+                            zapid,
                             closeDecision,
                             scanProgress.getOrDefault(zapid, 0),
                             scanStatus.getOrDefault(zapid, ""))) {
@@ -3066,6 +5260,34 @@ public class ExtensionPtk extends ExtensionAdaptor
                             (System.currentTimeMillis() - start),
                             100,
                             effectiveFinalStatus);
+            PtkZapSessionSnapshot cleanSnapshot = sessionSnapshot(zapid);
+            if (cleanSnapshot != null) {
+                summaryExtra.put("contractVersion", cleanSnapshot.contractVersion());
+                summaryExtra.put("publisherDrained", cleanSnapshot.publisherDrained());
+                summaryExtra.put("terminalProgressSeen", cleanSnapshot.terminalProgressSeen());
+                if (cleanSnapshot.completionStatus() != null
+                        && !cleanSnapshot.completionStatus().isBlank()) {
+                    summaryExtra.put("completionStatus", cleanSnapshot.completionStatus());
+                }
+                if (cleanSnapshot.releaseStatus() != null
+                        && !cleanSnapshot.releaseStatus().isBlank()) {
+                    summaryExtra.put("releaseStatus", cleanSnapshot.releaseStatus());
+                }
+                if (cleanSnapshot.contractVersion() >= 2) {
+                    summaryExtra.put("releaseClean", cleanSnapshot.isV2ReleaseClean());
+                }
+                if (cleanSnapshot.closeRequest() != null) {
+                    summaryExtra.put("closeRequestId", cleanSnapshot.closeRequest().id());
+                    summaryExtra.put(
+                            "closeRequestAck", cleanSnapshot.closeRequest().acknowledged());
+                }
+            }
+            markBrowserTaskClosed(
+                    zapid,
+                    browserid,
+                    "safe_to_close",
+                    getStringField(closeDecision, "reason"),
+                    System.currentTimeMillis());
             logCloseContractDecision(
                     zapid,
                     browserid,
@@ -3075,6 +5297,13 @@ public class ExtensionPtk extends ExtensionAdaptor
                     100,
                     effectiveFinalStatus,
                     closeDecision);
+            String closePhase =
+                    cleanSnapshot != null
+                                    && cleanSnapshot.contractVersion() >= 2
+                                    && !cleanSnapshot.isV2ReleaseClean()
+                            ? "incomplete_close"
+                            : "clean_close";
+            logContractPhase(closePhase, zapid, browserid, summaryExtra);
             logTimingSummary(
                     zapid, browserid, "session.summary", elapsedSinceFirstMs, summaryExtra);
             logTimingSummary(
@@ -3083,8 +5312,16 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
 
         private boolean isTerminalProgress(String zapid) {
-            return isTerminalProgressValue(
-                    scanProgress.getOrDefault(zapid, 100), scanStatus.get(zapid));
+            if (zapid == null || zapid.isBlank()) {
+                return false;
+            }
+            if (progressContractVersionByZapId.getOrDefault(zapid, 0) >= 2) {
+                return canAcceptObservedV2SafeToClose(zapid);
+            }
+            if (terminalProgressLogged.contains(zapid)) {
+                return true;
+            }
+            return isTerminalProgressValue(scanProgress.get(zapid), scanStatus.get(zapid));
         }
     }
 }

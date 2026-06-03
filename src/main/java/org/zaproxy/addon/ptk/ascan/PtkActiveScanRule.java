@@ -95,28 +95,37 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
 
     @Override
     public void scan() {
+        HostProcess hostProcess = getParent();
+        if (hostProcess == null) {
+            LOGGER.warn(
+                    "PTK active scan rule skipped: {}",
+                    Constant.messages.getString(MESSAGE_PREFIX + "fail.missingdependency"));
+            return;
+        }
+
         ExtensionClientIntegration extClient = getExtension(ExtensionClientIntegration.class);
         ExtensionPtk extPtk = getExtension(ExtensionPtk.class);
+        if (extClient == null || extPtk == null || extPtk.getParam() == null) {
+            skipScan(hostProcess, "fail.missingdependency");
+            return;
+        }
         PtkParam ptkParam = extPtk.getParam();
 
         if (!ptkParam.isActiveScanRuleEnabled()) {
-            getParent()
-                    .pluginSkipped(
-                            this, Constant.messages.getString(MESSAGE_PREFIX + "fail.skipped"));
+            skipScan(hostProcess, "fail.skipped");
             return;
         }
 
         HttpMessage baseMsg = getBaseMsg();
-        HostProcess hostProcess = getParent();
         String url = resolveClientSpiderStartUrl(hostProcess, baseMsg);
         if (url == null || url.isBlank()) {
-            getParent()
-                    .pluginSkipped(
-                            this, Constant.messages.getString(MESSAGE_PREFIX + "fail.badurl"));
+            skipScan(hostProcess, "fail.badurl");
             return;
         }
         String baseUrl =
-                baseMsg != null && baseMsg.getRequestHeader().getURI() != null
+                baseMsg != null
+                                && baseMsg.getRequestHeader() != null
+                                && baseMsg.getRequestHeader().getURI() != null
                         ? baseMsg.getRequestHeader().getURI().toString()
                         : null;
         if (baseUrl != null && !baseUrl.equals(url)) {
@@ -125,9 +134,17 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
                     url,
                     baseUrl);
         }
-        Context context = getParent().getContext();
-        User user = getParent().getHttpSender().getUser(getBaseMsg());
+        if (hostProcess.getHttpSender() == null) {
+            skipScan(hostProcess, "fail.missingdependency");
+            return;
+        }
+        Context context = hostProcess.getContext();
+        User user = baseMsg != null ? hostProcess.getHttpSender().getUser(baseMsg) : null;
 
+        if (extClient.getClientParam() == null) {
+            skipScan(hostProcess, "fail.missingdependency");
+            return;
+        }
         ClientOptions options = extClient.getClientParam().clone();
         options.setBrowserId(ptkParam.getActiveScanBrowserId());
         options.setActionWaitTimeInSecs(ptkParam.getActiveScanActionWaitTimeInSecs());
@@ -151,7 +168,7 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
                         .setHrefType(HistoryReference.TYPE_SCANNER)
                         .setTmpHrefType(HistoryReference.TYPE_SCANNER_TEMPORARY)
                         .setInitiator(HttpSender.ACTIVE_SCANNER_INITIATOR)
-                        .setHttpSender(this.getParent().getHttpSender())
+                        .setHttpSender(hostProcess.getHttpSender())
                         .setIncludeExtensions(List.of("ptk-latest", "ptk-latest.xpi"))
                         .build();
 
@@ -159,19 +176,16 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
         try {
             scanId = extClient.startScan(url, options, scanOptions);
         } catch (Exception e) {
-            getParent()
-                    .pluginSkipped(
-                            this, Constant.messages.getString(MESSAGE_PREFIX + "fail.spiderstart"));
+            skipScan(hostProcess, "fail.spiderstart");
             return;
         }
 
         ClientSpider spider = extClient.getScan(scanId);
         if (spider == null) {
-            getParent()
-                    .pluginSkipped(
-                            this, Constant.messages.getString(MESSAGE_PREFIX + "fail.spidernull"));
+            skipScan(hostProcess, "fail.spidernull");
             return;
         }
+        extPtk.seedActiveScanClientSpiderTasks(url);
 
         long start = System.currentTimeMillis();
         LOGGER.debug("PTK active scan rule started client spider id={} url={}", scanId, url);
@@ -186,7 +200,7 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
                     spider.stopScan();
                     break;
                 }
-                boolean parentPaused = getParent() != null && getParent().isPaused();
+                boolean parentPaused = hostProcess.isPaused();
                 if (parentPaused && !spiderPaused) {
                     spider.pauseScan();
                     spiderPaused = true;
@@ -208,6 +222,15 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
                     scanId,
                     url,
                     System.currentTimeMillis() - start);
+        }
+    }
+
+    private void skipScan(HostProcess hostProcess, String messageKey) {
+        String message = Constant.messages.getString(MESSAGE_PREFIX + messageKey);
+        if (hostProcess != null) {
+            hostProcess.pluginSkipped(this, message);
+        } else {
+            LOGGER.warn("PTK active scan rule skipped: {}", message);
         }
     }
 

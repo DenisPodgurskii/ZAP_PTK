@@ -55,6 +55,13 @@ function isThirdPartyScriptForPage(scriptUrl, pageUrl) {
   return scriptOrigin !== pageOrigin;
 }
 
+function isLikelyTruncatedExternalScriptCapture(script, code) {
+  if (!script?.src || typeof code !== "string") return false;
+  if (script.truncated === true) return true;
+  const length = code.length;
+  return length === 512 * 1024 || length === 1024 * 1024;
+}
+
 function hasCatalogData(catalog) {
   if (!catalog || typeof catalog !== "object") return false;
   return [
@@ -231,6 +238,14 @@ export class sastEngine {
     this._setCatalog(opts?.catalog || {});
     this._setRulepack(opts?.rulepack || opts?.modules || {});
     this.events = createEmitter({ async: true, replay: 1 });
+  }
+
+  async fetchExternalScriptCode(scriptUrl) {
+    const res = await fetch(scriptUrl, { credentials: "include", cache: "force-cache" });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    return res.text();
   }
 
   _setCatalog(catalog) {
@@ -702,25 +717,21 @@ export class sastEngine {
         const hasCaptured = Boolean(captured && captured.trim().length);
         let code = hasCaptured ? captured : "";
 
-        if (script.src && hasCaptured) {
-        }
-
-        if (script.src && !hasCaptured) {
+        const capturedLooksTruncated = isLikelyTruncatedExternalScriptCapture(script, captured);
+        if (script.src && (!hasCaptured || capturedLooksTruncated)) {
           if (this._allowFetchExternalScripts) {
             this.events.emit("progress", { message: "Parsing external scripts", file: script.src });
             try {
-              const res = await fetch(script.src);
-              if (!res.ok) {
-                throw new Error(`HTTP ${res.status}`);
-              }
-              code = await res.text();
+              code = await this.fetchExternalScriptCode(script.src);
               fetchedScriptFiles.push(fileId);
             } catch (err) {
               const errorText = err?.message || String(err);
               const thirdParty = isThirdPartyScriptForPage(fileId, file);
               fetchFailures.push({
                 file: fileId,
-                error: errorText,
+                error: capturedLooksTruncated
+                  ? `truncated_capture_refetch_failed:${errorText}`
+                  : errorText,
                 thirdParty
               });
               if (!thirdParty) {
@@ -728,7 +739,7 @@ export class sastEngine {
               }
               continue;
             }
-          } else if (!hasCaptured) {
+          } else if (!hasCaptured || capturedLooksTruncated) {
             continue;
           }
         }

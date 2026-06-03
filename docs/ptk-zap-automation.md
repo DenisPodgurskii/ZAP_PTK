@@ -2,28 +2,39 @@
 
 This document describes how PTK is expected to work inside production ZAP automation plans and how to validate results.
 
-The important rule is simple: do not hide instability by changing scan strategy, rulepacks, seed URLs, or `spiderClient` behavior. First prove where the loss happens.
+The important rule is simple: do not hide instability by changing scan strategy, rulepacks, seed URLs, active-scan-rule settings, or legacy `spiderClient` behavior. First prove where the loss happens.
+
+For the full callback, progress, finding-publish, Client Spider, and browser-close lifecycle contract, see [ptk-zap-lifecycle-contract.md](ptk-zap-lifecycle-contract.md).
 
 ## Standard Flow
 
-A normal PTK/ZAP browser automation run should keep the ZAP exploration path intact:
+A normal active-scan-rule PTK/ZAP browser automation run should keep the ZAP exploration path intact:
 
 1. ZAP `spider` discovers URLs.
-2. ZAP `spiderClient` loads in-scope URLs in real browsers.
-3. The bundled PTK extension starts a PTK automation session in each ZAP-managed browser.
-4. PTK publishes findings back to ZAP through the PTK callback endpoints.
-5. ZAP stores and reports the imported PTK alerts.
+2. ZAP `activeScan` runs the PTK active scan rule.
+3. The PTK active scan rule starts Client Spider with the configured browser id and thread count.
+4. The bundled PTK extension starts a PTK automation session in each ZAP-managed browser.
+5. PTK publishes findings back to ZAP through the PTK callback endpoints.
+6. ZAP stores and reports the imported PTK alerts.
 
-The canonical Firing Range release-style plans are the project-level `plan_range_edge.yaml` and `plan_range_ff.yaml`. They are the templates for release validation. Local runs may override browser id, browser count, or headed/headless mode for capacity testing, but that must be reported as a different test case.
+The canonical Firing Range release-style plans live under `zap_plans/active_scan_rule`. Legacy `spiderClient` compatibility plans live under `zap_plans/spider_client`. The low-level release runner rejects mixed mode/plan families before ZAP starts, so active-scan-rule mode must use active-scan-rule plans and legacy automated-scanning mode must use spiderClient plans. Local runs may override browser id, browser count, or headed/headless mode for capacity testing, but that must be reported as a different test case.
 
 Do not compare a diagnostic plan with fewer browsers, diagnostic-only jobs, or explicit URL lists as if it were the same release plan.
 
 ## Required ZAP Configuration
 
-The add-on expects PTK automation to be enabled when ZAP starts:
+The default release mode enables the PTK active scan rule and disables deprecated automated scanning:
+
+```text
+-config ptk.activescan.rule.enabled=true
+-config ptk.automatedScanning.enabled=false
+```
+
+For legacy `spiderClient` compatibility only, invert those flags:
 
 ```text
 -config ptk.automatedScanning.enabled=true
+-config ptk.activescan.rule.enabled=false
 ```
 
 The PTK extension is bundled into the ZAP add-on under:
@@ -40,11 +51,26 @@ ZAP should not force-close a PTK browser while PTK is still producing findings. 
 
 1. ZAP calls a WebDriver script in the browser before closing it.
 2. The script asks PTK for current session progress.
-3. If needed, the script asks PTK to stop the session.
-4. PTK flushes findings and reports a terminal state or `safeToClose=true`.
-5. ZAP closes the browser only when the close decision is safe, or after a bounded timeout.
+3. The script reports terminal, local-tab-safe, or wait state. It must not stop PTK merely because a close grace window elapsed.
+4. While owner-tab PTK activity is still fresh, Java keeps the WebDriver close blocked, uses callback progress as the source of truth, and does not send a close request to PTK.
+5. Only after meaningful PTK activity becomes stale does Java create a `closeRequestId` and ask PTK for graceful stop/drain.
+6. PTK continues publishing findings/progress through normal callbacks.
+7. ZAP closes the browser only when the close decision is terminal-safe, local-tab-safe, or after a bounded forced/incomplete timeout.
 
 `safeToClose` from progress callbacks is accepted only after ZAP has explicitly started the close request for that zapid. This prevents a normal page/progress callback from pre-setting close readiness.
+
+### Close Control Delivery
+
+`/ptk/control` is the extension-background polling channel for close-control delivery. It is not a second close-request creator. Java creates a close request from the browser-close/adaptive-stale path, then `/ptk/control` returns that active request to the matching zapid/sessionId/browserid until PTK acknowledges it.
+
+Control acknowledgement is strict and idempotent:
+
+- a mismatched `closeRequestId`, `sessionId`, or `browserid` is ignored;
+- `closeRequestAck=true` means PTK received the active request, not that the session is terminal or release-clean;
+- the extension records acknowledgement before trying to echo it through `/ptk/progress`, so a failed progress ack post does not erase the control ack path;
+- stop/drain work is scheduled asynchronously and must not hold the control poll in flight.
+
+Clean close still requires terminal progress, publisher drain, completed release state, and no forced/incomplete lifecycle. The MV3 `chrome.alarms` wakeup is allowed only as a recovery trigger while ZAP progress monitors are active; it complements the normal timer/event poll path.
 
 The close budget is intentionally generous for overloaded multi-browser client-spider runs: Java can wait through the configured polling window plus bounded follow-up close-decision scripts before recording `forced_closed`. Tab-local decisions such as `browser_tab_safe_to_close` return through a fast path and should not consume that budget.
 
@@ -52,27 +78,92 @@ Important close-decision states:
 
 | Decision / Reason | Meaning |
 |---|---|
-| `safe_to_close` + `terminal_after_stop` | PTK stopped and reached terminal state during close. |
 | `safe_to_close` + `already_terminal` | PTK was already terminal before the close request completed. |
 | `browser_tab_safe_to_close` + `no_active_browser_work` | The current WebDriver tab has no PTK browser-local work left and may close, but this is not global PTK session terminal evidence. |
 | `browser_tab_safe_to_close` + `non_owner_active_work` | The current WebDriver tab is not the PTK session owner for the active target and may close without stopping the global PTK session. |
-| `wait` + `close_requested` | PTK accepted stop, but Java should keep waiting for terminal progress. |
+| `wait` + `active_browser_work` | The ZAP-owned PTK session still has concrete queue/task work. Java should keep waiting while meaningful progress or alert activity remains fresh. |
+| `wait` + `owner_waiting_for_terminal` | The owner tab is non-terminal but has no concrete browser-local work in the progress snapshot. This is not clean close evidence. |
+| `wait` + `activity_stale_waiting_for_terminal` | Java has not seen meaningful progress/alert activity recently. This is when Java may request graceful stop/drain through an explicit `closeRequestId`; it is not clean-close evidence by itself. |
 | `not_applicable` + `automation_disabled` | The page bridge did not expose PTK automation for the current tab. Treat this as a startup/session issue, not as a finding issue. |
 | `forced_closed` | ZAP exhausted the close budget. This is a lifecycle warning even if findings were imported. |
 | `browser_session_invalid:*` | ZAP could not prove a valid browser/PTK session for the target. |
 
 Do not treat `progress=0 status=callback` as a started PTK scan. It only proves callback/config handshake. A real PTK session starts when a `sessionId` appears.
 
+## Timeout Model
+
+Timeouts are allowed only as safety caps around asynchronous boundaries. They must not be the evidence that makes a run pass. In particular, Client Spider `shutdownTime` is crawl queue tuning, not PTK finding-drain or close-readiness proof. Omitting it from an Automation plan does not disable it; Client Spider uses its default quiet window, currently 5 seconds.
+
+### Plan And Release Runner Timing
+
+| Setting | Current Use | Meaning |
+|---|---|---|
+| `pageLoadTime: 5` | Canonical Firing Range plans and release runner default | Per-page browser dwell/load time for Client Spider tasks. It can affect coverage, but it is not PTK drain evidence. |
+| `shutdownTime` | Explicit value omitted by default in `tasks/release/zap-escape-matrix.sh`; optional via `--shutdown-time <seconds>` | Client Spider quiet-window after its queue becomes empty. When omitted, ZAP uses its default, currently 5 seconds. Use larger values only for explicit crawl-coverage comparisons. Do not rely on it for PTK close correctness. |
+| `maxDuration: 0` | Canonical plans | No explicit max-duration cap from the plan. |
+| `maxChildren: 0` | Canonical plans | No explicit child-count cap from the plan. |
+| `numberOfBrowsers` | `1` and `5` release slices | Maximum Client Spider concurrency. It is not a guarantee that exactly this many WebDriver workers will be launched. |
+
+### ZAP Add-On Close Timing
+
+| Constant | Value | Purpose |
+|---|---:|---|
+| `BROWSER_CLOSE_SCRIPT_TIMEOUT_MS` | `30000ms` | Selenium async-script budget for one browser close-decision call. Prevents WebDriver hangs. |
+| `BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS` | `25000ms` | Budget passed to PTK graceful stop/drain when ZAP explicitly asks for close. Clean close still requires terminal/drained/ack evidence. |
+| `BROWSER_CLOSE_MAX_ATTEMPTS` x `BROWSER_CLOSE_WAIT_SLICE_MS` | `120 x 1000ms` | Java polling budget after close starts. This is bounded waiting, not a success condition. |
+| `BROWSER_CLOSE_ACTIVITY_STALE_MS` | `30000ms` | Staleness diagnostic threshold. It explains why Java is still waiting or later forced/incomplete; it is not clean-close evidence and should not be used to make the scan pass. |
+| `BROWSER_CLOSE_NO_PROGRESS_GRACE_MS` | `25000ms` | Startup grace for a browser that reaches close before PTK progress is observed. Prevents misclassifying delayed extension handshakes too early. |
+| `BROWSER_CLOSE_AUTOMATION_DISABLED_GRACE_MS` | `2500ms` | Small grace for tabs where PTK reports automation disabled/not applicable. |
+| `BROWSER_CLOSE_FOLLOW_UP_DECISION_EVERY_ATTEMPTS` | `15` | Java may retry close-decision roughly every 15 seconds while the close loop remains open. |
+| `BROWSER_CLOSE_MAX_WALL_CLOCK_MS` | About 7 minutes | Absolute worst-case safety ceiling. If reached, the result is forced/incomplete, not clean. |
+
+### ZAP Config And Callback Timing
+
+| Timer | Value | Purpose |
+|---|---:|---|
+| Config fetch retry delays | `0, 250, 1000, 2500, 5000ms` | Startup robustness when several browser sessions hit `/ptk/config` at once. |
+| Config fetch timeout | `2500ms` per attempt | Prevents a stalled config request from blocking startup forever. |
+| Callback post retry delays | `250, 1000, 4000ms` | Network retry for ZAP callback posts. |
+| ZAP history seed cache TTL | `2000ms` | Avoids walking the ZAP SiteTree on every `/ptk/config` request. |
+| ZAP history failure log interval | `60000ms` | Rate-limits repeated SiteTree/history warning logs. |
+
+### Extension Progress, Publisher, And Engine Timing
+
+| Timer | Value | Purpose |
+|---|---:|---|
+| Progress heartbeat | `2000ms` | Regular `/ptk/progress` callback cadence. |
+| Progress idle grace | `6000ms` | Extension-side quiet check for progress. |
+| Passive engine idle grace | `8000ms` | Lets passive engines settle when they do not have explicit active tasks. |
+| Target activity quiet grace | `2500ms` | Avoids treating navigation/target activity as stable too early. |
+| Publisher poll interval | `2000ms` | Finding export cadence from PTK to ZAP. |
+| Publisher terminal drain | `2` stable passes, `3000ms` flush timeout, max `4` passes | Actual publisher drain evidence. This must be reported through the close-readiness contract. |
+| ZAP close engine stop timeout | `25000ms` | Caps engine stop work after explicit ZAP close request. |
+| Close terminal retry | Every `2000ms`, max `30000ms` | Retries terminal progress publication if the first terminal callback does not land. |
+| Child-tab waits | `750ms` engine-ready, `250ms` IAST drain, `2500ms` SAST collection | Browser child-tab orchestration only; not ZAP close evidence. |
+
+### Release Matrix Timing Outside ZAP
+
+The agent and npm release matrices use longer process-level budgets such as `--ptk-drain-timeout-ms 600000` and provider budget `120000ms`. These are CLI/process gates and are separate from ZAP browser-close correctness.
+
+When a test needs an increased `shutdownTime` to pass, classify the result as a crawl-coverage/timing finding first. Do not call it a stable PTK close-readiness result until the same close/drain path is proven with the default ZAP quiet window.
+
+## ZAP-Managed PTK Attack Tabs
+
+For ZAP-managed DAST sessions, PTK browser attack tabs are extension-owned work, not Client Spider target-window work. The extension opens these DAST attack tabs in a PTK-owned auxiliary browser window when the browser supports that API, and falls back to the current-window tab path only if the auxiliary window cannot be created.
+
+This avoids coupling PTK finding generation to the lifetime of the WebDriver-owned target window. Client Spider may request close for that target window as soon as its own crawl queue is quiet; PTK attack tabs must still be able to finish and publish findings without relying on a larger `shutdownTime`.
+
+Manual browser scans and non-ZAP sessions keep the normal same-window attack-tab behavior.
+
 ## Browser Evidence Logs
 
-The add-on logs PTK/ZAP browser truth as `PTK_BROWSER_EVIDENCE` lines in `zap.log`.
+The add-on logs PTK/ZAP browser truth as `PTK_BROWSER_EVIDENCE` lines in `zap.log`. Config callbacks are logged through debug callback/timing logs rather than browser evidence; do not treat config callback evidence as scan-start evidence.
 
 Key events:
 
 | Event | Meaning |
 |---|---|
 | `browser_loaded` | ZAP launched or navigated a browser to a URL. |
-| `config_callback` | Browser requested PTK configuration from ZAP. |
 | `ptk_progress_seen` | ZAP received progress, usually initial callback state. May not include a PTK session yet. |
 | `ptk_session_established` | A PTK session id was observed for the zapid. This is the session-start proof. |
 | `ptk_session_terminal` | PTK reported terminal progress. |

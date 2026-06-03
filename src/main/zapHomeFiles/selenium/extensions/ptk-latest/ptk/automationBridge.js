@@ -217,6 +217,24 @@
             }
         },
 
+        async requestActivation(options = {}) {
+            if (this._automationEnabled !== false) {
+                return { ok: true, allowed: true, reason: 'already_enabled' }
+            }
+
+            const response = await sendMessage('automation-activate', {
+                reason: options.reason || 'bridge_request'
+            })
+            if (response.error && response.allowed !== true) {
+                return { ok: false, allowed: false, error: response.error, reason: response.reason || response.error }
+            }
+            return {
+                ok: response.ok !== false,
+                allowed: response.allowed === true,
+                reason: response.reason || (response.allowed === true ? 'manual_activation_granted' : 'manual_activation_denied')
+            }
+        },
+
         /**
          * Start a session while keeping low-level start control in PTK_AUTOMATION.
          * This keeps the default low-level start path unchanged while allowing
@@ -297,8 +315,13 @@
                         sessionId: options?.sessionId,
                         sessionScope: options?.sessionScope,
                         stopTimeoutMs: options?.stopTimeoutMs,
+                        drainTimeoutMs: options?.drainTimeoutMs,
                         source: options?.source,
-                        zapid: options?.zapid
+                        zapid: options?.zapid,
+                        currentUrl: options?.currentUrl,
+                        closeRequestId: options?.closeRequestId,
+                        closeRequestMode: options?.closeRequestMode,
+                        closeRequestReason: options?.closeRequestReason
                     },
                     wait: options?.wait !== false,  // default true
                     includeFindings: options?.includeFindings === true,
@@ -569,17 +592,8 @@
         _automationEnabled: initialAutomationEnabled
     }
 
-    // Load the PTK_AGENT workflow layer only for automation-enabled pages.
-    // Disabled manual bridges are installed on ordinary pages for status/close
-    // compatibility and must not add extra page-world script injection.
-    if (initialAutomationEnabled === true) {
-        try {
-            const bridgeSrc = document.currentScript?.src
-            if (bridgeSrc) {
-                const script = document.createElement('script')
-                script.src = new URL('ptkAgentAutomation.js', bridgeSrc).href
-                ;(document.head || document.documentElement).appendChild(script)
-            }
-        } catch (_) { }
-    }
+    // The workflow PTK_AGENT layer is injected by the extension content runtime
+    // only after the background authorizes this tab. Do not self-inject a
+    // sibling script from page world: strict Trusted Types pages such as Gmail
+    // block string assignment to HTMLScriptElement.src there.
 })()

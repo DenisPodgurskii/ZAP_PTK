@@ -13,6 +13,21 @@ const KEY_IDLE_EVICT_MS = 10 * 60 * 1000
 const PUBLISHED_STATE_CAP_PER_KEY = 5000
 const ZAP_SESSION_SCAN_LOOKBACK_MS = 30 * 1000
 const TERMINAL_DRAIN_MIN_STABLE_PASSES = 2
+const ACK_RESOLVED_STATUSES = new Set([
+    'accepted_raised',
+    'accepted_duplicate',
+    'rejected_missing_mapping',
+    'rejected_invalid_url',
+    'rejected_missing_site_tree_match',
+    'rejected_raise_failed'
+])
+
+function createPublisherBatchId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+        return globalThis.crypto.randomUUID()
+    }
+    return `ptk-zap-batch-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
+}
 
 function chunkArray(items, size) {
     if (!Array.isArray(items) || !items.length) return []
@@ -142,6 +157,9 @@ export default class ZapPublisher {
 
         this.publishedState = new Map()
         this.lastSeen = new Map()
+        this.inFlightBatches = new Map()
+        this.batchSeq = 0
+        this.lastAckedBatchSeq = 0
         this._pollIdleWaiters = new Set()
         this.flushRequested = false
     }
@@ -176,6 +194,9 @@ export default class ZapPublisher {
                 drained: true,
                 pendingFindings: 0,
                 pendingByEngine: {},
+                inFlightBatches: 0,
+                inFlightByEngine: {},
+                lastAckedBatchSeq: this.lastAckedBatchSeq,
                 passes: 0,
                 stablePasses: 0
             }
@@ -185,6 +206,9 @@ export default class ZapPublisher {
             drained: true,
             pendingFindings: 0,
             pendingByEngine: {},
+            inFlightBatches: 0,
+            inFlightByEngine: {},
+            lastAckedBatchSeq: this.lastAckedBatchSeq,
             passes: 0,
             stablePasses: 0
         }
@@ -220,7 +244,10 @@ export default class ZapPublisher {
             return {
                 drained: true,
                 pendingFindings: 0,
-                pendingByEngine: {}
+                pendingByEngine: {},
+                inFlightBatches: 0,
+                inFlightByEngine: {},
+                lastAckedBatchSeq: this.lastAckedBatchSeq
             }
         }
 
@@ -229,7 +256,10 @@ export default class ZapPublisher {
             return {
                 drained: true,
                 pendingFindings: 0,
-                pendingByEngine: {}
+                pendingByEngine: {},
+                inFlightBatches: 0,
+                inFlightByEngine: {},
+                lastAckedBatchSeq: this.lastAckedBatchSeq
             }
         }
 
@@ -256,15 +286,21 @@ export default class ZapPublisher {
         }
 
         return {
-            drained: pendingFindings === 0 && !this.pollInFlight,
+            drained: pendingFindings === 0 && !this.pollInFlight && this.inFlightBatches.size === 0,
             pendingFindings,
-            pendingByEngine
+            pendingByEngine,
+            inFlightBatches: this.inFlightBatches.size,
+            inFlightByEngine: this._countInFlightByEngine(),
+            lastAckedBatchSeq: this.lastAckedBatchSeq
         }
     }
 
     resetState() {
         this.publishedState.clear()
         this.lastSeen.clear()
+        this.inFlightBatches.clear()
+        this.batchSeq = 0
+        this.lastAckedBatchSeq = 0
         this.wasActive = false
         this.activeSinceMs = Date.now()
     }
@@ -512,6 +548,107 @@ export default class ZapPublisher {
         return findings
     }
 
+    _beginBatch({ engine, scanId, entries = [] } = {}) {
+        const batchSeq = this.batchSeq + 1
+        this.batchSeq = batchSeq
+        const batchId = createPublisherBatchId()
+        const state = {
+            batchId,
+            batchSeq,
+            engine,
+            scanId,
+            entries,
+            startedAt: Date.now()
+        }
+        this.inFlightBatches.set(batchId, state)
+        return state
+    }
+
+    _finishBatch(batch) {
+        if (!batch?.batchId) return
+        this.inFlightBatches.delete(batch.batchId)
+    }
+
+    _countInFlightByEngine() {
+        const counts = {}
+        for (const batch of this.inFlightBatches.values()) {
+            const engine = String(batch?.engine || '').toUpperCase()
+            if (!engine) continue
+            counts[engine] = (counts[engine] || 0) + 1
+        }
+        return counts
+    }
+
+    _resolveAckedEntries(ack, batch) {
+        const entries = Array.isArray(batch?.entries) ? batch.entries : []
+        if (!entries.length) return []
+
+        if (!ack || typeof ack !== 'object') {
+            return []
+        }
+
+        const findingResults = Array.isArray(ack.findingResults) ? ack.findingResults : []
+        const resultMap = new Map()
+        for (const result of findingResults) {
+            if (!result || typeof result !== 'object') continue
+            const status = String(result.status || '').trim()
+            if (!ACK_RESOLVED_STATUSES.has(status)) continue
+            for (const key of [
+                result.id,
+                result.findingId,
+                result.fingerprint,
+                result.findingKey
+            ]) {
+                if (typeof key === 'string' && key.trim()) {
+                    resultMap.set(key.trim(), result)
+                }
+            }
+        }
+
+        if (resultMap.size === 0) {
+            if (findingResults.length > 0) {
+                return []
+            }
+            const contractVersion = Number(ack.contractVersion)
+            const isV2Structured = contractVersion >= 2 || ack.structuredAck === true
+            const isExplicitLegacy = ack.legacyAck === true || (Number.isFinite(contractVersion) && contractVersion < 2)
+            if (isV2Structured) {
+                if (ack.structuredAck === true
+                    && ack.allFindingsAccepted === true
+                    && ack.accepted === entries.length
+                    && ack.received === entries.length) {
+                    return entries
+                }
+                return []
+            }
+            if (isExplicitLegacy && (ack.result === 'OK' || ack.accepted === entries.length || ack.received === entries.length)) {
+                return entries
+            }
+            return []
+        }
+
+        return entries.filter((entry) => {
+            const mapped = entry?.mapped || {}
+            const candidates = [
+                mapped.id,
+                mapped.fingerprint,
+                entry.findingKey
+            ].filter(value => typeof value === 'string' && value.trim())
+            return candidates.some(candidate => resultMap.has(candidate.trim()))
+        })
+    }
+
+    _pollControlAfterAck(source) {
+        try {
+            this.zapBridge?.pollControlMonitors?.({ source })
+        } catch (err) {
+            this.zapBridge?._debugLog?.('[PTK ZAP] Control poll after alert acknowledgement failed:', {
+                source,
+                error: err?.message || String(err)
+            })
+        }
+    }
+
     async _publishDastFindings({ key, scanId, scanResult, findings: sourceFindings, rawCount = 0, reconCount = 0, synthesizedCount = 0 }) {
         const {
             entries: findings,
@@ -545,19 +682,29 @@ export default class ZapPublisher {
 
         const chunks = chunkArray(findings, ALERT_CHUNK_SIZE)
         for (const chunk of chunks) {
+            const batch = this._beginBatch({ engine: 'DAST', scanId, entries: chunk })
             try {
-                await this.zapBridge.sendDastFindingsBatch({
+                const ack = await this.zapBridge.sendDastFindingsBatch({
                     scanId,
                     findings: chunk.map((entry) => entry.mapped),
-                    truncated: false
+                    truncated: false,
+                    batchId: batch.batchId,
+                    batchSeq: batch.batchSeq
                 })
-                chunk.forEach((entry) => this._markFindingVersionPublished(key, entry.findingKey, entry.signature))
+                const resolvedEntries = this._resolveAckedEntries(ack, batch)
+                resolvedEntries.forEach((entry) => this._markFindingVersionPublished(key, entry.findingKey, entry.signature))
+                if (resolvedEntries.length > 0) {
+                    this.lastAckedBatchSeq = Math.max(this.lastAckedBatchSeq, batch.batchSeq)
+                    this._pollControlAfterAck('publisher_ack')
+                }
             } catch (err) {
                 console.warn('[PTK ZAP] Failed to send DAST findings chunk; dropping chunk', {
                     engine: 'DAST',
                     scanId,
                     error: err?.message || String(err)
                 })
+            } finally {
+                this._finishBatch(batch)
             }
         }
     }
@@ -592,19 +739,29 @@ export default class ZapPublisher {
 
         const chunks = chunkArray(findings, ALERT_CHUNK_SIZE)
         for (const chunk of chunks) {
+            const batch = this._beginBatch({ engine, scanId, entries: chunk })
             try {
-                await sender({
+                const ack = await sender({
                     scanId,
                     findings: chunk.map((entry) => entry.mapped),
-                    truncated: false
+                    truncated: false,
+                    batchId: batch.batchId,
+                    batchSeq: batch.batchSeq
                 })
-                chunk.forEach((entry) => this._markFindingVersionPublished(key, entry.findingKey, entry.signature))
+                const resolvedEntries = this._resolveAckedEntries(ack, batch)
+                resolvedEntries.forEach((entry) => this._markFindingVersionPublished(key, entry.findingKey, entry.signature))
+                if (resolvedEntries.length > 0) {
+                    this.lastAckedBatchSeq = Math.max(this.lastAckedBatchSeq, batch.batchSeq)
+                    this._pollControlAfterAck('publisher_ack')
+                }
             } catch (err) {
                 console.warn('[PTK ZAP] Failed to send findings chunk; dropping chunk', {
                     engine,
                     scanId,
                     error: err?.message || String(err)
                 })
+            } finally {
+                this._finishBatch(batch)
             }
         }
     }

@@ -125,6 +125,47 @@ function isHttpPageUrl(value) {
     }
 }
 
+function parseHttpPageUrl(value) {
+    try {
+        const parsed = new URL(String(value || ''))
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+        return parsed
+    } catch (_) {
+        return null
+    }
+}
+
+function effectiveHttpPort(parsed) {
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) return -1
+    if (parsed.port) return Number(parsed.port)
+    return parsed.protocol === 'https:' ? 443 : 80
+}
+
+function sameHttpOrigin(leftValue, rightValue) {
+    const left = parseHttpPageUrl(leftValue)
+    const right = parseHttpPageUrl(rightValue)
+    if (!left || !right) return false
+    return left.protocol === right.protocol
+        && String(left.hostname || '').toLowerCase() === String(right.hostname || '').toLowerCase()
+        && effectiveHttpPort(left) === effectiveHttpPort(right)
+}
+
+function targetScopePathPrefix(pathname = '') {
+    const path = typeof pathname === 'string' && pathname.startsWith('/') ? pathname : '/'
+    if (!path || path === '/') return '/'
+    if (path.endsWith('/')) return path
+    const index = path.lastIndexOf('/')
+    return index >= 0 ? path.slice(0, index + 1) : '/'
+}
+
+function sameOriginAndPathScoped(targetValue, candidateValue) {
+    const target = parseHttpPageUrl(targetValue)
+    const candidate = parseHttpPageUrl(candidateValue)
+    if (!target || !candidate) return false
+    return sameHttpOrigin(target.href, candidate.href)
+        && candidate.pathname.startsWith(targetScopePathPrefix(target.pathname))
+}
+
 function cloneJsonSafe(value, { warnings = null, label = 'value' } = {}) {
     if (value === undefined || value === null) return null
     try {
@@ -158,6 +199,8 @@ const ZAP_DEFERRED_ENGINE_START_BASE_DELAY_MS = 1500
 const ZAP_DEFERRED_ENGINE_START_SPREAD_MS = 500
 const ZAP_DEFERRED_ENGINE_START_BUCKETS = 4
 const ZAP_DEFERRED_ENGINE_PER_ENGINE_DELAY_MS = 1000
+const ZAP_RELATED_SAST_WORK_EVIDENCE_MS = 10000
+const MANUAL_AUTOMATION_BOOTSTRAP_GRANT_TTL_MS = 60 * 1000
 const CONTENT_RUNTIME_MODE_PENDING = 'pending'
 const CONTENT_RUNTIME_MODE_MANUAL = 'manual'
 const CONTENT_RUNTIME_MODE_AUTOMATION = 'automation'
@@ -320,8 +363,62 @@ class EngineAdapter {
             if (options?.zapTiming && typeof options.zapTiming === 'object') {
                 iastOpts.zapTiming = options.zapTiming
             }
-            // Just call runBackgroundScan - it handles "already running" internally by returning false
-            await iast.runBackgroundScan(tabId, host, options?.policyCode || 'SMART', iastOpts)
+            const started = await iast.runBackgroundScan(tabId, host, options?.policyCode || 'SMART', iastOpts)
+            if (started === false) {
+                const activeTabId = Number(iast?.scanResult?.tabId)
+                const activeHost = String(iast?.scanResult?.host || '').toLowerCase()
+                const requestedHost = String(host || '').toLowerCase()
+                const canEnrollRelated = iast?.isScanRunning === true
+                    && Number.isInteger(activeTabId)
+                    && activeTabId >= 0
+                    && activeTabId !== tabId
+                    && activeHost
+                    && requestedHost
+                    && activeHost === requestedHost
+                    && typeof iast.enrollRelatedScanTab === 'function'
+                if (canEnrollRelated) {
+                    const enrolled = await iast.enrollRelatedScanTab(tabId, {
+                        role: 'zap_parallel_worker',
+                        sourceEngine: 'IAST',
+                        sessionId,
+                        url: options?.zapTiming?.targetUrl || null
+                    })
+                    if (enrolled) {
+                        if (options?.waitForReady !== false) {
+                            const readyTimeoutMs = Number.isFinite(Number(options?.agentReadyTimeoutMs))
+                                ? Math.max(1000, Number(options.agentReadyTimeoutMs))
+                                : 15000
+                            const ready = await this.automationModule?._waitForIastAgentReady?.(tabId, readyTimeoutMs)
+                            if (!ready) {
+                                const failureReason = this.app?.iast?.agentFailedTabs?.get?.(tabId)
+                                if (failureReason) {
+                                    throw new Error(`iast_agent_failed:${failureReason}`)
+                                }
+                                console.warn('[PTK Automation] IAST related tab readiness not confirmed; continuing in best-effort mode', {
+                                    tabId,
+                                    ownerTabId: activeTabId,
+                                    readyTimeoutMs
+                                })
+                            }
+                        }
+                        return {
+                            ok: true,
+                            status: ENGINE_STATUS_RUNNING,
+                            warning: 'iast_enrolled_related_zap_worker',
+                            relatedTab: true,
+                            ownerTabId: activeTabId,
+                            scanId: iast?.scanResult?.scanId || iast?.currentScanId || null
+                        }
+                    }
+                }
+                return {
+                    ok: false,
+                    status: ENGINE_STATUS_ERROR,
+                    error: iast?.isScanRunning === true
+                        ? 'iast_already_running_for_different_tab'
+                        : 'iast_start_returned_false'
+                }
+            }
             if (options?.waitForReady === false) {
                 return { ok: true }
             }
@@ -344,6 +441,16 @@ class EngineAdapter {
         },
         stop: async (sessionId, timeoutMs = 60000, options = {}) => {
             const iast = this.app?.iast
+            const session = this.automationModule?.sessions?.get?.(sessionId) || null
+            const state = session?.engineStates?.IAST || null
+            if (state?.relatedTab === true) {
+                if (Number.isInteger(session?.tabId) && typeof iast?.releaseRelatedScanTab === 'function') {
+                    try {
+                        iast.releaseRelatedScanTab(session.tabId)
+                    } catch (_) { }
+                }
+                return this._createEmptyStats()
+            }
             if (!iast?.isScanRunning) return this._createEmptyStats()
             const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
             const effectiveTimeoutMs = zapCloseRequest
@@ -413,10 +520,121 @@ class EngineAdapter {
                     sastOpts[key] = options[key]
                 }
             }
-            await sast.runBackgroundScan(tabId, host, { policyCode: options?.policyCode || 'SMART' }, sastOpts)
+            const started = await sast.runBackgroundScan(tabId, host, { policyCode: options?.policyCode || 'SMART' }, sastOpts)
+            if (started !== false) {
+                return { ok: true }
+            }
+
+            const activeTabId = Number(sast?.scanResult?.tabId ?? sast?.activeTabId)
+            const activeHost = String(sast?.scanResult?.host || '').toLowerCase()
+            const requestedHost = String(host || '').toLowerCase()
+            const canQueueRelatedWork = options?.zapManaged === true
+                && sast?.isScanRunning === true
+                && Number.isInteger(activeTabId)
+                && activeTabId >= 0
+                && activeTabId !== tabId
+                && activeHost
+                && requestedHost
+                && activeHost === requestedHost
+
+            if (!canQueueRelatedWork) {
+                return {
+                    ok: false,
+                    status: ENGINE_STATUS_ERROR,
+                    error: sast?.isScanRunning === true
+                        ? 'sast_already_running_for_different_tab'
+                        : 'sast_start_returned_false'
+                }
+            }
+
+            const session = this.automationModule?.sessions?.get?.(sessionId) || null
+            const relatedTasks = []
+            const markRelatedWork = (patch = {}) => {
+                if (!session?.engineStates?.SAST) return
+                session.engineStates.SAST = Object.assign({}, session.engineStates.SAST, patch)
+            }
+
+            if (typeof sast.collectAndScanTab === 'function') {
+                relatedTasks.push(Promise.resolve().then(() => sast.collectAndScanTab(tabId, {
+                    delayMs: options?.spaDelayMs || 500,
+                    attempts: 4,
+                    timeoutMs: 12000,
+                    retryDelayMs: 600
+                })))
+            }
+
+            const seedUrls = Array.isArray(sastOpts.zapPageSourceUrls)
+                ? sastOpts.zapPageSourceUrls
+                : (Array.isArray(sastOpts.zapHistorySeedUrls) ? sastOpts.zapHistorySeedUrls : [])
+            if (seedUrls.length && typeof sast.scanZapManagedPageSources === 'function') {
+                relatedTasks.push(Promise.resolve().then(() => sast.scanZapManagedPageSources(seedUrls, {
+                    startUrl: options?.zapTiming?.targetUrl || host,
+                    zapTiming: options?.zapTiming || null,
+                    source: 'zap_parallel_worker_seed',
+                    sastPageSourceMaxPages: sastOpts.sastPageSourceMaxPages,
+                    sastPageSourceMaxBytes: sastOpts.sastPageSourceMaxBytes,
+                    enableSastPageSourceLinkDiscovery: sastOpts.enableSastPageSourceLinkDiscovery === true
+                })))
+            }
+
+            if (!relatedTasks.length) {
+                return {
+                    ok: false,
+                    status: ENGINE_STATUS_ERROR,
+                    error: 'sast_related_worker_no_collection_path'
+                }
+            }
+
+            markRelatedWork({
+                relatedTab: true,
+                ownerTabId: activeTabId,
+                relatedWorkPending: true,
+                relatedWorkQueuedAt: Date.now(),
+                relatedWorkCompletedAt: null,
+                relatedWorkError: null
+            })
+
+            Promise.allSettled(relatedTasks)
+                .then((results) => {
+                    const rejected = results.find((result) => result?.status === 'rejected')
+                    markRelatedWork({
+                        relatedWorkPending: false,
+                        relatedWorkCompletedAt: Date.now(),
+                        relatedWorkError: rejected?.reason?.message || (rejected ? String(rejected.reason) : null)
+                    })
+                    if (rejected) {
+                        console.warn('[PTK Automation] Related ZAP SAST worker collection failed', {
+                            sessionId,
+                            tabId,
+                            ownerTabId: activeTabId,
+                            error: rejected.reason?.message || String(rejected.reason)
+                        })
+                    }
+                })
+                .catch((err) => {
+                    markRelatedWork({
+                        relatedWorkPending: false,
+                        relatedWorkCompletedAt: Date.now(),
+                        relatedWorkError: err?.message || String(err)
+                    })
+                })
+
+            return {
+                ok: true,
+                status: ENGINE_STATUS_RUNNING,
+                warning: 'sast_enrolled_related_zap_worker',
+                relatedTab: true,
+                ownerTabId: activeTabId,
+                scanId: sast?.scanResult?.scanId || null
+            }
         },
         stop: async (sessionId, timeoutMs = 60000, options = {}) => {
             const sast = this.app?.sast
+            const session = this.automationModule?.sessions?.get?.(sessionId) || null
+            const state = session?.engineStates?.SAST || null
+            if (state?.relatedTab === true) {
+                return this._createEmptyStats()
+            }
             if (!sast?.isScanRunning) return this._createEmptyStats()
             const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
             const effectiveTimeoutMs = zapCloseRequest
@@ -538,6 +756,7 @@ export class ptk_automation {
         this.evictedSessions = new Map()             // bounded diagnostics for missing-session failures
         this.replayableExportLeases = new Map()      // leaseId -> privileged replayable export metadata
         this.ptkChildTabRecords = new Map()          // sessionId:tabId -> PTK-created child tab engine work
+        this.manualAutomationBootstrapGrants = new Map() // tabId -> short-lived explicit manual automation grant
         this.MAX_COMPLETED_SESSIONS = 20
         this.SESSION_TTL_MS = 24 * 60 * 60 * 1000
         this.app = null
@@ -679,6 +898,120 @@ export class ptk_automation {
         return this.sessions.get(sessionId) || null
     }
 
+    _getCompletedSessionForTab(tabId) {
+        if (!Number.isInteger(tabId)) return null
+        const sessionId = this.lastCompletedSessionByTabId.get(tabId)
+        if (!sessionId) return null
+        const session = this.sessions.get(sessionId) || null
+        if (session && this._isTerminalSessionStatus(session.status)) return session
+        this.lastCompletedSessionByTabId.delete(tabId)
+        return null
+    }
+
+    _getSessionScopeUrl(session = null) {
+        if (!session || typeof session !== 'object') return null
+        return toNonEmptyString(session.targetUrl)
+            || toNonEmptyString(session.pageUrl)
+            || toNonEmptyString(session.lastInScopeUrl)
+            || null
+    }
+
+    _sessionUrlInScope(session = null, candidateUrl = '', options = {}) {
+        if (!session) return false
+        if (options?.requireActive !== false && !this._isActiveSessionStatus(session.status)) return false
+        const parsedCandidate = parseHttpPageUrl(candidateUrl)
+        if (!parsedCandidate) return false
+
+        const scopeUrl = this._getSessionScopeUrl(session)
+        if (scopeUrl) {
+            return session.source === 'zap'
+                ? sameOriginAndPathScoped(scopeUrl, parsedCandidate.href)
+                : sameHttpOrigin(scopeUrl, parsedCandidate.href)
+        }
+
+        if (session.host) {
+            return String(parsedCandidate.hostname || '').toLowerCase() === String(session.host || '').toLowerCase()
+        }
+
+        // Legacy test/session objects can predate explicit scope metadata. Keep
+        // those working, but all real sessions created by this module set a scope.
+        return true
+    }
+
+    _recordInScopeSessionUrl(session = null, candidateUrl = '') {
+        if (!session || !this._sessionUrlInScope(session, candidateUrl)) return false
+        const parsedCandidate = parseHttpPageUrl(candidateUrl)
+        if (!parsedCandidate) return false
+        session.lastInScopeUrl = parsedCandidate.href
+        return true
+    }
+
+    _getPtkChildTabRecord(tabId) {
+        if (!Number.isInteger(tabId)) return null
+        for (const record of this.ptkChildTabRecords.values()) {
+            if (Number(record?.tabId) === tabId) return record
+        }
+        return null
+    }
+
+    _ptkChildTabUrlInScope(tabId, candidateUrl = '') {
+        const record = this._getPtkChildTabRecord(tabId)
+        if (!record) return false
+        const session = this.sessions.get(record.sessionId) || null
+        if (session) return this._sessionUrlInScope(session, candidateUrl)
+        return record.url ? sameHttpOrigin(record.url, candidateUrl) : false
+    }
+
+    _detectedZapTabUrlInScope(detectedPayload = null, candidateUrl = '') {
+        const targetUrl = toNonEmptyString(detectedPayload?.targetUrl)
+        if (!targetUrl) return true
+        return sameOriginAndPathScoped(targetUrl, candidateUrl)
+    }
+
+    _pruneManualAutomationBootstrapGrants(now = Date.now()) {
+        for (const [tabId, grant] of this.manualAutomationBootstrapGrants.entries()) {
+            if (!grant || Number(grant.expiresAt || 0) <= now) {
+                this.manualAutomationBootstrapGrants.delete(tabId)
+            }
+        }
+    }
+
+    _getManualAutomationBootstrapGrant(tabId, now = Date.now()) {
+        if (!Number.isInteger(tabId)) return null
+        this._pruneManualAutomationBootstrapGrants(now)
+        const grant = this.manualAutomationBootstrapGrants.get(tabId) || null
+        if (!grant || Number(grant.expiresAt || 0) <= now) {
+            this.manualAutomationBootstrapGrants.delete(tabId)
+            return null
+        }
+        return grant
+    }
+
+    _createManualAutomationBootstrapGrant(tabId, details = {}) {
+        if (!Number.isInteger(tabId)) return null
+        const now = Date.now()
+        const ttlMs = Number.isFinite(Number(details.ttlMs)) && Number(details.ttlMs) > 0
+            ? Math.min(Number(details.ttlMs), MANUAL_AUTOMATION_BOOTSTRAP_GRANT_TTL_MS)
+            : MANUAL_AUTOMATION_BOOTSTRAP_GRANT_TTL_MS
+        const grant = {
+            tabId,
+            reason: String(details.reason || 'manual_activation_request'),
+            url: typeof details.url === 'string' ? details.url : null,
+            createdAt: now,
+            expiresAt: now + ttlMs
+        }
+        this.manualAutomationBootstrapGrants.set(tabId, grant)
+        return grant
+    }
+
+    _consumeManualAutomationBootstrapGrant(tabId, now = Date.now()) {
+        const grant = this._getManualAutomationBootstrapGrant(tabId, now)
+        if (grant) {
+            this.manualAutomationBootstrapGrants.delete(tabId)
+        }
+        return grant
+    }
+
     _hasActiveSessionInAnyTab() {
         for (const session of this.sessions.values()) {
             if (this._isActiveSessionStatus(session?.status)) return true
@@ -687,11 +1020,7 @@ export class ptk_automation {
     }
 
     _isPtkChildTab(tabId) {
-        if (!Number.isInteger(tabId)) return false
-        for (const record of this.ptkChildTabRecords.values()) {
-            if (Number(record?.tabId) === tabId) return true
-        }
-        return false
+        return !!this._getPtkChildTabRecord(tabId)
     }
 
     _getDastController() {
@@ -736,9 +1065,21 @@ export class ptk_automation {
     }
 
     _isZapManagedActiveSessionForTab(tabId) {
-        const session = this._getSessionForTab(tabId)
+        const session = this._getSessionForTab(tabId) || this._getCompletedSessionForTab(tabId)
         if (!session || session.source !== 'zap') return false
         return this._isActiveSessionStatus(session.status)
+    }
+
+    _getFetchedZapConfigMode() {
+        const resolved = this.zap?._resolvedConfig || null
+        if (!resolved || resolved.fetchedAt == null || !Number.isFinite(Number(resolved.fetchedAt))) {
+            return null
+        }
+        const mode = String(resolved.mode || '').trim().toLowerCase()
+        if (mode === 'auto' || mode === 'manual') {
+            return mode
+        }
+        return null
     }
 
     _getContentRuntimeProfile({ tabId = null, frameId = 0, url = '', zapTargetObserved = false } = {}) {
@@ -749,13 +1090,51 @@ export class ptk_automation {
         const detectedPayload = transport?.getLastDetectedPayload?.() || null
         const detectedTabId = Number.isInteger(detectedPayload?.tabId) ? detectedPayload.tabId : null
         const isBootstrapUrl = transport?.isBootstrapUrl?.(safeUrl) === true
-        const hasZapSession = this._isZapManagedActiveSessionForTab(tabId)
+        const activeSession = this._getSessionForTab(tabId)
+        const hasActiveSession = !!activeSession && this._isActiveSessionStatus(activeSession.status)
+        const activeSessionInScope = !hasActiveSession || isBootstrapUrl || this._sessionUrlInScope(activeSession, safeUrl)
+        const hasZapSession = hasActiveSession && activeSession.source === 'zap' && activeSessionInScope
+        const fetchedZapConfigMode = this._getFetchedZapConfigMode()
+        const zapAutomationRuntimeAllowed = fetchedZapConfigMode !== 'manual' || hasZapSession
         const isDetectedAutomationTab = Number.isInteger(tabId) && Number.isInteger(detectedTabId) && tabId === detectedTabId
-        const isZapAutomationTab = hasZapSession || isDetectedAutomationTab
+        const detectedAutomationTabInScope = isDetectedAutomationTab
+            && (isBootstrapUrl || this._detectedZapTabUrlInScope(detectedPayload, safeUrl))
+        const isZapAutomationTab = zapAutomationRuntimeAllowed && (hasZapSession || detectedAutomationTabInScope)
+        const isPtkChildTab = this._isPtkChildTab(tabId)
+        const ptkChildTabInScope = !isPtkChildTab || isBootstrapUrl || this._ptkChildTabUrlInScope(tabId, safeUrl)
         const isZapActive = transport?.isActive?.() === true
 
+        if (isTopFrame && hasActiveSession && !activeSessionInScope) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_PENDING,
+                script: CONTENT_RUNTIME_SCRIPT_NONE,
+                reason: 'active_session_out_of_scope'
+            }
+        }
+
+        if (
+            isTopFrame
+            && hasActiveSession
+            && activeSessionInScope
+            && activeSession.source !== 'zap'
+        ) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_MANUAL,
+                script: CONTENT_RUNTIME_SCRIPT_MANUAL,
+                reason: 'active_session_tab'
+            }
+        }
+
+        if (isTopFrame && isPtkChildTab && !ptkChildTabInScope) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_PENDING,
+                script: CONTENT_RUNTIME_SCRIPT_NONE,
+                reason: 'ptk_child_tab_out_of_scope'
+            }
+        }
+
         if (!isTopFrame) {
-            if (isZapAutomationTab || isBootstrapUrl) {
+            if (zapAutomationRuntimeAllowed && (isZapAutomationTab || isBootstrapUrl)) {
                 return {
                     mode: isZapActive || isZapAutomationTab ? CONTENT_RUNTIME_MODE_AUTOMATION : CONTENT_RUNTIME_MODE_PENDING,
                     script: CONTENT_RUNTIME_SCRIPT_NONE,
@@ -769,7 +1148,7 @@ export class ptk_automation {
             }
         }
 
-        if (isZapActive && (isZapAutomationTab || isBootstrapUrl)) {
+        if (isZapActive && (isZapAutomationTab || (zapAutomationRuntimeAllowed && isBootstrapUrl))) {
             return {
                 mode: CONTENT_RUNTIME_MODE_AUTOMATION,
                 script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
@@ -777,7 +1156,7 @@ export class ptk_automation {
             }
         }
 
-        if (isZapActive && isTopFrame && zapTargetObserved) {
+        if (isZapActive && isTopFrame && zapAutomationRuntimeAllowed && zapTargetObserved) {
             return {
                 mode: CONTENT_RUNTIME_MODE_AUTOMATION,
                 script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
@@ -798,6 +1177,29 @@ export class ptk_automation {
                 mode: CONTENT_RUNTIME_MODE_AUTOMATION,
                 script: CONTENT_RUNTIME_SCRIPT_AUTOMATION,
                 reason: 'zap_tab_claimed'
+            }
+        }
+
+        if (isTopFrame && isZapActive && fetchedZapConfigMode === 'manual') {
+            return {
+                mode: CONTENT_RUNTIME_MODE_MANUAL,
+                script: CONTENT_RUNTIME_SCRIPT_MANUAL,
+                reason: 'zap_manual_config'
+            }
+        }
+
+        if (
+            isTopFrame
+            && (
+                (isZapActive && zapAutomationRuntimeAllowed)
+                || this._hasActiveSessionInAnyTab()
+                || this._hasBrowserEngineScanRunningInAnyTab()
+            )
+        ) {
+            return {
+                mode: CONTENT_RUNTIME_MODE_PENDING,
+                script: CONTENT_RUNTIME_SCRIPT_NONE,
+                reason: 'other_scan_active_out_of_scope'
             }
         }
 
@@ -867,13 +1269,19 @@ export class ptk_automation {
             ? message.url
             : (typeof sender?.url === 'string' ? sender.url : '')
         const zapHintUrl = typeof message?.zapHintUrl === 'string' ? message.zapHintUrl : ''
-        const observedUrls = Array.from(new Set([url, zapHintUrl].filter((value) => typeof value === 'string' && value)))
+        const currentPageIsZapBootstrap = this.zap?.transport?.isBootstrapUrl?.(url) === true
+        const observedUrls = Array.from(new Set([
+            url,
+            currentPageIsZapBootstrap ? zapHintUrl : ''
+        ].filter((value) => typeof value === 'string' && value)))
+        const currentTargetUrl = frameId === 0 && isHttpZapTargetUrl(url) ? url : null
         for (const observedUrl of observedUrls) {
             try {
                 this.zap?.transport?.processContentObservedZapUrl?.({
                     tabId,
                     frameId,
-                    url: observedUrl
+                    url: observedUrl,
+                    targetUrl: currentTargetUrl
                 })
             } catch (error) {
                 console.warn('[PTK Automation] Failed to process bootstrap URL for ZAP detection', {
@@ -885,12 +1293,12 @@ export class ptk_automation {
             }
         }
         let zapTargetObserved = false
-        if (frameId === 0 && isHttpZapTargetUrl(url)) {
+        if (currentTargetUrl) {
             try {
                 zapTargetObserved = this.zap?.transport?.processContentObservedTargetUrl?.({
                     tabId,
                     frameId,
-                    url
+                    url: currentTargetUrl
                 }) === true
             } catch (error) {
                 console.warn('[PTK Automation] Failed to process target URL for ZAP detection', {
@@ -904,6 +1312,9 @@ export class ptk_automation {
         // Target observations grant automation only after zapTransport accepts
         // the URL as scoped to the active ZAP target.
         const profile = this._getContentRuntimeProfile({ tabId, frameId, url, zapTargetObserved })
+        if (frameId === 0) {
+            this._recordInScopeSessionUrl(this._getSessionForTab(tabId), url)
+        }
         const files = CONTENT_RUNTIME_FILES[profile.script] || []
         const useStaticFirefoxManualRuntime = profile.script === CONTENT_RUNTIME_SCRIPT_MANUAL && this._isFirefoxRuntime()
 
@@ -943,12 +1354,24 @@ export class ptk_automation {
             return { ok: true, allowed: false, reason: 'no_tab_context' }
         }
 
-        const session = this._getSessionForTab(tabId)
+        const session = this._getSessionForTab(tabId) || this._getCompletedSessionForTab(tabId)
         if (session && this._isActiveSessionStatus(session.status)) {
+            if (!this._sessionUrlInScope(session, url)) {
+                return { ok: true, allowed: false, reason: 'active_session_out_of_scope', tabId, frameId, sessionId: session.id }
+            }
             return { ok: true, allowed: true, reason: 'active_session_tab', tabId, frameId, sessionId: session.id }
+        }
+        if (session && this._isTerminalSessionStatus(session.status)) {
+            if (!this._sessionUrlInScope(session, url, { requireActive: false })) {
+                return { ok: true, allowed: false, reason: 'terminal_session_out_of_scope', tabId, frameId, sessionId: session.id }
+            }
+            return { ok: true, allowed: true, reason: 'terminal_session_tab', tabId, frameId, sessionId: session.id }
         }
 
         if (this._isPtkChildTab(tabId)) {
+            if (!this._ptkChildTabUrlInScope(tabId, url)) {
+                return { ok: true, allowed: false, reason: 'ptk_child_tab_out_of_scope', tabId, frameId }
+            }
             return { ok: true, allowed: true, reason: 'ptk_child_tab', tabId, frameId }
         }
 
@@ -960,19 +1383,80 @@ export class ptk_automation {
         const detectedPayload = transport?.getLastDetectedPayload?.() || null
         const detectedTabId = Number.isInteger(detectedPayload?.tabId) ? detectedPayload.tabId : null
         if (Number.isInteger(detectedTabId) && detectedTabId === tabId) {
+            if (!this._detectedZapTabUrlInScope(detectedPayload, url)) {
+                return { ok: true, allowed: false, reason: 'zap_detected_tab_out_of_scope', tabId, frameId }
+            }
             return { ok: true, allowed: true, reason: 'zap_detected_tab', tabId, frameId }
         }
         if (transport?.isBootstrapUrl?.(url) === true) {
             return { ok: true, allowed: true, reason: 'zap_bootstrap_url', tabId, frameId }
         }
 
+        const grant = this._getManualAutomationBootstrapGrant(tabId)
+        if (grant) {
+            return {
+                ok: true,
+                allowed: true,
+                reason: 'manual_bootstrap_grant',
+                grantReason: grant.reason,
+                tabId,
+                frameId
+            }
+        }
+
         if (this._hasActiveSessionInAnyTab() || this._hasBrowserEngineScanRunningInAnyTab()) {
             return { ok: true, allowed: false, reason: 'other_scan_active', tabId, frameId }
         }
 
-        // Preserve PTK_AGENT/SDK startup: before the first session exists, the
-        // intended page must be able to expose the agent so it can start one.
-        return { ok: true, allowed: true, reason: 'bootstrap_no_active_session', tabId, frameId }
+        return { ok: true, allowed: false, reason: 'manual_bootstrap_not_armed', tabId, frameId }
+    }
+
+    handleManualAutomationActivationRequest(message = {}, sender = {}) {
+        const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
+        const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
+        const url = typeof message?.url === 'string'
+            ? message.url
+            : (typeof sender?.url === 'string' ? sender.url : '')
+
+        if (!this.isAutomationEnabled()) {
+            return { ok: true, allowed: false, reason: 'automation_disabled' }
+        }
+
+        if (!Number.isInteger(tabId)) {
+            return { ok: true, allowed: false, reason: 'no_tab_context' }
+        }
+
+        if (frameId !== 0) {
+            return { ok: true, allowed: false, reason: 'not_top_frame', tabId, frameId }
+        }
+
+        if (sender?.tab && sender.tab.active === false) {
+            return { ok: true, allowed: false, reason: 'inactive_tab', tabId, frameId }
+        }
+
+        const existingAuthorization = this.handleManualAutomationAuthorization(message, sender)
+        if (existingAuthorization?.allowed === true) {
+            return existingAuthorization
+        }
+
+        if (existingAuthorization?.reason === 'other_scan_active') {
+            return existingAuthorization
+        }
+
+        const grant = this._createManualAutomationBootstrapGrant(tabId, {
+            reason: message?.reason || 'manual_activation_request',
+            url
+        })
+
+        return {
+            ok: true,
+            allowed: true,
+            reason: 'manual_activation_granted',
+            grantReason: grant?.reason || 'manual_activation_request',
+            expiresAt: grant?.expiresAt || null,
+            tabId,
+            frameId
+        }
     }
 
     _getZapTimingForSession(session = null) {
@@ -1032,10 +1516,13 @@ export class ptk_automation {
         // scripts may read progress and request stop for the explicit ZAP
         // session attached to the same tab. All other automation commands remain
         // blocked, and the background session lookup still owns the decision.
-        if (message?.options?.source !== 'zap_browser_close') return false
-
         const type = String(message?.type || '').replace(/_/g, '-')
-        if (type !== 'get-session-progress' && type !== 'session-end') return false
+        if (type !== 'get-session-progress' && type !== 'session-end' && type !== 'zap-keepalive') return false
+        if (type === 'zap-keepalive') {
+            if (message?.options?.source !== 'zap_keepalive') return false
+            return this._isZapManagedActiveSessionForTab(tabId)
+        }
+        if (message?.options?.source !== 'zap_browser_close') return false
 
         const requestedSessionId = toNonEmptyString(message?.sessionId)
             || toNonEmptyString(message?.options?.sessionId)
@@ -1064,6 +1551,37 @@ export class ptk_automation {
         }
 
         return true
+    }
+
+    async msg_zap_keepalive(message, sender) {
+        const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
+        if (!Number.isInteger(tabId)) {
+            return { ok: false, error: 'no_tab_context', requestId: message.requestId }
+        }
+
+        const requestedSessionId = toNonEmptyString(message?.sessionId)
+            || toNonEmptyString(message?.options?.sessionId)
+            || this.activeSessionByTabId.get(tabId)
+            || null
+        const session = requestedSessionId ? this.sessions.get(requestedSessionId) : null
+        if (!session || session.source !== 'zap' || !this._isActiveSessionStatus(session.status)) {
+            return {
+                ok: false,
+                reason: 'no_active_zap_session',
+                requestId: message.requestId
+            }
+        }
+
+        const result = typeof this.zap?.tickProgressMonitors === 'function'
+            ? this.zap.tickProgressMonitors({ source: 'content_keepalive' })
+            : { ok: false, monitors: 0, reason: 'zap_bridge_unavailable' }
+        this.zap?.pollControlMonitors?.({ source: 'content_keepalive' })
+        return {
+            ok: result?.ok === true,
+            monitors: Number(result?.monitors || 0),
+            sessionId: session.id,
+            requestId: message.requestId
+        }
     }
 
     onMessage(message, sender, sendResponse) {
@@ -1161,6 +1679,15 @@ export class ptk_automation {
             this.activeSessionByTabId.delete(tabId)
         }
 
+        const manualGrant = this._consumeManualAutomationBootstrapGrant(tabId)
+        if (!manualGrant && !this._isBrowserEngineScanRunningForTab(tabId) && !this._isPtkChildTab(tabId)) {
+            return {
+                ok: false,
+                error: 'manual_automation_not_authorized',
+                requestId
+            }
+        }
+
         // Background generates the sessionId (single source of truth)
         const sessionId = this._generateSessionId()
         const host = this._extractHost(pageUrl)
@@ -1172,6 +1699,9 @@ export class ptk_automation {
             tabId,
             frameId,
             host,
+            pageUrl,
+            targetUrl: pageUrl,
+            lastInScopeUrl: pageUrl,
             project: options?.project || null,
             testRunId: options?.testRunId || null,
             engines,
@@ -1208,7 +1738,7 @@ export class ptk_automation {
             engines: Array.isArray(payload?.engines) ? payload.engines : null,
             zapSessionKey: payload?.zapSessionKey || null
         })
-        if (!tabId) {
+        if (tabId === null || tabId < 0) {
             console.warn('[PTK Automation] startZapConfiguredSession rejected: missing tabId', {
                 tabId,
                 zapSessionKey: payload?.zapSessionKey || null
@@ -1302,7 +1832,9 @@ export class ptk_automation {
             engineStates: {},
             source: 'zap',
             zapSessionKey,
-            targetUrl
+            targetUrl,
+            pageUrl: targetUrl,
+            lastInScopeUrl: targetUrl
         }
 
         this._initializeEngineStates(session, engines)
@@ -1406,7 +1938,7 @@ export class ptk_automation {
         }
     }
 
-    getZapManagedScanIds({ engine = null, zapSessionKey = null, host = null } = {}) {
+    getZapManagedScanContexts({ engine = null, zapSessionKey = null, host = null } = {}) {
         const engineName = String(engine || '').trim().toUpperCase()
         if (!engineName) return []
 
@@ -1426,19 +1958,26 @@ export class ptk_automation {
             const startedAt = Date.parse(session.startedAt || '')
             entries.push({
                 scanId,
-                startedAt: Number.isFinite(startedAt) ? startedAt : 0
+                startedAt: Number.isFinite(startedAt) ? startedAt : 0,
+                sessionId: session.id || null,
+                zapSessionKey: session.zapSessionKey || null,
+                host: session.host || null
             })
         }
 
         const seen = new Set()
         return entries
             .sort((a, b) => a.startedAt - b.startedAt)
-            .map(entry => entry.scanId)
-            .filter(scanId => {
+            .filter(entry => {
+                const scanId = entry.scanId
                 if (seen.has(scanId)) return false
                 seen.add(scanId)
                 return true
             })
+    }
+
+    getZapManagedScanIds(options = {}) {
+        return this.getZapManagedScanContexts(options).map(entry => entry.scanId)
     }
 
     async requestZapSessionStop(sessionId, options = {}) {
@@ -1461,12 +2000,34 @@ export class ptk_automation {
         }
 
         const timeoutMs = this._normalizeStopTimeoutMs(options?.timeoutMs)
+        const zapCloseRequest = options?.source === 'zap_browser_close'
+        const closeRequestId = toNonEmptyString(options?.closeRequestId)
+        if (closeRequestId) {
+            session.closeRequestId = closeRequestId
+            session.closeRequestAck = true
+            session.closeRequestMode = toNonEmptyString(options?.closeRequestMode) || 'graceful_stop_and_drain'
+            session.closeRequestReason = toNonEmptyString(options?.closeRequestReason) || null
+        }
         if (session.stopRequestedAt) {
-            if (options?.source === 'zap_browser_close') {
-                await this._completeZapCloseFallbackAfterGrace(session, {
+            if (zapCloseRequest) {
+                await this._finalizeZapCloseSessionForTerminal(session, {
                     zapid: options?.zapid,
-                    timeoutMs
+                    timeoutMs,
+                    reason: 'zap_close_stop_already_requested'
                 })
+                const responseStatus = session.status || 'stopping'
+                return {
+                    ok: true,
+                    sessionId: safeSessionId,
+                    status: responseStatus,
+                    completionStatus: session.completionStatus || session.summary?.status || null,
+                    summary: session.summary || null,
+                    stopRequestedAt: session.stopRequestedAt,
+                    alreadyRequested: true,
+                    closeRequestId: session.closeRequestId || null,
+                    closeRequestAck: session.closeRequestAck === true,
+                    source: options?.source || null
+                }
             }
             return {
                 ok: true,
@@ -1476,6 +2037,8 @@ export class ptk_automation {
                 summary: session.summary || null,
                 stopRequestedAt: session.stopRequestedAt,
                 alreadyRequested: true,
+                closeRequestId: session.closeRequestId || null,
+                closeRequestAck: session.closeRequestAck === true,
                 source: options?.source || null
             }
         }
@@ -1484,9 +2047,29 @@ export class ptk_automation {
         session.status = 'stopping'
         session.stopInProgress = true
 
+        if (zapCloseRequest) {
+            await this._finalizeZapCloseSessionForTerminal(session, {
+                zapid: options?.zapid,
+                timeoutMs,
+                reason: toNonEmptyString(options?.closeRequestReason) || 'zap_browser_close_terminalized'
+            })
+            const responseStatus = session.status || 'stopping'
+            return {
+                ok: true,
+                sessionId: safeSessionId,
+                status: responseStatus,
+                completionStatus: session.completionStatus || session.summary?.status || null,
+                summary: session.summary || null,
+                stopRequestedAt: session.stopRequestedAt,
+                closeRequestId: session.closeRequestId || null,
+                closeRequestAck: session.closeRequestAck === true,
+                source: options?.source || null
+            }
+        }
+
         this._stopEnginesAsync(session, timeoutMs, {
             source: options?.source || null,
-            zapCloseRequest: options?.source === 'zap_browser_close'
+            zapCloseRequest: false
         })
             .then(stats => {
                 session.stopInProgress = false
@@ -1506,17 +2089,6 @@ export class ptk_automation {
                 session.error = err?.message || String(err)
             })
 
-        if (options?.source === 'zap_browser_close') {
-            this._scheduleZapCloseTerminalFallback(session, {
-                zapid: options?.zapid,
-                timeoutMs
-            })
-            await this._completeZapCloseFallbackAfterGrace(session, {
-                zapid: options?.zapid,
-                timeoutMs
-            })
-        }
-
         return {
             ok: true,
             sessionId: safeSessionId,
@@ -1524,6 +2096,8 @@ export class ptk_automation {
             completionStatus: session.completionStatus || session.summary?.status || null,
             summary: session.summary || null,
             stopRequestedAt: session.stopRequestedAt,
+            closeRequestId: session.closeRequestId || null,
+            closeRequestAck: session.closeRequestAck === true,
             source: options?.source || null
         }
     }
@@ -1546,6 +2120,13 @@ export class ptk_automation {
             return { ok: false, error: resolution.error, requestId }
         }
         const session = resolution.session
+        const closeRequestId = toNonEmptyString(options?.closeRequestId)
+        if (options?.source === 'zap_browser_close' && closeRequestId) {
+            session.closeRequestId = closeRequestId
+            session.closeRequestAck = true
+            session.closeRequestMode = toNonEmptyString(options?.closeRequestMode) || 'graceful_stop_and_drain'
+            session.closeRequestReason = toNonEmptyString(options?.closeRequestReason) || null
+        }
 
         // === Non-blocking stop (wait=false) ===
         if (wait === false) {
@@ -1554,10 +2135,28 @@ export class ptk_automation {
             session.status = 'stopping'
             session.stopInProgress = true
 
+            if (options?.source === 'zap_browser_close') {
+                await this._finalizeZapCloseSessionForTerminal(session, {
+                    zapid: options?.zapid,
+                    timeoutMs: stopTimeoutMs,
+                    reason: toNonEmptyString(options?.closeRequestReason) || 'zap_browser_close_terminalized'
+                })
+                const responseStatus = session.status || 'stopping'
+                return {
+                    ok: true,
+                    requestId,
+                    status: responseStatus,
+                    completionStatus: session.completionStatus || session.summary?.status || null,
+                    summary: session.summary || { status: session.status || 'stopping' },
+                    closeRequestId: session.closeRequestId || null,
+                    closeRequestAck: session.closeRequestAck === true
+                }
+            }
+
             // Fire-and-forget stop with completion handler
             this._stopEnginesAsync(session, stopTimeoutMs, {
                 source: options?.source || null,
-                zapCloseRequest: options?.source === 'zap_browser_close'
+                zapCloseRequest: false
             })
                 .then(stats => {
                     session.stopInProgress = false
@@ -1573,32 +2172,12 @@ export class ptk_automation {
                     session.error = err.message
                 })
 
-            if (options?.source === 'zap_browser_close') {
-                this._scheduleZapCloseTerminalFallback(session, {
-                    zapid: options?.zapid,
-                    timeoutMs: stopTimeoutMs
-                })
-                await this._completeZapCloseFallbackAfterGrace(session, {
-                    zapid: options?.zapid,
-                    timeoutMs: stopTimeoutMs
-                })
-            }
-
             // Return immediately
             // NOTE: Do NOT clear activeSessionByTabId yet - wait until completed
-            if (options?.source !== 'zap_browser_close') {
-                return {
-                    ok: true,
-                    requestId,
-                    summary: { status: 'stopping' }
-                }
-            }
             return {
                 ok: true,
                 requestId,
-                status: session.status || 'stopping',
-                completionStatus: session.completionStatus || session.summary?.status || null,
-                summary: session.summary || { status: session.status || 'stopping' }
+                summary: { status: 'stopping' }
             }
         }
 
@@ -1776,22 +2355,27 @@ export class ptk_automation {
             }) === true
             let zapTerminalPost = null
             if (!zapProgressTerminalPosted && terminalStatus.includes(String(snapshot.status || '').toLowerCase())) {
-                try {
-                    zapTerminalPost = await this.zap?.postTerminalProgressForClose?.({
-                        zapid: options?.zapid,
-                        sessionId: resolution.sessionId
-                    })
-                    zapProgressTerminalPosted = this.zap?.transport?.isSessionTerminal?.({
-                        zapid: options?.zapid,
-                        sessionId: resolution.sessionId
-                    }) === true
-                } catch (err) {
-                    zapTerminalPost = {
-                        ok: false,
-                        posted: false,
-                        reason: err?.message || String(err)
-                    }
+                const terminalPostPayload = {
+                    zapid: options?.zapid,
+                    sessionId: resolution.sessionId
                 }
+                zapTerminalPost = {
+                    ok: true,
+                    posted: false,
+                    reason: 'terminal_progress_post_queued'
+                }
+                Promise.resolve()
+                    .then(() => this.zap?.postTerminalProgressForClose?.(terminalPostPayload))
+                    .catch((err) => {
+                        debugAutomationLog('[PTK Automation] Failed to post ZAP terminal progress from status read', {
+                            sessionId: resolution.sessionId,
+                            error: err?.message || String(err)
+                        })
+                    })
+                zapProgressTerminalPosted = this.zap?.transport?.isSessionTerminal?.({
+                    zapid: options?.zapid,
+                    sessionId: resolution.sessionId
+                }) === true
             }
             zapCloseProgress = {
                 zapProgressTerminalPosted,
@@ -2623,7 +3207,18 @@ export class ptk_automation {
 
         for (const engineName of session.engines) {
             const adapter = this.engines.getAdapter(engineName)
-            if (!adapter) continue
+            if (!adapter) {
+                session.engineStates[engineName] = {
+                    status: 'error',
+                    error: 'adapter_not_found',
+                    completionStatus: 'engine_incomplete',
+                    drained: false
+                }
+                stats.completionStatus = 'engine_incomplete'
+                stats.incompleteEngines = Array.isArray(stats.incompleteEngines) ? stats.incompleteEngines : []
+                stats.incompleteEngines.push(engineName)
+                continue
+            }
 
             try {
                 const engineStats = await adapter.stop(session.id, timeoutMs, options)
@@ -2637,7 +3232,15 @@ export class ptk_automation {
                 })
                 if (incomplete) stats.completionStatus = 'engine_incomplete'
             } catch (err) {
-                session.engineStates[engineName] = { status: 'error', error: err.message }
+                session.engineStates[engineName] = {
+                    status: 'error',
+                    error: err.message,
+                    completionStatus: 'engine_incomplete',
+                    drained: false
+                }
+                stats.completionStatus = 'engine_incomplete'
+                stats.incompleteEngines = Array.isArray(stats.incompleteEngines) ? stats.incompleteEngines : []
+                stats.incompleteEngines.push(engineName)
             }
         }
 
@@ -2693,6 +3296,10 @@ export class ptk_automation {
             if (!adapter) {
                 session.engineStates[engineName].status = 'error'
                 session.engineStates[engineName].error = 'adapter_not_found'
+                session.engineStates[engineName].completionStatus = 'engine_incomplete'
+                session.engineStates[engineName].drained = false
+                stats.completionStatus = 'engine_incomplete'
+                stats.incompleteEngines.push(engineName)
                 return
             }
 
@@ -2721,6 +3328,10 @@ export class ptk_automation {
                 console.error('[PTK Automation] Engine stop failed', engineName, err)
                 session.engineStates[engineName].status = 'error'
                 session.engineStates[engineName].error = err.message
+                session.engineStates[engineName].completionStatus = 'engine_incomplete'
+                session.engineStates[engineName].drained = false
+                stats.completionStatus = 'engine_incomplete'
+                stats.incompleteEngines.push(engineName)
             }
         })
 
@@ -2825,16 +3436,19 @@ export class ptk_automation {
         this._finalScanIdCapture(session)
 
         const completionStatus = stats?.completionStatus === 'engine_incomplete'
+            || stats?.completionStatus === 'publisher_incomplete'
             || (Array.isArray(stats?.incompleteEngines) && stats.incompleteEngines.length > 0)
-            ? 'engine_incomplete'
+            ? (stats?.completionStatus === 'publisher_incomplete' ? 'publisher_incomplete' : 'engine_incomplete')
             : 'completed'
         session.finishedAt = new Date().toISOString()
-        session.status = 'completed'
+        session.status = completionStatus === 'completed' ? 'completed' : 'cancelled'
         session.completionStatus = completionStatus
+        session.releaseStatus = completionStatus === 'completed' ? 'clean' : 'incomplete'
 
         // Store summary for get-session-progress to return
         session.summary = {
             status: completionStatus,
+            releaseStatus: session.releaseStatus,
             stats: {
                 findingsCount: stats.findingsCount,
                 bySeverity: stats.bySeverity
@@ -2876,6 +3490,86 @@ export class ptk_automation {
                 zapid
             })
         }, fallbackMs)
+    }
+
+    _postZapCloseTerminalProgress(session, { zapid = null } = {}) {
+        if (!session?.id) return
+        Promise.resolve()
+            .then(() => this.zap?.postTerminalProgressForClose?.({
+                sessionId: session.id,
+                zapid
+            }))
+            .catch((err) => {
+                debugAutomationLog('[PTK Automation] Failed to post ZAP close terminal progress', {
+                    sessionId: session.id,
+                    error: err?.message || String(err)
+                })
+            })
+    }
+
+    async _finalizeZapCloseSessionForTerminal(session, { zapid = null, reason = 'zap_browser_close_terminalized', timeoutMs = ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS } = {}) {
+        if (!session || session.status === 'completed' || session.status === 'error') {
+            if (session?.id) {
+                await this.zap?.postTerminalProgressForClose?.({
+                    sessionId: session.id,
+                    zapid
+                })
+            }
+            return false
+        }
+        if (!session.stopRequestedAt) {
+            session.stopRequestedAt = new Date().toISOString()
+        }
+
+        if (session.zapCloseTerminalFallbackTimer) {
+            clearTimeout(session.zapCloseTerminalFallbackTimer)
+            delete session.zapCloseTerminalFallbackTimer
+        }
+
+        session.stopInProgress = false
+        session.warnings = Array.isArray(session.warnings) ? session.warnings : []
+        session.warnings.push({
+            code: reason,
+            at: new Date().toISOString()
+        })
+
+        const stats = await this._stopEnginesAsync(session, timeoutMs, {
+            source: 'zap_browser_close',
+            zapCloseRequest: true
+        })
+        this._finalizeSession(session, stats)
+
+        await this.zap?.postTerminalProgressForClose?.({
+            sessionId: session.id,
+            zapid
+        })
+        return true
+    }
+
+    _stopZapEnginesBestEffortAfterTerminal(session, { timeoutMs = ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS } = {}) {
+        if (!session || !Array.isArray(session.engines) || !session.engines.length) return
+        const sessionId = session.id
+        const engineNames = Array.from(session.engines)
+        const boundedTimeoutMs = Math.max(250, Math.min(5000, this._normalizeStopTimeoutMs(timeoutMs)))
+        setTimeout(() => {
+            for (const engineName of engineNames) {
+                const adapter = this.engines?.getAdapter?.(engineName)
+                if (!adapter || typeof adapter.stop !== 'function') continue
+                Promise.resolve()
+                    .then(() => adapter.stop(sessionId, boundedTimeoutMs, {
+                        source: 'zap_browser_close',
+                        zapCloseRequest: true,
+                        terminalAlreadyPosted: true
+                    }))
+                    .catch((err) => {
+                        debugAutomationLog('[PTK Automation] Best-effort ZAP engine stop after terminal failed', {
+                            sessionId,
+                            engineName,
+                            error: err?.message || String(err)
+                        })
+                    })
+            }
+        }, 0)
     }
 
     async _completeZapCloseFallbackAfterGrace(session, { zapid = null, timeoutMs = ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS } = {}) {
@@ -2922,10 +3616,6 @@ export class ptk_automation {
                 })
                 stats.incompleteEngines.push(engineUpper)
             }
-        }
-
-        if (!stats.incompleteEngines.length && engines.length > 0) {
-            stats.completionStatus = 'completed'
         }
 
         session.stopInProgress = false
@@ -3422,6 +4112,11 @@ export class ptk_automation {
      */
     _isActiveSessionStatus(status) {
         return ACTIVE_SESSION_STATUSES.has(String(status || '').toLowerCase())
+    }
+
+    _isTerminalSessionStatus(status) {
+        const normalized = String(status || '').toLowerCase()
+        return normalized === 'completed' || normalized === 'cancelled' || normalized === 'error'
     }
 
     /**
@@ -3989,9 +4684,18 @@ export class ptk_automation {
                 status: engineStatus,
                 startedAt: Date.now()
             })
-            const scanId = adapter.getScanId?.() || null
+            if (startResult?.ok === false) {
+                session.engineStates[engineName].error = startResult?.error || startResult?.message || 'engine_start_failed'
+            }
+            const scanId = startResult?.scanId || adapter.getScanId?.() || null
             if (scanId) {
                 session.scanIds[engineName] = scanId
+            }
+            if (startResult?.relatedTab === true) {
+                session.engineStates[engineName].relatedTab = true
+            }
+            if (Number.isInteger(startResult?.ownerTabId)) {
+                session.engineStates[engineName].ownerTabId = startResult.ownerTabId
             }
             if (startResult?.warning) {
                 session.engineStates[engineName].warning = startResult.warning
@@ -4140,10 +4844,14 @@ export class ptk_automation {
             sessionId: session.id,
             status: sessionStatus,
             completionStatus: session.completionStatus || session.summary?.status || sessionStatus,
+            releaseStatus: session.releaseStatus || session.summary?.releaseStatus || null,
             error: session.error || firstEngineError || null,
             startedAt: session.startedAt,
             finishedAt: session.finishedAt,
             stopRequestedAt: session.stopRequestedAt || null,
+            closeRequestId: session.closeRequestId || null,
+            closeRequestAck: session.closeRequestAck === true,
+            closeRequestMode: session.closeRequestMode || null,
             elapsedMs,
             lastUpdatedAt: latestActivityAt,
             engines: enginesProgress,
@@ -4185,7 +4893,11 @@ export class ptk_automation {
             targetUrl: session.targetUrl || session.pageUrl || null,
             sessionStatus: snapshot.status,
             completionStatus: snapshot.completionStatus || session.completionStatus || null,
+            releaseStatus: session.releaseStatus || session.summary?.releaseStatus || null,
             stopRequestedAt: session.stopRequestedAt || null,
+            closeRequestId: session.closeRequestId || null,
+            closeRequestAck: session.closeRequestAck === true,
+            closeRequestMode: session.closeRequestMode || null,
             requiredEngines: runtimeSnapshot.requiredEngines,
             engines: runtimeSnapshot.engines,
             startedAt: session.startedAt || null,
@@ -4223,7 +4935,7 @@ export class ptk_automation {
             }
 
             engines[engineName] = {
-                state: engineState.status || 'unknown',
+                state: engineProgress?.status || engineState.status || 'unknown',
                 telemetry
             }
 
@@ -4272,7 +4984,7 @@ export class ptk_automation {
             toFiniteNumber(engineProgress?.findingsCount, 0)
         ].some(value => Number.isFinite(value) && value > 0) || Boolean(toNonEmptyString(lastActivityAt))
         return {
-            status: engineState?.status || 'unknown',
+            status: engineProgress?.status || engineState?.status || 'unknown',
             isRunning: engineProgress?.isRunning === true,
             idle: engineProgress?.idle === true,
             phase: engineProgress?.phase || null,
@@ -4398,8 +5110,15 @@ export class ptk_automation {
         const liveProgress = this._getLiveSastAutomationProgress() || {}
         const automationState = this.app?.sast?.sessionCoordinator?.getAutomationState?.() || {}
         const scanResult = this.app?.sast?.scanResult || null
+        const relatedWorkPending = engineState?.relatedTab === true && engineState?.relatedWorkPending === true
+        const relatedWorkCompletedAtMs = Number(engineState?.relatedWorkCompletedAt || 0)
+        const relatedWorkRecentlyCompleted = engineState?.relatedTab === true
+            && relatedWorkCompletedAtMs > 0
+            && Date.now() - relatedWorkCompletedAtMs <= ZAP_RELATED_SAST_WORK_EVIDENCE_MS
         const normalized = this._normalizeSastRuntimeFields({
-            phase: liveProgress.phase || engineProgress?.phase || null,
+            phase: relatedWorkPending
+                ? 'file'
+                : (relatedWorkRecentlyCompleted ? 'file_complete' : (liveProgress.phase || engineProgress?.phase || null)),
             totalFiles: liveProgress.totalFiles ?? engineProgress?.totalFiles,
             completedFiles: liveProgress.completedFiles ?? engineProgress?.completedFiles,
             totalModules: liveProgress.totalModules ?? engineProgress?.totalModules,
@@ -4409,8 +5128,8 @@ export class ptk_automation {
             collectionState: automationState.collectionState || liveProgress.collectionState || engineProgress?.collectionState || null,
             analysisState: automationState.analysisState || liveProgress.analysisState || engineProgress?.analysisState || null,
             isSessionRunning: automationState.isSessionRunning === true || liveProgress.isRunning === true || engineProgress?.isRunning === true,
-            isAnalysisRunning: automationState.isAnalysisRunning === true || liveProgress.isAnalysisRunning === true || engineProgress?.isAnalysisRunning === true,
-            activeCollectionCount: automationState.activeCollectionCount,
+            isAnalysisRunning: relatedWorkPending || automationState.isAnalysisRunning === true || liveProgress.isAnalysisRunning === true || engineProgress?.isAnalysisRunning === true,
+            activeCollectionCount: toFiniteNumber(automationState.activeCollectionCount, 0) + (relatedWorkPending ? 1 : 0),
             pendingCollectionCount: automationState.pendingCollectionCount ?? liveProgress.pendingCollectionCount ?? engineProgress?.pendingCollectionCount,
             currentGeneration: automationState.currentGeneration,
             lastCompletedGeneration: automationState.lastCompletedGeneration || liveProgress.completedGeneration || engineProgress?.lastCompletedGeneration,
@@ -4426,6 +5145,18 @@ export class ptk_automation {
         const lastStatus = toNonEmptyString(liveProgress.lastStatus || engineProgress?.lastStatus) || null
         const findings = toFiniteNumber(liveProgress.findings ?? engineProgress?.findings, 0)
         const hints = toFiniteNumber(liveProgress.hints ?? engineProgress?.hints, 0)
+        const firstCollectionStarted = automationState.firstCollectionStarted === true
+        const firstCollectionSettled = automationState.firstCollectionSettled === true
+        const activeCollectionCount = normalized.activeCollectionCount
+        const pendingCollectionCount = toFiniteNumber(automationState.pendingCollectionCount ?? liveProgress.pendingCollectionCount ?? engineProgress?.pendingCollectionCount, 0)
+        const currentCollectionId = toNonEmptyString(automationState.currentCollectionId) || null
+        const lastCompletedCollectionId = toNonEmptyString(automationState.lastCompletedCollectionId) || null
+        const currentCollectionFile = toNonEmptyString(automationState.currentCollectionFile) || null
+        const lastCompletedFile = toNonEmptyString(automationState.lastCompletedFile) || null
+        const phaseName = typeof phase === 'string' ? phase.trim().toLowerCase() : ''
+        const collectionStateName = typeof normalized.collectionState === 'string'
+            ? normalized.collectionState.trim().toLowerCase()
+            : ''
         const lastActivityAt = scanResult?.lastUpdatedAt
             || scanResult?.updatedAt
             || engineProgress?.lastActivityAt
@@ -4435,7 +5166,17 @@ export class ptk_automation {
             || totalModules > 0
             || completedModules > 0
             || Boolean(currentFile || currentModule || lastStatus)
-            || (typeof phase === 'string' && phase.trim().toLowerCase() !== 'idle')
+            || (phaseName !== '' && phaseName !== 'idle' && phaseName !== 'waiting')
+            || (collectionStateName !== ''
+                && collectionStateName !== 'completed'
+                && collectionStateName !== 'waiting_for_page_activity')
+            || firstCollectionStarted
+            || firstCollectionSettled
+            || activeCollectionCount > 0
+            || pendingCollectionCount > 0
+            || Boolean(currentCollectionId || lastCompletedCollectionId || currentCollectionFile || lastCompletedFile)
+            || relatedWorkPending
+            || relatedWorkRecentlyCompleted
             || findings > 0
             || hints > 0
 
@@ -4454,25 +5195,25 @@ export class ptk_automation {
             lastStatus,
             findings,
             hints,
-            firstCollectionStarted: automationState.firstCollectionStarted === true,
-            firstCollectionSettled: automationState.firstCollectionSettled === true,
+            firstCollectionStarted,
+            firstCollectionSettled,
             firstCollectionError: toNonEmptyString(automationState.firstCollectionError) || null,
-            activeCollectionCount: normalized.activeCollectionCount,
-            pendingCollectionCount: toFiniteNumber(automationState.pendingCollectionCount ?? liveProgress.pendingCollectionCount ?? engineProgress?.pendingCollectionCount, 0),
+            activeCollectionCount,
+            pendingCollectionCount,
             collectionState: normalized.collectionState || null,
             sessionState: normalized.sessionState || null,
             analysisState: normalized.analysisState || null,
             currentGeneration: normalized.currentGeneration,
             lastCompletedGeneration: normalized.lastCompletedGeneration,
-            currentCollectionId: toNonEmptyString(automationState.currentCollectionId) || null,
-            currentCollectionFile: toNonEmptyString(automationState.currentCollectionFile) || null,
+            currentCollectionId,
+            currentCollectionFile,
             currentCollectionScriptsCount: toFiniteNumber(automationState.currentCollectionScriptsCount),
             currentCollectionHtmlChars: toFiniteNumber(automationState.currentCollectionHtmlChars),
             currentCollectionFindingsCount: toFiniteNumber(automationState.currentCollectionFindingsCount),
             currentCollectionStartedAt: toNonEmptyString(automationState.currentCollectionStartedAt) || null,
             currentCollectionPayloadAt: toNonEmptyString(automationState.currentCollectionPayloadAt) || null,
-            lastCompletedCollectionId: toNonEmptyString(automationState.lastCompletedCollectionId) || null,
-            lastCompletedFile: toNonEmptyString(automationState.lastCompletedFile) || null,
+            lastCompletedCollectionId,
+            lastCompletedFile,
             lastCompletedModule: toNonEmptyString(automationState.lastCompletedModule) || null,
             lastCompletedScriptsCount: toFiniteNumber(automationState.lastCompletedScriptsCount),
             lastCompletedHtmlChars: toFiniteNumber(automationState.lastCompletedHtmlChars),
@@ -4600,6 +5341,10 @@ export class ptk_automation {
         const total = toFiniteNumber(progress.progress?.total, null)
         const finiteComplete = total !== null && done !== null && done >= total
         const queueEmpty = remaining <= 0 && activeTasks <= 0 && taskQueue <= 0 && requestQueue <= 0 && pendingPlans <= 0 && planning <= 0 && pendingCaptures <= 0
+        const collectionState = String(progress.collectionState ?? engineState.collectionState ?? '').toLowerCase()
+        const analysisState = String(progress.analysisState ?? engineState.analysisState ?? '').toLowerCase()
+        const activeCollectionCount = toFiniteNumber(progress.activeCollectionCount ?? engineState.activeCollectionCount, 0)
+        const pendingCollectionCount = toFiniteNumber(progress.pendingCollectionCount ?? engineState.pendingCollectionCount, 0)
         const hasExplicitWorkCounters = [
             progress.remaining,
             progress.progress?.remaining,
@@ -4615,13 +5360,30 @@ export class ptk_automation {
             && (finiteComplete || progress.totalFiles > 0 && progress.completedFiles >= progress.totalFiles)
             && !progress.currentFile
             && !progress.currentModule
-            && !/collection_pending|payload_received|analyzing|running/i.test(`${progress.collectionState || ''} ${progress.analysisState || ''}`)
+            && !/collection_pending|payload_received|analyzing|running/i.test(`${collectionState} ${analysisState}`)
+        const terminalSastSettled = engineUpper === 'SAST'
+            && requireStop
+            && session.stopRequestedAt
+            && (state === 'stopped' || state === 'cancelled' || state === 'completed'
+                || status === 'stopped' || status === 'cancelled' || status === 'completed')
+            && /complete|completed/.test(collectionState)
+            && /complete|completed/.test(analysisState)
+            && activeCollectionCount <= 0
+            && pendingCollectionCount <= 0
+            && !/collection_pending|payload_received|analyzing/.test(`${collectionState} ${analysisState}`)
         const passiveComplete = ['IAST', 'SCA'].includes(engineUpper) && queueEmpty && !hasExplicitWorkCounters
+        const stoppedNoRemaining = (state === 'stopped'
+            || state === 'cancelled'
+            || status === 'stopped'
+            || status === 'cancelled'
+            || phase === 'stopped'
+            || phase === 'cancelled')
+            && queueEmpty
         const idleComplete = (state === 'stopping' || status === 'stopping' || status === 'idle' || phase === 'idle')
             && (hasExplicitWorkCounters || progress.idle === true || status === 'idle' || phase === 'idle')
             && queueEmpty
         if (requireStop && !session.stopRequestedAt) return false
-        return idleComplete || finiteComplete && queueEmpty || sastComplete || passiveComplete
+        return idleComplete || stoppedNoRemaining || finiteComplete && queueEmpty || sastComplete || terminalSastSettled || passiveComplete
     }
 
     /**
@@ -4692,6 +5454,9 @@ export class ptk_automation {
         if (engineState.error) {
             result.error = engineState.error
         }
+        if (session?.source === 'zap') {
+            result.targetWindowRequired = false
+        }
 
         // Get scanResult reference (fast lookup, no deep copy)
         const scanResult = this._getEngineScanResult(engineUpper)
@@ -4745,6 +5510,8 @@ export class ptk_automation {
                 result.historySeedTotalAvailable = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedTotalAvailable, 0)
                 result.historySeedDroppedByCap = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedDroppedByCap, 0)
                 result.historySeedDuplicatesSkipped = toFiniteNumber(coordinatorState?.lastAutomationSeedResult?.historySeedDuplicatesSkipped, 0)
+                result.targetWindowRequired = liveProgress.targetWindowRequired !== false
+                result.zapAttackWindow = liveProgress.zapAttackWindow || null
                 result.lastActivityAt = liveProgress.lastActivityAt || result.lastActivityAt
                 if (engineState.status === 'running' && result.idle) {
                     result.status = 'idle'

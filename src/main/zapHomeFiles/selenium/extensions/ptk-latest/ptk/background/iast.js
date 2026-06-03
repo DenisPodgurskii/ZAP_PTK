@@ -46,10 +46,67 @@ function normalizeIastBackgroundStrategy(value = 'SMART') {
 
 function buildIastAgentScriptFiles(scanStrategy = 'SMART', { isFirefox = false } = {}) {
     const prefix = isFirefox ? 'content/' : 'ptk/content/'
+    const bootstrap = `${prefix}iast_agent_bootstrap.js`
     const strategy = normalizeIastBackgroundStrategy(scanStrategy)
     return strategy === 'COMPREHENSIVE'
-        ? [`${prefix}iast_comprehensive_bootstrap.js`, `${prefix}iast.js`]
-        : [`${prefix}iast.js`]
+        ? [bootstrap, `${prefix}iast_comprehensive_bootstrap.js`, `${prefix}iast.js`]
+        : [bootstrap, `${prefix}iast.js`]
+}
+
+function normalizeIastRegistrationHost({ host = '', targetUrl = '' } = {}) {
+    const candidates = [targetUrl, host]
+        .map((value) => typeof value === 'string' ? value.trim() : '')
+        .filter(Boolean)
+
+    for (const candidate of candidates) {
+        try {
+            const normalizedCandidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
+                ? candidate
+                : `https://${candidate.replace(/^\/+/, '')}`
+            const parsed = new URL(normalizedCandidate)
+            const protocol = String(parsed.protocol || '').toLowerCase()
+            if (protocol !== 'http:' && protocol !== 'https:') continue
+            const hostname = String(parsed.hostname || '').toLowerCase()
+            const hostWithPort = String(parsed.host || '').toLowerCase()
+            if (!hostname || hostname === '*' || hostname.includes('*')) continue
+            return {
+                hostname,
+                hostWithPort: hostWithPort || hostname
+            }
+        } catch (_) { }
+    }
+
+    return null
+}
+
+function formatIastRegistrationMatchHost(hostname = '') {
+    const normalized = String(hostname || '').trim().toLowerCase()
+    if (!normalized) return ''
+    if (normalized.includes(':') && !normalized.startsWith('[')) {
+        return `[${normalized}]`
+    }
+    return normalized
+}
+
+function buildIastAgentScriptRegistrationScope({ host = '', targetUrl = '' } = {}) {
+    const normalized = normalizeIastRegistrationHost({ host, targetUrl })
+    if (!normalized) return null
+    const matchHost = formatIastRegistrationMatchHost(normalized.hostname)
+    if (!matchHost) return null
+
+    const scope = {
+        matches: [
+            `http://${matchHost}/*`,
+            `https://${matchHost}/*`
+        ]
+    }
+    if (normalized.hostWithPort && normalized.hostWithPort !== normalized.hostname) {
+        scope.includeGlobs = [
+            `http://${normalized.hostWithPort}/*`,
+            `https://${normalized.hostWithPort}/*`
+        ]
+    }
+    return scope
 }
 
 function clearIastModuleSendTracking(tabId = null) {
@@ -645,6 +702,7 @@ async function sendIastModulesToContent(tabId, attempt = 1, options = {}) {
 
     const payload = {
         channel: 'ptk_background_iast2content_modules',
+        active: true,
         iastModules: modules,
         iastModulesSignature: modulesSignature,
         scanStrategy: iastScanStrategy
@@ -744,6 +802,8 @@ const MAX_HTTP_EVENTS = 1000
 const MAX_TRACKED_REQUESTS = 500
 const IMPORT_TRANSFER_TTL_MS = 10 * 60 * 1000
 const IMPORT_TRANSFER_MAX_ENTRIES = 2
+const IAST_AGENT_SCRIPT_TAG_MAX_ATTEMPTS = 4
+const IAST_AGENT_SCRIPT_TAG_RETRY_DELAYS_MS = Object.freeze([100, 250, 500])
 const SEVERITY_ORDER = {
     info: 0,
     low: 1,
@@ -755,6 +815,80 @@ const SEVERITY_ORDER = {
 function isHttpUrl(url) {
     if (!url) return false
     return /^https?:\/\//i.test(String(url))
+}
+
+function buildIastAgentScriptTagLoaderSource(src, scanStrategy = 'SMART', options = {}) {
+    const retryDelays = Array.isArray(options?.retryDelaysMs)
+        ? options.retryDelaysMs
+            .map(value => Number(value))
+            .filter(value => Number.isFinite(value) && value >= 0)
+        : IAST_AGENT_SCRIPT_TAG_RETRY_DELAYS_MS
+    const maxAttempts = Number.isFinite(Number(options?.maxAttempts))
+        ? Math.max(1, Math.floor(Number(options.maxAttempts)))
+        : IAST_AGENT_SCRIPT_TAG_MAX_ATTEMPTS
+    const strategy = String(scanStrategy || 'SMART').trim().toUpperCase() === 'COMPREHENSIVE'
+        ? 'COMPREHENSIVE'
+        : 'SMART'
+
+    return `
+        (function(src, strategy, retryDelays, maxAttempts) {
+            var attempts = 0;
+            function postReady() {
+                try { window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*'); } catch (e) {}
+            }
+            function postFailed(error) {
+                try { window.postMessage({ channel: 'ptk_iast_agent_failed', error: error || 'script_load_failed' }, '*'); } catch (e) {}
+            }
+            function removeLoader() {
+                try {
+                    var existing = document.getElementById('__ptk_iast_agent__');
+                    if (existing) existing.remove();
+                } catch (e) {}
+            }
+            function scheduleRetry() {
+                var delay = retryDelays[Math.min(attempts - 1, retryDelays.length - 1)] || 0;
+                try { setTimeout(loadAgent, delay); } catch (e) { loadAgent(); }
+            }
+            function loadAgent() {
+                try {
+                    window.__PTK_IAST_SCAN_STRATEGY__ = strategy || 'SMART';
+                    window.__PTK_IAST_AGENT_AUTHORIZED__ = true;
+                    window.__PTK_IAST_PROVISIONAL_HOOKS__ = true;
+                    if (window.__PTK_IAST_AGENT_LOADED__ === true) {
+                        postReady();
+                        return;
+                    }
+                    removeLoader();
+                    attempts += 1;
+                    var script = document.createElement('script');
+                    script.id = '__ptk_iast_agent__';
+                    script.src = src;
+                    script.type = 'text/javascript';
+                    script.async = true;
+                    script.onload = function() {
+                        postReady();
+                    };
+                    script.onerror = function() {
+                        removeLoader();
+                        if (attempts < maxAttempts) {
+                            scheduleRetry();
+                            return;
+                        }
+                        postFailed('script_load_failed');
+                    };
+                    (document.head || document.documentElement).appendChild(script);
+                } catch (e) {
+                    if (attempts < maxAttempts) {
+                        attempts += 1;
+                        scheduleRetry();
+                        return;
+                    }
+                    postFailed(e && e.message ? e.message : 'script_inject_failed');
+                }
+            }
+            loadAgent();
+        })(${JSON.stringify(src || '')}, ${JSON.stringify(strategy)}, ${JSON.stringify(retryDelays)}, ${maxAttempts});
+    `
 }
 
 export class ptk_iast {
@@ -1491,19 +1625,32 @@ export class ptk_iast {
         if (message.channel === "ptk_content_iast2background_request_modules") {
             ;(async () => {
                 try {
-                    const modules = await loadIastModules(this.currentRulepackLoadOptions || {})
-                    if (!modules) {
-                        console.warn('[PTK IAST BG] No IAST modules available for request')
+                    const tabId = sender?.tab?.id
+                    if (!this.isTrackedScanTab(tabId)) {
+                        const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
                         sendResponse && sendResponse({
+                            active: false,
+                            reason,
                             iastModules: null,
                             iastModulesSignature: null,
                             scanStrategy: iastScanStrategy
                         })
                         return
                     }
-                    const tabId = sender?.tab?.id
+                    const modules = await loadIastModules(this.currentRulepackLoadOptions || {})
+                    if (!modules) {
+                        console.warn('[PTK IAST BG] No IAST modules available for request')
+                        sendResponse && sendResponse({
+                            active: true,
+                            iastModules: null,
+                            iastModulesSignature: null,
+                            scanStrategy: iastScanStrategy
+                        })
+                        return
+                    }
                     //console.log('[PTK IAST BG] Content requested IAST modules for tab', tabId)
                     sendResponse && sendResponse({
+                        active: true,
                         iastModules: modules,
                         iastModulesSignature: buildIastModulesSignature(modules, iastScanStrategy),
                         scanStrategy: iastScanStrategy
@@ -1511,6 +1658,7 @@ export class ptk_iast {
                 } catch (err) {
                     console.warn('[PTK IAST BG] Failed to load IAST modules', err)
                     sendResponse && sendResponse({
+                        active: true,
                         iastModules: null,
                         iastModulesSignature: null,
                         scanStrategy: iastScanStrategy,
@@ -2161,7 +2309,10 @@ export class ptk_iast {
             noise: computeIastNoiseTelemetry(this.scanResult)
         }
         this.broadcastScanUpdate()
-        await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART')
+        await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
+            host: this.scanResult.host,
+            targetUrl: this.scanResult.targetUrl || zapTiming?.targetUrl || null
+        })
         this.addListeners()
         const devtoolsStartedAt = Date.now()
         await this.attachDevtoolsDebugger(tabId)
@@ -3356,20 +3507,36 @@ export class ptk_iast {
         return false
     }
 
-    async registerScript(scanStrategy = 'SMART') {
+    async registerScript(scanStrategy = 'SMART', scope = {}) {
         const files = buildIastAgentScriptFiles(scanStrategy, { isFirefox: worker.isFirefox === true })
         try {
             if (!browser?.scripting?.registerContentScripts) {
                 return false
             }
             await this.unregisterScript()
-            await browser.scripting.registerContentScripts([{
+            const registrationScope = buildIastAgentScriptRegistrationScope(scope)
+            if (!registrationScope?.matches?.length) {
+                console.warn('[PTK IAST] Skipping dynamic IAST script registration without scan host scope')
+                return false
+            }
+            const contentScript = {
                 id: 'iast-agent',
                 js: files,
-                matches: ['<all_urls>'],
+                matches: registrationScope.matches,
                 runAt: 'document_start',
-                world: 'MAIN'
-            }])
+                world: 'MAIN',
+                persistAcrossSessions: false
+            }
+            if (Array.isArray(registrationScope.includeGlobs) && registrationScope.includeGlobs.length) {
+                contentScript.includeGlobs = registrationScope.includeGlobs
+            }
+            try {
+                await browser.scripting.registerContentScripts([contentScript])
+            } catch (e) {
+                if (!contentScript.includeGlobs) throw e
+                delete contentScript.includeGlobs
+                await browser.scripting.registerContentScripts([contentScript])
+            }
             return true
         } catch (e) {
             console.warn('[PTK IAST] Failed to register IAST script:', e);
@@ -3389,26 +3556,61 @@ export class ptk_iast {
             const results = await execution({
                 target: { tabId },
                 world: 'MAIN',
-                func: (src, strategy) => {
+                func: (src, strategy, retryDelays, maxAttempts) => {
                     try {
-                        window.__PTK_IAST_SCAN_STRATEGY__ = strategy || 'SMART'
-                        const existing = document.getElementById('__ptk_iast_agent__')
-                        if (existing) {
-                            try { window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*') } catch (_) { }
-                            return true
-                        }
-                        const script = document.createElement('script')
-                        script.id = '__ptk_iast_agent__'
-                        script.src = src
-                        script.type = 'text/javascript'
-                        script.async = true
-                        script.onload = function () {
+                        let attempts = 0
+                        const postReady = () => {
                             try { window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*') } catch (_) { }
                         }
-                        script.onerror = function () {
-                            try { window.postMessage({ channel: 'ptk_iast_agent_failed', error: 'script_load_failed' }, '*') } catch (_) { }
+                        const postFailed = (error) => {
+                            try { window.postMessage({ channel: 'ptk_iast_agent_failed', error: error || 'script_load_failed' }, '*') } catch (_) { }
                         }
-                        ;(document.head || document.documentElement).appendChild(script)
+                        const removeLoader = () => {
+                            try {
+                                const existing = document.getElementById('__ptk_iast_agent__')
+                                if (existing) existing.remove()
+                            } catch (_) { }
+                        }
+                        const scheduleRetry = () => {
+                            const delay = retryDelays[Math.min(attempts - 1, retryDelays.length - 1)] || 0
+                            try { setTimeout(loadAgent, delay) } catch (_) { loadAgent() }
+                        }
+                        const loadAgent = () => {
+                            try {
+                                window.__PTK_IAST_SCAN_STRATEGY__ = strategy || 'SMART'
+                                window.__PTK_IAST_AGENT_AUTHORIZED__ = true
+                                window.__PTK_IAST_PROVISIONAL_HOOKS__ = true
+                                if (window.__PTK_IAST_AGENT_LOADED__ === true) {
+                                    postReady()
+                                    return
+                                }
+                                removeLoader()
+                                attempts += 1
+                                const script = document.createElement('script')
+                                script.id = '__ptk_iast_agent__'
+                                script.src = src
+                                script.type = 'text/javascript'
+                                script.async = true
+                                script.onload = postReady
+                                script.onerror = function () {
+                                    removeLoader()
+                                    if (attempts < maxAttempts) {
+                                        scheduleRetry()
+                                        return
+                                    }
+                                    postFailed('script_load_failed')
+                                }
+                                ;(document.head || document.documentElement).appendChild(script)
+                            } catch (error) {
+                                if (attempts < maxAttempts) {
+                                    attempts += 1
+                                    scheduleRetry()
+                                    return
+                                }
+                                postFailed(error?.message || 'script_inject_failed')
+                            }
+                        }
+                        loadAgent()
                         return true
                     } catch (error) {
                         try {
@@ -3417,7 +3619,7 @@ export class ptk_iast {
                         return false
                     }
                 },
-                args: [url, normalizedStrategy]
+                args: [url, normalizedStrategy, IAST_AGENT_SCRIPT_TAG_RETRY_DELAYS_MS, IAST_AGENT_SCRIPT_TAG_MAX_ATTEMPTS]
             })
             return Array.isArray(results) ? results.some(entry => entry?.result === true) : true
         }
@@ -3433,6 +3635,8 @@ export class ptk_iast {
                     func: (strategy) => {
                         try {
                             window.__PTK_IAST_SCAN_STRATEGY__ = strategy || 'SMART'
+                            window.__PTK_IAST_AGENT_AUTHORIZED__ = true
+                            window.__PTK_IAST_PROVISIONAL_HOOKS__ = true
                         } catch (_) { }
                     },
                     args: [normalizedStrategy]
@@ -3456,27 +3660,7 @@ export class ptk_iast {
         // MV2-safe injection: use tabs.executeScript + script tag with absolute URL
         if (browser?.tabs?.executeScript && url) {
             try {
-                const code = `
-                    (function() {
-                        try {
-                            window.__PTK_IAST_SCAN_STRATEGY__ = ${JSON.stringify(normalizedStrategy)};
-                            if (document.getElementById('__ptk_iast_agent__')) return;
-                            var s = document.createElement('script');
-                            s.id = '__ptk_iast_agent__';
-                            s.src = ${JSON.stringify(url)};
-                            s.type = 'text/javascript';
-                            s.onload = function() {
-                                try { window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*'); } catch (e) {}
-                                try { s.remove(); } catch (e) {}
-                            };
-                            s.onerror = function() {
-                                try { window.postMessage({ channel: 'ptk_iast_agent_failed', error: 'script_load_failed' }, '*'); } catch (e) {}
-                                try { s.remove(); } catch (e) {}
-                            };
-                            (document.head || document.documentElement).appendChild(s);
-                        } catch (e) {}
-                    })();
-                `
+                const code = buildIastAgentScriptTagLoaderSource(url, normalizedStrategy)
                 // Use document_idle for already-loaded pages (document_start is for initial load)
                 await browser.tabs.executeScript(tabId, { code, runAt: 'document_idle' })
                 return true
@@ -3507,8 +3691,10 @@ export class ptk_iast {
 }
 
 export const __iastTestHooks = {
+    buildIastAgentScriptTagLoaderSource,
     buildDefaultIastRuntimeHealthTelemetry,
     buildIastAgentScriptFiles,
+    buildIastAgentScriptRegistrationScope,
     buildIastModulesSignature,
     clearIastModuleSendTracking,
     getIastModuleDeliveryState,
