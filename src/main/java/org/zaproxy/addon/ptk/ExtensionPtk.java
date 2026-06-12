@@ -45,6 +45,7 @@ import org.parosproxy.paros.model.SiteNode;
 import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMalformedHeaderException;
 import org.parosproxy.paros.network.HttpMessage;
+import org.parosproxy.paros.network.HttpSender;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
 import org.zaproxy.addon.client.ClientCallBackUtils;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
@@ -1648,9 +1649,12 @@ public class ExtensionPtk extends ExtensionAdaptor
                 LOGGER.debug("PTK /ptk/config cache hit after lock");
                 return cachedConfigJson;
             }
-            boolean zapAutomationEnabled = param.isZapAutomationEnabled();
+            boolean zapAutomationEnabled =
+                    param.isAutomatedScanningEnabled()
+                            || (cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
+                                    && param.isActiveScanRuleEnabled());
             String mode = zapAutomationEnabled ? "auto" : "manual";
-            LOGGER.debug(
+            LOGGER.info(
                     "PTK mode {} auto={} active={} effective={}",
                     mode,
                     param.isAutomatedScanningEnabled(),
@@ -2112,7 +2116,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                                 summary.append(" ").append(name).append("=").append(value);
                             }
                         });
-        LOGGER.info(summary.toString());
+        LOGGER.debug(summary.toString());
     }
 
     void recordBrowserCoverageBrowserLoaded(
@@ -2143,7 +2147,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                                 summary.append(" ").append(name).append("=").append(value);
                             }
                         });
-        LOGGER.info(summary.toString());
+        LOGGER.debug(summary.toString());
     }
 
     void recordBrowserCoverageInvalid(String zapid, String targetUrl, String reason, String error) {
@@ -3715,7 +3719,10 @@ public class ExtensionPtk extends ExtensionAdaptor
                 String zapid = getStringField(requestData, "zapid");
                 String browserid = getStringField(requestData, "browserid");
                 rememberBrowserId(zapid, browserid);
-                boolean zapAutomationEnabled = getParam().isZapAutomationEnabled();
+                boolean zapAutomationEnabled =
+                        getParam().isAutomatedScanningEnabled()
+                                || (cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
+                                        && getParam().isActiveScanRuleEnabled());
                 rememberConfigMode(zapid, zapAutomationEnabled);
                 markCallbackStart(zapid);
                 logBrowserEvidence(zapid, browserid, "config_callback", null, null);
