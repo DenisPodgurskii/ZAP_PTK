@@ -8,7 +8,7 @@ import java.util.Iterator;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.zaproxy.addon.client.ClientOptions;
+import org.zaproxy.addon.client.spider.ClientSpiderOptions;
 import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
 /** Unit tests for {@link PtkParam}. */
@@ -55,7 +55,7 @@ class PtkParamTest {
     @Test
     void activeScanOptions_persistedAndReloaded() {
         param.setActiveScanRuleEnabled(true);
-        param.setActiveScanBrowserId(ClientOptions.DEFAULT_BROWSER_ID);
+        param.setActiveScanBrowserId(ClientSpiderOptions.DEFAULT_BROWSER_ID);
         param.setActiveScanActionWaitTimeInSecs(5);
         param.setActiveScanThreadCount(3);
 
@@ -63,7 +63,7 @@ class PtkParamTest {
         reloaded.load(config);
 
         assertTrue(reloaded.isActiveScanRuleEnabled());
-        assertEquals(ClientOptions.DEFAULT_BROWSER_ID, reloaded.getActiveScanBrowserId());
+        assertEquals(ClientSpiderOptions.DEFAULT_BROWSER_ID, reloaded.getActiveScanBrowserId());
         assertEquals(5, reloaded.getActiveScanActionWaitTimeInSecs());
         assertEquals(3, reloaded.getActiveScanThreadCount());
     }

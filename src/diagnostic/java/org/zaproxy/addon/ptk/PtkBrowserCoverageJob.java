@@ -33,10 +33,10 @@ import org.zaproxy.addon.automation.AutomationJob;
 import org.zaproxy.addon.automation.AutomationJobException;
 import org.zaproxy.addon.automation.AutomationProgress;
 import org.zaproxy.addon.automation.ContextWrapper;
-import org.zaproxy.addon.client.ClientOptions;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
 import org.zaproxy.addon.client.internal.ClientMap;
 import org.zaproxy.addon.client.spider.ClientSpider;
+import org.zaproxy.addon.client.spider.ClientSpiderOptions;
 import org.zaproxy.addon.client.spider.ScanOptions;
 import org.zaproxy.addon.commonlib.ExtensionCommonlib;
 import org.zaproxy.zap.extension.selenium.ExtensionSelenium;
@@ -499,7 +499,7 @@ class PtkBrowserCoverageJob extends AutomationJob {
         String zapid = null;
         String browserId = nonBlank(parameters.getBrowserId());
         if (browserId == null) {
-            browserId = ClientOptions.DEFAULT_BROWSER_ID;
+            browserId = ClientSpiderOptions.DEFAULT_BROWSER_ID;
         }
         try {
             browser = openDirectBrowser(client, selenium, attempt.target);
@@ -677,7 +677,7 @@ class PtkBrowserCoverageJob extends AutomationJob {
         if (selenium == null) {
             throw new IllegalStateException("Selenium add-on unavailable");
         }
-        ClientOptions options = createClientOptions();
+        ClientSpiderOptions options = createClientSpiderOptions();
         ClientSpider spider =
                 new ClientSpider(
                         client,
@@ -1346,8 +1346,8 @@ class PtkBrowserCoverageJob extends AutomationJob {
         return end > start ? url.substring(start, end) : null;
     }
 
-    private ClientOptions createClientOptions() {
-        ClientOptions options = new ClientOptions();
+    private ClientSpiderOptions createClientSpiderOptions() {
+        ClientSpiderOptions options = new ClientSpiderOptions();
         options.load(new XMLConfiguration());
         String browserId = nonBlank(parameters.getBrowserId());
         if (browserId != null) {

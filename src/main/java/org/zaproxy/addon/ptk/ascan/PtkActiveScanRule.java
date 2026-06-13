@@ -16,9 +16,9 @@ import org.parosproxy.paros.core.scanner.HostProcess;
 import org.parosproxy.paros.model.HistoryReference;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpSender;
-import org.zaproxy.addon.client.ClientOptions;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
 import org.zaproxy.addon.client.spider.ClientSpider;
+import org.zaproxy.addon.client.spider.ClientSpiderOptions;
 import org.zaproxy.addon.client.spider.ScanOptions;
 import org.zaproxy.addon.ptk.ExtensionPtk;
 import org.zaproxy.addon.ptk.options.PtkParam;
@@ -145,7 +145,7 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
             skipScan(hostProcess, "fail.missingdependency");
             return;
         }
-        ClientOptions options = extClient.getClientParam().clone();
+        ClientSpiderOptions options = extClient.getClientSpiderParam().clone();
         options.setBrowserId(ptkParam.getActiveScanBrowserId());
         options.setActionWaitTimeInSecs(ptkParam.getActiveScanActionWaitTimeInSecs());
         options.setThreadCount(ptkParam.getActiveScanThreadCount());
