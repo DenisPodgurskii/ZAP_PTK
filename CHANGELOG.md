@@ -3,6 +3,10 @@ All notable changes to this add-on will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## 0.6.0 - 2026-06-13
+### Changed
+- Update Client Side Integration add-on usage to latest version.
+
 ## 0.5.0 - 2026-06-04
 ### Added
 - Active scan rule "PTK Scan Rules" that runs all of the PTK scan rules enabled.

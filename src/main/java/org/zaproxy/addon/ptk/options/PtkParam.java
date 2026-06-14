@@ -8,7 +8,7 @@ import java.util.Set;
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.zaproxy.addon.client.ClientOptions;
+import org.zaproxy.addon.client.spider.ClientSpiderOptions;
 import org.zaproxy.addon.ptk.PtkResourcesLoader;
 import org.zaproxy.addon.ptk.PtkResourcesLoader.LoadedPtkResources;
 import org.zaproxy.addon.ptk.model.PtkAttack;
@@ -64,7 +64,8 @@ public class PtkParam extends VersionedAbstractParam {
     private static final String ACTIVE_SCAN_THREAD_COUNT_KEY = BASE_KEY + ".activescan.threadCount";
 
     /** Default browser for the PTK active scan rule (same as the Client add-on). */
-    public static final String DEFAULT_ACTIVE_SCAN_BROWSER_ID = ClientOptions.DEFAULT_BROWSER_ID;
+    public static final String DEFAULT_ACTIVE_SCAN_BROWSER_ID =
+            ClientSpiderOptions.DEFAULT_BROWSER_ID;
 
     /**
      * Default action wait for the PTK active scan rule. The Client add-on defaults to {@code 0};
