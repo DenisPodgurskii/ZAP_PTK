@@ -7,6 +7,7 @@ import java.awt.Insets;
 import java.awt.event.MouseEvent;
 import java.util.HashSet;
 import java.util.Set;
+import javax.swing.BorderFactory;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JLabel;
@@ -14,6 +15,7 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
 import javax.swing.ToolTipManager;
+import javax.swing.border.CompoundBorder;
 import javax.swing.border.EmptyBorder;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
@@ -68,6 +70,9 @@ public class PtkOptionsPanel extends AbstractParamPanel {
     private final ZapNumberSpinner actionWaitTimeSpinner;
     private final ZapNumberSpinner threadCountSpinner;
     private final JCheckBoxTree tree;
+    private final JComboBox<EngineRunLocation> dastRunLocationComboBox;
+    private final JComboBox<EngineRunLocation> sastRunLocationComboBox;
+    private final JComboBox<EngineRunLocation> iastRunLocationComboBox;
 
     public PtkOptionsPanel() {
         super();
@@ -90,6 +95,12 @@ public class PtkOptionsPanel extends AbstractParamPanel {
                 new ZapNumberSpinner(
                         1, PtkParam.getDefaultActiveScanThreadCount(), Integer.MAX_VALUE);
         enableActiveScanRuleCheckBox.addItemListener(e -> syncActiveScanTabState());
+        dastRunLocationComboBox = createRunLocationComboBox();
+        dastRunLocationComboBox.setSelectedItem(PtkParam.DEFAULT_DAST_RUN_LOCATION);
+        sastRunLocationComboBox = createRunLocationComboBox();
+        sastRunLocationComboBox.setSelectedItem(PtkParam.DEFAULT_SAST_RUN_LOCATION);
+        iastRunLocationComboBox = createRunLocationComboBox();
+        iastRunLocationComboBox.setSelectedItem(PtkParam.DEFAULT_IAST_RUN_LOCATION);
         tree =
                 new JCheckBoxTree() {
                     @Override
@@ -170,12 +181,48 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         activeScanTab.add(new JLabel(), LayoutHelper.getGBC(0, row + 1, 1, 0.5D, 1.0D));
         syncActiveScanTabState();
 
+        JPanel enginesTab = new JPanel(new BorderLayout());
+        enginesTab.add(buildRunLocationPanel(), BorderLayout.NORTH);
+
         JTabbedPane tabbedPane = new JTabbedPane();
+        tabbedPane.addTab(Constant.messages.getString(MESSAGE_PREFIX + "tab.engines"), enginesTab);
         tabbedPane.addTab(
                 Constant.messages.getString(MESSAGE_PREFIX + "tab.scanRules"), scanRulesTab);
         tabbedPane.addTab(
                 Constant.messages.getString(MESSAGE_PREFIX + "tab.activeScan"), activeScanTab);
         add(tabbedPane, BorderLayout.CENTER);
+    }
+
+    private JPanel buildRunLocationPanel() {
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setBorder(
+                new CompoundBorder(
+                        new EmptyBorder(4, 4, 0, 4),
+                        BorderFactory.createTitledBorder(
+                                Constant.messages.getString(
+                                        MESSAGE_PREFIX + "runLocation.sectionLabel"))));
+        addRunLocationRow(panel, "SAST", sastRunLocationComboBox, 0);
+        addRunLocationRow(panel, "IAST", iastRunLocationComboBox, 1);
+        addRunLocationRow(panel, "DAST", dastRunLocationComboBox, 2);
+        return panel;
+    }
+
+    private static void addRunLocationRow(
+            JPanel panel, String engine, JComboBox<EngineRunLocation> combo, int row) {
+        JLabel label = new JLabel(engine + ":");
+        label.setLabelFor(combo);
+        panel.add(
+                label,
+                LayoutHelper.getGBC(
+                        0, row, GridBagConstraints.RELATIVE, 1.0, new Insets(2, 2, 2, 2)));
+        panel.add(
+                combo,
+                LayoutHelper.getGBC(
+                        1, row, GridBagConstraints.REMAINDER, 1.0, new Insets(2, 2, 2, 2)));
+    }
+
+    private static JComboBox<EngineRunLocation> createRunLocationComboBox() {
+        return new JComboBox<>(EngineRunLocation.values());
     }
 
     private static TreeModel buildTreeModel() {
@@ -291,6 +338,9 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         updateBrowsers(param.getActiveScanBrowserId());
         actionWaitTimeSpinner.setValue(param.getActiveScanActionWaitTimeInSecs());
         threadCountSpinner.setValue(param.getActiveScanThreadCount());
+        sastRunLocationComboBox.setSelectedItem(param.getSastRunLocation());
+        iastRunLocationComboBox.setSelectedItem(param.getIastRunLocation());
+        dastRunLocationComboBox.setSelectedItem(param.getDastRunLocation());
         syncActiveScanTabState();
         tree.setModel(buildTreeModel());
         expandEnginesAndModulesOnly(tree);
@@ -357,6 +407,15 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         }
         param.setActiveScanActionWaitTimeInSecs(actionWaitTimeSpinner.getValue());
         param.setActiveScanThreadCount(threadCountSpinner.getValue());
+        param.setSastRunLocation(
+                getSelectedRunLocation(
+                        sastRunLocationComboBox, PtkParam.DEFAULT_SAST_RUN_LOCATION));
+        param.setIastRunLocation(
+                getSelectedRunLocation(
+                        iastRunLocationComboBox, PtkParam.DEFAULT_IAST_RUN_LOCATION));
+        param.setDastRunLocation(
+                getSelectedRunLocation(
+                        dastRunLocationComboBox, PtkParam.DEFAULT_DAST_RUN_LOCATION));
 
         // Collect the IDs of enabled leaves (rule/attack nodes only; ignore parent paths).
         Set<String> enabledLeafIds = new HashSet<>();
@@ -413,6 +472,12 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         } else if (browserComboBox.getItemCount() > 0) {
             browserComboBox.setSelectedIndex(0);
         }
+    }
+
+    private static EngineRunLocation getSelectedRunLocation(
+            JComboBox<EngineRunLocation> combo, EngineRunLocation defaultValue) {
+        Object selected = combo.getSelectedItem();
+        return selected instanceof EngineRunLocation loc ? loc : defaultValue;
     }
 
     private String getSelectedBrowserId() {

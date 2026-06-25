@@ -8,6 +8,7 @@ import org.zaproxy.addon.ptk.model.PtkAttack;
 import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.PtkRule;
+import org.zaproxy.addon.ptk.options.EngineRunLocation;
 import org.zaproxy.addon.ptk.options.PtkParam;
 
 /**
@@ -22,7 +23,7 @@ public final class PtkConfigFilter {
 
     /**
      * Returns definitions filtered by the enabled flags in {@code param}. If {@code param} is
-     * {@code null} all definitions are returned unchanged.
+     * {@code null} all definitions are returned unchanged. No run-location filtering is applied.
      *
      * @param resources loaded SAST, IAST, DAST definitions
      * @param param the param instance to query for enabled state
@@ -30,6 +31,25 @@ public final class PtkConfigFilter {
      */
     public static Map<String, PtkModulesDefinition> filter(
             PtkResourcesLoader.LoadedPtkResources resources, PtkParam param) {
+        return filter(resources, param, null);
+    }
+
+    /**
+     * Returns definitions filtered by the enabled flags in {@code param} and by {@code
+     * currentContext}. Engines whose configured run location does not match {@code currentContext}
+     * are excluded entirely. A {@code null} context disables run-location filtering (all engines
+     * pass). If {@code param} is {@code null} all definitions are returned unchanged.
+     *
+     * @param resources loaded SAST, IAST, DAST definitions
+     * @param param the param instance to query for enabled state and run locations
+     * @param currentContext the scan context in which this config is being served, or {@code null}
+     *     to skip run-location filtering
+     * @return map with keys "sast", "iast", "dast"; keys with no enabled rules are omitted
+     */
+    public static Map<String, PtkModulesDefinition> filter(
+            PtkResourcesLoader.LoadedPtkResources resources,
+            PtkParam param,
+            EngineRunLocation currentContext) {
         Map<String, PtkModulesDefinition> out = new LinkedHashMap<>();
         if (param == null) {
             if (resources.getSastModules() != null) out.put("sast", resources.getSastModules());
@@ -37,9 +57,9 @@ public final class PtkConfigFilter {
             if (resources.getDastModules() != null) out.put("dast", resources.getDastModules());
             return out;
         }
-        addFiltered(out, "sast", resources.getSastModules(), param);
-        addFiltered(out, "iast", resources.getIastModules(), param);
-        addFiltered(out, "dast", resources.getDastModules(), param);
+        addFiltered(out, "sast", resources.getSastModules(), param, currentContext);
+        addFiltered(out, "iast", resources.getIastModules(), param, currentContext);
+        addFiltered(out, "dast", resources.getDastModules(), param, currentContext);
         return out;
     }
 
@@ -47,8 +67,15 @@ public final class PtkConfigFilter {
             Map<String, PtkModulesDefinition> out,
             String key,
             PtkModulesDefinition def,
-            PtkParam param) {
+            PtkParam param,
+            EngineRunLocation currentContext) {
         if (def == null) return;
+        if (currentContext != null) {
+            String engineName = def.getEngine();
+            if (engineName != null && param.getEngineRunLocation(engineName) != currentContext) {
+                return;
+            }
+        }
         PtkModulesDefinition filtered = filterDefinition(def, param);
         if (filtered != null) out.put(key, filtered);
     }
