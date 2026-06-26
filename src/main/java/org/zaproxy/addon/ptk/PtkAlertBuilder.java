@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.reflect.TypeToken;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -97,7 +98,7 @@ public final class PtkAlertBuilder {
                         .setAlertRef(alertRef);
         builder.setTags(tags);
         Alert baseAlert = builder.build();
-        String engineLower = engine.toLowerCase();
+        String engineLower = engine.toLowerCase(Locale.ROOT);
         String codeLink = CODE_LINK_BASE + engineLower + CODE_LINK_SUFFIX;
         String codeLinkText = CODE_LINK_TEXT_PREFIX + engineLower + CODE_LINK_SUFFIX;
         return new ExampleAlert(baseAlert, moduleName, codeLink, codeLinkText);
@@ -403,7 +404,7 @@ public final class PtkAlertBuilder {
 
     static int parseSeverity(String severity) {
         if (severity == null) return Alert.RISK_MEDIUM;
-        switch (severity.toLowerCase()) {
+        switch (severity.toLowerCase(Locale.ROOT)) {
             case "high":
                 return Alert.RISK_HIGH;
             case "medium":

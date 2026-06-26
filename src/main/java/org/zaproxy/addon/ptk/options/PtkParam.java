@@ -62,6 +62,8 @@ public class PtkParam extends VersionedAbstractParam {
     private static final String ACTIVE_SCAN_ACTION_WAIT_TIME_KEY =
             BASE_KEY + ".activescan.actionWaitTime";
     private static final String ACTIVE_SCAN_THREAD_COUNT_KEY = BASE_KEY + ".activescan.threadCount";
+    private static final String ENGINE_RUN_LOCATION_KEY_FORMAT =
+            BASE_KEY + ".engine.%s.runLocation";
 
     /** Default browser for the PTK active scan rule (same as the Client add-on). */
     public static final String DEFAULT_ACTIVE_SCAN_BROWSER_ID =
@@ -73,11 +75,21 @@ public class PtkParam extends VersionedAbstractParam {
      */
     public static final int DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME = 2;
 
+    public static final EngineRunLocation DEFAULT_DAST_RUN_LOCATION =
+            EngineRunLocation.ACTIVE_SCAN_RULE;
+    public static final EngineRunLocation DEFAULT_SAST_RUN_LOCATION =
+            EngineRunLocation.CLIENT_SPIDER;
+    public static final EngineRunLocation DEFAULT_IAST_RUN_LOCATION =
+            EngineRunLocation.CLIENT_SPIDER;
+
     private boolean automatedScanningEnabled = false;
     private boolean activeScanRuleEnabled = false;
     private String activeScanBrowserId = DEFAULT_ACTIVE_SCAN_BROWSER_ID;
     private int activeScanActionWaitTimeInSecs = DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME;
     private int activeScanThreadCount = getDefaultActiveScanThreadCount();
+    private EngineRunLocation dastRunLocation = DEFAULT_DAST_RUN_LOCATION;
+    private EngineRunLocation sastRunLocation = DEFAULT_SAST_RUN_LOCATION;
+    private EngineRunLocation iastRunLocation = DEFAULT_IAST_RUN_LOCATION;
 
     /** Returns half the available processor count, with a minimum of {@code 1}. */
     public static int getDefaultActiveScanThreadCount() {
@@ -101,6 +113,18 @@ public class PtkParam extends VersionedAbstractParam {
                     DEFAULT_ACTIVE_SCAN_BROWSER_ID);
             activeScanBrowserId = DEFAULT_ACTIVE_SCAN_BROWSER_ID;
         }
+        dastRunLocation =
+                getEnum(
+                        String.format(ENGINE_RUN_LOCATION_KEY_FORMAT, "DAST"),
+                        DEFAULT_DAST_RUN_LOCATION);
+        sastRunLocation =
+                getEnum(
+                        String.format(ENGINE_RUN_LOCATION_KEY_FORMAT, "SAST"),
+                        DEFAULT_SAST_RUN_LOCATION);
+        iastRunLocation =
+                getEnum(
+                        String.format(ENGINE_RUN_LOCATION_KEY_FORMAT, "IAST"),
+                        DEFAULT_IAST_RUN_LOCATION);
         // Scan-rule flags are read on demand via isRuleEnabled / isModuleEnabled / isEngineEnabled.
     }
 
@@ -263,6 +287,42 @@ public class PtkParam extends VersionedAbstractParam {
         getConfig().setProperty(ACTIVE_SCAN_THREAD_COUNT_KEY, this.activeScanThreadCount);
     }
 
+    public EngineRunLocation getDastRunLocation() {
+        return dastRunLocation;
+    }
+
+    public void setDastRunLocation(EngineRunLocation loc) {
+        this.dastRunLocation = loc;
+        getConfig().setProperty(String.format(ENGINE_RUN_LOCATION_KEY_FORMAT, "DAST"), loc.name());
+    }
+
+    public EngineRunLocation getSastRunLocation() {
+        return sastRunLocation;
+    }
+
+    public void setSastRunLocation(EngineRunLocation loc) {
+        this.sastRunLocation = loc;
+        getConfig().setProperty(String.format(ENGINE_RUN_LOCATION_KEY_FORMAT, "SAST"), loc.name());
+    }
+
+    public EngineRunLocation getIastRunLocation() {
+        return iastRunLocation;
+    }
+
+    public void setIastRunLocation(EngineRunLocation loc) {
+        this.iastRunLocation = loc;
+        getConfig().setProperty(String.format(ENGINE_RUN_LOCATION_KEY_FORMAT, "IAST"), loc.name());
+    }
+
+    public EngineRunLocation getEngineRunLocation(String engineName) {
+        return switch (engineName) {
+            case "DAST" -> dastRunLocation;
+            case "SAST" -> sastRunLocation;
+            case "IAST" -> iastRunLocation;
+            default -> EngineRunLocation.CLIENT_SPIDER;
+        };
+    }
+
     /**
      * Builds a stable cache key for the effective PTK config returned by {@code /ptk/config}. The
      * key changes whenever the automated-scanning mode or any enabled/disabled rule state changes.
@@ -272,6 +332,9 @@ public class PtkParam extends VersionedAbstractParam {
         key.append(isZapAutomationEnabled() ? "mode:auto" : "mode:manual");
         key.append("|automatedScanning:").append(automatedScanningEnabled);
         key.append("|activeScanRule:").append(activeScanRuleEnabled);
+        key.append("|dastRunLocation:").append(dastRunLocation.name());
+        key.append("|sastRunLocation:").append(sastRunLocation.name());
+        key.append("|iastRunLocation:").append(iastRunLocation.name());
         appendDefinitionCacheKey(key, resources != null ? resources.getSastModules() : null);
         appendDefinitionCacheKey(key, resources != null ? resources.getIastModules() : null);
         appendDefinitionCacheKey(key, resources != null ? resources.getDastModules() : null);

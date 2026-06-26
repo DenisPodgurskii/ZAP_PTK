@@ -14,6 +14,7 @@ import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.Set;
@@ -50,6 +51,7 @@ import org.zaproxy.addon.client.ClientCallBackImplementor;
 import org.zaproxy.addon.client.ClientCallBackUtils;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
+import org.zaproxy.addon.ptk.options.EngineRunLocation;
 import org.zaproxy.addon.ptk.options.PtkOptionsPanel;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.extension.alert.ExampleAlertProvider;
@@ -1195,11 +1197,12 @@ public class ExtensionPtk extends ExtensionAdaptor
         if (host == null || host.isBlank()) {
             return false;
         }
-        String normalizedHost = host.toLowerCase().strip();
+        String normalizedHost = host.toLowerCase(Locale.ROOT).strip();
         while (normalizedHost.endsWith(".")) {
             normalizedHost = normalizedHost.substring(0, normalizedHost.length() - 1);
         }
-        String normalizedPath = path == null || path.isBlank() ? "/" : path.toLowerCase();
+        String normalizedPath =
+                path == null || path.isBlank() ? "/" : path.toLowerCase(Locale.ROOT);
 
         if ("edge.microsoft.com".equals(normalizedHost)
                 && normalizedPath.startsWith("/componentupdater/")) {
@@ -1649,24 +1652,46 @@ public class ExtensionPtk extends ExtensionAdaptor
                 LOGGER.debug("PTK /ptk/config cache hit after lock");
                 return cachedConfigJson;
             }
+            EngineRunLocation currentContext =
+                    cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
+                            ? EngineRunLocation.ACTIVE_SCAN_RULE
+                            : EngineRunLocation.CLIENT_SPIDER;
+            Map<String, PtkModulesDefinition> config =
+                    PtkConfigFilter.filter(resources, param, currentContext);
+
+            // Auto mode if: deprecated flag set, active-scan-rule path, or engines are present
+            // for this context (covers the CLIENT_SPIDER run-location case).
             boolean zapAutomationEnabled =
                     param.isAutomatedScanningEnabled()
                             || (cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
-                                    && param.isActiveScanRuleEnabled());
+                                    && param.isActiveScanRuleEnabled())
+                            || !config.isEmpty();
             String mode = zapAutomationEnabled ? "auto" : "manual";
+
             LOGGER.info(
                     "PTK mode {} auto={} active={} effective={}",
                     mode,
                     param.isAutomatedScanningEnabled(),
                     param.isActiveScanRuleEnabled(),
                     zapAutomationEnabled);
+            LOGGER.info(
+                    "PTK config context={} initiator={} sast={} iast={} dast={}",
+                    currentContext,
+                    cbContext.initiator(),
+                    param.getSastRunLocation(),
+                    param.getIastRunLocation(),
+                    param.getDastRunLocation());
+            LOGGER.info(
+                    "PTK config engines enabled: sast={} iast={} dast={}",
+                    config.get("sast") != null,
+                    config.get("iast") != null,
+                    config.get("dast") != null);
 
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("mode", mode);
             response.put("contractVersion", 2);
             response.put("ptkControlSupported", true);
             response.put("controlPath", "/ptk/control");
-            Map<String, PtkModulesDefinition> config = PtkConfigFilter.filter(resources, param);
             response.put("sast", config.get("sast") != null ? config.get("sast") : Map.of());
             response.put("iast", config.get("iast") != null ? config.get("iast") : Map.of());
             response.put("dast", config.get("dast") != null ? config.get("dast") : Map.of());
@@ -3316,8 +3341,6 @@ public class ExtensionPtk extends ExtensionAdaptor
                     evidenceExtra);
             if ("forced_closed".equals(decision) || "failed".equals(decision)) {
                 LOGGER.warn(summary.toString());
-            } else if ("safe_to_close".equals(decision)) {
-                LOGGER.info(summary.toString());
             } else {
                 LOGGER.debug(summary.toString());
             }
@@ -3449,20 +3472,11 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
 
         private void logBrowserEvidenceAtSelectedLevel(String event, String summary) {
-            String normalizedEvent = event != null ? event : "";
-            if ("browser_session_invalid".equals(normalizedEvent)) {
+            if ("browser_session_invalid".equals(event != null ? event : "")) {
                 LOGGER.warn(summary);
-            } else if (isInfoBrowserEvidenceEvent(normalizedEvent)) {
-                LOGGER.info(summary);
             } else {
                 LOGGER.debug(summary);
             }
-        }
-
-        private boolean isInfoBrowserEvidenceEvent(String event) {
-            return "browser_loaded".equals(event)
-                    || "ptk_session_established".equals(event)
-                    || "ptk_session_terminal".equals(event);
         }
 
         @SuppressWarnings("unchecked")
@@ -3576,23 +3590,10 @@ public class ExtensionPtk extends ExtensionAdaptor
 
         private void logEngineEvidenceAtSelectedLevel(
                 String zapid, Map<String, Object> extra, String summary) {
-            String engine = getStringField(extra, "engine");
             String status = getStringField(extra, "status");
             String completionStatus = getStringField(extra, "completionStatus");
-            boolean failed = isFailedEngineEvidence(status, completionStatus);
-            boolean execution = isConcreteEngineExecutionEvidence(extra, status, completionStatus);
-
-            if (failed) {
+            if (isFailedEngineEvidence(status, completionStatus)) {
                 LOGGER.warn(summary);
-                return;
-            }
-
-            String key =
-                    (zapid != null && !zapid.isBlank() ? zapid : "unknown")
-                            + "|"
-                            + (engine != null && !engine.isBlank() ? engine : "unknown");
-            if (execution && engineEvidenceInfoLogged.add(key)) {
-                LOGGER.info(summary);
             } else {
                 LOGGER.debug(summary);
             }
@@ -3673,8 +3674,6 @@ public class ExtensionPtk extends ExtensionAdaptor
         private void logContractPhaseAtSelectedLevel(String phase, String summary) {
             if (isWarnContractPhase(phase)) {
                 LOGGER.warn(summary);
-            } else if (isInfoContractPhase(phase)) {
-                LOGGER.info(summary);
             } else {
                 LOGGER.debug(summary);
             }
@@ -3685,13 +3684,6 @@ public class ExtensionPtk extends ExtensionAdaptor
                     || "incomplete_close".equals(phase)
                     || "callback_bootstrap_failed".equals(phase)
                     || "callback_acquired_no_config".equals(phase);
-        }
-
-        private boolean isInfoContractPhase(String phase) {
-            return "session_started".equals(phase)
-                    || "terminal_progress_seen".equals(phase)
-                    || "publisher_drained".equals(phase)
-                    || "clean_close".equals(phase);
         }
 
         @Override
@@ -4608,7 +4600,7 @@ public class ExtensionPtk extends ExtensionAdaptor
             if (browserid == null || browserid.isBlank()) {
                 return false;
             }
-            String normalized = browserid.toLowerCase();
+            String normalized = browserid.toLowerCase(Locale.ROOT);
             return normalized.contains("chrome") || normalized.contains("edge");
         }
 
