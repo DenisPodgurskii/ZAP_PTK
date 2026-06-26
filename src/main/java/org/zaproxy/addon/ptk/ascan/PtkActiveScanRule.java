@@ -165,6 +165,7 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
                         .setUser(user)
                         .setSubtreeOnly(false)
                         .setExternalControl(true)
+                        .setExistingOnly(true)
                         .setHrefType(HistoryReference.TYPE_SCANNER)
                         .setTmpHrefType(HistoryReference.TYPE_SCANNER_TEMPORARY)
                         .setInitiator(HttpSender.ACTIVE_SCANNER_INITIATOR)

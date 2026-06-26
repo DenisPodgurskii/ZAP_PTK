@@ -30,7 +30,7 @@ zapAddOn {
     addOnId.set("ptk")
     addOnName.set(if (diagnosticBuild) "OWASP PTK Diagnostic" else "OWASP PTK")
     zapVersion.set("2.17.0")
-    addOnStatus.set(AddOnStatus.ALPHA)
+    addOnStatus.set(AddOnStatus.BETA)
 
     manifest {
         author.set("ZAP Dev Team")
@@ -51,7 +51,7 @@ zapAddOn {
                 }
                 register("selenium")
                 register("client") {
-                    version.set(">=0.27.0")
+                    version.set(">=0.28.0")
                 }
             }
         }
@@ -90,7 +90,7 @@ dependencies {
         zapAddOn("org.zaproxy.addon:automation:0.60.0")
         zapAddOn("org.zaproxy.addon:commonlib:1.40.0")
     }
-    zapAddOn("org.zaproxy.addon:client:0.27.0")
+    zapAddOn("org.zaproxy.addon:client:0.28.0")
     zapAddOn("org.zaproxy.addon:selenium:15.49.0")
     compileOnly("org.projectlombok:lombok:1.18.34")
     annotationProcessor("org.projectlombok:lombok:1.18.34")
