@@ -47,7 +47,7 @@ import org.zaproxy.zap.extension.selenium.Browser;
 public class PtkParam extends VersionedAbstractParam {
 
     private static final Logger LOGGER = LogManager.getLogger(PtkParam.class);
-    private static final int CURRENT_CONFIG_VERSION = 2;
+    static final int CURRENT_CONFIG_VERSION = 3;
 
     private static final String BASE_KEY = "ptk";
     private static final String CONFIG_VERSION_KEY = BASE_KEY + VERSION_ATTRIBUTE;
@@ -83,7 +83,7 @@ public class PtkParam extends VersionedAbstractParam {
             EngineRunLocation.CLIENT_SPIDER;
 
     private boolean automatedScanningEnabled = false;
-    private boolean activeScanRuleEnabled = false;
+    private boolean activeScanRuleEnabled = true;
     private String activeScanBrowserId = DEFAULT_ACTIVE_SCAN_BROWSER_ID;
     private int activeScanActionWaitTimeInSecs = DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME;
     private int activeScanThreadCount = getDefaultActiveScanThreadCount();
@@ -99,7 +99,7 @@ public class PtkParam extends VersionedAbstractParam {
     @Override
     protected void parseImpl() {
         automatedScanningEnabled = getConfig().getBoolean(AUTOMATED_SCANNING_ENABLED_KEY, false);
-        activeScanRuleEnabled = getConfig().getBoolean(ACTIVE_SCAN_RULE_ENABLED_KEY, false);
+        activeScanRuleEnabled = getConfig().getBoolean(ACTIVE_SCAN_RULE_ENABLED_KEY, true);
         activeScanBrowserId = getString(ACTIVE_SCAN_BROWSER_ID_KEY, DEFAULT_ACTIVE_SCAN_BROWSER_ID);
         activeScanActionWaitTimeInSecs =
                 getInt(ACTIVE_SCAN_ACTION_WAIT_TIME_KEY, DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME);
@@ -134,12 +134,17 @@ public class PtkParam extends VersionedAbstractParam {
     }
 
     @Override
+    @SuppressWarnings("fallthrough")
     protected void updateConfigsImpl(int fileVersion) {
         switch (fileVersion) {
             case NO_CONFIG_VERSION:
                 break;
             case 1:
                 migrateV1ToV2();
+                // fall through
+            case 2:
+                getConfig().setProperty(ACTIVE_SCAN_RULE_ENABLED_KEY, true);
+                activeScanRuleEnabled = true;
                 break;
             default:
                 break;

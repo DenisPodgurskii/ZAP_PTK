@@ -44,7 +44,7 @@ class PtkParamTest {
         assertTrue(param.isModuleEnabled(SAST, SAST_MOD));
         assertTrue(param.isRuleEnabled(SAST, SAST_MOD, SAST_RULE_0));
         assertFalse(param.isAutomatedScanningEnabled());
-        assertFalse(param.isActiveScanRuleEnabled());
+        assertTrue(param.isActiveScanRuleEnabled());
         assertEquals(PtkParam.DEFAULT_ACTIVE_SCAN_BROWSER_ID, param.getActiveScanBrowserId());
         assertEquals(
                 PtkParam.DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME,
@@ -175,7 +175,7 @@ class PtkParamTest {
         assertTrue(param.isModuleEnabled(IAST, IAST_MOD));
         assertTrue(param.isRuleEnabled(SAST, SAST_MOD, SAST_RULE_0));
         // Version key must not be affected
-        assertEquals(2, config.getInt("ptk[@version]"));
+        assertEquals(PtkParam.CURRENT_CONFIG_VERSION, config.getInt("ptk[@version]"));
         // No keys left under ptk.scanrules
         Iterator<String> remaining = config.getKeys(PtkParam.SCAN_RULES_KEY);
         assertFalse(remaining.hasNext());
@@ -205,13 +205,14 @@ class PtkParamTest {
 
     @Test
     void configCacheKey_changesWhenActiveScanRuleModeChanges() {
+        String activeRuleKey = param.buildConfigCacheKey(null);
+        assertTrue(activeRuleKey.startsWith("mode:auto"));
+
+        param.setActiveScanRuleEnabled(false);
         String manualKey = param.buildConfigCacheKey(null);
 
-        param.setActiveScanRuleEnabled(true);
-        String activeRuleKey = param.buildConfigCacheKey(null);
-
         assertFalse(activeRuleKey.equals(manualKey));
-        assertTrue(activeRuleKey.startsWith("mode:auto"));
+        assertTrue(manualKey.startsWith("mode:manual"));
     }
 
     // --- migration: v1 → v2 ---
@@ -235,7 +236,7 @@ class PtkParamTest {
         // Rules NOT in the v1 list must be disabled
         assertFalse(migrated.isRuleEnabled(SAST, SAST_MOD, "no-appendchild"));
 
-        assertEquals(2, config.getInt("ptk[@version]"));
+        assertEquals(PtkParam.CURRENT_CONFIG_VERSION, config.getInt("ptk[@version]"));
         assertFalse(config.containsKey("ptk.scanrules.checked"));
     }
 
@@ -248,7 +249,7 @@ class PtkParamTest {
         migrated.load(config);
 
         assertTrue(migrated.isRuleEnabled(SAST, SAST_MOD, SAST_RULE_0));
-        assertEquals(2, config.getInt("ptk[@version]"));
+        assertEquals(PtkParam.CURRENT_CONFIG_VERSION, config.getInt("ptk[@version]"));
         assertFalse(config.getKeys(PtkParam.SCAN_RULES_KEY).hasNext());
     }
 
@@ -298,7 +299,7 @@ class PtkParamTest {
         assertTrue(migrated.isEngineEnabled(IAST));
         assertTrue(migrated.isEngineEnabled(DAST));
         assertTrue(migrated.isRuleEnabled(SAST, SAST_MOD, SAST_RULE_0));
-        assertEquals(2, config.getInt("ptk[@version]"));
+        assertEquals(PtkParam.CURRENT_CONFIG_VERSION, config.getInt("ptk[@version]"));
     }
 
     @Test
@@ -311,7 +312,7 @@ class PtkParamTest {
         PtkParam migrated = new PtkParam();
         migrated.load(config);
 
-        assertEquals(2, config.getInt("ptk[@version]"));
+        assertEquals(PtkParam.CURRENT_CONFIG_VERSION, config.getInt("ptk[@version]"));
 
         // Loading again from the same (already-migrated) config object must not re-disable rules.
         PtkParam reloaded = new PtkParam();
@@ -328,6 +329,41 @@ class PtkParamTest {
         migrated.load(config);
 
         assertTrue(migrated.isAutomatedScanningEnabled());
+    }
+
+    // --- migration: v2 → v3 ---
+
+    @Test
+    void migration_fromV2_enablesActiveScanRule() {
+        config.setProperty("ptk[@version]", 2);
+        config.setProperty("ptk.activescan.rule.enabled", false);
+
+        PtkParam migrated = new PtkParam();
+        migrated.load(config);
+
+        assertTrue(migrated.isActiveScanRuleEnabled());
+        assertEquals(PtkParam.CURRENT_CONFIG_VERSION, config.getInt("ptk[@version]"));
+    }
+
+    @Test
+    void migration_fromV2_activeScanRuleEnabledWrittenToConfig() {
+        config.setProperty("ptk[@version]", 2);
+
+        PtkParam migrated = new PtkParam();
+        migrated.load(config);
+
+        assertTrue(config.getBoolean("ptk.activescan.rule.enabled"));
+    }
+
+    @Test
+    void migration_fromV1_alsoEnablesActiveScanRule() {
+        config.setProperty("ptk[@version]", 1);
+
+        PtkParam migrated = new PtkParam();
+        migrated.load(config);
+
+        assertTrue(migrated.isActiveScanRuleEnabled());
+        assertEquals(PtkParam.CURRENT_CONFIG_VERSION, config.getInt("ptk[@version]"));
     }
 
     // --- new install ---
