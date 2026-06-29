@@ -10,10 +10,13 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.zaproxy.addon.ptk.model.EngineMapping;
+import org.zaproxy.addon.ptk.model.ModuleRuleMapping;
 import org.zaproxy.addon.ptk.model.PtkAttack;
 import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.PtkRule;
+import org.zaproxy.addon.ptk.model.ZapMappingDefinition;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
@@ -26,6 +29,8 @@ class PtkConfigFilterTest {
     void setUp() {
         param = new PtkParam();
         param.load(new ZapXmlConfiguration());
+        // Tests exercise the per-flag code path; opt out of recommended-defaults mode.
+        param.setUseRecommendedDefaults(false);
     }
 
     // --- default (no flags) ---
@@ -270,5 +275,81 @@ class PtkConfigFilterTest {
         a.setId(id);
         a.setName(id);
         return a;
+    }
+
+    private static ZapMappingDefinition zapMappingFor(
+            String engine, ModuleRuleMapping... mappings) {
+        EngineMapping em = new EngineMapping(engine, null, Arrays.asList(mappings));
+        return new ZapMappingDefinition(null, 1, List.of(em));
+    }
+
+    // --- recommended defaults mode ---
+
+    @Test
+    void filter_recommendedDefaults_noZapMapping_includesAllRules() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1"), rule("r2")));
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(sast, null, null, null);
+        param.setUseRecommendedDefaults(true);
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        assertNotNull(result.get("sast"));
+        assertEquals(2, result.get("sast").getModules().get(0).getRules().size());
+    }
+
+    @Test
+    void filter_recommendedDefaults_moduleRecommendedFalse_excludesModule() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1"), rule("r2")));
+        ModuleRuleMapping mm = new ModuleRuleMapping();
+        mm.setModuleId("m1");
+        mm.setRecommended(false);
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(
+                        sast, null, null, zapMappingFor("SAST", mm));
+        param.setUseRecommendedDefaults(true);
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        assertNull(result.get("sast"));
+    }
+
+    @Test
+    void filter_recommendedDefaults_ruleOverrideFalse_excludesOnlyThatRule() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1"), rule("r2")));
+        ModuleRuleMapping mm = new ModuleRuleMapping();
+        mm.setModuleId("m1");
+        mm.setRecommended(true);
+        mm.setRecommendedRuleOverrides(Map.of("r1", false));
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(
+                        sast, null, null, zapMappingFor("SAST", mm));
+        param.setUseRecommendedDefaults(true);
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        assertNotNull(result.get("sast"));
+        List<PtkRule> rules = result.get("sast").getModules().get(0).getRules();
+        assertEquals(1, rules.size());
+        assertEquals("r2", rules.get(0).getId());
+    }
+
+    @Test
+    void filter_recommendedDefaults_ignoresParamRuleFlags() {
+        PtkModulesDefinition sast = definition("SAST", module("m1", rule("r1"), rule("r2")));
+        ModuleRuleMapping mm = new ModuleRuleMapping();
+        mm.setModuleId("m1");
+        mm.setRecommended(true);
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(
+                        sast, null, null, zapMappingFor("SAST", mm));
+        param.setUseRecommendedDefaults(true);
+        // r1 is disabled in the param flags but recommended mode should include it
+        // (recommended=true)
+        param.setRuleEnabled("SAST", "m1", "r1", false);
+
+        Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
+
+        assertEquals(2, result.get("sast").getModules().get(0).getRules().size());
     }
 }

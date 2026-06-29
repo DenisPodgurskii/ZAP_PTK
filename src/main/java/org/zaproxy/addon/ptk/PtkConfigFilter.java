@@ -57,9 +57,9 @@ public final class PtkConfigFilter {
             if (resources.getDastModules() != null) out.put("dast", resources.getDastModules());
             return out;
         }
-        addFiltered(out, "sast", resources.getSastModules(), param, currentContext);
-        addFiltered(out, "iast", resources.getIastModules(), param, currentContext);
-        addFiltered(out, "dast", resources.getDastModules(), param, currentContext);
+        addFiltered(out, "sast", resources.getSastModules(), param, resources, currentContext);
+        addFiltered(out, "iast", resources.getIastModules(), param, resources, currentContext);
+        addFiltered(out, "dast", resources.getDastModules(), param, resources, currentContext);
         return out;
     }
 
@@ -68,6 +68,7 @@ public final class PtkConfigFilter {
             String key,
             PtkModulesDefinition def,
             PtkParam param,
+            PtkResourcesLoader.LoadedPtkResources resources,
             EngineRunLocation currentContext) {
         if (def == null) return;
         if (currentContext != null) {
@@ -76,13 +77,17 @@ public final class PtkConfigFilter {
                 return;
             }
         }
-        PtkModulesDefinition filtered = filterDefinition(def, param);
+        PtkModulesDefinition filtered = filterDefinition(def, param, resources);
         if (filtered != null) out.put(key, filtered);
     }
 
-    private static PtkModulesDefinition filterDefinition(PtkModulesDefinition def, PtkParam param) {
+    private static PtkModulesDefinition filterDefinition(
+            PtkModulesDefinition def,
+            PtkParam param,
+            PtkResourcesLoader.LoadedPtkResources resources) {
         if (def == null || def.getModules() == null) return null;
         String engine = def.getEngine();
+        boolean useRecommended = param.isUseRecommendedDefaults();
         List<PtkModule> filteredModules = new ArrayList<>();
         for (PtkModule mod : def.getModules()) {
             String moduleId = mod.getId();
@@ -90,7 +95,11 @@ public final class PtkConfigFilter {
             if (mod.getRules() != null) {
                 ruleList = new ArrayList<>();
                 for (PtkRule r : mod.getRules()) {
-                    if (r.getId() != null && param.isRuleEnabled(engine, moduleId, r.getId())) {
+                    boolean enabled =
+                            useRecommended
+                                    ? resources.isRecommendedEnabled(engine, moduleId, r.getId())
+                                    : param.isRuleEnabled(engine, moduleId, r.getId());
+                    if (r.getId() != null && enabled) {
                         ruleList.add(r);
                     }
                 }
@@ -99,7 +108,11 @@ public final class PtkConfigFilter {
             if (mod.getAttacks() != null) {
                 attackList = new ArrayList<>();
                 for (PtkAttack a : mod.getAttacks()) {
-                    if (a.getId() != null && param.isRuleEnabled(engine, moduleId, a.getId())) {
+                    boolean enabled =
+                            useRecommended
+                                    ? resources.isRecommendedEnabled(engine, moduleId, a.getId())
+                                    : param.isRuleEnabled(engine, moduleId, a.getId());
+                    if (a.getId() != null && enabled) {
                         attackList.add(a);
                     }
                 }

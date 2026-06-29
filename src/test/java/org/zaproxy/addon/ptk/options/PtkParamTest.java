@@ -181,6 +181,69 @@ class PtkParamTest {
         assertFalse(remaining.hasNext());
     }
 
+    // --- useRecommendedDefaults ---
+
+    @Test
+    void freshConfig_useRecommendedDefaultsIsTrue() {
+        assertTrue(param.isUseRecommendedDefaults());
+    }
+
+    @Test
+    void useRecommendedDefaults_setFalse_persistedAndReloaded() {
+        param.setUseRecommendedDefaults(false);
+
+        PtkParam reloaded = new PtkParam();
+        reloaded.load(config);
+
+        assertFalse(reloaded.isUseRecommendedDefaults());
+    }
+
+    @Test
+    void useRecommendedDefaults_setTrue_persistedAndReloaded() {
+        param.setUseRecommendedDefaults(false);
+        param.setUseRecommendedDefaults(true);
+
+        PtkParam reloaded = new PtkParam();
+        reloaded.load(config);
+
+        assertTrue(reloaded.isUseRecommendedDefaults());
+    }
+
+    @Test
+    void clearScanRulesConfig_doesNotClearUseRecommendedDefaults() {
+        param.setUseRecommendedDefaults(false);
+        param.setEngineEnabled(SAST, false);
+
+        param.clearScanRulesConfig();
+
+        // ptk.useRecommendedDefaults is outside ptk.scanrules.* and must survive the clear
+        assertFalse(param.isUseRecommendedDefaults());
+    }
+
+    @Test
+    void configCacheKey_includesUseRecommendedDefaultsFlag() {
+        param.setUseRecommendedDefaults(true);
+        String keyOn = param.buildConfigCacheKey(null);
+
+        param.setUseRecommendedDefaults(false);
+        String keyOff = param.buildConfigCacheKey(null);
+
+        assertTrue(keyOn.contains("useRecommendedDefaults:true"));
+        assertTrue(keyOff.contains("useRecommendedDefaults:false"));
+        assertFalse(keyOn.equals(keyOff));
+    }
+
+    @Test
+    void configCacheKey_whenRecommendedTrue_perRuleFlagsIgnored() {
+        param.setUseRecommendedDefaults(true);
+        String keyBefore = param.buildConfigCacheKey(null);
+
+        param.setRuleEnabled(SAST, SAST_MOD, SAST_RULE_0, false);
+        String keyAfter = param.buildConfigCacheKey(null);
+
+        assertEquals(keyBefore, keyAfter);
+    }
+
     // --- automatedScanning ---
 
     @Test
