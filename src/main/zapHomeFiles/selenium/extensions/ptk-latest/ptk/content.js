@@ -424,10 +424,33 @@ function installPtkSpaUrlNotifier(sourceScript = 'content.js') {
         }).catch(() => { });
     };
 
-    const wrapHistory = (fn) => function () {
-        const ret = fn.apply(this, arguments);
-        notify(`history.${fn?.name || 'state'}`);
-        return ret;
+    const wrapHistory = (fn) => {
+        // Use Proxy so history.pushState.toString() still returns "[native code]".
+        // Sites with anti-bot/integrity checks (e.g. Akamai) verify the native
+        // signature and abort login flows when they see a plain wrapper function.
+        if (typeof Proxy === 'function' && typeof Reflect !== 'undefined') {
+            return new Proxy(fn, {
+                apply(target, thisArg, args) {
+                    const ret = Reflect.apply(target, thisArg, args);
+                    notify(`history.${target?.name || 'state'}`);
+                    return ret;
+                }
+            });
+        }
+        // Fallback for environments without Proxy: preserve toString manually.
+        const wrapper = function () {
+            const ret = fn.apply(this, arguments);
+            notify(`history.${fn?.name || 'state'}`);
+            return ret;
+        };
+        try {
+            Object.defineProperty(wrapper, 'toString', {
+                value: fn.toString.bind(fn),
+                writable: true,
+                configurable: true
+            });
+        } catch (_) {}
+        return wrapper;
     };
 
     try {

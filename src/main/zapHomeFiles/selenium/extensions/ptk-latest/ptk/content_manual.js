@@ -298,6 +298,7 @@ function ensureInjectBridge() {
         script.onload = () => {
             script.dataset.ptkInjectLoaded = 'true';
             onLoad();
+            try { script.remove(); } catch (_) {}
         };
         script.onerror = onError;
         const injectUrl = runtimeGetURL('ptk/inject.js');
@@ -368,10 +369,29 @@ setInterval(function () {
         }).catch(() => { })
     }
 
-    const wrapHistory = (fn) => function () {
-        const ret = fn.apply(this, arguments)
-        notify(`history.${fn?.name || 'state'}`)
-        return ret
+    const wrapHistory = (fn) => {
+        if (typeof Proxy === 'function' && typeof Reflect !== 'undefined') {
+            return new Proxy(fn, {
+                apply(target, thisArg, args) {
+                    const ret = Reflect.apply(target, thisArg, args)
+                    notify(`history.${target?.name || 'state'}`)
+                    return ret
+                }
+            })
+        }
+        const wrapper = function () {
+            const ret = fn.apply(this, arguments)
+            notify(`history.${fn?.name || 'state'}`)
+            return ret
+        }
+        try {
+            Object.defineProperty(wrapper, 'toString', {
+                value: fn.toString.bind(fn),
+                writable: true,
+                configurable: true
+            })
+        } catch (_) {}
+        return wrapper
     }
 
     try {
@@ -937,8 +957,10 @@ async function enableAutomationIfAllowed(reason = 'settings') {
         // Silently fail - automation stays disabled
     }
 
-    // Automation OFF: keep existing behavior (top frame only)
-    if (!automationEnabled && (!enabled || shouldInstallDisabledAutomationBridgeForDenial(initialAuthorization))) {
+    // Only install the disabled bridge when automation is explicitly ON in settings.
+    // Setting window.PTK_AUTOMATION on every page—even when automation is off—can
+    // trigger bot-detection systems (e.g. Akamai Bot Manager) and break login flows.
+    if (!automationEnabled && enabled && shouldInstallDisabledAutomationBridgeForDenial(initialAuthorization)) {
         installDisabledAutomationBridgeForTopFrame()
     }
 
@@ -1226,7 +1248,12 @@ function installPtkAutomationBridge(version, nonce, automationEnabledState) {
         script.dataset.ptkExtensionOrigin = new URL(bridgeUrl).origin
     } catch (_) { }
     if (automationEnabledState === true) {
-        script.onload = () => injectPtkAgentAutomationLayer()
+        script.onload = () => {
+            try { script.remove(); } catch (_) {}
+            injectPtkAgentAutomationLayer()
+        }
+    } else {
+        script.onload = () => { try { script.remove(); } catch (_) {} }
     }
     const parent = document.documentElement || document.head || document.body
     parent.appendChild(script)
