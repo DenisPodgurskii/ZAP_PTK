@@ -7,8 +7,11 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
+import org.zaproxy.addon.ptk.model.EngineMapping;
+import org.zaproxy.addon.ptk.model.ModuleRuleMapping;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.ZapMappingDefinition;
 
@@ -120,6 +123,39 @@ public class PtkResourcesLoader {
             if (iastModules != null) list.add(iastModules);
             if (dastModules != null) list.add(dastModules);
             return list;
+        }
+
+        /**
+         * Returns whether a rule/attack is enabled under "Use recommended defaults" mode.
+         *
+         * <p>Lookup order:
+         *
+         * <ol>
+         *   <li>Per-rule override in {@code recommendedRuleOverrides} for the matching module.
+         *   <li>Module-level {@code recommended} flag.
+         *   <li>Default {@code true} if the module is not present in the ZAP mapping.
+         * </ol>
+         *
+         * @param engine the engine name (e.g. "DAST", "SAST", "IAST")
+         * @param moduleId the module identifier
+         * @param ruleId the rule or attack identifier
+         * @return {@code true} if the rule should be active under recommended defaults
+         */
+        public boolean isRecommendedEnabled(String engine, String moduleId, String ruleId) {
+            if (zapMapping == null || zapMapping.getEngines() == null) return true;
+            for (EngineMapping em : zapMapping.getEngines()) {
+                if (!engine.equalsIgnoreCase(em.getEngine()) || em.getModuleMappings() == null)
+                    continue;
+                for (ModuleRuleMapping mm : em.getModuleMappings()) {
+                    if (!moduleId.equals(mm.getModuleId())) continue;
+                    Map<String, Boolean> overrides = mm.getRecommendedRuleOverrides();
+                    if (overrides != null && overrides.containsKey(ruleId)) {
+                        return overrides.get(ruleId);
+                    }
+                    return mm.isRecommended();
+                }
+            }
+            return true;
         }
     }
 }
