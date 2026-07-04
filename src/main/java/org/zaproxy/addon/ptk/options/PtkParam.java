@@ -52,6 +52,7 @@ public class PtkParam extends VersionedAbstractParam {
     private static final String BASE_KEY = "ptk";
     private static final String CONFIG_VERSION_KEY = BASE_KEY + VERSION_ATTRIBUTE;
     static final String SCAN_RULES_KEY = BASE_KEY + ".scanrules";
+    private static final String USE_RECOMMENDED_DEFAULTS_KEY = BASE_KEY + ".useRecommendedDefaults";
     // Key used by the v1 config format (positional path list); only read during migration.
     private static final String V1_CHECKED_LIST_KEY = SCAN_RULES_KEY + ".checked";
     private static final String AUTOMATED_SCANNING_ENABLED_KEY =
@@ -84,6 +85,7 @@ public class PtkParam extends VersionedAbstractParam {
 
     private boolean automatedScanningEnabled = false;
     private boolean activeScanRuleEnabled = true;
+    private boolean useRecommendedDefaults = true;
     private String activeScanBrowserId = DEFAULT_ACTIVE_SCAN_BROWSER_ID;
     private int activeScanActionWaitTimeInSecs = DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME;
     private int activeScanThreadCount = getDefaultActiveScanThreadCount();
@@ -100,6 +102,7 @@ public class PtkParam extends VersionedAbstractParam {
     protected void parseImpl() {
         automatedScanningEnabled = getConfig().getBoolean(AUTOMATED_SCANNING_ENABLED_KEY, false);
         activeScanRuleEnabled = getConfig().getBoolean(ACTIVE_SCAN_RULE_ENABLED_KEY, true);
+        useRecommendedDefaults = getConfig().getBoolean(USE_RECOMMENDED_DEFAULTS_KEY, true);
         activeScanBrowserId = getString(ACTIVE_SCAN_BROWSER_ID_KEY, DEFAULT_ACTIVE_SCAN_BROWSER_ID);
         activeScanActionWaitTimeInSecs =
                 getInt(ACTIVE_SCAN_ACTION_WAIT_TIME_KEY, DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME);
@@ -265,6 +268,15 @@ public class PtkParam extends VersionedAbstractParam {
         getConfig().setProperty(ACTIVE_SCAN_RULE_ENABLED_KEY, this.activeScanRuleEnabled);
     }
 
+    public boolean isUseRecommendedDefaults() {
+        return useRecommendedDefaults;
+    }
+
+    public void setUseRecommendedDefaults(boolean use) {
+        this.useRecommendedDefaults = use;
+        getConfig().setProperty(USE_RECOMMENDED_DEFAULTS_KEY, this.useRecommendedDefaults);
+    }
+
     public String getActiveScanBrowserId() {
         return activeScanBrowserId;
     }
@@ -340,9 +352,14 @@ public class PtkParam extends VersionedAbstractParam {
         key.append("|dastRunLocation:").append(dastRunLocation.name());
         key.append("|sastRunLocation:").append(sastRunLocation.name());
         key.append("|iastRunLocation:").append(iastRunLocation.name());
-        appendDefinitionCacheKey(key, resources != null ? resources.getSastModules() : null);
-        appendDefinitionCacheKey(key, resources != null ? resources.getIastModules() : null);
-        appendDefinitionCacheKey(key, resources != null ? resources.getDastModules() : null);
+        key.append("|useRecommendedDefaults:").append(useRecommendedDefaults);
+        // When recommended defaults are active the effective rule states come from the static
+        // zap-mapping.json resource, so per-rule flags don't affect the served config.
+        if (!useRecommendedDefaults) {
+            appendDefinitionCacheKey(key, resources != null ? resources.getSastModules() : null);
+            appendDefinitionCacheKey(key, resources != null ? resources.getIastModules() : null);
+            appendDefinitionCacheKey(key, resources != null ? resources.getDastModules() : null);
+        }
         return key.toString();
     }
 

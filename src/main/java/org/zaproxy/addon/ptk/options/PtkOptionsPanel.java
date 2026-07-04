@@ -1,6 +1,7 @@
 package org.zaproxy.addon.ptk.options;
 
 import java.awt.BorderLayout;
+import java.awt.Component;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -14,11 +15,14 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
+import javax.swing.JTree;
 import javax.swing.ToolTipManager;
+import javax.swing.UIManager;
 import javax.swing.border.CompoundBorder;
 import javax.swing.border.EmptyBorder;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
+import javax.swing.tree.TreeCellRenderer;
 import javax.swing.tree.TreeModel;
 import javax.swing.tree.TreePath;
 import org.parosproxy.paros.Constant;
@@ -70,6 +74,8 @@ public class PtkOptionsPanel extends AbstractParamPanel {
     private final ZapNumberSpinner actionWaitTimeSpinner;
     private final ZapNumberSpinner threadCountSpinner;
     private final JCheckBoxTree tree;
+    private final JCheckBox useRecommendedDefaultsCheckBox;
+    private final LockedAwareCellRenderer lockedRenderer;
     private final JComboBox<EngineRunLocation> dastRunLocationComboBox;
     private final JComboBox<EngineRunLocation> sastRunLocationComboBox;
     private final JComboBox<EngineRunLocation> iastRunLocationComboBox;
@@ -94,6 +100,11 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         threadCountSpinner =
                 new ZapNumberSpinner(
                         1, PtkParam.getDefaultActiveScanThreadCount(), Integer.MAX_VALUE);
+        useRecommendedDefaultsCheckBox =
+                new JCheckBox(
+                        Constant.messages.getString(
+                                MESSAGE_PREFIX + "scanRules.useRecommendedDefaults"),
+                        false);
         enableActiveScanRuleCheckBox.addItemListener(e -> syncActiveScanTabState());
         dastRunLocationComboBox = createRunLocationComboBox();
         dastRunLocationComboBox.setSelectedItem(PtkParam.DEFAULT_DAST_RUN_LOCATION);
@@ -119,11 +130,30 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         ToolTipManager.sharedInstance().registerComponent(tree);
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
+        lockedRenderer = new LockedAwareCellRenderer(tree);
+        tree.setCellRenderer(lockedRenderer);
         tree.setModel(buildTreeModel());
         expandEnginesAndModulesOnly(tree);
         checkAll(tree);
 
+        useRecommendedDefaultsCheckBox.addItemListener(
+                e -> {
+                    boolean useRecommended = useRecommendedDefaultsCheckBox.isSelected();
+                    if (useRecommended) {
+                        PtkResourcesLoader.LoadedPtkResources resources =
+                                new PtkResourcesLoader().loadAll();
+                        applyRecommendedStateToTree(resources);
+                    }
+                    syncCheckboxLock(useRecommended);
+                    tree.repaint();
+                });
+
+        JPanel scanRulesHeader = new JPanel(new BorderLayout());
+        scanRulesHeader.setBorder(new EmptyBorder(4, 4, 2, 4));
+        scanRulesHeader.add(useRecommendedDefaultsCheckBox, BorderLayout.WEST);
+
         JPanel scanRulesTab = new JPanel(new BorderLayout());
+        scanRulesTab.add(scanRulesHeader, BorderLayout.NORTH);
         scanRulesTab.add(new JScrollPane(tree), BorderLayout.CENTER);
 
         JPanel activeScanTab = new JPanel(new GridBagLayout());
@@ -345,6 +375,121 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         tree.setModel(buildTreeModel());
         expandEnginesAndModulesOnly(tree);
 
+        PtkResourcesLoader.LoadedPtkResources resources = new PtkResourcesLoader().loadAll();
+        boolean useRecommended = param.isUseRecommendedDefaults();
+        useRecommendedDefaultsCheckBox.setSelected(useRecommended);
+        if (useRecommended) {
+            applyRecommendedStateToTree(resources);
+        } else {
+            applyParamStateToTree(param);
+        }
+        syncCheckboxLock(useRecommended);
+    }
+
+    @Override
+    public void saveParam(Object obj) throws Exception {
+        PtkParam param = getPtkParam(obj);
+        boolean activeScanRuleEnabled = enableActiveScanRuleCheckBox.isSelected();
+        param.setActiveScanRuleEnabled(activeScanRuleEnabled);
+        if (activeScanRuleEnabled) {
+            param.setAutomatedScanningEnabled(false);
+        } else {
+            param.setAutomatedScanningEnabled(enableAutomatedScanningCheckBox.isSelected());
+        }
+        String browserId = getSelectedBrowserId();
+        if (browserId != null) {
+            param.setActiveScanBrowserId(browserId);
+        }
+        param.setActiveScanActionWaitTimeInSecs(actionWaitTimeSpinner.getValue());
+        param.setActiveScanThreadCount(threadCountSpinner.getValue());
+        param.setSastRunLocation(
+                getSelectedRunLocation(
+                        sastRunLocationComboBox, PtkParam.DEFAULT_SAST_RUN_LOCATION));
+        param.setIastRunLocation(
+                getSelectedRunLocation(
+                        iastRunLocationComboBox, PtkParam.DEFAULT_IAST_RUN_LOCATION));
+        param.setDastRunLocation(
+                getSelectedRunLocation(
+                        dastRunLocationComboBox, PtkParam.DEFAULT_DAST_RUN_LOCATION));
+
+        boolean useRecommended = useRecommendedDefaultsCheckBox.isSelected();
+
+        if (!useRecommended) {
+            // Collect the IDs of enabled leaves (rule/attack nodes only; ignore parent paths).
+            Set<String> enabledLeafIds = new HashSet<>();
+            TreePath[] checked = tree.getCheckedPaths();
+            if (checked != null) {
+                for (TreePath path : checked) {
+                    DefaultMutableTreeNode node =
+                            (DefaultMutableTreeNode) path.getLastPathComponent();
+                    if (node.isLeaf()) {
+                        String s = treePathToIdString(path);
+                        if (!s.isEmpty()) enabledLeafIds.add(s);
+                    }
+                }
+            }
+            LoadedPtkResources resources = new PtkResourcesLoader().loadAll();
+            // saveFromEnabledLeafs calls clearScanRulesConfig() which wipes all keys under
+            // ptk.scanrules — setUseRecommendedDefaults must be called after to survive the clear.
+            param.saveFromEnabledLeafs(enabledLeafIds, resources);
+        }
+        param.setUseRecommendedDefaults(useRecommended);
+    }
+
+    /**
+     * Populates the checkbox tree with the recommended state from {@code resources}. Starts
+     * all-checked then unchecks items that are recommended-off, mirroring the pattern used by
+     * {@link #applyParamStateToTree}.
+     */
+    private void applyRecommendedStateToTree(PtkResourcesLoader.LoadedPtkResources resources) {
+        checkAll(tree);
+        DefaultMutableTreeNode root = (DefaultMutableTreeNode) tree.getModel().getRoot();
+        for (int ei = 0; ei < root.getChildCount(); ei++) {
+            DefaultMutableTreeNode engineNode = (DefaultMutableTreeNode) root.getChildAt(ei);
+            String engine = nodeId(engineNode);
+            boolean anyEnabledInEngine = false;
+
+            for (int mi = 0; mi < engineNode.getChildCount(); mi++) {
+                DefaultMutableTreeNode moduleNode =
+                        (DefaultMutableTreeNode) engineNode.getChildAt(mi);
+                String moduleId = nodeId(moduleNode);
+                boolean anyEnabledInModule = false;
+
+                for (int ri = 0; ri < moduleNode.getChildCount(); ri++) {
+                    DefaultMutableTreeNode ruleNode =
+                            (DefaultMutableTreeNode) moduleNode.getChildAt(ri);
+                    if (resources.isRecommendedEnabled(engine, moduleId, nodeId(ruleNode))) {
+                        anyEnabledInModule = true;
+                        anyEnabledInEngine = true;
+                    }
+                }
+
+                if (!anyEnabledInModule) {
+                    tree.checkSubTree(new TreePath(moduleNode.getPath()), false);
+                } else {
+                    for (int ri = 0; ri < moduleNode.getChildCount(); ri++) {
+                        DefaultMutableTreeNode ruleNode =
+                                (DefaultMutableTreeNode) moduleNode.getChildAt(ri);
+                        String ruleId = nodeId(ruleNode);
+                        if (!resources.isRecommendedEnabled(engine, moduleId, ruleId)) {
+                            tree.check(new TreePath(ruleNode.getPath()), false);
+                        }
+                    }
+                }
+            }
+
+            if (!anyEnabledInEngine) {
+                tree.checkSubTree(new TreePath(engineNode.getPath()), false);
+            }
+        }
+    }
+
+    /**
+     * Populates the checkbox tree with the stored rule-enabled state from {@code param}. This is
+     * the original {@code initParam} tree-population logic, extracted so it can be called when
+     * toggling off "Use recommended defaults".
+     */
+    private void applyParamStateToTree(PtkParam param) {
         // JCheckBoxTree.check(leaf, true) does NOT propagate isSelected=true up to parent
         // nodes — only checkSubTree does. Start from all-checked so parents are already
         // selected, then uncheck disabled nodes top-down: checkSubTree for fully-disabled
@@ -391,47 +536,27 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         }
     }
 
-    @Override
-    public void saveParam(Object obj) throws Exception {
-        PtkParam param = getPtkParam(obj);
-        boolean activeScanRuleEnabled = enableActiveScanRuleCheckBox.isSelected();
-        param.setActiveScanRuleEnabled(activeScanRuleEnabled);
-        if (activeScanRuleEnabled) {
-            param.setAutomatedScanningEnabled(false);
-        } else {
-            param.setAutomatedScanningEnabled(enableAutomatedScanningCheckBox.isSelected());
-        }
-        String browserId = getSelectedBrowserId();
-        if (browserId != null) {
-            param.setActiveScanBrowserId(browserId);
-        }
-        param.setActiveScanActionWaitTimeInSecs(actionWaitTimeSpinner.getValue());
-        param.setActiveScanThreadCount(threadCountSpinner.getValue());
-        param.setSastRunLocation(
-                getSelectedRunLocation(
-                        sastRunLocationComboBox, PtkParam.DEFAULT_SAST_RUN_LOCATION));
-        param.setIastRunLocation(
-                getSelectedRunLocation(
-                        iastRunLocationComboBox, PtkParam.DEFAULT_IAST_RUN_LOCATION));
-        param.setDastRunLocation(
-                getSelectedRunLocation(
-                        dastRunLocationComboBox, PtkParam.DEFAULT_DAST_RUN_LOCATION));
+    /**
+     * Locks or unlocks the checkboxes in the tree. When locked the checkboxes are shown greyed-out
+     * (visible but not interactive); the tree expand/collapse controls remain fully functional.
+     */
+    private void syncCheckboxLock(boolean locked) {
+        lockedRenderer.setLocked(locked);
+        setAllCheckBoxesEnabled(!locked);
+    }
 
-        // Collect the IDs of enabled leaves (rule/attack nodes only; ignore parent paths).
-        Set<String> enabledLeafIds = new HashSet<>();
-        TreePath[] checked = tree.getCheckedPaths();
-        if (checked != null) {
-            for (TreePath path : checked) {
-                DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
-                if (node.isLeaf()) {
-                    String s = treePathToIdString(path);
-                    if (!s.isEmpty()) enabledLeafIds.add(s);
-                }
-            }
-        }
+    private void setAllCheckBoxesEnabled(boolean enabled) {
+        DefaultMutableTreeNode root = (DefaultMutableTreeNode) tree.getModel().getRoot();
+        if (root == null) return;
+        setCheckBoxesEnabledRecursive(new TreePath(root), enabled);
+    }
 
-        LoadedPtkResources resources = new PtkResourcesLoader().loadAll();
-        param.saveFromEnabledLeafs(enabledLeafIds, resources);
+    private void setCheckBoxesEnabledRecursive(TreePath path, boolean enabled) {
+        tree.setCheckBoxEnabled(path, enabled);
+        DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
+        for (int i = 0; i < node.getChildCount(); i++) {
+            setCheckBoxesEnabledRecursive(path.pathByAddingChild(node.getChildAt(i)), enabled);
+        }
     }
 
     private static PtkParam getPtkParam(Object obj) {
@@ -510,5 +635,67 @@ public class PtkOptionsPanel extends AbstractParamPanel {
     @Override
     public String getHelpIndex() {
         return "ptk.options";
+    }
+
+    /**
+     * Cell renderer for the scan-rules tree that shows checkboxes as greyed-out (disabled) when the
+     * "Use recommended defaults" mode is active, while still displaying them. This lets users see
+     * which rules are included in the recommended set without being able to change them. The tree's
+     * expand/collapse controls are unaffected.
+     */
+    private static class LockedAwareCellRenderer extends JPanel implements TreeCellRenderer {
+
+        private static final long serialVersionUID = 1L;
+
+        private final JCheckBoxTree tree;
+        private final JCheckBox checkBox;
+        private final JLabel label;
+        private boolean locked;
+
+        LockedAwareCellRenderer(JCheckBoxTree tree) {
+            super(new BorderLayout());
+            this.tree = tree;
+            checkBox = new JCheckBox();
+            label = new JLabel();
+            label.setOpaque(true);
+            add(checkBox, BorderLayout.CENTER);
+            add(label, BorderLayout.EAST);
+            setOpaque(false);
+        }
+
+        void setLocked(boolean locked) {
+            this.locked = locked;
+        }
+
+        @Override
+        public Component getTreeCellRendererComponent(
+                JTree jtree,
+                Object value,
+                boolean selected,
+                boolean expanded,
+                boolean leaf,
+                int row,
+                boolean hasFocus) {
+            DefaultMutableTreeNode node = (DefaultMutableTreeNode) value;
+            TreePath tp = new TreePath(node.getPath());
+            label.setText(value != null ? value.toString() : "");
+            label.setForeground(
+                    UIManager.getColor(
+                            selected ? "Tree.selectionForeground" : "Tree.textForeground"));
+            label.setBackground(
+                    UIManager.getColor(
+                            selected ? "Tree.selectionBackground" : "Tree.textBackground"));
+            try {
+                boolean checked = tree.isChecked(tp);
+                boolean partial = tree.isSelectedPartially(tp);
+                checkBox.setSelected(checked);
+                checkBox.setOpaque(partial);
+                checkBox.setVisible(true);
+                checkBox.setEnabled(!locked);
+            } catch (NullPointerException e) {
+                checkBox.setVisible(false);
+            }
+            return this;
+        }
     }
 }

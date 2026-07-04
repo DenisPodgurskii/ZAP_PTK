@@ -8,6 +8,7 @@
         {
           "moduleId": "sql_injection",
           "baseAlertId": 200000,
+		  "recommended": false,
           "rules": {
             "sqlinjection_1": 1,
             "sqlinjection_3": 2,
@@ -18,6 +19,7 @@
         {
           "moduleId": "os_command_injection",
           "baseAlertId": 200001,
+		  "recommended": false,
           "rules": {
             "oscommand_inband_pipe_passwd": 1
           }
@@ -25,6 +27,7 @@
         {
           "moduleId": "xss",
           "baseAlertId": 200002,
+		  "recommended": false,
           "rules": {
             "xss_1": 1,
             "xss_2": 2,
@@ -93,6 +96,7 @@
         {
           "moduleId": "version_control_exposure",
           "baseAlertId": 200004,
+		  "recommended": false,
           "rules": {
             "repo_1": 1,
             "repo_2": 2,
@@ -102,6 +106,7 @@
         {
           "moduleId": "headers",
           "baseAlertId": 200005,
+		  "recommended": false,
           "rules": {
             "header_csp_missing": 1,
             "header_csp_weak_scripts": 2,
@@ -131,6 +136,7 @@
         {
           "moduleId": "sensitive_data_exposure",
           "baseAlertId": 200006,
+		  "recommended": false,
           "rules": {
             "credit_card_number": 1,
             "social_securityn_umber": 2
@@ -163,6 +169,7 @@
         {
           "moduleId": "recon_error_stacktraces",
           "baseAlertId": 200010,
+		  "recommended": false,
           "rules": {
             "recon_node_stacktrace": 1,
             "recon_java_stacktrace": 2,
@@ -190,6 +197,7 @@
         {
           "moduleId": "recon_api_docs_specs",
           "baseAlertId": 200012,
+		  "recommended": false,
           "rules": {
             "recon_swagger_ui": 1,
             "recon_openapi_spec": 2,
@@ -249,6 +257,7 @@
         {
           "moduleId": "recon_cache_privacy",
           "baseAlertId": 200018,
+		  "recommended": false,
           "rules": {
             "recon_cache_public_with_set_cookie": 1
           }
@@ -513,6 +522,7 @@
         {
           "moduleId": "dom-xss",
           "baseAlertId": 220000,
+		  "recommended": false,
           "rules": {
             "no-inner-outer-html": 1,
             "no-appendchild": 2,
@@ -523,6 +533,10 @@
             "no-insertadjacenthtml": 7,
             "dom-xss-taint": 8,
             "dom-xss-taint-angular": 9
+          },
+          "recommendedRuleOverrides": {
+			"dom-xss-taint": true,
+			"dom-xss-taint-angular": true
           }
         },
         {
@@ -531,26 +545,37 @@
           "rules": {
             "no-document-cookie-assignment": 1,
             "cookie-manipulation-taint": 2
+          },
+          "recommendedRuleOverrides": {
+            "no-document-cookie-assignment": false
           }
         },
         {
           "moduleId": "open-redirection",
           "baseAlertId": 220002,
+		  "recommended": false,
           "rules": {
             "no-open-primitive-usage": 1,
             "same-origin-url-mutation": 2,
             "open-redirection-taint": 3
+          },
+          "recommendedRuleOverrides": {
+			"open-redirection-taint": true
           }
         },
         {
           "moduleId": "javascript-injection",
           "baseAlertId": 220003,
+		  "recommended": false,
           "rules": {
             "no-string-based-timers": 1,
             "no-execscript": 2,
             "no-eval-strings": 3,
             "no-function-ctor-strings": 4,
             "javascript-injection-taint": 5
+          },
+          "recommendedRuleOverrides": {
+			"javascript-injection-taint": true
           }
         },
         {
@@ -575,22 +600,30 @@
             "client-template-injection-taint": 4,
             "react-dangerouslysetinnerhtml-taint": 5,
             "lit-unsafehtml-taint": 6
+          },
+          "recommendedRuleOverrides": {
+            "vue-v-html-template-review": false
           }
         },
         {
           "moduleId": "network-destination-poisoning",
           "baseAlertId": 220006,
+		  "recommended": false,
           "rules": {
             "sendbeacon-review": 1,
             "sendbeacon-body-review": 2,
             "eventsource-constructor-review": 3,
             "axios-direct-request-review": 4,
             "network-destination-url-taint": 5
+          },
+          "recommendedRuleOverrides": {
+            "network-destination-url-taint": true
           }
         },
         {
           "moduleId": "client-script-loader-poisoning",
           "baseAlertId": 220007,
+		  "recommended": false,
           "rules": {
             "jquery-getscript-review": 1,
             "systemjs-import-review": 2,
@@ -600,6 +633,9 @@
             "serviceworker-register-review": 6,
             "importscripts-review": 7,
             "script-loader-url-taint": 8
+          },
+          "recommendedRuleOverrides": {
+			"script-loader-url-taint": true
           }
         },
         {
@@ -615,6 +651,12 @@
             "message-handler-missing-origin-check": 7,
             "message-handler-wildcard-reply": 8,
             "web-message-taint": 9
+          },
+          "recommendedRuleOverrides": {
+            "weak-message-origin-check": false,
+            "message-listener-review": false,
+            "weak-message-origin-regex-check": false,
+            "postmessage-wildcard-target": false
           }
         },
         {
@@ -623,6 +665,9 @@
           "rules": {
             "link-attribute-assignment": 1,
             "link-manipulation-taint": 2
+          },
+          "recommendedRuleOverrides": {
+            "link-attribute-assignment": false
           }
         },
         {
