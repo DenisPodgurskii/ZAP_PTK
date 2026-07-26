@@ -18,6 +18,10 @@ function injectSpaJsHook() {
         s.async = false
         ; (document.documentElement || document.head || document.body).appendChild(s)
         s.onload = () => { try { s.remove() } catch (_) { } }
+        s.onerror = () => {
+            hookInjected = false
+            try { s.remove() } catch (_) { }
+        }
     } catch (_) { hookInjected = false }
 }
 

@@ -1,29 +1,96 @@
 /* Author: Denis Podgurskii */
 import * as jose from "../packages/jose/browser/index.js"
 import CryptoES from "../packages/crypto-es/index.js"
-import { ptk_decoder } from "./decoder.js"
 
 /* Utils */
 const worker = self
+
+function base64url_encode(source) {
+    let encodedSource = CryptoES.enc.Base64.stringify(CryptoES.enc.Utf8.parse(source))
+    encodedSource = encodedSource.replace(/=+$/, '')
+    encodedSource = encodedSource.replace(/\+/g, '-')
+    encodedSource = encodedSource.replace(/\//g, '_')
+    return encodedSource
+}
 
 
 export class ptk_utils {
     constructor() { }
 
-    static getOrigin(sender) {
-        let origin = null, regex = RegExp('extension:\/\/' + browser.runtime.id)
-        if (regex.test(sender.url) || (worker.isFirefox && sender.id === browser.runtime.id && sender.url.startsWith('moz-extension://'))) {
-            origin = browser.runtime.id
-        } else if (sender.url.startsWith("http")) {
-            origin = (new URL(sender.url)).origin
-        } else if (sender.url.startsWith("file:///")) {
-            origin = sender.url
+    static _originOf(value) {
+        if (typeof value !== 'string' || !value) return null
+        const extensionMatch = value.match(/^(chrome-extension|moz-extension):\/\/([^/]+)/i)
+        if (extensionMatch) return `${extensionMatch[1].toLowerCase()}://${extensionMatch[2]}`
+        try {
+            return new URL(value).origin
+        } catch (_) {
+            return null
         }
-        return origin
+    }
+
+    static _extensionOrigin() {
+        try {
+            return this._originOf(browser.runtime.getURL(''))
+        } catch (_) {
+            return null
+        }
+    }
+
+    static getOrigin(sender) {
+        if (!sender || typeof sender.url !== 'string') return null
+        if (this.isTrustedExtensionPageSender(sender)) return browser.runtime.id
+        try {
+            const parsed = new URL(sender.url)
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.origin
+            if (parsed.protocol === 'file:') return sender.url
+        } catch (_) { }
+        return null
+    }
+
+    static isTrustedExtensionPageSender(sender) {
+        if (!sender || sender.id !== browser.runtime.id || typeof sender.url !== 'string') return false
+        const extensionOrigin = this._extensionOrigin()
+        if (!extensionOrigin) return false
+
+        try {
+            if (this._originOf(sender.url) !== extensionOrigin) return false
+            if (sender.origin && sender.origin !== 'null' && this._originOf(sender.origin) !== extensionOrigin) return false
+
+            // An extension page embedded by a website inherits that web tab and
+            // must not gain privileged UI access. PTK's own popup shell, however,
+            // deliberately hosts dashboard/JWT pages in an extension-owned iframe.
+            if (sender.tab) {
+                const tabUrl = sender.tab.url || sender.tab.pendingUrl || ''
+                if (!tabUrl || this._originOf(tabUrl) !== extensionOrigin) return false
+            }
+            return true
+        } catch (_) {
+            return false
+        }
+    }
+
+    static isTrustedContentSender(sender) {
+        if (!sender || sender.id !== browser.runtime.id || !Number.isInteger(sender?.tab?.id)) return false
+        if (typeof sender.url !== 'string' || !sender.url) return false
+        const extensionOrigin = this._extensionOrigin()
+
+        try {
+            const parsed = new URL(sender.url)
+            if (extensionOrigin && this._originOf(sender.url) === extensionOrigin) return false
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'file:') {
+                return true
+            }
+            if ((parsed.protocol === 'about:' || parsed.protocol === 'blob:') && Number(sender.frameId) > 0) {
+                const tabUrl = sender.tab.url || sender.tab.pendingUrl || ''
+                const tabProtocol = new URL(tabUrl).protocol
+                return tabProtocol === 'http:' || tabProtocol === 'https:' || tabProtocol === 'file:'
+            }
+        } catch (_) { }
+        return false
     }
 
     static isTrustedOrigin(sender) {
-        return (sender.id === browser.runtime.id)
+        return this.isTrustedExtensionPageSender(sender)
     }
 
     static jsonSetValueByPath(jsonData, path, value, add = false) {
@@ -81,21 +148,25 @@ export class ptk_utils {
     }
 
     static UUID() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8)
-            return v.toString(16)
-        })
+        if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+        const bytes = new Uint8Array(16)
+        globalThis.crypto.getRandomValues(bytes)
+        bytes[6] = (bytes[6] & 0x0f) | 0x40
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
     }
 
     static attackId() {
-        return 'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8)
-            return v.toString(16)
-        })
+        return this.UUID().replaceAll('-', '')
     }
 
     static attackParamId(l = 12) {
-        return Math.random().toString(36).slice(-l)
+        const length = Math.max(1, Math.min(128, Number(l) || 12))
+        const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789'
+        const bytes = new Uint8Array(length)
+        globalThis.crypto.getRandomValues(bytes)
+        return Array.from(bytes, (value) => alphabet[value % alphabet.length]).join('')
     }
 
     static isURL(url) {
@@ -395,10 +466,9 @@ export class ptk_jwtHelper {
     async signToken(header, payload, secret, keys) {
         let hObj = JSON.parse(header)
         let pObj = JSON.parse(payload)
-        const decoder = new ptk_decoder()
 
         if (hObj.alg.toLowerCase() == 'none') {
-            return decoder.base64url_encode(header.replace(/\n/g, '')) + "." + decoder.base64url_encode(payload.replace(/\n/g, '')) + "."
+            return base64url_encode(header.replace(/\n/g, '')) + "." + base64url_encode(payload.replace(/\n/g, '')) + "."
         }
         else if (['HS256', 'HS384', 'HS512'].includes(hObj.alg)) {
             if (secret == "") {

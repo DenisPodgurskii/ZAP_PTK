@@ -7,6 +7,7 @@ import { ptk_decoder } from "../../../background/decoder.js"
 import { shouldShowScanAnalysisUI } from "../../../background/analysis/featureFlags.js"
 import * as rutils from "../js/rutils.js"
 import { normalizeScanResult } from "../js/scanResultViewModel.js"
+import { renderAttackSurfaceRecommendationsHtml } from "../js/dastAttackSurfaceRecommendations.js"
 import { downloadScanExportResult, readScanFileText } from "../js/scanCompression.js"
 import {
     extractComparableResponseFromRun,
@@ -72,7 +73,7 @@ const DAST_SEVERITY_ORDER = {
     info: 4
 }
 const DAST_BUCKET_ORDER = ['critical', 'high', 'medium', 'low', 'info', 'nonvuln']
-const DAST_RESULT_VIEWS = new Set(['findings', 'analysis', 'explorer'])
+const DAST_RESULT_VIEWS = new Set(['findings', 'analysis', 'attack_paths', 'explorer'])
 const ANALYSIS_CANDIDATE_PAGE_SIZE = 10
 let dastResultView = 'findings'
 const ANALYSIS_CANDIDATE_INDEX = new Map()
@@ -883,6 +884,15 @@ function buildEmptyExplorerStateHtml() {
         <div class="ui info message">
             <div class="header">No explorer data yet</div>
             <p>Explorer appears when DAST, IAST, or SAST artifacts expose API routes, SPA routes, GraphQL traffic, hidden parameters, or client-side surfaces.</p>
+        </div>
+    `
+}
+
+function buildEmptyAttackPathsStateHtml() {
+    return `
+        <div class="ui info message">
+            <div class="header">No attack paths yet</div>
+            <p>Attack paths appear when PTK has enough route, parameter, authentication, runtime, or code evidence to suggest a focused manual path.</p>
         </div>
     `
 }
@@ -3749,7 +3759,6 @@ function renderAnalysisAndCoverage(vm, rawScan = {}) {
             </div>
         `
         : ''
-
     $analysis.html(`
         ${buildAnalysisStatusHtml(analysis, vm?.scanHealth || null)}
         <div class="ui message">
@@ -3761,6 +3770,25 @@ function renderAnalysisAndCoverage(vm, rawScan = {}) {
         ${candidateHtml}
         ${showMoreHtml}
     `)
+}
+
+function renderAttackPaths(vm, rawScan = {}) {
+    const analysis = vm?.analysis || rawScan?.analysis || null
+    const $attackPaths = $('#attack_paths_info')
+    if (!PRO_UI_VISIBLE) {
+        $attackPaths.html('')
+        return
+    }
+    if (!analysis || typeof analysis !== 'object') {
+        $attackPaths.html(buildEmptyAttackPathsStateHtml())
+        return
+    }
+    const recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : []
+    const html = renderAttackSurfaceRecommendationsHtml(recommendations, {
+        proUiVisible: PRO_UI_VISIBLE,
+        limit: 25
+    })
+    $attackPaths.html(html || buildEmptyAttackPathsStateHtml())
 }
 
 function renderExplorer(vm, rawScan = {}) {
@@ -3869,24 +3897,39 @@ function ensureAnalysisPanelsRendered({ force = false } = {}) {
     if (!raw) return
     const vm = controller.scanViewModel || normalizeScanResult(raw)
     renderAnalysisAndCoverage(vm, raw)
+    renderAttackPaths(vm, raw)
     renderExplorer(vm, raw)
     analysisPanelsDirty = false
+}
+
+function updateDastResultTabsUi() {
+    const $tabs = $('#dast_result_tabs')
+    const showAttackPaths = PRO_UI_VISIBLE === true
+    $tabs.find('.item[data-view="attack_paths"]').toggle(showAttackPaths)
+    $tabs.removeClass('two three item')
+    $tabs.addClass(showAttackPaths ? 'three item' : 'two item')
+    if (!showAttackPaths && dastResultView === 'attack_paths') {
+        dastResultView = 'findings'
+    }
 }
 
 function setDastResultView(view) {
     const normalizedView = String(view || '').trim().toLowerCase() === 'coverage' ? 'analysis' : view
     const requestedView = DAST_RESULT_VIEWS.has(normalizedView) ? normalizedView : 'findings'
-    const nextView = (!scanAnalysisUiEnabled && requestedView !== 'findings') ? 'findings' : requestedView
+    const gatedView = requestedView === 'attack_paths' && !PRO_UI_VISIBLE ? 'findings' : requestedView
+    const nextView = (!scanAnalysisUiEnabled && gatedView !== 'findings') ? 'findings' : gatedView
     dastResultView = nextView
+    updateDastResultTabsUi()
     $('#dast_result_tabs .item').removeClass('active')
     $(`#dast_result_tabs .item[data-view="${nextView}"]`).addClass('active')
     $('#dast_findings_filters')
         .css('visibility', 'visible')
         .css('pointer-events', 'auto')
-    $('#attacks_info').toggle(nextView === 'findings')
+    $('#attacks_info').css('display', nextView === 'findings' ? 'block' : 'none')
     $('#analysis_info').toggle(nextView === 'analysis')
+    $('#attack_paths_info').toggle(nextView === 'attack_paths')
     $('#explorer_info').toggle(nextView === 'explorer')
-    if (nextView === 'analysis' || nextView === 'explorer') {
+    if (nextView === 'analysis' || nextView === 'attack_paths' || nextView === 'explorer') {
         ensureAnalysisPanelsRendered()
     }
     if (nextView === 'analysis' && !$('#analysis_info').children().length) {
@@ -3894,6 +3937,9 @@ function setDastResultView(view) {
     }
     if (nextView === 'explorer' && !$('#explorer_info').children().length) {
         $('#explorer_info').html(buildEmptyExplorerStateHtml())
+    }
+    if (nextView === 'attack_paths' && !$('#attack_paths_info').children().length) {
+        $('#attack_paths_info').html(buildEmptyAttackPathsStateHtml())
     }
     if (nextView === 'findings') {
         renderStatsFromCounters()
@@ -5442,6 +5488,7 @@ jQuery(function () {
         $("#request_info").html("")
         $("#attacks_info").html("")
         $("#analysis_info").html("")
+        $("#attack_paths_info").html("")
         $("#explorer_info").html("")
         resetAnalysisSuppressionState()
         resetAnalysisUiState()
@@ -5907,7 +5954,7 @@ jQuery(function () {
             }
             changeView(result)
             bindScanResult(result)
-            setDastResultView('analysis')
+            setDastResultView(dastResultView === 'attack_paths' ? 'attack_paths' : 'analysis')
         } catch (err) {
             showResultDialog('Analysis', err?.message || 'Analysis could not be recomputed.')
             $button.removeClass('loading disabled')
@@ -5952,6 +5999,8 @@ jQuery(function () {
         if (dastResultView !== 'findings') {
             setDastResultView('findings')
         }
+        $('#attacks_info').css('display', 'block')
+        $('#analysis_info, #attack_paths_info, #explorer_info').hide()
         updateDastScopeFilterButtons()
         applyAttackFilters()
     }
@@ -6163,6 +6212,9 @@ function syncDastTopControls(viewState) {
     const hasData = viewState === 'idle_with_data'
     const isIdleEmpty = viewState === 'idle_empty'
     $('#run_scan_dlg .ptk-run-scan-intro-actions').toggle(PRO_UI_VISIBLE)
+    const $recordMacro = $('#ptk_dast_record_macro')
+    if (!PRO_UI_VISIBLE) $recordMacro.prop('checked', false)
+    $recordMacro.closest('.three.wide.column').toggle(PRO_UI_VISIBLE)
     $('.generate_report').toggle(hasData)
     $('.portal_scans_button').toggle(PORTAL_ACTIONS_VISIBLE && (isIdleEmpty || hasData))
     setPortalUploadAvailability(PORTAL_ACTIONS_VISIBLE && hasData)
@@ -6247,6 +6299,7 @@ function changeView(result) {
 function cleanScanResult() {
     $("#attacks_info").html("")
     $("#analysis_info").html("")
+    $("#attack_paths_info").html("")
     $("#explorer_info").html("")
     analysisPanelsDirty = true
     RELATED_FINDING_SUMMARY_INDEX.clear()
@@ -6310,7 +6363,7 @@ async function ensureRelatedFindingSummariesLoaded() {
         const result = await controller.getRelatedFindingSummaries()
         if (result instanceof Error || result?.success === false) return
         setRelatedFindingSummaryIndex(result?.findings || [])
-        if (dastResultView === 'analysis') {
+        if (dastResultView === 'analysis' || dastResultView === 'attack_paths') {
             analysisPanelsDirty = true
             ensureAnalysisPanelsRendered({ force: true })
         }
@@ -6527,6 +6580,7 @@ function bindScanResult(result) {
     scanAnalysisUiEnabled = shouldShowScanAnalysisUI(raw)
     refreshAnalysisSuppressions(raw?.host || vm?.host || null)
     if (scanAnalysisUiEnabled) {
+        updateDastResultTabsUi()
         $('#dast_result_tabs').show()
     } else {
         $('#dast_result_tabs').hide()
@@ -6535,10 +6589,11 @@ function bindScanResult(result) {
     $('#request_info').html("")
     $('#attacks_info').html("")
     $('#analysis_info').html("")
+    $('#attack_paths_info').html("")
     $('#explorer_info').html("")
     analysisPanelsDirty = true
     hideWelcomeForm()
-    if (scanAnalysisUiEnabled && (dastResultView === 'analysis' || dastResultView === 'explorer')) {
+    if (scanAnalysisUiEnabled && (dastResultView === 'analysis' || dastResultView === 'attack_paths' || dastResultView === 'explorer')) {
         ensureAnalysisPanelsRendered({ force: true })
     }
 
@@ -6557,6 +6612,9 @@ function bindScanResult(result) {
     }
     const groupedReconObservations = new Map()
     resetDastCounters()
+    attackFilterState.requestId = null
+    requestFilterDirty = false
+    updateRequestFilterStyle(null)
     requests.forEach((request, index) => {
         const requestKey = String(request.id ?? `req-${index}`)
         const original = request.original && request.original.request ? request.original : request.original
@@ -6611,7 +6669,8 @@ function bindScanResult(result) {
     dastScopeTouchedByUser = false
     applyDefaultAttackScope({ preserveManual: false })
     $("#attacks_info").attr("data-scope", attackFilterState.scope)
-    updateRequestFilterStyle(attackFilterState.requestId)
+    $("#attacks_info").removeAttr("data-request")
+    updateRequestFilterStyle(null)
     setDastResultView(dastResultView)
 
     const deferWork = () => {

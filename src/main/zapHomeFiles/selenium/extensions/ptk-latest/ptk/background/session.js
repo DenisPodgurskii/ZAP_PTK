@@ -36,16 +36,12 @@ export class ptk_session {
 
 
     onMessage(message, sender, sendResponse) {
-
-        if (!ptk_utils.isTrustedOrigin(sender))
-            return Promise.reject({ success: false, error: 'Error origin value' })
-
-        if (message.channel == "ptk_popup2background_session") {
-            if (this["msg_" + message.type]) {
-                return this["msg_" + message.type](message)
-            }
-            return Promise.resolve({ result: false })
+        if (message?.channel !== "ptk_popup2background_session") return undefined
+        if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+            return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
         }
+        if (this["msg_" + message.type]) return this["msg_" + message.type](message)
+        return Promise.resolve({ result: false })
     }
 
     addListiners() {

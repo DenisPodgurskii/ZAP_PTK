@@ -23,8 +23,10 @@ import { ExportChunkStore } from "./export/exportChunkStore.js"
 import { parseDownloadedScanPayload } from "./export/parseDownloadedScanPayload.js"
 import { parseUploadedScanFile } from "./export/parseUploadedScanFile.js"
 import {
-    buildPortalUrl as buildSharedPortalUrl,
-    getPortalBaseUrl,
+    PORTAL_BASE_URL,
+    buildStoredCredentialPortalUrl,
+    isLocalPortalBaseUrl,
+    normalizePortalBaseUrl,
     initializePortalRuntimeConfig
 } from "../common/portalConfig.js"
 import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js"
@@ -37,6 +39,8 @@ let iastModulesCacheKey = null
 let iastScanStrategy = 'SMART'
 const lastIastModuleDeliveryByTab = new Map()
 const inFlightIastModuleSendByTab = new Map()
+const IAST_BUFFER_MAX_ENTRIES = 200
+const IAST_BUFFER_ACK_MAX_ENTRIES = 2000
 
 function normalizeIastBackgroundStrategy(value = 'SMART') {
     return String(value || '').trim().toUpperCase() === 'COMPREHENSIVE'
@@ -450,8 +454,16 @@ function buildPortalRulepackLoadOptions(options = {}) {
         || hasPolicySelection
     if (!preferPortal) return null
 
-    const baseUrl = String(explicitPortal.baseUrl || getPortalBaseUrl() || '').trim()
-    const apiKey = String(explicitPortal.apiKey || explicitPortal.token || profile.api_key || '').trim()
+    const explicitBaseUrl = String(explicitPortal.baseUrl || '').trim()
+    const explicitApiKey = String(explicitPortal.apiKey || explicitPortal.token || '').trim()
+    const storedApiKey = String(profile.api_key || '').trim()
+    const baseUrl = explicitBaseUrl
+        ? normalizePortalBaseUrl(explicitBaseUrl, '')
+        : PORTAL_BASE_URL
+    const isProductionBase = baseUrl === PORTAL_BASE_URL
+    const usesExplicitLocalCredential = !!explicitApiKey && isLocalPortalBaseUrl(baseUrl)
+    if (!isProductionBase && !usesExplicitLocalCredential) return null
+    const apiKey = explicitApiKey || (isProductionBase ? storedApiKey : '')
     if (!baseUrl || !apiKey) return null
 
     return {
@@ -916,6 +928,7 @@ export class ptk_iast {
         this._persistDebounceMs = 1000
         this.exportChunkStore = new ExportChunkStore({ prefix: "iast" })
         this.importTransfers = new Map()
+        this._iastBufferAckedIds = new Set()
         this.resetScanResult()
         this.modulesCatalog = null
         this.currentRulepackOverride = null
@@ -1292,6 +1305,159 @@ export class ptk_iast {
         await ptk_storage.setItem(this.storageKey, {})
     }
 
+    _iastBufferStorageKeyForParts(tabId, frameId = 0) {
+        const normalizedTabId = this._normalizeTabId(tabId)
+        if (normalizedTabId === null) return null
+        const normalizedFrameId = Number.isInteger(Number(frameId)) ? Number(frameId) : 0
+        return `ptk_iast_buffer:${normalizedTabId}:${normalizedFrameId}`
+    }
+
+    _iastBufferStorageKey(sender = {}) {
+        return this._iastBufferStorageKeyForParts(sender?.tab?.id, sender?.frameId)
+    }
+
+    _cloneIastBufferPayload(value) {
+        try {
+            return JSON.parse(JSON.stringify(value))
+        } catch (_) {
+            return null
+        }
+    }
+
+    _iastBufferMessageId(message = {}) {
+        const id = message?.bufferId || message?.message?.__ptkIastBufferId || message?.message?.bufferId || null
+        return id == null ? null : String(id)
+    }
+
+    _rememberIastBufferAck(bufferId) {
+        if (!bufferId) return
+        this._iastBufferAckedIds.add(String(bufferId))
+        while (this._iastBufferAckedIds.size > IAST_BUFFER_ACK_MAX_ENTRIES) {
+            const first = this._iastBufferAckedIds.values().next().value
+            this._iastBufferAckedIds.delete(first)
+        }
+    }
+
+    async _readIastBufferEntries(key) {
+        if (!key) return []
+        const value = await ptk_storage.getItem(key)
+        return Array.isArray(value) ? value : []
+    }
+
+    async _writeIastBufferEntries(key, entries = []) {
+        if (!key) return
+        await ptk_storage.setItem(key, Array.isArray(entries) ? entries : [])
+    }
+
+    async _removeIastBufferKeys(keys = []) {
+        const uniqueKeys = Array.from(new Set((Array.isArray(keys) ? keys : [keys]).filter(Boolean)))
+        if (!uniqueKeys.length) return
+        try {
+            if (browser?.storage?.local?.remove) {
+                await browser.storage.local.remove(uniqueKeys)
+                return
+            }
+        } catch (_) { }
+        await Promise.all(uniqueKeys.map(key => this._writeIastBufferEntries(key, [])))
+    }
+
+    async _clearIastBufferForTab(tabId) {
+        const normalizedTabId = this._normalizeTabId(tabId)
+        if (normalizedTabId === null) return
+        const prefix = `ptk_iast_buffer:${normalizedTabId}:`
+        try {
+            const allItems = await browser.storage.local.get(null)
+            const keys = Object.keys(allItems || {}).filter(key => key.startsWith(prefix))
+            await this._removeIastBufferKeys(keys)
+        } catch (_) {
+            await this._writeIastBufferEntries(this._iastBufferStorageKeyForParts(normalizedTabId, 0), [])
+        }
+    }
+
+    async _clearIastBufferForSender(sender = {}) {
+        const key = this._iastBufferStorageKey(sender)
+        if (!key) return { ok: false, reason: 'missing_tab' }
+        await this._removeIastBufferKeys([key])
+        return { ok: true }
+    }
+
+    async _appendIastBufferMessage(message = {}, sender = {}) {
+        const tabId = this._normalizeTabId(sender?.tab?.id)
+        if (!this.isTrackedScanTab(tabId)) {
+            return {
+                ok: false,
+                reason: this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
+            }
+        }
+
+        const key = this._iastBufferStorageKey(sender)
+        if (!key) return { ok: false, reason: 'missing_tab' }
+
+        const bufferId = this._iastBufferMessageId(message)
+        if (bufferId && this._iastBufferAckedIds.has(bufferId)) {
+            return { ok: true, skipped: 'already_accepted' }
+        }
+
+        const payload = this._cloneIastBufferPayload(message?.message || null)
+        if (!payload || typeof payload !== "object") {
+            return { ok: false, reason: 'invalid_message' }
+        }
+
+        let entries = await this._readIastBufferEntries(key)
+        if (bufferId) {
+            entries = entries.filter(entry => String(entry?.id || '') !== bufferId)
+        }
+        entries.push({
+            id: bufferId,
+            message: payload,
+            tabId,
+            frameId: Number.isInteger(Number(sender?.frameId)) ? Number(sender.frameId) : 0,
+            url: message?.context?.url || sender?.url || null,
+            topFrame: message?.context?.topFrame === true,
+            createdAt: Date.now()
+        })
+        if (entries.length > IAST_BUFFER_MAX_ENTRIES) {
+            entries = entries.slice(entries.length - IAST_BUFFER_MAX_ENTRIES)
+        }
+        await this._writeIastBufferEntries(key, entries)
+        return { ok: true, count: entries.length }
+    }
+
+    async _flushIastBufferMessages(message = {}, sender = {}) {
+        const key = this._iastBufferStorageKey(sender)
+        if (!key) return { ok: false, reason: 'missing_tab', messages: [] }
+
+        const entries = await this._readIastBufferEntries(key)
+        await this._removeIastBufferKeys([key])
+
+        if (!this.isTrackedScanTab(sender?.tab?.id)) {
+            return {
+                ok: false,
+                reason: this.isScanRunning ? 'tab_mismatch' : 'inactive_scan',
+                messages: []
+            }
+        }
+
+        const messages = entries
+            .filter(entry => !entry?.id || !this._iastBufferAckedIds.has(String(entry.id)))
+            .map(entry => entry?.message)
+            .filter(entry => entry && typeof entry === "object")
+
+        return { ok: true, count: messages.length, messages }
+    }
+
+    async _ackIastBufferMessage(sender = {}, bufferId = null) {
+        if (!bufferId) return
+        this._rememberIastBufferAck(bufferId)
+        const key = this._iastBufferStorageKey(sender)
+        if (!key) return
+        const entries = await this._readIastBufferEntries(key)
+        const filtered = entries.filter(entry => String(entry?.id || '') !== String(bufferId))
+        if (filtered.length !== entries.length) {
+            await this._writeIastBufferEntries(key, filtered)
+        }
+    }
+
     _normalizeTabId(tabId) {
         const numeric = Number(tabId)
         return Number.isInteger(numeric) && numeric >= 0 ? numeric : null
@@ -1354,6 +1520,7 @@ export class ptk_iast {
         if (!this.registerRelatedScanTab(tabId, meta)) return false
         const normalized = this._normalizeTabId(tabId)
         clearIastModuleSendTracking(normalized)
+        await this._clearIastBufferForTab(normalized)
         try {
             await browser.tabs.sendMessage(normalized, {
                 channel: "ptk_background_iast2content",
@@ -1490,6 +1657,9 @@ export class ptk_iast {
     onMessage(message, sender, sendResponse) {
 
         if (message.channel == "ptk_popup2background_iast") {
+            if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+                return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
+            }
             if (this["msg_" + message.type]) {
                 return this["msg_" + message.type](message)
             }
@@ -1497,6 +1667,9 @@ export class ptk_iast {
         }
 
         if (message.channel == "ptk_content2iast") {
+            if (!ptk_utils.isTrustedContentSender(sender)) {
+                return Promise.resolve({ loadAgent: false })
+            }
 
             if (message.type == 'check') {
                 //console.log('check iast')
@@ -1508,6 +1681,43 @@ export class ptk_iast {
         }
 
         if (message.channel == "ptk_content_iast2background_iast") {
+            if (!ptk_utils.isTrustedContentSender(sender)) return
+
+            if (message.type === 'iast_buffer_append') {
+                ;(async () => {
+                    try {
+                        const result = await this._appendIastBufferMessage(message, sender)
+                        sendResponse && sendResponse(result)
+                    } catch (err) {
+                        sendResponse && sendResponse({ ok: false, error: err?.message || String(err) })
+                    }
+                })()
+                return true
+            }
+
+            if (message.type === 'iast_buffer_flush') {
+                ;(async () => {
+                    try {
+                        const result = await this._flushIastBufferMessages(message, sender)
+                        sendResponse && sendResponse(result)
+                    } catch (err) {
+                        sendResponse && sendResponse({ ok: false, error: err?.message || String(err), messages: [] })
+                    }
+                })()
+                return true
+            }
+
+            if (message.type === 'iast_buffer_clear') {
+                ;(async () => {
+                    try {
+                        const result = await this._clearIastBufferForSender(sender)
+                        sendResponse && sendResponse(result)
+                    } catch (err) {
+                        sendResponse && sendResponse({ ok: false, error: err?.message || String(err) })
+                    }
+                })()
+                return true
+            }
 
             if (message.type == 'finding_report') {
                 const senderTabId = sender?.tab?.id
@@ -1523,6 +1733,7 @@ export class ptk_iast {
                         })
                         this._applyRelatedTabEvidence(finding, senderTabId)
                         this.addOrUpdateFinding(finding)
+                        this._ackIastBufferMessage(sender, message?.bufferId).catch(() => { })
                     } catch (e) {
                         console.warn('[PTK IAST][background] createFindingFromIAST failed', e)
                     }
@@ -1535,6 +1746,7 @@ export class ptk_iast {
                             lastDroppedReason: reason
                         }
                     )
+                    this._rememberIastBufferAck(message?.bufferId)
                 }
                 return
             }
@@ -1546,6 +1758,7 @@ export class ptk_iast {
                         lastSenderTabId: senderTabId
                     })
                     this.addOrUpdateRuntimeSignal(this._applyRelatedTabRuntimeSignal(message.signal, senderTabId))
+                    this._ackIastBufferMessage(sender, message?.bufferId).catch(() => { })
                 } else {
                     const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
                     this._incrementIastAutomationTelemetry(
@@ -1555,6 +1768,7 @@ export class ptk_iast {
                             lastDroppedReason: reason
                         }
                     )
+                    this._rememberIastBufferAck(message?.bufferId)
                 }
                 return
             }
@@ -1623,6 +1837,10 @@ export class ptk_iast {
         }
 
         if (message.channel === "ptk_content_iast2background_request_modules") {
+            if (!ptk_utils.isTrustedContentSender(sender)) {
+                sendResponse && sendResponse({ active: false, reason: 'untrusted_content_sender', iastModules: null })
+                return false
+            }
             ;(async () => {
                 try {
                     const tabId = sender?.tab?.id
@@ -1973,10 +2191,7 @@ export class ptk_iast {
     }
 
     buildPortalUrl(endpoint, profile = {}) {
-        return buildSharedPortalUrl(endpoint, {
-            baseUrl: profile?.base_url || profile?.api_url || profile?.baseUrl || null,
-            apiBase: profile?.api_base || profile?.apiBase || undefined
-        })
+        return buildStoredCredentialPortalUrl(endpoint)
     }
 
     async msg_get_projects(message) {
@@ -1996,6 +2211,7 @@ export class ptk_iast {
                 Accept: "application/json"
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {
@@ -2059,6 +2275,7 @@ export class ptk_iast {
                 "X-PTK-Compression": compressed.compression
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache",
             body: compressed.body
         })
@@ -2101,6 +2318,7 @@ export class ptk_iast {
                 Accept: "application/json"
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {
@@ -2133,6 +2351,7 @@ export class ptk_iast {
                 Accept: "application/gzip, application/x-gzip"
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {
@@ -2263,6 +2482,7 @@ export class ptk_iast {
         this.agentFailedTabs.delete(tabId)
         this.isScanRunning = true
         this.scanningRequest = false
+        await this._clearIastBufferForTab(tabId)
         browser.tabs.sendMessage(tabId, {
             channel: "ptk_background_iast2content",
             type: "clean iast result"
@@ -2349,6 +2569,7 @@ export class ptk_iast {
 
     async stopBackgroundScan(options = {}) {
         const trackedTabIds = this._trackedScanTabIds()
+        await Promise.all(trackedTabIds.map(tabId => this._clearIastBufferForTab(tabId)))
         for (const tabId of trackedTabIds) {
             browser.tabs.sendMessage(tabId, {
                 channel: "ptk_background_iast2content",
@@ -2374,7 +2595,9 @@ export class ptk_iast {
             scanResultStore.setFinished(this.scanResult.scanId, finished)
             this.scanResult.finishedAt = finished
         }
-        scanResultStore._applyAnalysisSafe(this.scanResult, { force: true })
+        if (options?.skipPostStopAnalysis !== true) {
+            scanResultStore._applyAnalysisSafe(this.scanResult, { force: true })
+        }
         await this._flushPersistScanResult()
         this.broadcastScanUpdate()
         if (options?.skipPostStopAnalysis !== true) {

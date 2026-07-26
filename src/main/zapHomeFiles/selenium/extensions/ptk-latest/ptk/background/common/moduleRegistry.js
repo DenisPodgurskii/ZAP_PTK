@@ -2,8 +2,8 @@ import { loadCanonicalDastRulepack } from "../dast/contract/index.js"
 import { loadCanonicalSastRulepack } from "../sast/contract/index.js"
 import { loadCanonicalIastRulepack } from "../iast/contract/index.js"
 import {
+  PORTAL_BASE_URL,
   buildPortalUrl,
-  getPortalBaseUrl,
   initializePortalRuntimeConfig
 } from "../../common/portalConfig.js"
 
@@ -232,7 +232,9 @@ function normalizePortalEngine(engine) {
 }
 
 function buildPortalPoliciesUrl(opts = {}) {
-  const baseUrl = String(opts.baseUrl || "").trim() || getPortalBaseUrl()
+  // Stored production credentials reach this helper without an explicit base
+  // URL. Custom/local policy sources must supply both their own base and token.
+  const baseUrl = String(opts.baseUrl || "").trim() || PORTAL_BASE_URL
   return buildPortalUrl(
     normalizePathFragment(opts.policiesEndpoint, "/policies"),
     {
@@ -366,7 +368,8 @@ export async function fetchPortalPolicyMetadata(opts = {}) {
     method: "POST",
     headers,
     cache: "no-cache",
-    credentials: "omit"
+    credentials: "omit",
+    redirect: "error"
   }
   if (safeEngine) {
     headers["Content-Type"] = "application/json"
@@ -433,7 +436,8 @@ export async function loadPortalRulepack(engine, opts = {}) {
       method: "GET",
       headers,
       cache: "no-cache",
-      credentials: "omit"
+      credentials: "omit",
+      redirect: "error"
     })
     if (!response?.ok) {
       const payload = await parsePortalResponseBody(response)

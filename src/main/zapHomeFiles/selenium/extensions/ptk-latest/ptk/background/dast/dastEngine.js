@@ -2145,6 +2145,19 @@ export class dastEngine {
         return true
     }
 
+    _canUsePartialCapturedOriginal(schema = null, rawMeta = {}, capturedResponse = null) {
+        if (!capturedResponse || typeof capturedResponse !== 'object') return false
+        const statusCode = Number(capturedResponse.statusCode ?? capturedResponse.status)
+        if (!Number.isFinite(statusCode)) return false
+        const method = String(
+            schema?.request?.method
+            || rawMeta?.method
+            || capturedResponse?.method
+            || ''
+        ).trim().toUpperCase()
+        return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+    }
+
     _getHeaderValue(headers = [], name = '') {
         if (!Array.isArray(headers) || !name) return ''
         const target = String(name || '').trim().toLowerCase()
@@ -2260,9 +2273,13 @@ export class dastEngine {
         return request
     }
 
-    _buildCapturedOriginalFromMeta(schema, rawMeta, modules = []) {
+    _buildCapturedOriginalFromMeta(schema, rawMeta, modules = [], options = {}) {
         const capturedResponse = this._normalizeCapturedResponse(rawMeta?.capturedResponse || null)
-        if (!this._capturedOriginalSatisfiesRequirements(capturedResponse, modules)) {
+        const satisfiesRequirements = this._capturedOriginalSatisfiesRequirements(capturedResponse, modules)
+        const usePartialCapturedOriginal = !satisfiesRequirements
+            && options?.allowPartialCapturedOriginal === true
+            && this._canUsePartialCapturedOriginal(schema, rawMeta, capturedResponse)
+        if (!satisfiesRequirements && !usePartialCapturedOriginal) {
             return null
         }
         const request = cloneValue(schema?.request || {})
@@ -2300,10 +2317,79 @@ export class dastEngine {
         if (typeof capturedResponse.timeMs === 'number') {
             response.timeMs = capturedResponse.timeMs
         }
+        if (usePartialCapturedOriginal) {
+            response.baselineSource = 'captured_partial'
+            this._appendRuntimeEvent({
+                type: 'dast_baseline_captured_partial',
+                phase: 'plan_build',
+                method: request?.method || capturedResponse?.method || null,
+                url: request?.url || capturedResponse?.url || null,
+                statusCode: response.statusCode ?? response.status ?? null,
+                hasHeaders: Array.isArray(response.headers) && response.headers.length > 0,
+                hasBody: typeof response.body === 'string',
+                fallbackReason: options?.fallbackReason || null,
+                replayStatusCode: options?.replayStatusCode ?? null
+            })
+        } else {
+            response.baselineSource = 'captured'
+        }
         return {
             request,
             response
         }
+    }
+
+    _baselineResponseText(original = null) {
+        const response = original?.response && typeof original.response === 'object'
+            ? original.response
+            : null
+        if (!response) return ''
+        return [
+            response.body,
+            response.statusText,
+            response.statusMessage,
+            response.statusLine,
+            response.errorMessage
+        ]
+            .filter(value => value != null)
+            .map(value => String(value))
+            .join(' ')
+            .slice(0, 2000)
+    }
+
+    _stateChangingReplayFallbackReason(original = null) {
+        const response = original?.response && typeof original.response === 'object'
+            ? original.response
+            : null
+        if (!response) return 'replay_missing_response'
+        const statusCode = Number(response.statusCode ?? response.status)
+        if (!Number.isFinite(statusCode)) return 'replay_missing_status'
+        if (statusCode < 400) return null
+        if (statusCode === 401 || statusCode === 403) return null
+        const text = this._baselineResponseText(original)
+        if (/\b(?:wrong\s+answer|invalid\s+captcha|captcha\s+(?:failed|invalid|wrong))\b/i.test(text)) {
+            return 'replay_captcha_failed'
+        }
+        if (/\b(?:constraint\s+failed|foreign\s+key\s+constraint|validation\s+(?:failed|error)|invalid\s+(?:input|request|value)|required|no\s+such\s+product)\b/i.test(text)) {
+            return 'replay_validation_failed'
+        }
+        if (statusCode >= 500) return 'replay_5xx'
+        return null
+    }
+
+    _buildCapturedOriginalFallbackAfterReplay(schema, rawMeta, modules, replayOriginal = null) {
+        const capturedResponse = this._normalizeCapturedResponse(rawMeta?.capturedResponse || null)
+        if (!this._canUsePartialCapturedOriginal(schema, rawMeta, capturedResponse)) return null
+        const capturedStatusCode = Number(capturedResponse.statusCode ?? capturedResponse.status)
+        if (!Number.isFinite(capturedStatusCode) || capturedStatusCode >= 400) return null
+        const fallbackReason = this._stateChangingReplayFallbackReason(replayOriginal)
+        if (!fallbackReason) return null
+        const replayStatusCode = Number(replayOriginal?.response?.statusCode ?? replayOriginal?.response?.status)
+        return this._buildCapturedOriginalFromMeta(schema, rawMeta, modules, {
+            allowPartialCapturedOriginal: true,
+            fallbackReason,
+            replayStatusCode: Number.isFinite(replayStatusCode) ? replayStatusCode : null
+        })
     }
 
     async _resolveOriginalForPlan(schema, rawMeta = {}, options = {}) {
@@ -2330,7 +2416,12 @@ export class dastEngine {
             return capturedOriginal
         }
         this._recordBaselineResolution("replay")
-        const original = await this.executeOriginal(schema)
+        let original = await this.executeOriginal(schema)
+        const capturedFallbackOriginal = this._buildCapturedOriginalFallbackAfterReplay(schema, rawMeta, modules, original)
+        if (capturedFallbackOriginal) {
+            original = capturedFallbackOriginal
+            this._recordBaselineResolution("captured")
+        }
         this._applyRequestDiscoveryMetadata(original, rawMeta)
         if (originalCacheKey && original) {
             const cacheOriginal = cloneValue(original)
@@ -7751,25 +7842,55 @@ export class dastEngine {
     }
 
     async _waitForTabReady(tabId, timeoutMs = 8000) {
-        return new Promise((resolve) => {
-            let done = false
-            const finish = () => {
-                if (done) return
-                done = true
-                try { browser.tabs.onUpdated.removeListener(listener) } catch (_) { }
-                resolve()
+        if (!Number.isInteger(Number(tabId)) || Number(tabId) < 0) {
+            return {
+                ready: false,
+                reason: 'invalid_tab',
+                status: null
             }
-            const timer = setTimeout(() => {
-                clearTimeout(timer)
-                finish()
-            }, timeoutMs)
-            const listener = (updatedTabId, info) => {
-                if (updatedTabId === tabId && info.status === 'complete') {
-                    clearTimeout(timer)
-                    finish()
+        }
+        return new Promise((resolve) => {
+            let settled = false
+            let timer = null
+            const normalizedTabId = Number(tabId)
+            const finish = (ready, reason, tab = null) => {
+                if (settled) return
+                settled = true
+                if (timer) clearTimeout(timer)
+                try { browser.tabs.onUpdated.removeListener(listener) } catch (_) { }
+                resolve({
+                    ready,
+                    reason,
+                    status: tab?.status || null
+                })
+            }
+            const listener = (updatedTabId, info, tab) => {
+                if (
+                    Number(updatedTabId) === normalizedTabId
+                    && (info?.status === 'complete' || tab?.status === 'complete')
+                ) {
+                    finish(true, 'updated_complete', tab)
                 }
             }
-            browser.tabs.onUpdated.addListener(listener)
+            try {
+                browser.tabs.onUpdated.addListener(listener)
+            } catch (error) {
+                finish(false, error?.message || 'listener_failed')
+                return
+            }
+            timer = setTimeout(() => {
+                finish(false, 'timeout')
+            }, timeoutMs)
+            Promise.resolve()
+                .then(() => browser.tabs.get(normalizedTabId))
+                .then((tab) => {
+                    if (tab?.status === 'complete') {
+                        finish(true, 'already_complete', tab)
+                    }
+                })
+                .catch((error) => {
+                    finish(false, error?.message || 'tab_lookup_failed')
+                })
         })
     }
 
@@ -8870,13 +8991,17 @@ export class dastEngine {
     }
 
     _decodeHtmlDiscoveryValue(value) {
-        return String(value || '')
-            .replace(/&amp;/gi, '&')
-            .replace(/&quot;/gi, '"')
-            .replace(/&#0*39;/gi, "'")
-            .replace(/&#x0*27;/gi, "'")
-            .replace(/&lt;/gi, '<')
-            .replace(/&gt;/gi, '>')
+        const entityMap = {
+            amp: '&',
+            quot: '"',
+            lt: '<',
+            gt: '>',
+            apos: "'"
+        }
+        return String(value || '').replace(
+            /&(amp|quot|lt|gt|apos|#0*39|#x0*27);/gi,
+            (entity, name) => entityMap[String(name).toLowerCase()] || "'"
+        )
     }
 
     _isSeedableHtmlLinkUrl(candidate, baseUrl) {

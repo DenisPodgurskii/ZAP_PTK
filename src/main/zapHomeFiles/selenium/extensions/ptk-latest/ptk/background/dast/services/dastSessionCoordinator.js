@@ -30,6 +30,15 @@ function toPositiveNumber(value, fallback) {
     return Number.isFinite(num) && num > 0 ? num : fallback
 }
 
+function shouldSkipPostStopAnalysis(options = {}) {
+    const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
+    if (options?.skipPostStopAnalysis === true) return true
+    if (options?.skipPostStopAnalysis === false) return false
+    if (options?.immediateAnalysis === true) return false
+    if (options?.immediateAnalysis === false) return true
+    return zapCloseRequest
+}
+
 function withTimeout(promise, timeoutMs) {
     const boundedMs = Math.max(0, Number(timeoutMs) || 0)
     if (!boundedMs) {
@@ -214,7 +223,7 @@ export class DastSessionCoordinator {
     async stopBackgroundScan(options = {}) {
         const waitForIdleBeforeStop = options?.waitForIdleBeforeStop !== false
         const idleTimeoutMs = Number.isFinite(options?.idleTimeoutMs) ? Number(options.idleTimeoutMs) : 120000
-        const skipPostStopAnalysis = options?.skipPostStopAnalysis === true
+        const skipPostStopAnalysis = shouldSkipPostStopAnalysis(options)
 
         this.state.acceptIncomingRequests = false
         this.state.userInteractionUnlocked = false
@@ -358,6 +367,7 @@ export class DastSessionCoordinator {
             throw new Error("automation_session_mismatch")
         }
         const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
+        const skipPostStopAnalysis = shouldSkipPostStopAnalysis(options)
         const normalizedTimeoutMs = toPositiveNumber(timeoutMs, 180000)
         const seedWaitMs = this._resolveAutomationSeedStopWaitMs(normalizedTimeoutMs, { zapCloseRequest })
         let drainResult = {
@@ -384,7 +394,7 @@ export class DastSessionCoordinator {
         }
         const scanResult = await this.stopBackgroundScan({
             waitForIdleBeforeStop: false,
-            skipPostStopAnalysis: zapCloseRequest
+            skipPostStopAnalysis
         })
         const stats = this.collectSeverityStats?.(scanResult) || { counts: {}, findingsCount: 0 }
         this.state.automationSession = null

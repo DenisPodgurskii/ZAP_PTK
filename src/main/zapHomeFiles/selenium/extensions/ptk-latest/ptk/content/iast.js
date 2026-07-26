@@ -3869,18 +3869,11 @@ function matchesTaint(input) {
 }
 
 (function flushBufferedFindings() {
-    const key = 'ptk_iast_buffer';
-    const data = localStorage.getItem(key);
-    if (!data) return;
-    let arr;
-    try { arr = JSON.parse(data); } catch { arr = null; }
-    if (Array.isArray(arr)) {
-        arr.forEach(msg => {
-            try { emitIastPageBridgeMessage(msg); }
-            catch (e) {/*ignore*/ }
+    try {
+        emitIastPageBridgeMessage({
+            channel: 'ptk_iast_buffer_flush_request'
         });
-    }
-    localStorage.removeItem(key);
+    } catch (_) {/*ignore*/ }
 })();
 
 function sanitizeIastPayloadValue(v) {
@@ -3903,18 +3896,27 @@ function sanitizeIastPayloadValue(v) {
     return v;
 }
 
+function createIastBufferId() {
+    try {
+        if (crypto?.randomUUID) return crypto.randomUUID();
+    } catch (_) { }
+    return `iast-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function postBufferedIastMessage(msg) {
     withoutHooks(() => {
-        const key = 'ptk_iast_buffer';
-        let buf;
+        const bufferId = createIastBufferId();
+        const bufferedMsg = msg && typeof msg === 'object'
+            ? Object.assign({}, msg, { __ptkIastBufferId: bufferId })
+            : { value: msg, __ptkIastBufferId: bufferId };
         try {
-            buf = JSON.parse(localStorage.getItem(key) || '[]');
-        } catch (_) {
-            buf = [];
-        }
-        buf.push(msg);
-        localStorage.setItem(key, JSON.stringify(buf));
-        emitIastPageBridgeMessage(msg);
+            emitIastPageBridgeMessage({
+                channel: 'ptk_iast_buffer_append',
+                bufferId,
+                message: bufferedMsg
+            });
+        } catch (_) {/*ignore*/ }
+        emitIastPageBridgeMessage(bufferedMsg);
     });
 }
 
@@ -5411,14 +5413,7 @@ function getIastSuppressionConfig() {
     if (window?.__PTK_IAST_SUPPRESSIONS__ && typeof window.__PTK_IAST_SUPPRESSIONS__ === 'object') {
         return window.__PTK_IAST_SUPPRESSIONS__;
     }
-    try {
-        const raw = localStorage.getItem('ptk_iast_suppressions');
-        if (!raw) return null;
-        const parsed = JSON.parse(raw);
-        return parsed && typeof parsed === 'object' ? parsed : null;
-    } catch (_) {
-        return null;
-    }
+    return null;
 }
 
 function evaluateIastSuppression({ ruleId, sinkId, context, detection }) {

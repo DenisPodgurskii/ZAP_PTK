@@ -7,7 +7,10 @@ function clone(value) {
 }
 
 function buildEvidenceId() {
-    return `evidence_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    if (globalThis.crypto?.randomUUID) return `evidence_${globalThis.crypto.randomUUID()}`
+    const bytes = new Uint8Array(16)
+    globalThis.crypto.getRandomValues(bytes)
+    return `evidence_${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`
 }
 
 function normalizeHostValue(host) {
@@ -187,6 +190,13 @@ export class EvidencePackageStore {
             await this._persist()
         }
         return deleted
+    }
+
+    async clearAll() {
+        this._packages = []
+        this._loaded = true
+        await this._persist()
+        return true
     }
 }
 

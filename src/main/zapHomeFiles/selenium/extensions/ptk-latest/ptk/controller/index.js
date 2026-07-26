@@ -153,4 +153,20 @@ export class ptk_controller_index {
         }).catch(e => e)
     }
 
+    async createReportSnapshot(snapshot) {
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_dashboard",
+            type: "create_report_snapshot",
+            snapshot
+        }).catch(e => e)
+    }
+
+    async consumeReportSnapshot(snapshotId) {
+        return browser.runtime.sendMessage({
+            channel: "ptk_popup2background_dashboard",
+            type: "consume_report_snapshot",
+            snapshotId
+        }).catch(e => e)
+    }
+
 }

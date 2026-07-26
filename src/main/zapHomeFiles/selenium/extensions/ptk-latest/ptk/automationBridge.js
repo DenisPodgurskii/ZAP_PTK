@@ -321,7 +321,8 @@
                         currentUrl: options?.currentUrl,
                         closeRequestId: options?.closeRequestId,
                         closeRequestMode: options?.closeRequestMode,
-                        closeRequestReason: options?.closeRequestReason
+                        closeRequestReason: options?.closeRequestReason,
+                        immediateAnalysis: options?.immediateAnalysis
                     },
                     wait: options?.wait !== false,  // default true
                     includeFindings: options?.includeFindings === true,

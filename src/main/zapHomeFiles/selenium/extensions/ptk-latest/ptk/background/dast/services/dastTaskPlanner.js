@@ -208,14 +208,69 @@ export class DastTaskPlanner {
     }
 
     _decodeJsStringLiteral(value = "") {
-        try {
-            return JSON.parse(`"${String(value).replace(/"/g, '\\"')}"`)
-        } catch {
-            return String(value)
-                .replace(/\\'/g, "'")
-                .replace(/\\"/g, '"')
-                .replace(/\\\\/g, "\\")
+        const input = String(value)
+        let decoded = ""
+        for (let index = 0; index < input.length; index += 1) {
+            const char = input[index]
+            if (char !== "\\" || index + 1 >= input.length) {
+                decoded += char
+                continue
+            }
+
+            const escape = input[++index]
+            const simpleEscapes = {
+                b: "\b",
+                f: "\f",
+                n: "\n",
+                r: "\r",
+                t: "\t",
+                v: "\v",
+                "0": "\0",
+                "\\": "\\",
+                "'": "'",
+                '"': '"'
+            }
+            if (Object.prototype.hasOwnProperty.call(simpleEscapes, escape)) {
+                decoded += simpleEscapes[escape]
+                continue
+            }
+            if (escape === "\n") continue
+            if (escape === "\r") {
+                if (input[index + 1] === "\n") index += 1
+                continue
+            }
+            if (escape === "x") {
+                const hex = input.slice(index + 1, index + 3)
+                if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+                    decoded += String.fromCharCode(parseInt(hex, 16))
+                    index += 2
+                    continue
+                }
+            }
+            if (escape === "u") {
+                const braced = input.slice(index + 1).match(/^\{([0-9a-fA-F]{1,6})\}/)
+                if (braced) {
+                    const codePoint = parseInt(braced[1], 16)
+                    if (codePoint <= 0x10ffff) {
+                        decoded += String.fromCodePoint(codePoint)
+                        index += braced[0].length
+                        continue
+                    }
+                }
+                const hex = input.slice(index + 1, index + 5)
+                if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+                    decoded += String.fromCharCode(parseInt(hex, 16))
+                    index += 4
+                    continue
+                }
+            }
+
+            // Preserve malformed escape sequences so heuristic extraction does
+            // not silently turn invalid source into a different storage key.
+            if (escape === "x" || escape === "u") decoded += "\\"
+            decoded += escape
         }
+        return decoded
     }
 
     _extractJsStringBindings(source = "") {

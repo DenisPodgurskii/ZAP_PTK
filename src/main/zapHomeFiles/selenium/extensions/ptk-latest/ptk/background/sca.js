@@ -20,7 +20,7 @@ import { parseDownloadedScanPayload } from "./export/parseDownloadedScanPayload.
 import { parseUploadedScanFile } from "./export/parseUploadedScanFile.js"
 import retireModule from "../packages/retire/retire.js"
 import {
-    buildPortalUrl as buildSharedPortalUrl,
+    buildStoredCredentialPortalUrl,
     initializePortalRuntimeConfig
 } from "../common/portalConfig.js"
 
@@ -402,6 +402,9 @@ export class ptk_sca {
 
     onMessage(message, sender, sendResponse) {
         if (message.channel == "ptk_popup2background_sca") {
+            if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+                return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
+            }
             if (this["msg_" + message.type]) {
                 return this["msg_" + message.type](message)
             }
@@ -494,6 +497,7 @@ export class ptk_sca {
                 'Accept': 'application/json'
             },
             credentials: 'omit',
+            redirect: 'error',
             cache: 'no-cache'
         })
             .then(async (httpResponse) => {
@@ -555,6 +559,7 @@ export class ptk_sca {
                 'X-PTK-Compression': compressed.compression
             },
             credentials: 'omit',
+            redirect: 'error',
             cache: 'no-cache',
             body: compressed.body
         })
@@ -651,6 +656,7 @@ export class ptk_sca {
                 'Accept': 'application/json'
             },
             credentials: 'omit',
+            redirect: 'error',
             cache: 'no-cache'
         })
             .then(async (httpResponse) => {
@@ -686,6 +692,7 @@ export class ptk_sca {
                 'Accept': 'application/gzip, application/x-gzip'
             },
             credentials: 'omit',
+            redirect: 'error',
             cache: 'no-cache'
         })
             .then(async (httpResponse) => {
@@ -715,7 +722,7 @@ export class ptk_sca {
     }
 
     buildPortalUrl(endpoint) {
-        return buildSharedPortalUrl(endpoint)
+        return buildStoredCredentialPortalUrl(endpoint)
     }
 
     async ensureRepoReady() {
@@ -774,14 +781,16 @@ export class ptk_sca {
             .catch(() => { })
     }
 
-    async stopBackgroundScan() {
+    async stopBackgroundScan(options = {}) {
         this.isScanRunning = false
         this.activeTabId = null
         if (this.scanResult) {
             this.scanResult.finishedAt = new Date().toISOString()
-            try {
-                applyScanAnalysis(this.scanResult, { force: true })
-            } catch (_) { }
+            if (options?.skipPostStopAnalysis !== true) {
+                try {
+                    applyScanAnalysis(this.scanResult, { force: true })
+                } catch (_) { }
+            }
         }
         await this._flushPersistScanResult()
         this.removeListeners()

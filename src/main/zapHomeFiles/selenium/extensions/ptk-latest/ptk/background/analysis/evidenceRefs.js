@@ -7,7 +7,7 @@ function toNonEmptyString(value) {
 function normalizeLoc(loc) {
     if (!loc || typeof loc !== "object") return null
     const out = {}
-    const allowed = ["method", "path", "route", "module", "rule", "kind", "host", "param", "severity", "title"]
+    const allowed = ["method", "path", "route", "module", "rule", "kind", "host", "param", "severity", "title", "engine"]
     allowed.forEach((key) => {
         const value = toNonEmptyString(loc[key])
         if (value) out[key] = value

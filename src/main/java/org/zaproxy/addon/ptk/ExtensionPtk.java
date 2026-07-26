@@ -1,6 +1,7 @@
 package org.zaproxy.addon.ptk;
 
 import com.google.gson.Gson;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URLDecoder;
@@ -9,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.LinkedHashMap;
@@ -84,7 +86,7 @@ import org.zaproxy.zap.model.Context;
  * - Hard timeout means forced/incomplete. It is not clean close evidence.
  */
 final class PtkCloseContract {
-    static final int BROWSER_CLOSE_MAX_ATTEMPTS = 120;
+    static final int BROWSER_CLOSE_MAX_ATTEMPTS = 360;
     static final long BROWSER_CLOSE_WAIT_SLICE_MS = 1000;
     static final long BROWSER_CLOSE_NO_PROGRESS_GRACE_MS = 25000;
     static final long BROWSER_CLOSE_AUTOMATION_DISABLED_GRACE_MS = 2500;
@@ -442,6 +444,43 @@ final class PtkCloseContract {
             }
         }
         return false;
+    }
+
+    static boolean isTrustedRunnerTerminalCloseDecision(
+            Map<String, Object> closeDecision,
+            String expectedSessionId,
+            String expectedCloseRequestId) {
+        if (closeDecision == null
+                || !Boolean.TRUE.equals(closeDecision.get("trustedRunnerVerified"))
+                || !"ptk-zap-control-v1".equals(getString(closeDecision, "trustedRunner"))
+                || !"webdriver_extension_runner".equals(getString(closeDecision, "source"))
+                || !"safe_to_close".equals(getString(closeDecision, "decision"))
+                || !isTerminalProgressValue(null, getString(closeDecision, "scanState"))
+                || !Boolean.TRUE.equals(closeDecision.get("terminalFinalized"))
+                || !Boolean.TRUE.equals(closeDecision.get("idleVerified"))
+                || !Boolean.TRUE.equals(closeDecision.get("closeRequestAck"))) {
+            return false;
+        }
+        String scanState = getString(closeDecision, "scanState");
+        String completionStatus = getString(closeDecision, "completionStatus");
+        String releaseStatus = getString(closeDecision, "releaseStatus");
+        if (!scanState.equals(completionStatus)) {
+            return false;
+        }
+        if ("completed".equals(completionStatus)) {
+            if (!"clean".equals(releaseStatus)
+                    || !Boolean.TRUE.equals(closeDecision.get("publisherDrained"))) {
+                return false;
+            }
+        } else if (!"incomplete".equals(releaseStatus)) {
+            return false;
+        }
+        return expectedSessionId != null
+                && !expectedSessionId.isBlank()
+                && expectedSessionId.equals(getString(closeDecision, "sessionId"))
+                && expectedCloseRequestId != null
+                && !expectedCloseRequestId.isBlank()
+                && expectedCloseRequestId.equals(getString(closeDecision, "closeRequestId"));
     }
 
     static boolean isBrowserLocalNonParticipantCloseDecision(Map<String, Object> closeDecision) {
@@ -1413,6 +1452,16 @@ public class ExtensionPtk extends ExtensionAdaptor
         return "chrome-extension://" + extensionId + PTK_ZAP_RUNNER_PATH;
     }
 
+    static boolean isChromiumBrowserName(String browserName) {
+        if (browserName == null || browserName.isBlank()) {
+            return false;
+        }
+        String normalized = browserName.toLowerCase(Locale.ROOT);
+        return normalized.contains("chrome")
+                || normalized.contains("chromium")
+                || normalized.contains("edge");
+    }
+
     static String zapCallbackRunnerSkipReason(
             boolean zapAutomationEnabled, String browserid, String callbackUrl) {
         if (callbackUrl == null
@@ -2357,6 +2406,66 @@ public class ExtensionPtk extends ExtensionAdaptor
                     closeDecision, progress, status)) {
                 return false;
             }
+            String expectedSessionId = sessionIdByZapId.get(zapid);
+            String expectedCloseRequestId = activeCloseRequestId(zapid);
+            if (PtkCloseContract.isTrustedRunnerTerminalCloseDecision(
+                    closeDecision, expectedSessionId, expectedCloseRequestId)) {
+                String completionStatus = getStringField(closeDecision, "completionStatus");
+                String releaseStatus = getStringField(closeDecision, "releaseStatus");
+                boolean publisherDrained =
+                        Boolean.TRUE.equals(getBooleanField(closeDecision, "publisherDrained"));
+                PtkZapSessionState state = sessionStateByZapId.get(zapid);
+                if (state != null) {
+                    state.recordProgress(
+                            browserIdByZapId.get(zapid),
+                            expectedSessionId,
+                            100,
+                            completionStatus,
+                            "trusted_runner_terminal:" + completionStatus,
+                            true,
+                            Math.max(2, progressContractVersionByZapId.getOrDefault(zapid, 0)),
+                            publisherDrained,
+                            null,
+                            System.currentTimeMillis());
+                    state.rememberReleaseState(completionStatus, releaseStatus);
+                    state.acknowledgeCloseRequest(expectedCloseRequestId);
+                    state.setSafeToClose(true);
+                }
+                closeRequestAckByZapId.put(zapid, true);
+                scanProgress.put(zapid, 100);
+                scanStatus.put(zapid, completionStatus);
+                terminalProgressLogged.add(zapid);
+                publisherDrainedByZapId.put(zapid, publisherDrained);
+                safeToCloseByZapId.put(zapid, true);
+                Map<String, Object> trustedFields = new LinkedHashMap<>();
+                trustedFields.put("sessionId", expectedSessionId);
+                trustedFields.put("closeRequestId", expectedCloseRequestId);
+                trustedFields.put("source", "webdriver_extension_runner");
+                trustedFields.put("status", completionStatus);
+                trustedFields.put("completionStatus", completionStatus);
+                trustedFields.put("releaseStatus", releaseStatus);
+                trustedFields.put("publisherDrained", publisherDrained);
+                logContractPhase(
+                        "control_close_request_returned",
+                        zapid,
+                        browserIdByZapId.get(zapid),
+                        trustedFields);
+                logContractPhase(
+                        "control_close_request_acknowledged",
+                        zapid,
+                        browserIdByZapId.get(zapid),
+                        trustedFields);
+                logContractPhase(
+                        "terminal_progress_seen",
+                        zapid,
+                        browserIdByZapId.get(zapid),
+                        trustedFields);
+                if (publisherDrained) {
+                    logContractPhase(
+                            "publisher_drained", zapid, browserIdByZapId.get(zapid), trustedFields);
+                }
+                return true;
+            }
             Integer closeDecisionContractVersion =
                     getIntegerField(closeDecision, "contractVersion");
             if (closeDecisionContractVersion != null
@@ -3161,6 +3270,28 @@ public class ExtensionPtk extends ExtensionAdaptor
             }
 
             Map<String, Object> callbackDecision = buildCallbackCloseDecisionFromState(zapid);
+            if (callbackDecision != null
+                    && canAcceptCloseDecisionSafeToClose(
+                            zapid,
+                            callbackDecision,
+                            scanProgress.getOrDefault(zapid, 0),
+                            scanStatus.getOrDefault(zapid, ""))) {
+                return callbackDecision;
+            }
+
+            String closeRequestId = activeCloseRequestId(zapid);
+            if (ccbutils != null
+                    && closeRequestId != null
+                    && !closeRequestId.isBlank()
+                    && hasSessionId(zapid)) {
+                Map<String, Object> bridgeDecision =
+                        requestPtkOwnerStatusViaWebDriver(
+                                ccbutils, zapid, closeRequestId, closeDeadlineMs);
+                if (bridgeDecision != null) {
+                    return bridgeDecision;
+                }
+            }
+
             if (callbackDecision != null) {
                 return callbackDecision;
             }
@@ -3168,6 +3299,372 @@ public class ExtensionPtk extends ExtensionAdaptor
             fallback.put("reason", "page_visible_close_bridge_disabled");
             fallback.put("remainingMs", remainingMs);
             return fallback;
+        }
+
+        private Map<String, Object> requestPtkOwnerStatusViaWebDriver(
+                ClientCallBackUtils ccbutils,
+                String zapid,
+                String closeRequestId,
+                long closeDeadlineMs) {
+            if (ccbutils == null
+                    || zapid == null
+                    || zapid.isBlank()
+                    || closeRequestId == null
+                    || closeRequestId.isBlank()) {
+                return null;
+            }
+
+            WebDriver driver;
+            try {
+                driver = ccbutils.getWebDriver();
+            } catch (RuntimeException e) {
+                LOGGER.debug(
+                        "PTK closeContract could not resolve WebDriver for zapid {}: {}",
+                        zapid,
+                        e.getMessage());
+                return null;
+            }
+            if (!(driver instanceof JavascriptExecutor js)) {
+                return null;
+            }
+
+            long remainingMs = remainingCloseBudgetMs(closeDeadlineMs);
+            if (remainingMs < 2_500L) {
+                return null;
+            }
+            long bridgeBudgetMs =
+                    Math.min(
+                            PtkCloseContract.BROWSER_CLOSE_PTK_STOP_TIMEOUT_MS,
+                            remainingMs - 1_000L);
+
+            try {
+                driver.manage()
+                        .timeouts()
+                        .scriptTimeout(
+                                Duration.ofMillis(
+                                        Math.min(
+                                                PtkCloseContract.BROWSER_CLOSE_SCRIPT_TIMEOUT_MS,
+                                                bridgeBudgetMs + 2_000L)));
+            } catch (RuntimeException e) {
+                LOGGER.debug(
+                        "PTK closeContract could not set WebDriver script timeout: {}",
+                        e.getMessage());
+            }
+
+            String runnerUrl = resolvePtkTrustedRunnerUrl(driver, zapid);
+            if (runnerUrl == null || runnerUrl.isBlank()) {
+                return null;
+            }
+
+            String script =
+                    """
+                    const done = arguments[arguments.length - 1];
+                    const sessionId = String(arguments[0] || '');
+                    const zapid = String(arguments[1] || '');
+                    const closeRequestId = String(arguments[2] || '');
+                    const timeoutMs = Math.max(1000, Number(arguments[3]) || 10000);
+                    const startedAt = Date.now();
+                    const terminal = new Set([
+                      'completed', 'cancelled', 'error', 'timeout', 'engine_incomplete', 'publisher_incomplete'
+                    ]);
+                    let settled = false;
+                    const finish = (value) => {
+                      if (settled) return;
+                      settled = true;
+                      done(value || null);
+                    };
+                    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+                    const statusOf = (value) => String(
+                      value && (value.status || value.completionStatus || value.summary && value.summary.status) || ''
+                    ).toLowerCase();
+                    const completionStatusOf = (value) => String(
+                      value && (value.completionStatus || value.finalSummary && value.finalSummary.status) || ''
+                    ).toLowerCase();
+                    const runtime = globalThis.browser && globalThis.browser.runtime
+                      ? globalThis.browser.runtime
+                      : globalThis.chrome && globalThis.chrome.runtime
+                        ? globalThis.chrome.runtime
+                        : null;
+                    const send = (payload, responseTimeoutMs = 3000) => new Promise((resolve) => {
+                      if (!runtime || typeof runtime.sendMessage !== 'function') {
+                        resolve({ ok: false, reason: 'runtime_unavailable' });
+                        return;
+                      }
+                      let completed = false;
+                      const finish = (value) => {
+                        if (completed) return;
+                        completed = true;
+                        resolve(value || { ok: false, reason: 'empty_response' });
+                      };
+                      try {
+                        if (globalThis.browser && runtime === globalThis.browser.runtime) {
+                          Promise.resolve(runtime.sendMessage(payload)).then(
+                            finish,
+                            (error) => finish({ ok: false, reason: error && error.message || String(error) })
+                          );
+                        } else {
+                          runtime.sendMessage(payload, (response) => {
+                            const lastError = runtime.lastError && runtime.lastError.message;
+                            finish(response || { ok: false, reason: lastError || 'empty_response' });
+                          });
+                        }
+                      } catch (error) {
+                        finish({ ok: false, reason: error && error.message || String(error) });
+                      }
+                      setTimeout(() => finish({ ok: false, reason: 'runtime_response_timeout' }), responseTimeoutMs);
+                    });
+                    const baseMessage = {
+                      channel: 'ptk_extension_zap_runner',
+                      sessionId,
+                      zapid,
+                      closeRequestId,
+                      timeoutMs,
+                      drainTimeoutMs: timeoutMs
+                    };
+                    const waitDecision = (latest, queueDrained = false) => {
+                      const dast = latest && latest.engines && latest.engines.DAST || {};
+                      return {
+                        ok: false,
+                        participant: 'ptk',
+                        decision: 'wait',
+                        scanState: statusOf(latest) || 'running',
+                        statusBefore: statusOf(latest) || 'running',
+                        sessionId,
+                        source: 'webdriver_extension_runner',
+                        reason: 'active_browser_work',
+                        stopRequested: false,
+                        closeRequestId,
+                        closeRequestAck: false,
+                        trustedRunner: latest && latest.trustedRunner || null,
+                        runnerProgress: Number(dast.progress || 0),
+                        runnerPlanned: Number(dast.planned || 0),
+                        runnerExecuted: Number(dast.executed || 0),
+                        runnerRemaining: Number(dast.remaining || 0),
+                        runnerTaskQueue: Number(dast.taskQueue || 0),
+                        runnerFindings: Number(dast.findingsCount || 0),
+                        runnerQueueDrained: queueDrained
+                      };
+                    };
+                    const terminalDecision = (latest) => {
+                      const latestStatus = completionStatusOf(latest);
+                      const closeIdentityVerified = latest
+                        && String(latest.closeRequestId || '') === closeRequestId
+                        && latest.closeRequestAck === true
+                        && latest.idleVerified === true;
+                      if (!latest || latest.ok !== true || !latest.finishedAt
+                          || !terminal.has(latestStatus) || !closeIdentityVerified) {
+                        return null;
+                      }
+                      const releaseStatus = String(latest.releaseStatus || '').toLowerCase();
+                      return {
+                        ok: true,
+                        participant: 'ptk',
+                        decision: 'safe_to_close',
+                        scanState: latestStatus,
+                        statusBefore: statusOf(latest) || 'running',
+                        sessionId,
+                        source: 'webdriver_extension_runner',
+                        reason: 'already_terminal',
+                        stopRequested: latest.stopRequestedAt ? true : false,
+                        closeRequestId,
+                        closeRequestAck: true,
+                        trustedRunner: latest.trustedRunner,
+                        terminalFinalized: true,
+                        completionStatus: latestStatus,
+                        releaseStatus,
+                        idleVerified: latest.idleVerified === true,
+                        publisherDrained: latestStatus === 'completed' && releaseStatus === 'clean'
+                      };
+                    };
+                    (async () => {
+                      try {
+                        let latest = null;
+                        while (Date.now() - startedAt < timeoutMs) {
+                          latest = await send({
+                            ...baseMessage,
+                            type: 'close_session_status',
+                            requestId: 'zap-close-status-' + Date.now()
+                          });
+                          if (latest && latest.trustedRunner !== 'ptk-zap-control-v1') {
+                            finish({
+                              ok: false,
+                              participant: 'ptk',
+                              decision: 'wait',
+                              scanState: 'unknown',
+                              source: 'webdriver_extension_runner',
+                              reason: 'trusted_runner_identity_missing',
+                              stopRequested: false,
+                              closeRequestId
+                            });
+                            return;
+                          }
+                          const latestTerminal = terminalDecision(latest);
+                          if (latestTerminal) {
+                            finish(latestTerminal);
+                            return;
+                          }
+                          const dast = latest && latest.engines && latest.engines.DAST || {};
+                          const remaining = Number(dast.remaining || 0);
+                          const taskQueue = Number(dast.taskQueue || 0);
+                          if (remaining <= 0 && taskQueue <= 0) {
+                            const responseBudgetMs = Math.max(
+                              1000,
+                              timeoutMs - (Date.now() - startedAt) - 500
+                            );
+                            const closeResult = await send({
+                              ...baseMessage,
+                              type: 'close_session_if_idle',
+                              requestId: 'zap-close-if-idle-' + Date.now()
+                            }, responseBudgetMs);
+                            if (closeResult && closeResult.reason === 'runtime_response_timeout') {
+                              finish(waitDecision(latest, true));
+                              return;
+                            }
+                            if (closeResult && closeResult.trustedRunner !== 'ptk-zap-control-v1') {
+                              finish({
+                                ok: false,
+                                participant: 'ptk',
+                                decision: 'wait',
+                                scanState: 'unknown',
+                                source: 'webdriver_extension_runner',
+                                reason: 'trusted_runner_identity_missing',
+                                stopRequested: false,
+                                closeRequestId
+                              });
+                              return;
+                            }
+                            const closeTerminal = terminalDecision(closeResult);
+                            if (closeTerminal) {
+                              finish(closeTerminal);
+                              return;
+                            }
+                            latest = closeResult || latest;
+                            if (latest && latest.closeInProgress === true) {
+                              await sleep(500);
+                              continue;
+                            }
+                          }
+                          await sleep(1000);
+                        }
+                        finish(waitDecision(latest, false));
+                      } catch (error) {
+                        finish({
+                          ok: false,
+                          participant: 'ptk',
+                          decision: 'wait',
+                          scanState: 'unknown',
+                          source: 'webdriver_extension_runner',
+                          reason: 'trusted_runner_failed',
+                          error: error && error.message || String(error),
+                          stopRequested: false,
+                          closeRequestId
+                        });
+                      }
+                    })();
+                    """;
+
+            String sessionId = sessionIdByZapId.get(zapid);
+            String originalWindow = null;
+            String runnerWindow = null;
+            try {
+                originalWindow = driver.getWindowHandle();
+                driver.switchTo().newWindow(WindowType.TAB);
+                runnerWindow = driver.getWindowHandle();
+                driver.navigate().to(runnerUrl);
+                String loadedRunnerUrl = driver.getCurrentUrl();
+                if (!runnerUrl.equals(loadedRunnerUrl)) {
+                    throw new IllegalStateException("trusted_runner_navigation_mismatch");
+                }
+                Object rawResult =
+                        js.executeAsyncScript(
+                                script, sessionId, zapid, closeRequestId, bridgeBudgetMs);
+                return normalizeCloseScriptResult(rawResult, loadedRunnerUrl);
+            } catch (RuntimeException e) {
+                Map<String, Object> failed = new LinkedHashMap<>();
+                failed.put("ok", false);
+                failed.put("participant", "ptk");
+                failed.put("decision", "wait");
+                failed.put("scanState", scanStatus.getOrDefault(zapid, "running"));
+                failed.put("source", "webdriver_extension_runner");
+                failed.put("reason", "trusted_runner_failed");
+                failed.put("error", e.getMessage());
+                failed.put("stopRequested", false);
+                failed.put("closeRequestId", closeRequestId);
+                failed.put("windowUrl", runnerUrl);
+                return failed;
+            } finally {
+                closeZapCallbackRunnerWindow(
+                        driver, runnerWindow, originalWindow, "trusted_close_control_completed");
+            }
+        }
+
+        private String resolvePtkTrustedRunnerUrl(WebDriver driver, String zapid) {
+            String browserid = browserIdByZapId.get(zapid);
+            String browserName = null;
+            if (driver instanceof RemoteWebDriver remoteDriver) {
+                browserName = remoteDriver.getCapabilities().getBrowserName();
+            }
+            if (isChromiumBrowserName(browserName) || isChromiumBrowserId(browserid)) {
+                Path chromiumPath = getPtkChromiumExtensionPath();
+                return Files.isDirectory(chromiumPath)
+                        ? buildChromiumZapRunnerUrl(chromiumPath)
+                        : null;
+            }
+            try {
+                if (!(driver instanceof RemoteWebDriver remoteDriver)) {
+                    return null;
+                }
+                Object profileValue = remoteDriver.getCapabilities().getCapability("moz:profile");
+                if (!(profileValue instanceof String profilePath) || profilePath.isBlank()) {
+                    return null;
+                }
+                Path prefsPath = Path.of(profilePath).resolve("prefs.js");
+                if (!Files.isRegularFile(prefsPath)) {
+                    return null;
+                }
+                String prefs = Files.readString(prefsPath, StandardCharsets.UTF_8);
+                String marker = "\\\"pentestkit@DenisPodgurskii\\\":\\\"";
+                int markerIndex = prefs.indexOf(marker);
+                if (markerIndex < 0) {
+                    return null;
+                }
+                int uuidStart = markerIndex + marker.length();
+                int uuidEnd = prefs.indexOf("\\\"", uuidStart);
+                if (uuidEnd <= uuidStart) {
+                    return null;
+                }
+                String extensionUuid = prefs.substring(uuidStart, uuidEnd);
+                if (!extensionUuid.matches("[A-Fa-f0-9-]{32,64}")) {
+                    return null;
+                }
+                return "moz-extension://" + extensionUuid + PTK_ZAP_RUNNER_PATH;
+            } catch (IOException | RuntimeException e) {
+                LOGGER.debug(
+                        "PTK closeContract could not resolve trusted runner for zapid {}: {}",
+                        zapid,
+                        e.getMessage());
+                return null;
+            }
+        }
+
+        private Map<String, Object> normalizeCloseScriptResult(Object rawResult, String windowUrl) {
+            if (!(rawResult instanceof Map<?, ?> rawMap)) {
+                return null;
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            rawMap.forEach(
+                    (key, value) -> {
+                        if (key != null) {
+                            result.put(String.valueOf(key), value);
+                        }
+                    });
+            if (windowUrl != null && !windowUrl.isBlank()) {
+                result.put("windowUrl", windowUrl);
+            }
+            if ("ptk-zap-control-v1".equals(result.get("trustedRunner"))) {
+                result.put("trustedRunnerVerified", true);
+            }
+            return result;
         }
 
         private Map<String, Object> buildCallbackCloseDecisionFromState(String zapid) {
@@ -3302,6 +3799,20 @@ public class ExtensionPtk extends ExtensionAdaptor
                 Object windowUrl = diagnostics.get("windowUrl");
                 if (windowUrl != null) {
                     summary.append(" windowUrl=").append(redactZapCallbackValueForLog(windowUrl));
+                }
+                for (String key :
+                        List.of(
+                                "runnerProgress",
+                                "runnerPlanned",
+                                "runnerExecuted",
+                                "runnerRemaining",
+                                "runnerTaskQueue",
+                                "runnerFindings",
+                                "runnerQueueDrained")) {
+                    Object value = diagnostics.get(key);
+                    if (value != null) {
+                        summary.append(" ").append(key).append("=").append(value);
+                    }
                 }
             }
 
@@ -4699,10 +5210,11 @@ public class ExtensionPtk extends ExtensionAdaptor
             boolean hadProgressBeforeClose = scanProgress.containsKey(zapid);
             boolean callbackObservedOwnerSession =
                     ownerTargetClose && hadProgressBeforeClose && hasSessionId(zapid);
+            if (callbackObservedOwnerSession && !isSafeToClose(zapid)) {
+                ensureCloseRequest(zapid, "owner_browser_close_requested");
+            }
             Map<String, Object> closeDecision =
-                    callbackObservedOwnerSession && !isSafeToClose(zapid)
-                            ? buildCallbackOwnerWaitDecision(zapid)
-                            : requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
+                    requestPtkCloseDecision(ccbutils, zapid, closeDeadlineMs);
             if (!"callback_progress".equals(getStringField(closeDecision, "source"))) {
                 markCloseDecisionAttempted(zapid, System.currentTimeMillis());
             }

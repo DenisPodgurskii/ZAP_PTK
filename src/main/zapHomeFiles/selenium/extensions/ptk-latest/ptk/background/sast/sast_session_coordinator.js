@@ -345,7 +345,7 @@ export class SastSessionCoordinator {
     if (this.spaScanInFlight.has(normalized)) return;
     this.spaScanInFlight.add(normalized);
     try {
-      if (this.isCollectedPayloadUsable(payload)) {
+      if (this.isCollectedPayloadUsable(payload) && sameDocumentUrl(payload.file, normalized)) {
         await this.scanCollectedPayload(tabId, payload, {
           source: "content_route_payload",
           expectedUrl: normalized

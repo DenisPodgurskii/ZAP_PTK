@@ -4,6 +4,10 @@ import { ptk_utils, ptk_jwtHelper } from "../../../background/utils.js"
 import { ptk_decoder } from "../../../background/decoder.js"
 import * as rutils from "../js/rutils.js"
 import { Curl2Json, Json2Curl } from "../../../background/lib/curl.js"
+import {
+    encodeMultipartHeaderParameter,
+    normalizeMultipartBoundary
+} from "../../../background/requestBuilder/multipartEncoding.js"
 
 
 //import { Parser }  from '../../../packages/curl/tree-sitter.js';
@@ -429,20 +433,21 @@ class rbuilderUI {
                         const boundary = boundaryMatch?.[1]
                             ? String(boundaryMatch[1]).trim().replace(/^"|"$/g, '')
                             : ''
-                        if (boundary) {
+                        const safeBoundary = normalizeMultipartBoundary(boundary)
+                        if (safeBoundary) {
                             const parts = []
                             Object.entries(request.requestBody.formData).forEach(([name, value]) => {
                                 const values = Array.isArray(value) ? value : [value]
                                 values.forEach((entry) => {
                                     parts.push(
-                                        `--${boundary}\r\n`
-                                        + `Content-Disposition: form-data; name="${String(name).replace(/"/g, '\\"')}"\r\n`
+                                        `--${safeBoundary}\r\n`
+                                        + `Content-Disposition: form-data; name="${encodeMultipartHeaderParameter(name)}"\r\n`
                                         + `\r\n`
                                         + `${String(entry ?? '')}\r\n`
                                     )
                                 })
                             })
-                            headersStr += "\n\n" + parts.join('') + `--${boundary}--`
+                            headersStr += "\n\n" + parts.join('') + `--${safeBoundary}--`
                         }
                     } else {
                         let params = Object.keys(request.requestBody.formData).map(function (k) {

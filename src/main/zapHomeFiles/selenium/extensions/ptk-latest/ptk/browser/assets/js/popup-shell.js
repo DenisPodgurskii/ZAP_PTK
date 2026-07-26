@@ -20,6 +20,13 @@ const POPUP_HISTORY_ROUTES = new Set([
   'xss',
   'sql'
 ])
+const POPUP_MODAL_PAGES = new Map([
+  ['settings', 'settings.html'],
+  ['credits', 'credits.html'],
+  ['disclaimer', 'disclaimer.html'],
+  ['privacy', 'privacy.html'],
+  ['contact', 'contact.html']
+])
 
 const RELEASE_NOTE_HTML = `
   <div id="ptk_release_note" class="ptk-shell-release-note" role="status" aria-live="polite">
@@ -103,17 +110,17 @@ function renderShell() {
             </span>
           </button>
           <div class="ptk-shell-dropdown-menu" role="menu">
-            <button type="button" data-modal-page="settings.html" role="menuitem">Settings</button>
+            <button type="button" data-modal-action="settings" role="menuitem">Settings</button>
             <hr class="ptk-shell-divider">
             <button type="button" data-action="reloadextension" role="menuitem">Reload PTK</button>
             <hr class="ptk-shell-divider">
             <a href="https://pentestkit.co.uk/howto.html" target="_blank" rel="noopener" role="menuitem">How to</a>
             <a href="https://pentestkit.co.uk/release_notes.html" target="_blank" rel="noopener" role="menuitem">Release notes</a>
             <hr class="ptk-shell-divider">
-            <button type="button" data-modal-page="credits.html" role="menuitem">Credits</button>
-            <button type="button" data-modal-page="disclaimer.html" role="menuitem">Disclaimer</button>
-            <button type="button" data-modal-page="privacy.html" role="menuitem">Privacy Policy</button>
-            <button type="button" data-modal-page="contact.html" role="menuitem">Contact Us</button>
+            <button type="button" data-modal-action="credits" role="menuitem">Credits</button>
+            <button type="button" data-modal-action="disclaimer" role="menuitem">Disclaimer</button>
+            <button type="button" data-modal-action="privacy" role="menuitem">Privacy Policy</button>
+            <button type="button" data-modal-action="contact" role="menuitem">Contact Us</button>
             <hr class="ptk-shell-divider">
             <div class="ptk-shell-static">Version: ${version}</div>
           </div>
@@ -169,11 +176,11 @@ function bindShell() {
       return
     }
 
-    const modalTrigger = event.target.closest('[data-modal-page]')
+    const modalTrigger = event.target.closest('[data-modal-action]')
     if (modalTrigger) {
       event.preventDefault()
       closeAllDropdowns()
-      openModal(modalTrigger.getAttribute('data-modal-page'))
+      openModal(modalTrigger.getAttribute('data-modal-action'))
       return
     }
 
@@ -215,8 +222,10 @@ function bindShell() {
     }).catch(() => {})
   })
 
-  function openModal(page) {
+  function openModal(action) {
     if (!modal || !modalBackdrop || !modalFrame) return
+    const page = POPUP_MODAL_PAGES.get(action)
+    if (!page) return
     modalFrame.src = page
     modal.classList.add('is-open')
     modalBackdrop.classList.add('is-open')

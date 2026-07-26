@@ -22,9 +22,10 @@ import runRuleTemplateRenderWorkflows from "./rules/ruleTemplateRenderWorkflows.
 import runRuleIastRuntimeSignals from "./rules/ruleIastRuntimeSignals.js"
 import runRuleSastCodeArtifacts from "./rules/ruleSastCodeArtifacts.js"
 import { buildApiExplorer } from "./apiExplorerBuilder.js"
+import { buildAttackSurfaceRecommendations } from "./attackSurfaceRecommendations.js"
 import { validateScanAnalysisV1 } from "./scanAnalysisSchema.js"
 
-export const ANALYSIS_VERSION = "1.7.7"
+export const ANALYSIS_VERSION = "1.7.9"
 
 const CACHE_KEY_PROP = "__ptkAnalysisCacheKey"
 const ENGINE_ORDER = Object.freeze(["DAST", "IAST", "SAST", "SCA"])
@@ -2648,6 +2649,17 @@ function buildAnalysis(scanResult, { caps = DEFAULT_CAPS, extraEnginesPresent = 
     const attackMap = buildAttackMap(scanResult, patterns, diffAnnotated.candidates, discovery)
     const objectInventory = buildObjectInventory(scanResult, patterns, diffAnnotated.candidates, discovery)
     const explorer = buildApiExplorer(scanResult, { relatedScans })
+    const recommendations = buildAttackSurfaceRecommendations({
+        scanResult,
+        context,
+        patterns,
+        candidates: diffAnnotated.candidates,
+        discovery,
+        opportunities,
+        attackMap,
+        objectInventory,
+        explorer
+    })
     const analysis = {
         version: ANALYSIS_VERSION,
         scanId: scanResult?.scanId || null,
@@ -2659,6 +2671,7 @@ function buildAnalysis(scanResult, { caps = DEFAULT_CAPS, extraEnginesPresent = 
         attackMap,
         objectInventory,
         opportunities,
+        recommendations,
         explorer
     }
     analysis.schemaValidation = validateScanAnalysisV1(analysis)

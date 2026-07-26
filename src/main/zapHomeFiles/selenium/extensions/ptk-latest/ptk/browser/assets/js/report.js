@@ -15,6 +15,15 @@ import { createPdfLayout, clampCellText, formatUrlForTable } from "./report/pdfL
 import { buildEvidenceRows } from "./report/evidenceRenderer.js"
 import { drawBadge, drawFlagIcon, drawReplayIcon, drawCheckIcon, drawRiskBarList, drawKeyValueBlock, normalizeEvidenceSummary, drawCodeBlock, drawHostBanner, drawSummaryCard, drawMutedText } from "./report/pdfComponents.js"
 import { renderEvidencePackageDetailHtml } from "./dastBugBountyWorkspace.js"
+import { escapeUiText, renderDataTableText, renderPreformattedJson } from "./safeUiText.js"
+import { escapeMarkdownCell, escapeMarkdownText, stripHtmlTags } from "./report/textEncoding.js"
+import {
+    countDastPresentationAttacks,
+    isIastReportFinding,
+    partitionReportFindings,
+    resolveReportEngineResult,
+    summarizeReportFindings
+} from "./report/reportingContract.js"
 
 const jwtHelper = new ptk_jwtHelper()
 const decoder = new ptk_decoder()
@@ -78,9 +87,7 @@ const exportModel = {
         sast: [],
         sca: []
     },
-    discoveries: {
-        sast: []
-    },
+    discoveries: { sast: [] },
     summary: {
         byEngine: {},
         bySeverity: {}
@@ -125,9 +132,7 @@ function initExportModel(reportType) {
         sast: [],
         sca: []
     }
-    exportModel.discoveries = {
-        sast: []
-    }
+    exportModel.discoveries = { sast: [] }
     exportModel.summary = { byEngine: {}, bySeverity: {} }
     exportModel.scanStats = {
         urlsSpidered: 0,
@@ -1455,6 +1460,23 @@ function replaceSectionDiscoveries(sectionId, discoveries) {
     updateExportButtons()
 }
 
+function bindCanonicalSectionStats(selector, findings, options = {}) {
+    const summary = summarizeReportFindings(findings)
+    $(`${selector} #vulns_count`).text(summary.findingsCount)
+    $(`${selector} #critical_count`).text(summary.critical)
+    $(`${selector} #high_count`).text(summary.high)
+    $(`${selector} #medium_count`).text(summary.medium)
+    $(`${selector} #low_count`).text(summary.low)
+    $(`${selector} #info_count`).text(summary.info)
+    if (Object.prototype.hasOwnProperty.call(options, 'attacksCount')) {
+        $(`${selector} #attacks_count`).text(options.attacksCount ?? 0)
+    }
+    if (Object.prototype.hasOwnProperty.call(options, 'discoveryCount')) {
+        $(`${selector} #sast_discovery_count`).text(options.discoveryCount ?? 0)
+    }
+    return summary
+}
+
 function safeJsonParse(value) {
     try {
         return JSON.parse(value)
@@ -1480,26 +1502,6 @@ function normalizeStorageEntries(value) {
         entries.push({ key, value: display })
     })
     return entries
-}
-
-function stripHtmlTags(value) {
-    if (!value) return ""
-    const text = String(value)
-    try {
-        if (typeof DOMParser !== "undefined") {
-            const doc = new DOMParser().parseFromString(text, "text/html")
-            return doc?.body?.textContent || ""
-        }
-    } catch (_) {
-        // Fall back to iterative regex stripping if DOMParser is unavailable.
-    }
-    let prev = text
-    let next = prev.replace(/<[^>]*>/g, "")
-    while (next !== prev) {
-        prev = next
-        next = prev.replace(/<[^>]*>/g, "")
-    }
-    return next
 }
 
 function updateExportDashboardModel() {
@@ -1693,21 +1695,6 @@ function buildExportFindingFromSca(entry) {
         cwe: Array.isArray(finding?.cwe) ? finding.cwe : (finding?.cwe ? [finding.cwe] : []),
         owasp: []
     }
-}
-
-function escapeMarkdownCell(value) {
-    if (value === null || value === undefined) return ""
-    const escaped = escapeMarkdownText(String(value))
-    return escaped.replace(/\|/g, "\\|").replace(/\n/g, " ").replace(/\r/g, " ")
-}
-
-function escapeMarkdownText(value) {
-    if (value === null || value === undefined) return ""
-    return String(value)
-        .replace(/\\/g, "\\\\")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
 }
 
 function toMarkdownTable(headers, rows) {
@@ -4530,6 +4517,33 @@ jQuery(function () {
     const iast_controller = new ptk_controller_iast()
     const sast_controller = new ptk_controller_sast()
 
+    async function loadReportEngineResult(engine, controller, snapshots, host) {
+        try {
+            const result = await resolveReportEngineResult({
+                snapshots,
+                engine,
+                loadLive: () => controller.init()
+            })
+            if (result?.scanResult && !hostsMatch(host, result.scanResult.host)) {
+                return { ...result, scanResult: null }
+            }
+            return result || { scanResult: null }
+        } catch (_) {
+            return { scanResult: null }
+        }
+    }
+
+    async function loadFullReportSnapshot(snapshotId) {
+        if (snapshotId) {
+            const response = await index_controller.consumeReportSnapshot(snapshotId)
+            return response?.success && response?.snapshot
+                ? { tab_full_info: response.snapshot }
+                : { tab_full_info: {} }
+        }
+        await browser.storage.local.remove('tab_full_info').catch(() => { })
+        return { tab_full_info: {} }
+    }
+
 
     $('#filter_all').on("click", function () {
         $('.attack_info').show()
@@ -4592,7 +4606,10 @@ jQuery(function () {
 
     async function bindInfo(host) {
         if (host) {
-            $('#dashboard_message_text').html('<h2>OWASP PTK Security Report</h2>  ' + host)
+            const container = $('#dashboard_message_text')
+            container.empty()
+            $('<h2>').text('OWASP PTK Security Report').appendTo(container)
+            container.append(document.createTextNode(`  ${String(host)}`))
             setExportMeta({ host })
         } else {
             $('#dashboard_message_text').html(`Reload the tab to activate tracking &nbsp;<i class="exclamation red  circle  icon"></i>`)
@@ -4627,7 +4644,10 @@ jQuery(function () {
                 ])
             })
         }
-        let params = { "data": dt }
+        let params = {
+            "data": dt,
+            columnDefs: [{ "targets": [0, 1, 2, 3], "render": renderDataTableText }]
+        }
         bindTable('#tbl_cves', params)
         $('.loader.cves').hide()
         updateReportDashboardVisibility()
@@ -4658,7 +4678,14 @@ jQuery(function () {
             }
             return a[0].localeCompare(b[0])
         })
-        let params = { "data": dt, "columns": [{ width: "45%" }, { width: "30%" }, { width: "25%" }] }
+        let params = {
+            "data": dt,
+            "columns": [
+                { width: "45%", render: renderDataTableText },
+                { width: "30%", render: renderDataTableText },
+                { width: "25%", render: renderDataTableText }
+            ]
+        }
         bindTable('#tbl_technologies', params)
         $('.loader.technologies').hide()
         updateReportDashboardVisibility()
@@ -4686,9 +4713,10 @@ jQuery(function () {
             var groupColumn = 0;
             let params = {
                 data: dt,
-                columnDefs: [{
-                    "visible": false, "targets": groupColumn
-                }],
+                columnDefs: [
+                    { "visible": false, "targets": groupColumn },
+                    { "targets": [0, 1, 2, 3], "render": renderDataTableText }
+                ],
                 "order": [[groupColumn, 'asc']],
                 "drawCallback": function (settings) {
                     var api = this.api();
@@ -4698,7 +4726,7 @@ jQuery(function () {
                     api.column(groupColumn, { page: 'current' }).data().each(function (group, i) {
                         if (last !== group) {
                             $(rows).eq(i).before(
-                                '<tr class="group" ><td colspan="3"><div class="ui grey ribbon label">' + group + '</div></td></tr>'
+                                '<tr class="group" ><td colspan="3"><div class="ui grey ribbon label">' + escapeUiText(group) + '</div></td></tr>'
                             );
                             last = group;
                         }
@@ -4711,7 +4739,7 @@ jQuery(function () {
             let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(dt), jwtHelper.sessionRegex)
             if (jwtToken) {
                 let jwt = JSON.parse(decodedToken)
-                tokens.push(['cookie', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
+                tokens.push(['cookie', renderPreformattedJson(jwt["payload"]), jwtToken[1]])
             }
         }
         $('.loader.storage').hide()
@@ -4765,7 +4793,8 @@ jQuery(function () {
                 }
             })
             let params = {
-                data: dt
+                data: dt,
+                columnDefs: [{ "targets": [0, 1], "render": renderDataTableText }]
             }
 
             bindTable('#tbl_headers', params)
@@ -4774,7 +4803,7 @@ jQuery(function () {
             if (jwtToken) {
                 try {
                     let jwt = JSON.parse(decodedToken)
-                    tokens.push(['headers', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
+                    tokens.push(['headers', renderPreformattedJson(jwt["payload"]), jwtToken[1]])
                 } catch (e) { }
             }
             bindTokens()
@@ -4811,7 +4840,7 @@ jQuery(function () {
             let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(item), jwtHelper.storageRegex)
             if (jwtToken) {
                 let jwt = JSON.parse(decodedToken)
-                tokens.push(['localStorage', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
+                tokens.push(['localStorage', renderPreformattedJson(jwt["payload"]), jwtToken[1]])
             }
             $('#localStorageText').text(output.replace(/\\r?\\n/g, '<br/>'))
         }
@@ -4824,7 +4853,7 @@ jQuery(function () {
             let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(item), jwtHelper.storageRegex)
             if (jwtToken) {
                 let jwt = JSON.parse(decodedToken)
-                tokens.push(['localStorage', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
+                tokens.push(['localStorage', renderPreformattedJson(jwt["payload"]), jwtToken[1]])
             }
             $('#sessionStorageText').text(output.replace(/\\r?\\n/g, '<br/>'))
         }
@@ -4842,8 +4871,8 @@ jQuery(function () {
         const vm = normalizeScanResult(scanResult)
         result.scanViewModel = vm
 
-        const findings = Array.isArray(vm.findings) ? vm.findings : []
-        const stats = vm.stats || scanResult.stats || {}
+        const normalizedFindings = Array.isArray(vm.findings) ? vm.findings : []
+        const { findings } = partitionReportFindings('IAST', normalizedFindings)
         if (!findings.length && (!Array.isArray(scanResult.items) || !scanResult.items.length)) {
             $('.loader.iast').hide()
             replaceSectionFindings("iast", [])
@@ -4852,15 +4881,10 @@ jQuery(function () {
         }
 
         $('#iast_report').show()
-        $('#iast_report #vulns_count').text(stats.findingsCount ?? findings.length ?? 0)
-        $('#iast_report #critical_count').text(stats.critical ?? scanResult.stats?.critical ?? 0)
-        $('#iast_report #high_count').text(stats.high ?? scanResult.stats?.high ?? 0)
-        $('#iast_report #medium_count').text(stats.medium ?? scanResult.stats?.medium ?? 0)
-        $('#iast_report #low_count').text(stats.low ?? scanResult.stats?.low ?? 0)
-        $('#iast_report #info_count').text(stats.info ?? scanResult.stats?.info ?? 0)
 
         const $container = $("#iast_report_items")
         $container.html("")
+        let exportFindings = []
 
         const sortBySeverity = (a, b) => {
             const left = a?.severity || a?.metadata?.severity || "info"
@@ -4878,7 +4902,7 @@ jQuery(function () {
             mapped.forEach((legacy, displayIndex) => {
                 $container.append(renderIastFinding(legacy, displayIndex))
             })
-            const exportFindings = findings.map(finding => buildExportFindingFromNormalized(finding, vm))
+            exportFindings = findings.map(finding => buildExportFindingFromNormalized(finding, vm))
             replaceSectionFindings("iast", exportFindings)
         } else if (Array.isArray(scanResult.items) && scanResult.items.length) {
             const legacyItems = scanResult.items.map((item, idx) => {
@@ -4886,12 +4910,18 @@ jQuery(function () {
                 const clone = { ...item }
                 clone.__index = idx
                 return clone
-            }).filter(Boolean)
+            }).filter(Boolean).filter(isIastReportFinding)
+            if (!legacyItems.length) {
+                $('.loader.iast').hide()
+                replaceSectionFindings("iast", [])
+                markSectionReady("iast")
+                return
+            }
             legacyItems.sort(sortBySeverity)
             legacyItems.forEach((item, displayIndex) => {
                 $container.append(renderIastFinding(item, displayIndex))
             })
-            const exportFindings = legacyItems.map(item => ({
+            exportFindings = legacyItems.map(item => ({
                 engine: "IAST",
                 severity: normalizeExportSeverity(item?.metadata?.severity || item?.severity),
                 confidence: resolveConfidenceValue(item?.confidence, item?.metadata?.confidence),
@@ -4927,6 +4957,7 @@ jQuery(function () {
             return
         }
 
+        bindCanonicalSectionStats('#iast_report', exportFindings)
         $(".content.stacktrace").show()
         $('.loader.iast').hide()
         markSectionReady("iast")
@@ -4952,9 +4983,21 @@ jQuery(function () {
         }
         const vm = normalizeScanResult(scanResult)
         result.scanViewModel = vm
-        const findings = Array.isArray(vm.findings) ? vm.findings : []
+        const normalizedFindings = Array.isArray(vm.findings) ? vm.findings : []
+        const partitionedFindings = partitionReportFindings('SAST', normalizedFindings)
+        const findings = partitionedFindings.findings
         const legacyItems = Array.isArray(scanResult.items) ? scanResult.items : []
+        const supportDiscoveryItems = partitionedFindings.discoveries.map((finding, index) => ({
+            id: finding?.id || `sast-support-${index + 1}`,
+            category: finding?.findingKind || finding?.outputKind || 'discovery',
+            title: finding?.ruleName || finding?.title || finding?.name || `Discovery ${index + 1}`,
+            summary: finding?.description || 'SAST support observation.',
+            details: [],
+            file: finding?.location?.file || '',
+            location: finding?.location || null
+        }))
         const discoveryItems = flattenSastDiscovery(vm.codeArtifacts || scanResult.codeArtifacts)
+            .concat(supportDiscoveryItems)
         if (!findings.length && !legacyItems.length && !discoveryItems.length) {
             $('.loader.sast').hide()
             $container.html("")
@@ -4983,6 +5026,7 @@ jQuery(function () {
         }
 
         $container.html("")
+        let exportFindings = []
         if (findings.length) {
             const mapped = findings.map(mapSastFindingToLegacy)
             mapped.sort((a, b) => severityRank(a.metadata?.severity) - severityRank(b.metadata?.severity))
@@ -4990,7 +5034,7 @@ jQuery(function () {
                 $container.append(renderSastFinding(item, index))
                 addRuleId(item)
             })
-            const exportFindings = findings.map(finding => buildExportFindingFromNormalized(finding, vm))
+            exportFindings = findings.map(finding => buildExportFindingFromNormalized(finding, vm))
             replaceSectionFindings("sast", exportFindings)
         } else {
             const sortedItems = [...legacyItems].sort((a, b) => {
@@ -5002,7 +5046,7 @@ jQuery(function () {
                 $container.append(renderSastFinding(item, index))
                 addRuleId(item)
             })
-            const exportFindings = sortedItems.map(item => ({
+            exportFindings = sortedItems.map(item => ({
                 engine: "SAST",
                 severity: normalizeExportSeverity(item?.metadata?.severity || item?.severity),
                 confidence: resolveConfidenceValue(item?.confidence, item?.metadata?.confidence),
@@ -5045,15 +5089,10 @@ jQuery(function () {
         const stats = vm.stats || scanResult.stats || {}
         const computedRulesCount = ruleIds.size
         const resolvedRulesCount = computedRulesCount || stats.rulesCount || 0
-        stats.rulesCount = resolvedRulesCount
         $('#sast_report #sast_rules_count').text(resolvedRulesCount)
-        $('#sast_report #vulns_count').text(stats.findingsCount ?? findings.length ?? 0)
-        $('#sast_report #sast_discovery_count').text(discoveryItems.length)
-        $('#sast_report #critical_count').text(stats.critical ?? scanResult.stats?.critical ?? 0)
-        $('#sast_report #high_count').text(stats.high ?? scanResult.stats?.high ?? 0)
-        $('#sast_report #medium_count').text(stats.medium ?? scanResult.stats?.medium ?? 0)
-        $('#sast_report #low_count').text(stats.low ?? scanResult.stats?.low ?? 0)
-        $('#sast_report #info_count').text(stats.info ?? scanResult.stats?.info ?? 0)
+        bindCanonicalSectionStats('#sast_report', exportFindings, {
+            discoveryCount: discoveryItems.length
+        })
 
         $(".content.stacktrace").show()
         $('.loader.sast').hide()
@@ -5105,47 +5144,7 @@ jQuery(function () {
         }
         const exportFindings = entries.map(entry => buildExportFindingFromSca(entry))
         replaceSectionFindings("sca", exportFindings)
-
-        const computedStats = {
-            findingsCount: 0,
-            critical: 0,
-            high: 0,
-            medium: 0,
-            low: 0,
-            info: 0
-        }
-        const bucketSeverity = (value) => {
-            const normalized = String(value || '').toLowerCase()
-            if (normalized === 'critical') return 'critical'
-            if (normalized === 'high') return 'high'
-            if (normalized === 'medium') return 'medium'
-            if (normalized === 'low') return 'low'
-            return 'info'
-        }
-        rawComponents.forEach(component => {
-            const vulns = Array.isArray(component?.findings)
-                ? component.findings
-                : (Array.isArray(component?.vulnerabilities) ? component.vulnerabilities : [])
-            if (!vulns.length && component?.severity) {
-                computedStats.findingsCount += 1
-                const key = bucketSeverity(component.severity)
-                computedStats[key] += 1
-                return
-            }
-            vulns.forEach(vuln => {
-                computedStats.findingsCount += 1
-                const key = bucketSeverity(vuln?.severity)
-                computedStats[key] += 1
-            })
-        })
-
-        const stats = scanResult.stats || computedStats
-        $('#sca_report #vulns_count').text(stats.findingsCount ?? computedStats.findingsCount)
-        $('#sca_report #critical_count').text(stats.critical ?? computedStats.critical)
-        $('#sca_report #high_count').text(stats.high ?? computedStats.high)
-        $('#sca_report #medium_count').text(stats.medium ?? computedStats.medium)
-        $('#sca_report #low_count').text(stats.low ?? computedStats.low)
-        $('#sca_report #info_count').text(stats.info ?? computedStats.info)
+        bindCanonicalSectionStats('#sca_report', exportFindings)
         $('.loader.sca').hide()
         markSectionReady("sca")
         applySeverityFilter("sca")
@@ -5164,8 +5163,9 @@ jQuery(function () {
         const vm = normalizeScanResult(scanResult)
         result.scanViewModel = vm
 
-        const findings = Array.isArray(vm.findings) ? vm.findings : []
-        const stats = vm.stats || scanResult.stats || {}
+        const normalizedFindings = Array.isArray(vm.findings) ? vm.findings : []
+        const partitionedFindings = partitionReportFindings('DAST', normalizedFindings)
+        const findings = partitionedFindings.findings
         const legacyItems = Array.isArray(scanResult.items) ? scanResult.items : []
         if (!findings.length && !legacyItems.length) {
             $('.loader.rattacker').hide()
@@ -5180,6 +5180,7 @@ jQuery(function () {
 
         const severityLevels = ["critical", "high", "medium", "low", "info"]
         const matchesSeverity = (value, level) => String(value || "").toLowerCase() === level
+        let exportFindings = []
         if (findings.length) {
             severityLevels.forEach(level => {
                 findings
@@ -5189,21 +5190,20 @@ jQuery(function () {
                         $content.append(bindReportItem(legacy.info, legacy.original))
                     })
             })
-            const exportFindings = findings.map(finding => buildExportFindingFromNormalized(finding, vm))
+            exportFindings = findings.map(finding => buildExportFindingFromNormalized(finding, vm))
             replaceSectionFindings("dast", exportFindings)
         } else if (Array.isArray(scanResult.items) && scanResult.items.length) {
             severityLevels.forEach(level => {
                 scanResult.items
-                    .filter(item => item.attacks.some(a => a.success && matchesSeverity(a.metadata?.severity, level)))
+                    .filter(item => item.attacks.some(a => a.success && matchesSeverity(a.metadata?.severity || a.severity, level)))
                     .forEach(item => {
                         item.attacks.forEach(attack => {
-                            if (attack.success && matchesSeverity(attack.metadata?.severity, level)) {
+                            if (attack.success && matchesSeverity(attack.metadata?.severity || attack.severity, level)) {
                                 $content.append(bindReportItem(attack, item.original))
                             }
                         })
                     })
             })
-            const exportFindings = []
             scanResult.items.forEach(item => {
                 const original = item.original || {}
                 const baseRequest = original.request || {}
@@ -5242,13 +5242,9 @@ jQuery(function () {
             return
         }
 
-        $('#rattacker_report #attacks_count').text(stats.attacksCount ?? findings.length ?? 0)
-        $('#rattacker_report #vulns_count').text(stats.findingsCount ?? findings.length ?? 0)
-        $('#rattacker_report #critical_count').text(stats.critical ?? scanResult.stats?.critical ?? 0)
-        $('#rattacker_report #high_count').text(stats.high ?? scanResult.stats?.high ?? 0)
-        $('#rattacker_report #medium_count').text(stats.medium ?? scanResult.stats?.medium ?? 0)
-        $('#rattacker_report #low_count').text(stats.low ?? scanResult.stats?.low ?? 0)
-        $('#rattacker_report #info_count').text(stats.info ?? scanResult.stats?.info ?? 0)
+        bindCanonicalSectionStats('#rattacker_report', exportFindings, {
+            attacksCount: countDastPresentationAttacks(vm)
+        })
         $('.loader.rattacker').hide()
 
         $(".codemirror_area").each(function (index) {
@@ -5287,7 +5283,12 @@ jQuery(function () {
         if (info.success) {
             color = severityMeta.color || ""
         }
-        let target = original?.request?.url ? original.request.url : ""
+        let target = original?.request?.url ? String(original.request.url) : ""
+        const safeTarget = safeHttpLink(target)
+        const targetText = ptk_utils.escapeHtml(target)
+        const targetMarkup = safeTarget
+            ? `<a href="${ptk_utils.escapeHtml(safeTarget)}" target="_blank" rel="noopener noreferrer">${targetText}</a>`
+            : `<span>${targetText}</span>`
         let request = info.request?.raw ? info.request.raw : original.request.raw
         let response = info.response?.raw
             ? info.response.raw
@@ -5302,7 +5303,7 @@ jQuery(function () {
                             <div class="content">
                                 <div class="header">
                                     ${icon}
-                                    <a href="${target}" target="_blank">${target}</a>
+                                    ${targetMarkup}
                                     ${confidenceBadge}
                                 </div>
                                 <p>Attack: ${ptk_utils.escapeHtml(info.metadata.name)} </p>
@@ -5471,8 +5472,11 @@ jQuery(function () {
             index_controller.tab = index_controller.tab || {}
             let host = null
             $('#dashboard').show()
-            browser.storage.local.get('tab_full_info').then(function (result) {
+            loadFullReportSnapshot(params.get('report_snapshot')).then(function (result) {
                 const info = result?.tab_full_info || {}
+                const engineSnapshots = info.engineSnapshots && typeof info.engineSnapshots === 'object'
+                    ? info.engineSnapshots
+                    : null
                 if (Object.prototype.hasOwnProperty.call(info, 'tabId')) {
                     index_controller.tab.tabId = info.tabId
                 }
@@ -5515,28 +5519,10 @@ jQuery(function () {
                 bindStorage()
                 bindHeaders()
 
-                if (result?.tab_full_info) {
-                    browser.storage.local.remove('tab_full_info')
-                }
-
-                dast_controller.init().then(function (result) {
-                    if (hostsMatch(host, result?.scanResult?.host))
-                        generateRattacker(result)
-                })
-                iast_controller.init().then(function (result) {
-                    if (hostsMatch(host, result?.scanResult?.host))
-                        generateIAST(result)
-                })
-
-                sast_controller.init().then(function (result) {
-                    if (hostsMatch(host, result?.scanResult?.host))
-                        generateSAST(result)
-                })
-
-                sca_controller.init().then(function (result) {
-                    if (hostsMatch(host, result?.scanResult?.host))
-                        generateSCA(result)
-                })
+                loadReportEngineResult('dast', dast_controller, engineSnapshots, host).then(generateRattacker)
+                loadReportEngineResult('iast', iast_controller, engineSnapshots, host).then(generateIAST)
+                loadReportEngineResult('sast', sast_controller, engineSnapshots, host).then(generateSAST)
+                loadReportEngineResult('sca', sca_controller, engineSnapshots, host).then(generateSCA)
             })
         })
     }

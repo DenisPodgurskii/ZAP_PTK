@@ -183,7 +183,9 @@ function bindRequests(index) {
         table.columns().flatten().each(function (colIdx) {
             let title = $(table.column(colIdx).header()).text()
             if (title) {
-                let select = $('<br/><input type="text" placeholder="Search ' + title + '" />')
+                $('<br/>').appendTo(table.column(colIdx).header())
+                let select = $('<input type="text" />')
+                    .attr('placeholder', 'Search ' + title)
                     .appendTo(
                         table.column(colIdx).header()
                     )

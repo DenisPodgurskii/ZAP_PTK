@@ -8,7 +8,7 @@ import { ptk_utils, ptk_jwtHelper } from "../../../background/utils.js"
 import { ptk_decoder } from "../../../background/decoder.js"
 import { ptk_controller_jwt } from "../../../controller/jwt.js"
 import { ptk_controller_session } from "../../../controller/session.js"
-import { registerDashboardTabListener, updateDashboardTab } from "../js/rutils.js"
+import { isInspectableTabUrl, registerDashboardTabListener, updateDashboardTab } from "../js/rutils.js"
 
 
 const controller = new ptk_controller_jwt()
@@ -903,9 +903,7 @@ jQuery(function () {
         try {
             const tabs = await browser.tabs.query({ currentWindow: true })
             const active = tabs && tabs.length ? tabs.find((t) => t.active) : null
-            const base = browser.runtime.getURL('')
-            const isExtensionUrl = (url) => !!url && url.startsWith(base)
-            if (active?.id && active?.url && !isExtensionUrl(active.url)) {
+            if (active?.id && isInspectableTabUrl(active?.url)) {
                 await updateDashboardTab(active.id, active.url)
             }
         } catch (_) { }
@@ -987,7 +985,9 @@ function bindTokens(tokens) {
         editorMode = null
         $("#source").dropdown('clear')
         $("#source option[value='" + tokens[i][0] + "']").remove()
-        $("#source").append(`<option value="${tokens[i][0]}" data-value="${tokens[i][1]}" selected>[${tokens[i][1]}] in ${tokens[i][0]}</option>`)
+        const option = new Option(`[${tokens[i][1]}] in ${tokens[i][0]}`, tokens[i][0], true, true)
+        option.dataset.value = tokens[i][1]
+        $("#source").append(option)
         selectedToken = tokens[i][2]
     }
     if (selectedToken) {

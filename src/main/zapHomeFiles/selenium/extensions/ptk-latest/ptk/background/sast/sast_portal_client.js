@@ -3,7 +3,7 @@ import buildExportScanResult from "../export/buildExportScanResult.js";
 import { compressScanPayload } from "../export/compressScanPayload.js";
 import { parseDownloadedScanPayload } from "../export/parseDownloadedScanPayload.js";
 import {
-  buildPortalUrl as buildSharedPortalUrl,
+  buildStoredCredentialPortalUrl,
   initializePortalRuntimeConfig
 } from "../../common/portalConfig.js";
 
@@ -13,10 +13,7 @@ export class SastPortalClient {
   }
 
   buildPortalUrl(endpoint, profile = null) {
-    return buildSharedPortalUrl(endpoint, {
-      baseUrl: profile?.base_url || profile?.api_url || profile?.baseUrl || null,
-      apiBase: profile?.api_base || profile?.apiBase || undefined
-    });
+    return buildStoredCredentialPortalUrl(endpoint);
   }
 
   async getProjects() {
@@ -36,6 +33,7 @@ export class SastPortalClient {
         Accept: 'application/json'
       },
       credentials: 'omit',
+      redirect: 'error',
       cache: 'no-cache'
     })
       .then(async (httpResponse) => {
@@ -91,6 +89,7 @@ export class SastPortalClient {
         'X-PTK-Compression': compressed.compression
       },
       credentials: 'omit',
+      redirect: 'error',
       cache: 'no-cache',
       body: compressed.body
     })
@@ -134,6 +133,7 @@ export class SastPortalClient {
         Accept: 'application/json'
       },
       credentials: 'omit',
+      redirect: 'error',
       cache: 'no-cache'
     })
       .then(async (httpResponse) => {
@@ -168,6 +168,7 @@ export class SastPortalClient {
         Accept: 'application/gzip, application/x-gzip'
       },
       credentials: 'omit',
+      redirect: 'error',
       cache: 'no-cache'
     })
       .then(async (httpResponse) => {

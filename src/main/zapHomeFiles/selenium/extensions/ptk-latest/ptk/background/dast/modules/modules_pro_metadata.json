@@ -1,0 +1,3526 @@
+{
+  "schema": "ptk-pro-module-metadata/v1",
+  "engine": "DAST",
+  "metadataVersion": "2026-06-04",
+  "moduleCount": 131,
+  "modules": [
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2015_1635",
+      "name": "Microsoft Windows 'HTTP.sys' - Remote Code Execution (CVE-2015-1635)",
+      "tier": "cve",
+      "category": "injection",
+      "severity": "critical",
+      "vulnId": "command_injection",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2015",
+        "kev",
+        "microsoft",
+        "iis",
+        "rce",
+        "vkev",
+        "vuln"
+      ],
+      "description": "Microsoft Windows 'HTTP.sys' - Remote Code Execution HTTP.sys in Microsoft Windows 7 SP1, Windows Server 2008 R2 SP1, Windows 8, Windows 8.1, and Windows Server 2012 Gold and R2 allows remote attackers to execute arbitrary code via crafted HTTP requests, aka \"HTTP.sys Remote Code Execution Vulnerability.\"",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2015-1635",
+        "Ref1": "https://www.exploit-db.com/exploits/36773",
+        "Ref2": "https://www.securitysift.com/an-analysis-of-ms15-034/",
+        "Ref3": "https://nvd.nist.gov/vuln/detail/CVE-2015-1635",
+        "Ref4": "http://www.securitytracker.com/id/1032109",
+        "Ref5": "https://github.com/b1gbroth3r/shoMe"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "78c2dec44baaeb1f"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2018_20062",
+      "name": "ThinkPHP 5.0.23 - Remote Code Execution (CVE-2018-20062)",
+      "tier": "cve",
+      "category": "injection",
+      "severity": "critical",
+      "vulnId": "command_injection",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2018",
+        "kev",
+        "thinkphp",
+        "rce",
+        "vkev",
+        "vuln"
+      ],
+      "description": "ThinkPHP 5.0.23 - Remote Code Execution An issue was discovered in NoneCms V1.3. thinkphp/library/think/App.php allows remote attackers to execute arbitrary PHP code via crafted use of the filter parameter, as demonstrated by the s=index/\\think\\Request/input?param=value query string.",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2018-20062",
+        "Ref1": "https://github.com/yilin1203/CVE-2018-20062/blob/main/CVE-2018-20062.py",
+        "Ref2": "https://github.com/yilin1203/CVE-2018-20062",
+        "Ref3": "https://github.com/vulhub/vulhub/tree/master/thinkphp/5-rce"
+      },
+      "surfaceHints": [
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "24299ea96c4b862e"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2019_10692",
+      "name": "WordPress Google Maps <7.11.18 - SQL Injection (CVE-2019-10692)",
+      "tier": "cve",
+      "category": "injection",
+      "severity": "critical",
+      "vulnId": "sql_injection",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2019",
+        "wp",
+        "wp-plugin",
+        "unauth",
+        "sqli",
+        "wordpress",
+        "googlemaps",
+        "wpscan",
+        "codecabin",
+        "vuln"
+      ],
+      "description": "WordPress Google Maps <7.11.18 - SQL Injection WordPress Google Maps plugin before 7.11.18 contains a SQL injection vulnerability. The plugin includes /class.rest-api.php in the REST API and does not sanitize field names before a [SQL example redacted]. An attacker can possibly obtain sensitive information from a database, modify data, and execute unauthorized administrative operations in the context of the affected ",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2019-10692",
+        "Ref1": "https://wpscan.com/vulnerability/475404ce-2a1a-4d15-bf02-df0ea2afdaea",
+        "Ref2": "https://wordpress.org/plugins/wp-google-maps/#developers",
+        "Ref3": "https://plugins.trac.wordpress.org/changeset?param=value",
+        "Ref4": "https://nvd.nist.gov/vuln/detail/CVE-2019-10692",
+        "Ref5": "https://github.com/VTFoundation/vulnerablewp"
+      },
+      "surfaceHints": [
+        "sensitive_data",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "edcdcafca768683a"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2020_14092",
+      "name": "WordPress PayPal Pro <1.1.65 - SQL Injection (CVE-2020-14092)",
+      "tier": "cve",
+      "category": "injection",
+      "severity": "critical",
+      "vulnId": "sql_injection",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2020",
+        "wp-plugin",
+        "sqli",
+        "paypal",
+        "wpscan",
+        "wordpress",
+        "ithemes",
+        "vuln"
+      ],
+      "description": "WordPress PayPal Pro <1.1.65 - SQL Injection WordPress PayPal Pro plugin before 1.1.65 is susceptible to SQL injection via the 'query' parameter which allows for any unauthenticated user to perform SQL queries with the results output to a web page in JSON format.",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2020-14092",
+        "Ref1": "https://wpscan.com/vulnerability/10287",
+        "Ref2": "https://wordpress.dwbooster.com/forms/payment-form-for-paypal-pro",
+        "Ref3": "https://nvd.nist.gov/vuln/detail/CVE-2020-14092",
+        "Ref4": "https://wordpress.org/plugins/payment-form-for-paypal-pro/#developers",
+        "Ref5": "https://wpvulndb.com/vulnerabilities/10287"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c7680982d846af55"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2020_17530",
+      "name": "Apache Struts 2.0.0-2.5.25 - Remote Code Execution (CVE-2020-17530)",
+      "tier": "cve",
+      "category": "injection",
+      "severity": "critical",
+      "vulnId": "command_injection",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2020",
+        "apache",
+        "rce",
+        "struts",
+        "kev",
+        "packetstorm",
+        "vkev",
+        "vuln"
+      ],
+      "description": "Apache Struts 2.0.0-2.5.25 - Remote Code Execution Apache Struts 2.0.0 through Struts 2.5.25 is susceptible to remote code execution because forced OGNL evaluation, when evaluated on raw user input in tag attributes, may allow it.",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2020-17530",
+        "Ref1": "http://packetstormsecurity.com/files/160721/Apache-Struts-2-Forced-Multi-OGNL-Evaluation.html",
+        "Ref2": "http://jvn.jp/en/jp/JVN43969166/index.html",
+        "Ref3": "https://cwiki.apache.org/confluence/display/WW/S2-061",
+        "Ref4": "https://security.netapp.com/advisory/ntap-20210115-0005/",
+        "Ref5": "https://nvd.nist.gov/vuln/detail/CVE-2020-17530"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3a149ffdff2cfabf"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2021_28918",
+      "name": "Netmask NPM Package - Server-Side Request Forgery (CVE-2021-28918)",
+      "tier": "cve",
+      "category": "ssrf",
+      "severity": "critical",
+      "vulnId": "ssrf",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2021",
+        "npm",
+        "netmask",
+        "ssrf",
+        "lfi",
+        "netmask_project",
+        "node.js",
+        "vuln"
+      ],
+      "description": "Netmask NPM Package - Server-Side Request Forgery Netmask NPM Package is susceptible to server-side request forgery because of improper input validation of octal strings in netmask npm package. This allows unauthenticated remote attackers to perform indeterminate SSRF, remote file inclusion, and local file inclusion attacks on many of the dependent packages. A remote unauthenticated attacker can bypass packages relyi",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2021-28918",
+        "Ref1": "https://github.com/sickcodes/security/blob/master/advisories/SICK-2021-011.md",
+        "Ref2": "https://github.com/advisories/GHSA-pch5-whg9-qr2r",
+        "Ref3": "https://nvd.nist.gov/vuln/detail/CVE-2021-28918",
+        "Ref4": "https://github.com/rs/node-netmask",
+        "Ref5": "https://rootdaemon.com/2021/03/29/vulnerability-in-netmask-npm-package-affects-280000-projects/"
+      },
+      "surfaceHints": [
+        "path_traversal",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "828a00a2b4b11134"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2022_1970_cve_2024_27954",
+      "name": "WordPress Automatic Plugin <3.92.1 - Arbitrary File Download and SSRF (CVE-2022-1970)",
+      "tier": "cve",
+      "category": "ssrf",
+      "severity": "critical",
+      "vulnId": "ssrf",
+      "tags": [
+        "cve",
+        "nuclei",
+        "wpscan",
+        "cve2024",
+        "wp",
+        "wordpress",
+        "wp-plugin",
+        "lfi",
+        "ssrf",
+        "wp-automatic",
+        "vkev",
+        "vuln"
+      ],
+      "description": "WordPress Automatic Plugin <3.92.1 - Arbitrary File Download and SSRF WordPress Automatic plugin <3.92.1 is vulnerable to unauthenticated Arbitrary File Download and SSRF Located in the downloader.php file, could permit attackers to download any file from a site. Sensitive data, including login credentials and backup files, could fall into the wrong hands. This vulnerability has been patched in version 3.92.1.",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2022-1970",
+        "Ref1": "https://wpscan.com/vulnerability/53b97401-1352-477b-a69a-680b01ef7266/",
+        "Ref2": "https://securityonline.info/40000-sites-exposed-wordpress-plugin-update-critical-cve-2024-27956-cve-2024-27954/#google_vignette",
+        "Ref3": "https://cve.mitre.org/cgi-bin/cvename.cgi?param=value"
+      },
+      "surfaceHints": [
+        "path_traversal",
+        "sensitive_data",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "2aca9649fc6e497b"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2022_47945",
+      "name": "Thinkphp Lang - Local File Inclusion (CVE-2022-47945)",
+      "tier": "cve",
+      "category": "path_traversal",
+      "severity": "critical",
+      "vulnId": "path_traversal",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2022",
+        "thinkphp",
+        "lfi",
+        "vkev",
+        "vuln"
+      ],
+      "description": "Thinkphp Lang - Local File Inclusion ThinkPHP Framework before 6.0.14 allows local file inclusion via the lang parameter when the language pack feature is enabled (lang_switch_on=true). An unauthenticated and remote attacker can exploit this to execute arbitrary operating system commands, as demonstrated by including pearcmd.php.",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2022-47945",
+        "Ref1": "https://tttang.com/archive/1865/",
+        "Ref2": "https://nvd.nist.gov/vuln/detail/CVE-2022-47945",
+        "Ref3": "https://github.com/top-think/framework/compare/v6.0.13...v6.0.14",
+        "Ref4": "https://github.com/top-think/framework/commit/c4acb8b4001b98a0078eda25840d33e295a7f099",
+        "Ref5": "https://github.com/ARPSyndicate/kenzer-templates"
+      },
+      "surfaceHints": [
+        "path_traversal"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "2694a34b1fdfbcd3"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2023_34598",
+      "name": "Gibbon v25.0.0 - Local File Inclusion (CVE-2023-34598)",
+      "tier": "cve",
+      "category": "path_traversal",
+      "severity": "critical",
+      "vulnId": "path_traversal",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2023",
+        "gibbon",
+        "lfi",
+        "gibbonedu",
+        "vkev",
+        "vuln"
+      ],
+      "description": "Gibbon v25.0.0 - Local File Inclusion Gibbon v25.0.0 is vulnerable to a Local File Inclusion (LFI) vulnerability where it's possible to include the content of several files present in the installation folder in the server's response.",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2023-34598",
+        "Ref1": "https://github.com/maddsec/CVE-2023-34598",
+        "Ref2": "https://twitter.com/shaybt12/status/1673612503547355137?s=20",
+        "Ref3": "https://nvd.nist.gov/vuln/detail/CVE-2023-34598",
+        "Ref4": "https://github.com/izj007/wechat",
+        "Ref5": "https://github.com/komodoooo/Some-things"
+      },
+      "surfaceHints": [
+        "path_traversal"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3b885313806262f1"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2023_5991",
+      "name": "Hotel Booking Lite < 4.8.5 - Arbitrary File Download & Deletion (CVE-2023-5991)",
+      "tier": "cve",
+      "category": "path_traversal",
+      "severity": "critical",
+      "vulnId": "path_traversal",
+      "tags": [
+        "cve",
+        "nuclei",
+        "cve2023",
+        "lfi",
+        "motopress-hotel-booking",
+        "wordpress",
+        "wp-plugin",
+        "wpscan",
+        "wp",
+        "motopress",
+        "vuln"
+      ],
+      "description": "Hotel Booking Lite < 4.8.5 - Arbitrary File Download & Deletion The Hotel Booking Lite WordPress plugin before 4.8.5 does not validate file paths provided via user input, as well as does not have proper CSRF and authorisation checks, allowing unauthenticated users to download and [SQL example redacted]",
+      "recommendationSummary": "Use the PTK proof to verify impact, then patch/upgrade to a fixed version per vendor advisory. Apply compensating controls (WAF rules, access restrictions) where patching is not immediate.",
+      "links": {
+        "NVD": "https://nvd.nist.gov/vuln/detail/CVE-2023-5991",
+        "Ref1": "https://wpscan.com/vulnerability/e9d35e36-1e60-4483-b8b3-5cbf08fcd49e/",
+        "Ref2": "https://nvd.nist.gov/vuln/detail/CVE-2023-5991"
+      },
+      "surfaceHints": [
+        "csrf",
+        "path_traversal",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "80f91b9a9a1ba087"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cve_2025_55182_react_rsc",
+      "name": "React2Shell: React Server Components RCE (CVE-2025-55182)",
+      "tier": "cve",
+      "category": "deserialization",
+      "severity": "critical",
+      "vulnId": "deserialization",
+      "tags": [
+        "cve",
+        "react",
+        "react2shell",
+        "nextjs",
+        "rce",
+        "rsc",
+        "flight",
+        "deserialization"
+      ],
+      "description": "CVE-2025-55182, also known as React2Shell, is a critical unauthenticated remote code execution vulnerability in the React Server Components (RSC) Flight protocol. Vulnerable versions of the react-server-dom-webpack, react-server-dom-parcel and react-server-dom-turbopack packages unsafely deserialize attacker-controlled Flight payloads for Server Function endpoints. A single crafted HTTP request can manipulate React c",
+      "recommendationSummary": "Immediately upgrade all React Server Components and framework dependencies to fixed versions. At minimum, [SQL example redacted].0.1, 19.1.2 or 19.2.1 or later, and apply the latest security releases of frameworks that implement React Server Components (for example, Next.js App R",
+      "links": {
+        "React Advisory": "https://react.dev/",
+        "NVD: CVE-2025-55182": "https://nvd.nist.gov/vuln/detail/CVE-2025-55182",
+        "Huntress React2Shell Campaign": "https://www.huntress.com/blog/peerblight-linux-backdoor-exploits-react2shell",
+        "Searchlight High-Fidelity Detection": "https://slcyber.io/research-center/high-fidelity-detection-mechanism-for-rsc-next-js-rce-cve-2025-55182-cve-2025-66478/",
+        "OffSec Technical Analysis": "https://www.offsec.com/blog/cve-2025-55182/"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d5ad2f1b2d772e44"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "angularjs_client_template_injection",
+      "name": "AngularJS client-side template / expression injection",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "angularjs_client_template_injection",
+      "tags": [
+        "dast",
+        "xss",
+        "angularjs",
+        "client-template-injection",
+        "sandbox-bypass"
+      ],
+      "description": "Detects AngularJS client-side template and expression injection by sending version-gated AngularJS sandbox-escape probes to query and form parameters, then requiring browser-executed proof from the PTK browser-nav harness.",
+      "recommendationSummary": "Do not render attacker-controlled values inside AngularJS templates or expressions. Treat reflected values as data, avoid dynamic expression evaluation, upgrade away from AngularJS where possible, and apply contextual output encoding plus a restrictive CSP.",
+      "links": {
+        "PortSwigger AngularJS sandbox contexts": "https://portswigger.net/web-security/cross-site-scripting/contexts/angularjs-sandbox",
+        "PortSwigger XSS cheat sheet": "https://portswigger.net/web-security/cross-site-scripting/cheat-sheet",
+        "AngularJS security guide": "https://docs.angularjs.org/guide/security"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "template_rendering"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e3046ae2c1763c2f"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "headers",
+      "name": "OWASP Secure Headers",
+      "tier": "free",
+      "category": "hardening",
+      "severity": "low",
+      "vulnId": "security_headers",
+      "tags": [
+        "dast",
+        "hardening",
+        "headers"
+      ],
+      "description": "The OWASP Secure Headers Project describes HTTP response headers that your application can use to increase the security of your application. Once set, these HTTP response headers can restrict modern browsers from running into easily preventable vulnerabilities.",
+      "recommendationSummary": "Configure security-related HTTP response headers consistently on all responses to harden the application against common browser-based attacks. HSTS – enforce HTTPS with a long max-age and includeSubDomains where appropriate. Content-Security-Policy – restrict scripts, styles, fra",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/693.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "15cf3ffbe059a6bb"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "jsonp_callback_injection",
+      "name": "JSONP Callback Injection (generic)",
+      "tier": "free",
+      "category": "xss",
+      "severity": "medium",
+      "vulnId": "jsonp_callback_injection",
+      "tags": [
+        "dast",
+        "jsonp",
+        "callback",
+        "xss"
+      ],
+      "description": "Tests callback-like parameters for JSONP-style JavaScript responses where user input controls the executed callback name.",
+      "recommendationSummary": "Avoid JSONP for new APIs. Return JSON with CORS controls instead. If JSONP must be supported, validate callbacks against a strict identifier allowlist. Return an error for callback names that are not known safe JavaScript identifiers. Prefer same-origin JSON APIs and explicit COR",
+      "links": {
+        "CWE-79": "https://cwe.mitre.org/data/definitions/79.html",
+        "CWE-94": "https://cwe.mitre.org/data/definitions/94.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "dom_xss",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f8f2d4fe508b5992"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "jwt_injection",
+      "name": "JWT None Algorithm attacks",
+      "tier": "free",
+      "category": "auth_session",
+      "severity": "high",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "jwt",
+        "token"
+      ],
+      "description": "This attack occurs when an attacker alters the token and changes the hashing algorithm to indicate, through the none keyword, that the integrity of the token has already been verified",
+      "recommendationSummary": "Use a secure and up to date library to handle JWTs. Ensure that the signature is valid, and that it is using the expected algorithm. Use a strong HMAC key or a unique private key to sign them. Ensure that there is no sensitive information exposed in the payload. Ensure that JWTs ",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/345.html"
+      },
+      "surfaceHints": [
+        "jwt_token",
+        "sensitive_data",
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f76b5cdfcde01bd1"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "open_redirect",
+      "name": "Open Redirect (generic)",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "open_redirect",
+      "tags": [
+        "dast",
+        "redirect"
+      ],
+      "description": "Tests for open redirect by forcing redirect-like parameters to an external, benign domain.",
+      "recommendationSummary": "Validate and constrain any redirect targets so that users cannot be bounced to arbitrary external domains. Use an allow list of valid redirect destinations or identifiers that are mapped to internal URLs on the server. Reject absolute URLs that point to untrusted origins and pref",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "785496209fab9e3e"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "os_command_injection",
+      "name": "OS command injection",
+      "tier": "free",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "command_injection",
+      "tags": [
+        "dast",
+        "command",
+        "injection"
+      ],
+      "description": "OS command injection (also known as shell injection) is a web security vulnerability that allows an attacker to execute arbitrary operating system (OS) commands on the server that is running an application, and typically fully compromise the application and all its data.",
+      "recommendationSummary": "Never concatenate untrusted input into shell commands. Use fixed command allow-lists and parameterized process execution APIs (e.g. execve with argument arrays, never [command example redacted]. Reject or strictly allow-list dangerous metacharacters and separators including |, ;,",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/78.html"
+      },
+      "surfaceHints": [
+        "command_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9465306fa5a4ac19"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_api_docs_specs",
+      "name": "Passive Recon: API Docs & Specs Exposure",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "api",
+        "docs"
+      ],
+      "description": "Detects exposure of API documentation, specs, and interactive consoles observed in traffic.",
+      "recommendationSummary": "Restrict API documentation endpoints to authenticated users where appropriate. Disable interactive consoles in production or protect them with strong auth.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "api_schema",
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "509f508319f74c15"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_cache_privacy",
+      "name": "Passive Recon: Cache & Privacy Posture",
+      "tier": "free",
+      "category": "security_misconfiguration",
+      "severity": "low",
+      "vulnId": "security_headers",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "cache"
+      ],
+      "description": "Flags potentially risky cacheability for responses that appear user-specific and missing cache partitioning indicators.",
+      "recommendationSummary": "Mark authenticated or user-specific responses as Cache-Control: no-store. Use appropriate Vary headers for responses that change by user or origin.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/525.html"
+      },
+      "surfaceHints": [
+        "cache_privacy",
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "bb6cb890891281ba"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_client_config_secrets",
+      "name": "Passive Recon: Client Config & Secret-Like Values",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "low",
+      "vulnId": "token_leak",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "secrets",
+        "javascript"
+      ],
+      "description": "Flags secret-like tokens and exposed configuration values in observed HTML/JS/JSON responses. These are recon leads; validate sensitivity before reporting.",
+      "recommendationSummary": "Remove secrets from client-delivered assets and rotate exposed credentials. Use automated secret scanning in CI/CD and pre-commit hooks.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/798.html"
+      },
+      "surfaceHints": [
+        "client_discovery",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d09cee695dd9f4c0"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_cors_posture",
+      "name": "Passive Recon: CORS Posture Indicators",
+      "tier": "free",
+      "category": "security_misconfiguration",
+      "severity": "low",
+      "vulnId": "insecure_cors",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "cors"
+      ],
+      "description": "Adds passive CORS posture checks: missing Vary: Origin for dynamic ACAO, and permissive allowed headers/methods.",
+      "recommendationSummary": "Include Vary: Origin for dynamic CORS responses. Restrict allowed methods/headers to what is necessary.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/942.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "78000a22882d38c9"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_error_stacktraces",
+      "name": "Passive Recon: Error & Stack Trace Disclosure",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "errors",
+        "infoleak"
+      ],
+      "description": "Detects common framework stack traces, error pages, and path disclosures in observed responses.",
+      "recommendationSummary": "Return generic error messages to clients and log detailed errors server-side. Disable debug/error pages in production and scrub internal paths/hostnames from responses.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/209.html"
+      },
+      "surfaceHints": [
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d3a4449674df628e"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_interesting_endpoints",
+      "name": "Passive Recon: Interesting Endpoint Patterns",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "endpoints"
+      ],
+      "description": "Flags high-value endpoint patterns observed in traffic (admin panels, debug endpoints, consoles, and backup/config file paths).",
+      "recommendationSummary": "Restrict administrative and debug endpoints behind strong authentication and network controls. Remove unused consoles and do not deploy backup/config files to production.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "ab4b5d1f96dea5ae"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_internal_hosts_env_hints",
+      "name": "Passive Recon: Internal Hosts & Environment Hints",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "low",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "infoleak"
+      ],
+      "description": "Detects internal hostnames/IPs and environment hints (staging/dev/local) disclosed in observed responses.",
+      "recommendationSummary": "Remove internal hostnames/IPs from client responses. Ensure staging/dev configuration is not exposed to production clients.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "5bd8b7c91579c0bb"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_parameter_leads",
+      "name": "Passive Recon: High-Risk Parameter Names",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "params"
+      ],
+      "description": "Flags request parameters and JSON keys commonly associated with high-impact findings (open redirect, SSRF, IDOR, file/path traversal).",
+      "recommendationSummary": "Review identified parameters for input validation and strong authorization checks. For redirect parameters, enforce allowlists and avoid open redirects. For URL fetch/webhook parameters, enforce strict allowlists and block internal IP ranges.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect",
+        "path_traversal",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9d9cc91207898b69"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_sourcemaps_debug",
+      "name": "Passive Recon: Source Maps & Debug Artifacts",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "low",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "javascript",
+        "debug"
+      ],
+      "description": "Detects source map references and common debug artifacts in observed HTML/JS responses. These are high-value recon leads for code disclosure and hidden endpoints.",
+      "recommendationSummary": "Do not publish source maps to production unless required; restrict access or strip sourceMappingURL references. Disable development tooling and verbose debug banners in production builds.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d83f1dfce32d33ee"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_tokens_in_url",
+      "name": "Passive Recon: Tokens & Secrets in URLs",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "token_leak",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "tokens"
+      ],
+      "description": "Detects access tokens, JWTs, and API keys present in URLs or query strings observed in traffic.",
+      "recommendationSummary": "Avoid placing secrets in URLs. Use Authorization headers or secure cookies. Rotate exposed tokens and ensure logs/analytics do not persist sensitive URLs.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/598.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f70a254847c46705"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_well_known_metadata",
+      "name": "Passive Recon: .well-known & Metadata Files",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "discovery"
+      ],
+      "description": "Flags security-relevant well-known resources and metadata files when they appear in observed traffic.",
+      "recommendationSummary": "Ensure well-known endpoints do not leak internal configuration or secrets. Review metadata contents and limit exposure where needed.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8027673464e2e67b"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sensitive_data_exposure",
+      "name": "Sensitive data exposure",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "low",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "info_leakage"
+      ],
+      "description": "Sensitive data is anything that should not be accessible to admin access, known as sensitive data. Sensitive data may include personally identifiable information (PII), such as Social Security numbers, financial information, or login credentials. Sensitive Data Exposure occurs when an organization unknowingly exposes sensitive data or when a security incident leads to the accidental or unlawful destruction, loss, alt",
+      "recommendationSummary": "Treat credentials, personal data, tokens and financial information as sensitive and protect them throughout their lifecycle. Classify what data is sensitive and avoid storing it unless there is a clear business need. Encrypt sensitive data at rest and in transit using modern, wel",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "client_discovery",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "6a40f36cd70fcbbb"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_dom_xss",
+      "name": "SPA hash-based DOM XSS",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "dast",
+        "spa",
+        "xss"
+      ],
+      "description": "Tests hash-based SPA parameters (http://host/#/route?param=value for DOM XSS by mutating the hash in a dedicated attack tab and inspecting the DOM.",
+      "recommendationSummary": "Treat all hash-based parameters and client-side routing inputs as untrusted, and ensure they are never inserted into the DOM as HTML or script. Use safe DOM APIs that set text content rather than HTML where user input is involved. Avoid building HTML strings from concatenated par",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8fc6780225de63c8"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_injection",
+      "name": "SQL Injection",
+      "tier": "free",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "injection",
+        "sql"
+      ],
+      "description": "A SQL injection attack consists of insertion or injection of a SQL query via the input data from the client to the application. A successful SQL injection exploit can read sensitive data from the database, modify database data (Insert/Update/Delete), execute administration operations on the database (such as shutdown the DBMS), recover the content of a given file present on the DBMS file system and in some cases issu",
+      "recommendationSummary": "SQL Injection happens when untrusted input is combined with SQL, letting attackers change a query’s meaning. How to prevent it: Use parameterized queries (prepared statements) for all user-controlled values. Prefer safe stored procedures that use parameters (avoid dynamic SQL ins",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sensitive_data",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "6f3c201487d77f3d"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "version_control_exposure",
+      "name": "Exposure of Version-Control Repository",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "info_leakage",
+        "vcs"
+      ],
+      "description": "Version control repositories such as CVS or git store version-specific metadata and other details within subdirectories. If these subdirectories are stored on a web server or added to an archive, then these could be used by an attacker. This information may include usernames, filenames, path root, IP addresses, and detailed 'diff' data about how files have been changed - which could reveal source code snippets that w",
+      "recommendationSummary": "Recommendations include removing any version control directories and repositories from the production server, disabling the use of remote version control repositories, and ensuring that the latest version control patches and version updates have been performed.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/527.html"
+      },
+      "surfaceHints": [
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a0e4b1431c308b20"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "websocket_security",
+      "name": "WebSocket security indicators",
+      "tier": "free",
+      "category": "security_misconfiguration",
+      "severity": "low",
+      "vulnId": "websocket_misconfiguration",
+      "tags": [
+        "dast",
+        "websocket"
+      ],
+      "description": "Looks for common WebSocket endpoints and insecure patterns such as ws:// from HTTPS pages.",
+      "recommendationSummary": "Protect WebSocket endpoints like any other authenticated API. Use wss:// for all WebSocket connections, especially from HTTPS origins. Validate the Origin header and enforce authentication and authorisation on each connection. Avoid exposing sensitive operations over publicly rea",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/319.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "realtime",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c201a5f3790646e8"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "xss",
+      "name": "Reflected Cross-Site Scripting (XSS)",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "reflected_xss",
+      "tags": [
+        "dast",
+        "xss",
+        "dom"
+      ],
+      "description": "Reflected Cross-site Scripting (XSS) is another name for non-persistent XSS, where the attack doesn't load with the vulnerable web application but is originated by the victim loading the offending URI. In this article we will see some ways to test a web application for this kind of vulnerability.",
+      "recommendationSummary": "Reflected XSS attacks are the most frequent type of XSS attacks found nowadays. When a web application is vulnerable to this type of attack, it will pass unvalidated input sent through requests to the client. Reflected attacks are delivered to the victim in various ways, such as ",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "cb06bc584f4093a2"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "access_control_coverage",
+      "name": "Access control coverage probes",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "high",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "dast",
+        "access-control"
+      ],
+      "description": "access-control probes for path-based bypass, header rewrite abuse, and role escalation parameters.",
+      "recommendationSummary": "Enforce authorization on the server for every endpoint and every object access. Do not trust client-side role indicators. Ignore untrusted rewrite headers for authorization decisions. Apply deny-by-default authorization checks consistently.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/285.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a07ae9d93b3aab70"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "access_control_idor_bola",
+      "name": "Access control IDOR/BOLA probes",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "high",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "dast",
+        "access-control",
+        "idor",
+        "bola"
+      ],
+      "description": "Tests object-level authorization by mutating object identifiers in path, query, and body parameters.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/639.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "72c8587a405f3e43"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "access_control_multi_identity",
+      "name": "Access control multi-identity diff",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "high",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "dast",
+        "access-control",
+        "multi-identity"
+      ],
+      "description": "Reserved multi-identity access-control differential family. It stays capability-gated until the scan engine can replay the same request across multiple identities.",
+      "recommendationSummary": "Verify authorization decisions with multiple real identities and deny object, tenant, and role escalation across equivalent requests.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/639.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e2a215716d029813"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "api_mass_assignment",
+      "name": "API mass assignment probes",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "high",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "dast",
+        "api",
+        "mass-assignment"
+      ],
+      "description": "Generic API mass-assignment probes using baseline-vs-mutated differential confirmation.",
+      "recommendationSummary": "Use strict server-side schema validation and per-field authorization checks. Reject unexpected privilege/financial/state fields and enforce allow-lists for writable attributes.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/915.html"
+      },
+      "surfaceHints": [
+        "api_schema",
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "17c0f1cda52b6984"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "api_parameter_pollution",
+      "name": "API parameter pollution probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "parameter_pollution",
+      "tags": [
+        "dast",
+        "api",
+        "hpp",
+        "pollution"
+      ],
+      "description": "Tests conflicting parameter encodings and nested structures that trigger parser confusion.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/20.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "prototype_pollution"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "04602afab3ccf9af"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "api_testing_coverage",
+      "name": "API testing coverage probes",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "high",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "dast",
+        "api"
+      ],
+      "description": "API probes for hidden endpoint exposure, method confusion, object-level authorization bypass, and mass assignment variants.",
+      "recommendationSummary": "Secure APIs with strict authorization, schema validation, and method enforcement. Enforce object-level access controls on every API endpoint. Reject unknown fields and unsafe method overrides. Do not expose internal/debug endpoints in production.",
+      "links": {
+        "OWASP": "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/",
+        "CWE": "https://cwe.mitre.org/data/definitions/639.html"
+      },
+      "surfaceHints": [
+        "api_schema",
+        "authz_object",
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "98c0855d887c1904"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "authentication_browser_workflows",
+      "name": "Authentication browser workflow checks",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "high",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "authentication",
+        "2fa",
+        "browser",
+        "workflow"
+      ],
+      "description": "Browser-session checks for MFA/2FA step-bypass conditions after first-factor login.",
+      "recommendationSummary": "Require MFA completion server-side before granting access to authenticated resources. Bind partial login state to the MFA challenge only. Block protected routes until MFA is fully satisfied. Do not rely on client navigation or UI-only guards to enforce MFA.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/287.html"
+      },
+      "surfaceHints": [
+        "jwt_token",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f92887e2d3e7d48e"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "authentication_coverage",
+      "name": "Authentication coverage probes",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "high",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "authentication"
+      ],
+      "description": "authentication probes for username enumeration and MFA challenge weaknesses.",
+      "recommendationSummary": "Harden authentication flows against enumeration and MFA bypass. Return uniform login error messages for valid and invalid usernames. Apply robust lockout and rate-limiting controls. Enforce MFA checks server-side for every authenticated session transition.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/204.html"
+      },
+      "surfaceHints": [
+        "jwt_token"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e373443a7380ab78"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "authentication_flaws",
+      "name": "Authentication flaw probes",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "high",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "authentication",
+        "login",
+        "2fa"
+      ],
+      "description": "Checks common authentication weaknesses including enumeration, weak lockout, and reset poisoning.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/307.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c3021fbaee22f72e"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "bsql_cookie_boolean_oracle",
+      "name": "Blind SQL injection (Cookie boolean oracle)",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "injection",
+        "sql",
+        "blind",
+        "cookie"
+      ],
+      "description": "Tests likely tracking cookies with boolean SQL conditions, preferring exact known names first and falling back to scored cookie selection to detect blind SQL injection through response-difference oracles.",
+      "recommendationSummary": "Use parameterized queries and never concatenate cookie values into SQL. Treat tracking cookies as untrusted input and validate them before backend use.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "bfc0d4390cb9ee2d"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "bsql_cookie_boolean_time_confirm",
+      "name": "Blind SQL injection (Cookie boolean oracle + Time confirm)",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "injection",
+        "sql",
+        "blind",
+        "cookie",
+        "time-based"
+      ],
+      "description": "Tests likely tracking cookies with boolean SQL conditions first, preferring exact known names and then scored fallback selection, and confirms exploitation with database-specific time-delay payloads.",
+      "recommendationSummary": "Use parameterized queries and never concatenate cookie values into SQL. Treat tracking cookies as untrusted input and validate them before backend use.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "ec556c41aefc881a"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "bsql_injection",
+      "name": "Blind SQL injection",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "injection",
+        "sql"
+      ],
+      "description": "A SQL injection attack consists of insertion or \\u201cinjection\\u201d of a SQL query via the input data from the client to the application. A successful SQL injection exploit can read sensitive data from the database, modify database data (Insert/Update/Delete), execute administration operations on the database (such as shutdown the DBMS), recover the content of a given file present on the DBMS file system and in som",
+      "recommendationSummary": "SQL Injection flaws are introduced when software developers create dynamic database queries that include user supplied input. Primary Defenses: Use of Prepared Statements (Parameterized Queries) Parameterized queries force the developer to first define all the SQL code, and then ",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sensitive_data",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "ee6a9d48f26dfb93"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "bsql_param_boolean_oracle",
+      "name": "Blind SQL injection (Param boolean oracle)",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "injection",
+        "sql",
+        "blind",
+        "params"
+      ],
+      "description": "Tests likely query or form parameters with boolean SQL conditions to detect blind SQL injection through response-difference oracles.",
+      "recommendationSummary": "Use parameterized queries and never concatenate user-controlled parameter values into SQL. Treat query string and form values as untrusted input and validate them before backend use.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "1e58288f0087d155"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "business_logic_abuse",
+      "name": "Business logic abuse probes",
+      "tier": "pro",
+      "category": "insecure_design",
+      "severity": "high",
+      "vulnId": "business_logic_abuse",
+      "tags": [
+        "dast",
+        "business-logic",
+        "workflow"
+      ],
+      "description": "Checks common logic flaws such as quantity tampering, discount abuse, and workflow skipping.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Insecure_Design/",
+        "CWE": "https://cwe.mitre.org/data/definitions/840.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "bc108ba96460ca1c"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "business_logic_coverage",
+      "name": "Business logic coverage probes",
+      "tier": "pro",
+      "category": "insecure_design",
+      "severity": "high",
+      "vulnId": "business_logic_abuse",
+      "tags": [
+        "dast",
+        "business-logic"
+      ],
+      "description": "business-logic probes for quantity, coupon, and price tampering abuse patterns.",
+      "recommendationSummary": "Implement strict server-side business rules for price, quantity, and workflow states. Do not trust client-provided price or discount parameters. Enforce per-user coupon usage and non-repeatable discount checks. Validate ranges for quantities and transaction amounts.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Insecure_Design/",
+        "CWE": "https://cwe.mitre.org/data/definitions/840.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "14d9ceda4d20a2dd"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cache_poisoning",
+      "name": "Web cache poisoning probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "web_cache_poisoning",
+      "tags": [
+        "dast",
+        "cache"
+      ],
+      "description": "Attempts to manipulate unkeyed headers to detect cache poisoning issues.",
+      "recommendationSummary": "Ensure that reverse proxies and caches key responses on all headers and parameters that influence the content. Normalise and strip untrusted headers such as X-Forwarded-Host or X-Original-URL before routing. Avoid reflecting unvalidated header values into responses. Configure cac",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/444.html"
+      },
+      "surfaceHints": [
+        "cache_privacy"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "51b924123e4b7ed5"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "clickjacking_coverage",
+      "name": "Clickjacking coverage probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "clickjacking",
+      "tags": [
+        "dast",
+        "clickjacking"
+      ],
+      "description": "clickjacking probes for frameable sensitive pages and ineffective frame-busting behavior.",
+      "recommendationSummary": "Protect sensitive pages from framing and UI redress attacks. Set X-Frame-Options: DENY or SAMEORIGIN where appropriate. Set CSP frame-ancestors to trusted origins only. Do not rely only on client-side frame-busting scripts.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/1021.html"
+      },
+      "surfaceHints": [
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "951b1f1274f16115"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "client_prototype_pollution_spa",
+      "name": "SPA client prototype pollution",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "high",
+      "vulnId": "integrity_failure",
+      "tags": [
+        "dast",
+        "spa",
+        "prototype-pollution"
+      ],
+      "description": "Mutates hash-based SPA parameters with prototype-pollution payloads and checks whether Object or Array prototypes are contaminated during client-side routing.",
+      "recommendationSummary": "Parse client-side JSON safely and block prototype-bearing keys such as __proto__, constructor.prototype, and prototype. Use hardened merge helpers that ignore prototype keys. Avoid deserializing attacker-controlled JSON directly into application config objects. Freeze or validate",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Prototype_Pollution",
+        "CWE": "https://cwe.mitre.org/data/definitions/1321.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "prototype_pollution"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9dcce8755b7e3b9b"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cors_advanced",
+      "name": "CORS advanced probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "insecure_cors",
+      "tags": [
+        "dast",
+        "cors",
+        "misconfiguration"
+      ],
+      "description": "Extended CORS checks including null origin and reflected-origin with credentials patterns.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/346.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "6cf6b5e1dc769fd0"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cors_coverage",
+      "name": "CORS coverage probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "high",
+      "vulnId": "insecure_cors",
+      "tags": [
+        "dast",
+        "cors"
+      ],
+      "description": "CORS probes for reflected origins, null-origin credentials, and permissive preflight behavior on sensitive flows.",
+      "recommendationSummary": "Apply strict origin allow-lists and credential controls for CORS. Never reflect arbitrary Origin values. Do not combine wildcard origins with credentialed requests. Restrict preflight methods/headers to minimum required values.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/346.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "437f5dcdf38a37a1"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "cors_misconfig",
+      "name": "CORS misconfiguration",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "insecure_cors",
+      "tags": [
+        "dast",
+        "cors"
+      ],
+      "description": "Sends crafted Origin headers to detect overly permissive CORS configurations.",
+      "recommendationSummary": "Limit which origins are permitted to make cross-site requests with credentials. Avoid using * in Access-Control-Allow-Origin when credentials are enabled. Use an explicit allow list of trusted origins and validate them server-side. Restrict allowed methods and headers to those th",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/346.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "53510e6714942b07"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "crlf_header_injection",
+      "name": "CRLF / Response Header Injection",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "medium",
+      "vulnId": "header_injection",
+      "tags": [
+        "dast",
+        "crlf",
+        "headers",
+        "response-splitting"
+      ],
+      "description": "Appends encoded CRLF sequences to likely header-controlled parameters and checks whether the server emits injected response headers or cookies.",
+      "recommendationSummary": "Reject CR and LF characters before interpolating untrusted data into response headers. Use framework APIs that safely construct headers instead of concatenating strings. Validate redirect, filename, locale, and download-related parameters with strict allow lists. Normalise or rej",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/113.html"
+      },
+      "surfaceHints": [
+        "file_upload",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "008ea9f6c620b032"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "csrf_protection",
+      "name": "CSRF protection checks",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "csrf",
+      "tags": [
+        "dast",
+        "csrf"
+      ],
+      "description": "Analyses state-changing requests for the presence of CSRF tokens or headers and attempts a token-stripped replay.",
+      "recommendationSummary": "Ensure that state-changing requests are protected against cross-site request forgery. Include an unguessable anti-CSRF token in all state-changing requests and validate it server-side. Use SameSite cookies and, where possible, verify the Origin or Referer headers. Avoid exposing ",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/352.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cors_cross_origin",
+        "csrf",
+        "jwt_token"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3c94ffecd16a9ebf"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "deserialization_active_tamper",
+      "name": "Insecure deserialization active tamper",
+      "tier": "pro",
+      "category": "deserialization",
+      "severity": "medium",
+      "vulnId": "deserialization",
+      "tags": [
+        "dast",
+        "deserialization"
+      ],
+      "description": "Active deserialization probes using codec-aware decode-mutate-reencode flows and differential confirmation.",
+      "recommendationSummary": "Deserialize only trusted data and validate type integrity before use. Use strict allow-lists for permitted classes/types. Cryptographically protect client-side serialized state and reject tampered values. Require deterministic authz/state checks before returning privileged respon",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A08_2025-Software_and_Data_Integrity_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/502.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "30a7a34328617ff8"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "dom_based_vuln_coverage",
+      "name": "DOM-based vulnerability coverage probes",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "dast",
+        "dom",
+        "xss"
+      ],
+      "description": "DOM workflow probes for client-side script sinks, javascript: redirects, and unsafe postMessage handling patterns.",
+      "recommendationSummary": "Harden client-side code against DOM sink injection and origin-trust mistakes. Avoid assigning unsanitized input to dangerous sinks (e.g., innerHTML, document.write, eval). Validate redirect targets and block javascript: URLs. Verify event.origin strictly in message handlers.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A03_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "dom_xss",
+        "file_upload",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8467d02028eaf1ab"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "dom_xss_url_params",
+      "name": "Browser-navigation DOM XSS via URL parameters",
+      "tier": "pro",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "dast",
+        "xss",
+        "dom"
+      ],
+      "description": "Tests top-level GET query parameters for browser-executed XSS by opening a real browser attack tab and requiring an execution marker after load or safe synthetic interaction.",
+      "recommendationSummary": "Treat URL query parameters as untrusted input and never pass them into dangerous DOM sinks such as innerHTML, outerHTML, insertAdjacentHTML, inline event handlers, JavaScript URLs, style blocks, or script-building logic. Use textContent or equivalent safe DOM APIs for user-contro",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3fd6839812749756"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "el_injection",
+      "name": "Expression Language Injection",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "dast",
+        "injection",
+        "el"
+      ],
+      "description": "Expression Language Injection - A server-side injection attack using the Spring Expression Language",
+      "recommendationSummary": "Whenever possible, applications should avoid incorporating user-controllable data into dynamically evaluated code. In almost every situation, there are safer alternative methods of implementing application functions, which cannot be manipulated to inject arbitrary code into the s",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/77.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f3ed46964d5d0d2c"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "file_upload_advanced",
+      "name": "Advanced file upload abuse",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "high",
+      "vulnId": "file_upload",
+      "tags": [
+        "dast",
+        "upload",
+        "files"
+      ],
+      "description": "Exercises higher-risk upload vectors such as SVG script payloads, HTML drops, and filename traversal attempts.",
+      "recommendationSummary": "Lock down upload flows with allow-listed types, strict filename normalisation, and out-of-web-root storage. Reject active content such as SVG, HTML, and executable polyglots unless explicitly required and safely sandboxed. Normalise and canonicalise filenames before storage. Stor",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/434.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3e6b6ae5923a1de2"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "file_upload_misconfig",
+      "name": "File upload misconfiguration",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "high",
+      "vulnId": "file_upload",
+      "tags": [
+        "dast",
+        "upload"
+      ],
+      "description": "Probes file upload endpoints for weak content-type and extension validation that could allow web shell or script upload.",
+      "recommendationSummary": "Lock down file upload handling so that only expected file types and extensions are accepted and stored safely. Validate file types using allow-listed extensions and server-side content inspection. Store uploads outside the web root or serve them via a separate static domain. Stri",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/434.html"
+      },
+      "surfaceHints": [
+        "command_injection",
+        "dom_xss",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8b99963485b61586"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "framework_exposure_pack",
+      "name": "Passive Recon: Framework Exposure Pack",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "frameworks"
+      ],
+      "description": "Detects framework and product-specific exposure surfaces that are not covered by the generic recon packs, including WordPress, Drupal, DWR, and common admin product routes.",
+      "recommendationSummary": "Remove or restrict product-specific admin and integration routes that should not be exposed publicly. Disable unused framework features, demo endpoints, and discovery surfaces in production. Keep third-party products and plugins patched and minimise path-based fingerprinting oppo",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "012fee11b0ede734"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "graphql_advanced",
+      "name": "GraphQL advanced probes",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "high",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "dast",
+        "graphql",
+        "api"
+      ],
+      "description": "Adds GraphQL abuse checks for aliases, depth/complexity, and authorization bypass patterns.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/285.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "graphql"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a0bde0c8f85cb668"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "graphql_coverage",
+      "name": "GraphQL coverage probes",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "high",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "dast",
+        "graphql"
+      ],
+      "description": "GraphQL probes for batch abuse, GET query override, and mutation IDOR patterns.",
+      "recommendationSummary": "Secure GraphQL endpoints with robust authorization and operation controls. Disable introspection and dangerous operations in production where appropriate. Apply object-level authorization to every resolver. Restrict batching, query depth, and operation complexity.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/285.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "graphql"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "48f3cb1eb790a8f5"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "graphql_introspection",
+      "name": "GraphQL Introspection",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "graphql"
+      ],
+      "description": "Attempts GraphQL introspection query; useful on /graphql endpoints.",
+      "recommendationSummary": "Control access to GraphQL introspection and schema metadata to avoid leaking internal object names and operations. Disable introspection in production where feasible, or require authentication and appropriate authorisation. Implement field-level authorisation and limit which oper",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "api_schema",
+        "authz_object",
+        "graphql"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "59787fd3aade7907"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "graphql_realtime_upload",
+      "name": "GraphQL realtime upload probes",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "high",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "dast",
+        "graphql",
+        "upload",
+        "realtime"
+      ],
+      "description": "Reserved GraphQL multipart-upload and subscription family. This stays capability-gated until realtime frame transport is available.",
+      "recommendationSummary": "Protect GraphQL upload and subscription endpoints with the same schema, authz, and replay controls as the rest of the API.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/285.html"
+      },
+      "surfaceHints": [
+        "api_schema",
+        "authz_object",
+        "file_upload",
+        "graphql",
+        "realtime"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "6acc6de5fccb3148"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "host_header_poisoning",
+      "name": "Host Header Injection / Poisoning",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "host_header_injection",
+      "tags": [
+        "dast",
+        "host",
+        "poisoning"
+      ],
+      "description": "Sends alternative host-related headers and checks for reflection in body or Location.",
+      "recommendationSummary": "Do not trust the incoming Host header or related forwarding headers when generating absolute URLs or security decisions. Use a configured allow list of expected hostnames and reject or normalise anything else. Avoid reflecting unvalidated hostnames into links, redirects or passwo",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/644.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "de32862ae5081636"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "information_disclosure_advanced",
+      "name": "Information disclosure advanced probes",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "info-disclosure",
+        "debug"
+      ],
+      "description": "Requests common diagnostic and backup artifacts that frequently expose sensitive operational data.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "client_discovery",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "171b80f2ca2d23b2"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "information_disclosure_coverage",
+      "name": "Information disclosure coverage probes",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "information-disclosure"
+      ],
+      "description": "information disclosure probes for debug output, exposed VCS/config files, and backup artifacts.",
+      "recommendationSummary": "Prevent sensitive diagnostics and files from being exposed to untrusted users. Disable debug output in production. Block direct access to repository/config/backup artifacts. Sanitize exception handling and generic error responses.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "client_discovery",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e5a385244b0c8ac6"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "insecure_deserialization",
+      "name": "Insecure deserialization",
+      "tier": "pro",
+      "category": "deserialization",
+      "severity": "low",
+      "vulnId": "deserialization",
+      "tags": [
+        "dast",
+        "serialization",
+        "passive"
+      ],
+      "description": "Passively detects likely serialized payloads in cookies, parameters, and JSON fields for follow-up verification.",
+      "recommendationSummary": "Treat serialized data from untrusted sources as hostile input. Prefer plain JSON DTOs over native object serialization for external input. Enforce allow-lists of classes/types during deserialization. Integrity-protect state tokens and reject modified payloads deterministically.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A08_2025-Software_or_Data_Integrity_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/502.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "fe11619ce144eb03"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "jwt_advanced",
+      "name": "JWT advanced attacks",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "high",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "jwt"
+      ],
+      "description": "JWT probes for alg=none acceptance, empty signatures, key confusion metadata abuse, and weak verification flows.",
+      "recommendationSummary": "Validate JWTs strictly and enforce a fixed verification policy. Reject alg=none, empty signatures, and unsupported algorithms. Do not trust unvalidated kid, jku, or embedded key metadata from tokens. Use strong key management and explicit algorithm allow-lists.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/345.html"
+      },
+      "surfaceHints": [
+        "jwt_token"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "cb9688c62f4b90b5"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "llm_prompt_injection",
+      "name": "LLM prompt injection probes",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "dast",
+        "llm",
+        "prompt-injection",
+        "ai"
+      ],
+      "description": "Injects prompt-injection payloads against AI endpoints to detect unsafe instruction following and data disclosure.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/74.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3cc9ec8194534930"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "nosql_injection",
+      "name": "NoSQL Injection (Mongo-style)",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "nosql_injection",
+      "tags": [
+        "dast",
+        "injection",
+        "nosql"
+      ],
+      "description": "Attempts to trigger NoSQL injection by abusing Mongo-style operators in query parameters and JSON bodies.",
+      "recommendationSummary": "Treat all user-controlled filters and query objects as untrusted and avoid passing them directly into NoSQL drivers. Use fixed query templates and map user input only to specific, typed fields. Disallow dangerous operators such as $where, $ne, $gt, $regex and JavaScript expressio",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/943.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "630a9cf42d71a642"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "oauth_advanced",
+      "name": "OAuth advanced probes",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "high",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "oauth"
+      ],
+      "description": "OAuth probes for redirect URI trust, state handling, and PKCE downgrade acceptance.",
+      "recommendationSummary": "Validate every OAuth authorization request parameter strictly. Require strong state validation per session. Use exact redirect URI matching against allow-lists. Enforce PKCE with S256 and reject insecure fallbacks.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "jwt_token",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "10c1cd6922c49d10"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "oauth_flaws",
+      "name": "OAuth misconfiguration probes",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "high",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "oauth",
+        "authentication"
+      ],
+      "description": "Tests OAuth authorization flows for redirect_uri and state handling weaknesses.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "jwt_token"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "7e6fbad5e998268d"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "os_command_injection_blind",
+      "name": "OS command injection (blind)",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "command_injection",
+      "tags": [
+        "dast",
+        "command",
+        "injection"
+      ],
+      "description": "Blind OS command injection probes for time-delay execution and output redirection retrieval. Covers in-band separator matrix (|, ;, &&, ||, %0A) applied to every write payload to bypass server-side input filters.",
+      "recommendationSummary": "Never concatenate untrusted input into shell commands. Use fixed command allow-lists and parameterized process execution APIs (e.g. execve with argument arrays, never [command example redacted]. Reject or strictly allow-list dangerous metacharacters and separators including |, ;,",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/78.html"
+      },
+      "surfaceHints": [
+        "command_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "fad6a033c0f6c835"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "path_traversal_advanced",
+      "name": "Advanced directory traversal",
+      "tier": "pro",
+      "category": "path_traversal",
+      "severity": "high",
+      "vulnId": "path_traversal",
+      "tags": [
+        "dast",
+        "file",
+        "traversal"
+      ],
+      "description": "Directory traversal (also known as file path traversal) is a web security vulnerability that allows an attacker to read arbitrary files on the server that is running an application. This might include application code and data, credentials for back-end systems, and sensitive operating system files.",
+      "recommendationSummary": "The application should validate the user input before processing it. Ideally, the validation should compare against a whitelist of permitted values. If that isn't possible for the required functionality, then the validation should verify that the input contains only permitted con",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/35.html"
+      },
+      "surfaceHints": [
+        "path_traversal",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "1a963abcd7d2b6a2"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "php_code_injection",
+      "name": "PHP Code Injection",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "dast",
+        "code",
+        "php"
+      ],
+      "description": "PHP Code Injection - Unsafe handling of user input leads to execution of arbitrary PHP code on the server",
+      "recommendationSummary": "Avoid using exec, shell_exec, system or passthru Avoid using strip_tags for sanitisation Code serialization Use a PHP security linter Utilise a SAST tool to identify code injection issues",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+      },
+      "surfaceHints": [
+        "command_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "feefe30c7f57de81"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "prototype_pollution_server",
+      "name": "Server-side prototype pollution probes",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "dast",
+        "prototype-pollution",
+        "javascript"
+      ],
+      "description": "Injects prototype-pollution keys into JSON/form payloads to detect unsafe merge behaviors.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/1321.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "prototype_pollution"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e808e838aa590634"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "race_condition_burst",
+      "name": "Race-condition burst probes",
+      "tier": "pro",
+      "category": "insecure_design",
+      "severity": "high",
+      "vulnId": "race_condition",
+      "tags": [
+        "dast",
+        "race-condition",
+        "replay"
+      ],
+      "description": "Runs burst-style replay probes against state-changing endpoints to detect missing replay and concurrency defenses.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Insecure_Design/",
+        "CWE": "https://cwe.mitre.org/data/definitions/362.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "7da0d5f12f0a4e3c"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_auth_identity_surfaces",
+      "name": "Passive Recon: Auth & Identity Surfaces",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "info",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "auth",
+        "identity"
+      ],
+      "description": "Flags authentication, registration, reset, MFA, impersonation, and federation surfaces that appear in observed traffic.",
+      "recommendationSummary": "Protect login, registration, reset, impersonation, and federation endpoints with appropriate rate-limits and authorization checks. Use these surfaces as high-priority authz diff and replay targets.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/306.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "702868af0a5cd609"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_business_workflow_surfaces",
+      "name": "Passive Recon: Billing, Admin & Support Workflows",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "workflow",
+        "billing",
+        "support",
+        "admin"
+      ],
+      "description": "Flags business-critical workflow routes and form surfaces related to billing, subscriptions, admin/backoffice actions, and support operations.",
+      "recommendationSummary": "Treat payment, refund, approval, export, and support workflows as high-priority manual review targets. Review these routes for authorization drift, unsafe overrides, and hidden workflow parameters.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "93c6610c8c863ee0"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_client_trust_boundaries",
+      "name": "Passive Recon: CSP & Client Trust Boundaries",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "csp",
+        "client"
+      ],
+      "description": "Inventories CSP trust posture, report endpoints, Trusted Types signals, and client-side cross-origin trust patterns without turning them into findings by default.",
+      "recommendationSummary": "Review CSP and client trust posture as part of frontend attack-surface mapping. Keep reportable CSP weaknesses in finding modules while using these observations to enrich Recon.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f1c5afa2d9393b44"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_file_data_surfaces",
+      "name": "Passive Recon: File & Data Transfer Surfaces",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "files",
+        "upload"
+      ],
+      "description": "Detects upload, download, export, and file-transfer features from observed requests and responses.",
+      "recommendationSummary": "Treat upload, download, archive, and export routes as high-priority bug bounty review targets. Review authz, object scope, content validation, and cache controls on these surfaces.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cache_privacy",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a7004b99e01cc3d4"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_graphql_operation_shapes",
+      "name": "Passive Recon: GraphQL Operation & Schema Shapes",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "graphql",
+        "api"
+      ],
+      "description": "Extracts GraphQL operation-shape hints, persisted query usage, upload transport, and schema-error disclosure patterns from observed traffic.",
+      "recommendationSummary": "Review exposed GraphQL operation names and schema hints as part of API attack-surface mapping. Restrict interactive GraphQL tooling and introspection where production use does not require them.",
+      "links": {
+        "OWASP": "https://owasp.org/API-Security/editions/2023/en/0xa9-improper-inventory-management/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "api_schema",
+        "file_upload",
+        "graphql"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "24fb5fbb9cc37ec9"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_header_tech_hints",
+      "name": "Passive Recon: Header Technology & Auth Hints",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "low",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "headers",
+        "fingerprint"
+      ],
+      "description": "Fingerprints server technology, framework hints, enabled methods, and auth challenge posture from HTTP headers.",
+      "recommendationSummary": "Minimize unnecessary banner and version disclosure in HTTP headers. Review enabled methods and auth challenges as part of attack surface mapping.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "390b259f8930a324"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_html_workflow_leads",
+      "name": "Passive Recon: HTML Workflow & Hidden Field Leads",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "html",
+        "forms"
+      ],
+      "description": "Detects hidden form fields and workflow actions that often map to authz, object-scope, redirect, invite, and callback behavior.",
+      "recommendationSummary": "Review hidden fields and form actions for object scope, authz drift, mass assignment, and open redirect behavior. Use these leads with session diff and replay workflows.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/639.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "jwt_token",
+        "open_redirect",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c3fba3090ebff6a1"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_realtime_surfaces",
+      "name": "Passive Recon: WebSocket, Socket.IO & Realtime Surfaces",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "websocket",
+        "realtime"
+      ],
+      "description": "Inventories realtime endpoints, WebSocket/Socket.IO transports, SSE responses, and client-visible realtime connection patterns.",
+      "recommendationSummary": "Review realtime endpoints for authentication, origin checks, namespace isolation, and token placement. Use these surfaces to prioritize manual review before active protocol testing.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "jwt_token",
+        "realtime"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3beb64d9817c6dd7"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "recon_tenant_boundary_surfaces",
+      "name": "Passive Recon: SaaS Tenant-Boundary Surfaces",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "info",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "recon",
+        "passive",
+        "tenant",
+        "saas",
+        "access-control"
+      ],
+      "description": "Detects tenant-scoping routes, headers, cookies, and payload fields that commonly define SaaS boundary controls.",
+      "recommendationSummary": "Use these observations to prioritize tenant-isolation review and authz diff testing. Track route, header, and field-level scope controls before attempting object-swap or cross-tenant validation.",
+      "links": {
+        "OWASP": "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/",
+        "CWE": "https://cwe.mitre.org/data/definitions/639.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "98593f962b871c17"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "request_smuggling_h1",
+      "name": "HTTP request smuggling H1 probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "high",
+      "vulnId": "request_smuggling",
+      "tags": [
+        "dast",
+        "http",
+        "smuggling"
+      ],
+      "description": "HTTP request smuggling is an exploitation technique in which a malicious request is inserted inside an original request, which is then processed by the backend server.",
+      "recommendationSummary": "Use HTTP/2 end to end and disable HTTP downgrading if possible. HTTP/2 uses a robust mechanism for determining the length of requests and, when used end to end, is inherently protected against request smuggling. If you can't avoid HTTP downgrading, make sure you validate the rewr",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/444.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c389ecaec41fb5c6"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "request_smuggling_h2",
+      "name": "HTTP request smuggling H2 probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "high",
+      "vulnId": "request_smuggling",
+      "tags": [
+        "dast",
+        "http",
+        "smuggling",
+        "http2"
+      ],
+      "description": "HTTP/2 downgrade and rewrite probes for browser/runtime paths that can prove H2 delivery semantics.",
+      "recommendationSummary": "Use HTTP/2 end to end and disable HTTP downgrading if possible. HTTP/2 uses a robust mechanism for determining the length of requests and, when used end to end, is inherently protected against request smuggling. If you cannot avoid HTTP downgrading, validate rewritten requests ag",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/444.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "19b424683d6090f2"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "saml_flaws",
+      "name": "SAML flow flaws",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "high",
+      "vulnId": "auth_failures",
+      "tags": [
+        "dast",
+        "saml",
+        "sso"
+      ],
+      "description": "Checks SAML request and logout flows for RelayState/open-redirect style flaws that can be observed from HTTP behavior.",
+      "recommendationSummary": "Validate RelayState and logout redirect parameters strictly and bind them to trusted destinations only. Require exact allow-list matches for ACS, logout, and RelayState destinations. Reject unsolicited external URLs in SAML and SSO parameters. Audit ACS and logout handlers for op",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f4ad5c68e0e29510"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "server_side_parameter_pollution",
+      "name": "Server-side parameter pollution",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "parameter_pollution",
+      "tags": [
+        "dast",
+        "parameter-pollution",
+        "sspp"
+      ],
+      "description": "Tests encoded parameter suffixes in captured query or form values to detect server-side parsing of hidden parameters such as field overrides in reset and search flows.",
+      "recommendationSummary": "Do not concatenate untrusted user input into internal query strings or backend parameter maps. Decode once, validate strictly, and allow-list accepted parameter names before relaying values to downstream handlers.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/235.html"
+      },
+      "surfaceHints": [
+        "prototype_pollution"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "66c95d44e331af0f"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_client_storage_token_misuse",
+      "name": "SPA client-side token storage misuse",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "sensitive_storage",
+      "tags": [
+        "dast",
+        "spa",
+        "storage"
+      ],
+      "description": "Tests whether SPA fragment parameters lead to sensitive tokens being stored in localStorage/sessionStorage or similar client-side storage.",
+      "recommendationSummary": "Minimise use of client-side storage for long-lived or highly sensitive tokens in SPA applications. Prefer httpOnly, secure cookies managed by the server for session identifiers. If localStorage or sessionStorage must be used, restrict token scope and lifetime and protect against ",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/922.html"
+      },
+      "surfaceHints": [
+        "jwt_token",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a8b92d9e995a6c04"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_cors_trusts_any_origin",
+      "name": "SPA CORS trusts any origin",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "insecure_cors",
+      "tags": [
+        "dast",
+        "spa",
+        "cors"
+      ],
+      "description": "Combines SPA discovery of API endpoints with checks for overly permissive CORS responses.",
+      "recommendationSummary": "Ensure that SPA API endpoints do not allow arbitrary origins with credentials. Use a specific allow list of front-end origins for CORS. Avoid sending Access-Control-Allow-Origin: * together with Access-Control-Allow-Credentials: true. Limit exposed methods and headers to those re",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/346.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "bbaaea054e1705d2"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_csrf_missing",
+      "name": "SPA CSRF missing protections",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "csrf",
+      "tags": [
+        "dast",
+        "spa",
+        "csrf"
+      ],
+      "description": "Analyses SPA-originated XHR/fetch requests for missing CSRF tokens or headers.",
+      "recommendationSummary": "Protect SPA XHR and fetch calls that change server state with CSRF tokens and SameSite cookies. Include anti-CSRF tokens in JSON bodies or custom headers and validate them server-side. Use SameSite=Lax or Strict for sensitive cookies where compatible with your flows. Avoid state-",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/352.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "csrf",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "b31ed8bcc2a61600"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_dom_open_redirect",
+      "name": "SPA hash-based open redirect",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "low",
+      "vulnId": "open_redirect",
+      "tags": [
+        "dast",
+        "spa",
+        "redirect"
+      ],
+      "description": "Tests hash-based SPA parameters for client-side / DOM open redirects.",
+      "recommendationSummary": "Do not let hash-based routing parameters control client-side redirects to arbitrary URLs. Allow navigation only to a predefined set of internal routes or trusted external domains. Normalise and validate redirect targets before calling navigation APIs. Prefer server-side checks fo",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "5c5a0018a2dffbbf"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_dom_sensitive_data_exposure",
+      "name": "SPA DOM sensitive data exposure",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "dast",
+        "spa",
+        "dom"
+      ],
+      "description": "Scans SPA-rendered DOM for sensitive data patterns (emails, JWTs, API keys, token-like values) on hash-routed views.",
+      "recommendationSummary": "Avoid rendering secrets, tokens or high-value personal data directly into the SPA DOM where it can be read by scripts, browser extensions or shoulder surfing. Only display the minimum amount of sensitive data required for the user task. Mask or truncate identifiers such as card n",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "client_discovery",
+        "dom_xss",
+        "jwt_token",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d7b1b3af6feaf3bb"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_insecure_postmessage",
+      "name": "SPA insecure postMessage",
+      "tier": "pro",
+      "category": "insecure_design",
+      "severity": "medium",
+      "vulnId": "postmessage_misuse",
+      "tags": [
+        "dast",
+        "spa",
+        "postmessage"
+      ],
+      "description": "Detects insecure window.postMessage handlers in SPA pages that do not validate origin or that process attacker-controlled data into DOM, redirects, or JS sinks.",
+      "recommendationSummary": "Validate window.postMessage usage in SPA components to ensure messages are only accepted from trusted origins and with expected structure. Always check the origin of incoming messages against an allow list. Validate message data before using it in DOM updates, navigation or secur",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/345.html"
+      },
+      "surfaceHints": [
+        "command_injection",
+        "cors_cross_origin",
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "7d8c140c34be4247"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_js_injection",
+      "name": "SPA hash-based JavaScript injection",
+      "tier": "pro",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "dast",
+        "spa",
+        "code"
+      ],
+      "description": "Tests hash-based SPA parameters for JavaScript injection into eval, Function, setTimeout(string) etc.",
+      "recommendationSummary": "Never evaluate untrusted data as JavaScript in SPA code, even if it originates from URL fragments, configuration or API responses. Avoid using eval, Function constructors or setTimeout/setInterval with string arguments. Design APIs so they return data, not code, and handle behavi",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/95.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "66b16da94b5b8a53"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_token_in_fragment",
+      "name": "SPA token in URL fragment",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "token_leak",
+      "tags": [
+        "dast",
+        "spa",
+        "token"
+      ],
+      "description": "Detects potentially sensitive tokens (OAuth access_token/id_token/JWT/long secrets) in SPA URL fragments like http://host/#/route?param=value",
+      "recommendationSummary": "Avoid placing access tokens, ID tokens or other secrets in the URL fragment of SPA routes. Prefer modern OAuth and OpenID Connect flows that return tokens via secure cookies or back-channel mechanisms. Do not log or persist full URLs that may contain fragment values with sensitiv",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/522.html"
+      },
+      "surfaceHints": [
+        "jwt_token",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "29aae2f11392177b"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "spa_token_leak_third_party",
+      "name": "SPA token leak to third-party",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "high",
+      "vulnId": "token_leak",
+      "tags": [
+        "dast",
+        "spa",
+        "token",
+        "leakage"
+      ],
+      "description": "Tests whether SPA fragment parameters or tokens are leaked to third-party domains via XHR/fetch/requests.",
+      "recommendationSummary": "Ensure that tokens and other secrets from SPA routes are never forwarded to third-party domains. Only send tokens to trusted back-end services over HTTPS. Inspect client-side code for fetch or XHR calls that embed fragment values or tokens in URLs, headers or bodies sent to third",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A04_2025-Cryptographic_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/359.html"
+      },
+      "surfaceHints": [
+        "client_discovery",
+        "jwt_token"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8a5b600fb76aade0"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_auth_bypass",
+      "name": "SQL injection Auth Bypass",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "auth"
+      ],
+      "description": "SQL Injection Auth Bypass module checks the application for SQL injection vulnerabilities attacks that can be used to fool the application into authenticating without the attacker needing valid credentials.",
+      "recommendationSummary": "It was discovered that SQL Injection techniques can be used to fool the application into authenticating without the attacker needing valid credentials. SQL Injection vulnerabilities on login pages expose an application to admin access and quite probably at the administrator level",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A07_2025-Authentication_Failures/",
+        "CWE": "https://cwe.mitre.org/data/definitions/287.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "sql_injection",
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "44df96c4c328b89e"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_blind_conditional_error",
+      "name": "SQL blind conditional error",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "blind",
+        "conditional-error"
+      ],
+      "description": "Uses conditional error-based blind SQL probes where TRUE path stays stable and FALSE path triggers DB errors for differential confirmation.",
+      "recommendationSummary": "Blind conditional SQL injection can reveal query influence even without direct data output. Use parameterized queries and avoid dynamic SQL expression assembly. Normalize server error handling and avoid returning DB parser/runtime details. Constrain DB permissions so injected con",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "62bba5780e5835a5"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_boolean_hidden_data",
+      "name": "SQL boolean-based hidden data",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "blind",
+        "boolean"
+      ],
+      "description": "Tests likely listing and search parameters for boolean-based SQL injection that changes server-side filtering logic without relying on visible database errors.",
+      "recommendationSummary": "Boolean-based SQL injection in filtering or search logic lets attackers alter the query predicate and expose data that should stay hidden. Use parameterized queries for all user-controlled values, including search, category and filter inputs. Avoid concatenating request parameter",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c7cf7e3700d91677"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_boolean_status_oracle",
+      "name": "SQL boolean semantic/status oracle",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "blind",
+        "boolean",
+        "semantic"
+      ],
+      "description": "Detects boolean-based SQL injection where the false branch changes semantic response content or route outcome without relying on large body-length deltas.",
+      "recommendationSummary": "Some SQL injection paths reveal themselves through semantic content drift such as Found 1 users becoming Found 0 users, or by switching to a not-found/denied branch. Use parameterized queries for all user-controlled values. Do not concatenate route, filter, or identifier paramete",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e8218c365bb7c1b6"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_content_length_oracle",
+      "name": "SQL content-length oracle",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "blind",
+        "length"
+      ],
+      "description": "Detects SQL injection paths that collapse rich result pages into a short generic error/empty page while still returning HTTP 200.",
+      "recommendationSummary": "Content-length oracles can confirm SQL injection even when the application suppresses verbose database errors. Use parameterized queries for all user input. Avoid exposing different template branches for injected predicates or parser fallbacks. Normalize error handling so malform",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection",
+        "template_rendering"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "b4badeecdd3fa58b"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_oast",
+      "name": "SQL OAST-style callback probes",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "oast",
+        "dns"
+      ],
+      "description": "Injects SQL payloads that attempt outbound DNS/HTTP callback behavior, with detection based on in-band error and callback-intent evidence (engine callback correlation pending).",
+      "recommendationSummary": "Block SQLi-driven outbound network primitives and dangerous DB procedures. Disable or tightly restrict network-capable DB functions/procedures. Use parameterized queries and least-privilege DB roles. Monitor for callback-domain indicators and suspicious SQL runtime errors.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "6e8c5ae690b6581b"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_time_delay",
+      "name": "SQL time-delay confirmation",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "blind",
+        "time-based"
+      ],
+      "description": "Runs time-based SQL payloads after a baseline request to confirm blind SQL injection through deterministic latency deltas.",
+      "recommendationSummary": "Time-based SQL injection confirms exploitable query control even when content does not differ. Use parameterized queries for all DB interactions. Reject suspicious metacharacters and unexpected query structures server-side. Monitor and rate-limit repeated timing probes.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "63c17ff3ea345d61"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_union_extract_version",
+      "name": "SQL [SQL example redacted]",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "union",
+        "version"
+      ],
+      "description": "Uses ORDER BY probes to infer the strongest plausible column count, then tries DB-specific [SQL example redacted].",
+      "recommendationSummary": "UNION-based SQL injection can expose database version details and other internal metadata directly in application responses. Use parameterized queries for all user-controlled values and never concatenate untrusted input into query structure. Apply allow-lists for filterable and s",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c465bd7437ba2f4f"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_union_recon",
+      "name": "SQL UNION recon",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "union"
+      ],
+      "description": "Performs staged UNION-based recon: infer the strongest plausible column count with ORDER BY and NULL [SQL example redacted].",
+      "recommendationSummary": "UNION-based SQL injection lets attackers merge arbitrary query results into the application response. Use parameterized queries for all user-controlled values and never concatenate untrusted input into SELECT, ORDER BY, or [SQL example redacted]. Apply allow-lists for sortable an",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "07f4443b4ca68f27"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_union_schema_enumeration",
+      "name": "SQL [SQL example redacted]",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "union",
+        "schema"
+      ],
+      "description": "Performs UNION-based schema enumeration probes for table and column discovery across common database metadata catalogs.",
+      "recommendationSummary": "Prevent UNION-based SQL injection by parameterizing all queries and blocking structural query manipulation. Use prepared statements for all user-controlled values. Avoid string concatenation in SELECT, ORDER BY, and [SQL example redacted]. Apply least-privilege DB accounts and bl",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "api_schema",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "eaebde3e2905227f"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_visible_error_extract",
+      "name": "SQL visible error extract",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "error-based"
+      ],
+      "description": "Triggers visible DB conversion/parser errors that leak version or SQL runtime details in response bodies.",
+      "recommendationSummary": "Visible SQL errors often expose DB engine and schema internals that accelerate exploitation. Use parameterized queries and strict server-side input handling. Return generic error responses and suppress DB runtime details. Harden logging/monitoring while avoiding error data exposu",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "api_schema",
+        "client_discovery",
+        "sensitive_data",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a3e5cb10f9738ccd"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "sql_xml_encoded",
+      "name": "SQL XML/encoded payload bypass",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "dast",
+        "sql",
+        "encoding",
+        "xml"
+      ],
+      "description": "Uses XML-entity and double-URL encoded SQL payloads to detect filter/WAF bypass conditions with boolean differential confirmation.",
+      "recommendationSummary": "Encoding-based SQLi bypasses still exploit unsafe query construction. Use parameterized queries and do not decode user input into SQL fragments. Apply canonicalization once, validate, then process. Avoid relying on blacklist-based filters or superficial WAF-only controls.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "command_injection",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "1154b5bbb6ff5177"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "ssrf_advanced",
+      "name": "SSRF advanced probes",
+      "tier": "pro",
+      "category": "ssrf",
+      "severity": "high",
+      "vulnId": "ssrf",
+      "tags": [
+        "dast",
+        "ssrf",
+        "metadata"
+      ],
+      "description": "Advanced SSRF payloads for metadata services, alternate localhost forms, and redirect pivots.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A10_2025-Server-Side_Request_Forgery_%28SSRF%29/",
+        "CWE": "https://cwe.mitre.org/data/definitions/918.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "6586cde0318c9c03"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "ssrf_coverage",
+      "name": "SSRF coverage probes",
+      "tier": "pro",
+      "category": "ssrf",
+      "severity": "high",
+      "vulnId": "ssrf",
+      "tags": [
+        "dast",
+        "ssrf"
+      ],
+      "description": "SSRF probes for localhost/admin reachability and whitelist bypass encodings.",
+      "recommendationSummary": "Do not let user-controlled input decide arbitrary outbound destinations. Allow-list destination hosts and protocols. Normalize and resolve URLs server-side before policy checks. Block access to loopback, link-local, and metadata address ranges.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A10_2025-Server-Side_Request_Forgery_%28SSRF%29/",
+        "CWE": "https://cwe.mitre.org/data/definitions/918.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "4456ef73cb8b5031"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "ssrf_oast",
+      "name": "SSRF blind OAST probes",
+      "tier": "pro",
+      "category": "ssrf",
+      "severity": "high",
+      "vulnId": "ssrf",
+      "tags": [
+        "dast",
+        "ssrf",
+        "oast",
+        "blind"
+      ],
+      "description": "Injects callback URLs into SSRF-like sinks and relies on out-of-band confirmation for blind server-side fetches.",
+      "recommendationSummary": "Do not allow user-controlled URLs to drive outbound server requests. Enforce strict allow lists for destinations and protocols. Block loopback, private, and metadata address space after DNS resolution and after redirects. Apply egress controls and monitor unexpected callback traf",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A10_2025-Server-Side_Request_Forgery_%28SSRF%29/",
+        "CWE": "https://cwe.mitre.org/data/definitions/918.html"
+      },
+      "surfaceHints": [
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "0ebcefc3cd942ea8"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "ssrf_probes",
+      "name": "Server-Side Request Forgery (generic probes)",
+      "tier": "pro",
+      "category": "ssrf",
+      "severity": "high",
+      "vulnId": "ssrf",
+      "tags": [
+        "dast",
+        "ssrf"
+      ],
+      "description": "Attempts to coerce SSRF via URL-bearing parameters or JSON leaves by redirecting requests to localhost admin endpoints, a common request pattern.",
+      "recommendationSummary": "Restrict where the server can make outbound HTTP requests and treat any user-controlled URL or hostname as untrusted. Use an allow list of internal and external endpoints instead of accepting arbitrary URLs from the client. Block requests to private, loopback and link-local range",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/918.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9b87cd9f32d045e0"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "ssti",
+      "name": "Server-Side Template Injection",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "dast",
+        "template",
+        "injection"
+      ],
+      "description": "Attempts engine-agnostic server-side template injection using common expression syntaxes.",
+      "recommendationSummary": "Avoid passing user input directly into server-side templates or expression engines. Use parameterised templates or view models instead of concatenating template fragments from user data. Disable or restrict dangerous template features such as arbitrary expression evaluation or ac",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+      },
+      "surfaceHints": [
+        "template_rendering"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c158666d10240e22"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "stored_xss_blind",
+      "name": "Stored XSS blind follow-up probes",
+      "tier": "pro",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "stored_xss",
+      "tags": [
+        "dast",
+        "xss",
+        "stored"
+      ],
+      "description": "Submits multiple stored-XSS-style payload variants into writable text, URL-like, markdown-like, and HTML-like persisted surfaces, then relies on follow-up retrieval to confirm later render.",
+      "recommendationSummary": "Treat all persisted user content as untrusted and sanitize or encode it before every render. Encode HTML, attribute, and script contexts separately. Sanitize rich-text and markdown content with an allow-list policy. Store uploads and user content on origins that cannot execute ac",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "file_upload",
+        "template_rendering"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "55e842a648c38fbf"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "web_cache_deception",
+      "name": "Web cache deception probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "web_cache_poisoning",
+      "tags": [
+        "dast",
+        "cache",
+        "deception"
+      ],
+      "description": "Attempts cache deception path variants to expose dynamic content through cacheable-looking URLs.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/525.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cache_privacy"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "af496336059d67b9"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "web_cache_poisoning_coverage",
+      "name": "Web cache poisoning coverage probes",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "high",
+      "vulnId": "web_cache_poisoning",
+      "tags": [
+        "dast",
+        "cache"
+      ],
+      "description": "cache poisoning probes for unkeyed headers and unkeyed query cache persistence.",
+      "recommendationSummary": "Ensure caches include all response-influencing inputs in cache keys. Do not reflect untrusted header values into cacheable responses. Normalize or [SQL example redacted]. Avoid caching personalized pages and sensitive endpoints.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/444.html"
+      },
+      "surfaceHints": [
+        "cache_privacy",
+        "sensitive_data",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a7aff17e233db04f"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "websocket_frames_security",
+      "name": "WebSocket frame security probes",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "medium",
+      "vulnId": "websocket_misconfiguration",
+      "tags": [
+        "dast",
+        "websocket",
+        "frame",
+        "replay"
+      ],
+      "description": "Performs WebSocket frame and replay probes for endpoints that are already reachable over an authenticated upgrade.",
+      "recommendationSummary": "Protect WebSocket endpoints like any other authenticated API. Validate message-level authentication and authorization on every frame. Reject replayed or out-of-sequence messages. Bind messages to the authenticated session and channel identity.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/306.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "jwt_token",
+        "realtime"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "527e50a00eb5656e"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "websocket_handshake_security",
+      "name": "WebSocket handshake security probes",
+      "tier": "pro",
+      "category": "auth_session",
+      "severity": "medium",
+      "vulnId": "websocket_misconfiguration",
+      "tags": [
+        "dast",
+        "websocket",
+        "auth"
+      ],
+      "description": "Performs HTTP upgrade handshake probes for WebSocket endpoints to detect weak auth/origin enforcement.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/",
+        "CWE": "https://cwe.mitre.org/data/definitions/306.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cors_cross_origin",
+        "realtime"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "96cf3559aa96ed0e"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "xpath_injection",
+      "name": "XPath injection",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "xpath_injection",
+      "tags": [
+        "dast",
+        "injection",
+        "xpath"
+      ],
+      "description": "Unsanitized parameters passed to XML XPath Queries can allow an attacker to control query behavior",
+      "recommendationSummary": "User input should be strictly validated before being incorporated into XPath queries. In most cases, it will be appropriate to accept input containing only short alphanumeric strings. At the very least, input containing any XPath metacharacters such as \" ' / @ = * [ ] ( and ) sho",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Injection/",
+        "CWE": "https://cwe.mitre.org/data/definitions/643.html"
+      },
+      "surfaceHints": [
+        "path_traversal"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "462d69c005ef8220"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "xxe_advanced",
+      "name": "XXE advanced probes",
+      "tier": "pro",
+      "category": "xxe",
+      "severity": "high",
+      "vulnId": "xxe",
+      "tags": [
+        "dast",
+        "xxe",
+        "xml"
+      ],
+      "description": "Advanced XML parser abuse probes including local DTD reuse, parameter entities, SVG uploads, and XInclude payloads.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/611.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "04ee13ecf9781e1a"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "xxe_advanced_oast",
+      "name": "XXE advanced blind OAST probes",
+      "tier": "pro",
+      "category": "xxe",
+      "severity": "high",
+      "vulnId": "xxe",
+      "tags": [
+        "dast",
+        "xxe",
+        "xml",
+        "oast",
+        "blind"
+      ],
+      "description": "Blind XXE probe that relies on out-of-band callback confirmation.",
+      "recommendationSummary": "Use strict server-side validation and authorization checks. Reject malformed, unexpected, and privilege-escalating input.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/611.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "23be89c6328bfeb6"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "xxe_coverage",
+      "name": "XXE coverage probes",
+      "tier": "pro",
+      "category": "xxe",
+      "severity": "high",
+      "vulnId": "xxe",
+      "tags": [
+        "dast",
+        "xxe"
+      ],
+      "description": "XXE probes for file disclosure, XInclude, and SOAP/XML parser abuse paths.",
+      "recommendationSummary": "Use secure XML parsing defaults and disable external entity resolution. Disable DTDs and external entities in all XML parsers. Use data formats that do not support entities where possible. Validate and allow-list XML schemas at trust boundaries.",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A05_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/611.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "1eebeb3b9179ecda"
+    },
+    {
+      "engine": "DAST",
+      "moduleId": "xxe_file_read",
+      "name": "XXE file read",
+      "tier": "pro",
+      "category": "xxe",
+      "severity": "high",
+      "vulnId": "xxe",
+      "tags": [
+        "dast",
+        "xxe"
+      ],
+      "description": "Sends classic external entity payload to read local files when XML is accepted.",
+      "recommendationSummary": "Harden XML parsers and message processors so that external entities and DTDs cannot be used to read local files or connect to internal services. Disable external entity resolution and DTD processing in XML parsers and frameworks. Use simpler data formats such as JSON where possib",
+      "links": {
+        "OWASP": "https://owasp.org/Top10/2025/A02_2025-Security_Misconfiguration/",
+        "CWE": "https://cwe.mitre.org/data/definitions/611.html"
+      },
+      "surfaceHints": [
+        "path_traversal"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "bbeb4f9919a37996"
+    }
+  ]
+}

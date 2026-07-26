@@ -2,6 +2,15 @@
 
 import { ptk_controller_traffic } from "../../../controller/traffic.js"
 const controller = new ptk_controller_traffic()
+const extensionOrigin = window.location.origin
+
+function mermaidLabel(value, maxLength) {
+    return String(value ?? '')
+        .slice(0, maxLength)
+        .replace(/[\r\n\x00-\x1f\x7f<>;&:[\]{}()]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+}
 
 jQuery(function () {
 
@@ -17,7 +26,7 @@ jQuery(function () {
 
     mermaid.initialize({
         startOnLoad: true,
-        securityLevel: 'loose',
+        securityLevel: 'strict',
         /*maxTextSize: 150000,*/
 
         sequence: {
@@ -44,7 +53,7 @@ jQuery(function () {
                 let tab = tabs[0]
                 if (tab && !tab.url.startsWith('chrome://')){
                     $form.form('set value', 'url', tab.url)
-                    window.parent.postMessage({url: tab.url}, '*');
+                    window.parent.postMessage({ channel: 'ptk_recording_url', url: tab.url }, extensionOrigin)
                 } 
             })
 
@@ -91,27 +100,27 @@ jQuery(function () {
 
                     if (item.browser.cookie) {
                         cookieIn++;
-                        diagramContent += "Browser->>Server: Host: " + item.hostname.substring(0, 30) + "..\n";
-                        diagramContent += "Note over Browser,Server: Cookie: " + item.browser.cookie.item.value.substring(0, 20).replaceAll(';', '') + "..\n";
+                        diagramContent += "Browser->>Server: Host " + mermaidLabel(item.hostname, 30) + "..\n";
+                        diagramContent += "Note over Browser,Server: Cookie " + mermaidLabel(item.browser.cookie.item.value, 20) + "..\n";
                     }
                     if (item.browser.authorization) {
                         if (item.browser.authorization.item.value.toLowerCase().includes('basic')) authHeaderBasicIn++;
                         else if (item.browser.authorization.item.value.toLowerCase().includes('bearer')) authHeaderBearerIn++;
                         else tokenIn++;
-                        diagramContent += "Browser->>Server: Host: " + item.hostname.substring(0, 30) + "..\n";
-                        diagramContent += "Note over Browser,Server: Authorization: " + item.browser.authorization.item.value.substring(0, 15).replaceAll(';', '') + "..\n";
+                        diagramContent += "Browser->>Server: Host " + mermaidLabel(item.hostname, 30) + "..\n";
+                        diagramContent += "Note over Browser,Server: Authorization " + mermaidLabel(item.browser.authorization.item.value, 15) + "..\n";
                     }
                 }
                 if (item.server) {
                     if (item.server.cookie) {
                         cookieIn++;
-                        diagramContent += "Server-->>Browser: Host: " + item.hostname.substring(0, 30) + "..\n";
-                        diagramContent += "Note over Server,Browser: Set-Cookie: " + item.server.cookie.item.value.substring(0, 15).replaceAll(';', '') + "..\n";
+                        diagramContent += "Server-->>Browser: Host " + mermaidLabel(item.hostname, 30) + "..\n";
+                        diagramContent += "Note over Server,Browser: Set Cookie " + mermaidLabel(item.server.cookie.item.value, 15) + "..\n";
                     }
                     if (item.server.token) {
                         tokenIn++;
-                        diagramContent += "Server-->>Browser: Host: " + item.hostname.substring(0, 30) + "..\n";
-                        diagramContent += "Note over Server,Browser: Token: " + item.server.token.item.substring(0, 15).replaceAll(';', '') + "..\n";
+                        diagramContent += "Server-->>Browser: Host " + mermaidLabel(item.hostname, 30) + "..\n";
+                        diagramContent += "Note over Server,Browser: Token " + mermaidLabel(item.server.token.item, 15) + "..\n";
                     }
                 }
             });
@@ -263,6 +272,7 @@ controller.setup = function (options, fileinputId, outputHolder, harLog) {
 }
 
 window.addEventListener('message', function (msg) {
-    if (msg.data.url)
+    if (msg.origin !== extensionOrigin || msg.source !== window.parent) return
+    if (msg.data?.channel === 'ptk_recording_url' && typeof msg.data.url === 'string')
         $('[name="url"]').val(msg.data.url)
 })

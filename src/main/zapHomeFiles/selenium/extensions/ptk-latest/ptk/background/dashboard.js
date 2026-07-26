@@ -7,23 +7,23 @@ import { setWappalyzerTechnologiesForHeaders } from "./headerAnalysis/wappalyzer
 import { setCveTechnologiesForHeaders } from "./headerAnalysis/cveHeadersEvaluator.js"
 import { ptk_utils, ptk_storage } from "./utils.js"
 import { portalPolicyRuntimeStore, normalizePortalPolicyEngine } from "./common/portalPolicyRuntimeStore.js"
+import { sensitiveArtifactStorage } from "./sensitiveArtifactStore.js"
+import { ReportSnapshotStore } from "./reportSnapshotStore.js"
 import {
-    buildPortalUrl as buildSharedPortalUrl,
+    buildStoredCredentialPortalUrl,
     initializePortalRuntimeConfig
 } from "../common/portalConfig.js"
 
 
 const worker = self
+const reportSnapshotStore = new ReportSnapshotStore({ storage: sensitiveArtifactStorage })
 
 function getPortalApiKey() {
     return String(worker?.ptk_app?.settings?.profile?.api_key || '').trim()
 }
 
 function buildDashboardPortalUrl(endpoint, profile = {}) {
-    return buildSharedPortalUrl(endpoint, {
-        baseUrl: profile?.base_url || profile?.api_url || profile?.baseUrl || null,
-        apiBase: profile?.api_base || profile?.apiBase || undefined
-    })
+    return buildStoredCredentialPortalUrl(endpoint)
 }
 
 export class ptk_dashboard {
@@ -870,17 +870,12 @@ export class ptk_dashboard {
     }
 
     onMessage(message, sender, sendResponse) {
-
-        if (!ptk_utils.isTrustedOrigin(sender))
-            return Promise.reject({ success: false, error: 'Error origin value' })
-
-        if (message.channel == "ptk_popup2background_dashboard") {
-            //console.log(message)
-            if (this["msg_" + message.type]) {
-                return this["msg_" + message.type](message)
-            }
-            return Promise.resolve()
+        if (message?.channel !== "ptk_popup2background_dashboard") return undefined
+        if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+            return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
         }
+        if (this["msg_" + message.type]) return this["msg_" + message.type](message)
+        return Promise.resolve()
     }
 
     async _refreshSelectedPortalPolicies(scans = {}, portalSelections = {}) {
@@ -1105,6 +1100,14 @@ export class ptk_dashboard {
             { policyState: portalPolicyRuntimeStore.getState() }))
     }
 
+    async msg_create_report_snapshot(message) {
+        return reportSnapshotStore.create(message?.snapshot)
+    }
+
+    async msg_consume_report_snapshot(message) {
+        return reportSnapshotStore.consume(message?.snapshotId)
+    }
+
     async msg_get_scans(message) {
         if (message?.tabId) {
             worker.ptk_app.proxy.setDashboardTab(message.tabId, message.url || '')
@@ -1221,6 +1224,7 @@ export class ptk_dashboard {
                 Accept: "application/json"
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {

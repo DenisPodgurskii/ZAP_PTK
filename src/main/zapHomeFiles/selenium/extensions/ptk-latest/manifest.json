@@ -1,11 +1,9 @@
 {
-"update_url": "https://clients2.google.com/service/update2/crx",
-
     "author": "Denis Podgurskii",
     "name": "OWASP Penetration Testing Kit",
     "short_name": "OWASP PTK",
     "description": "OWASP Penetration Testing Kit",
-    "version": "9.9.7",
+    "version": "9.9.8",
     "manifest_version": 3,
     "incognito": "split",
     "background": {
@@ -38,6 +36,7 @@
                 "<all_urls>"
             ],
             "js": [
+                "ptk/content_shared.js",
                 "ptk/content.js"
             ],
             "all_frames": true,
@@ -83,26 +82,21 @@
     "web_accessible_resources": [
         {
             "resources": [
-                "ptk/*.js",
-                "ptk/content/*.js",
-                "ptk/background/*.json",
-                "ptk/*.map",
-                "ptk/*.png",
-                "ptk/*.json",
-                "ptk/browser/*.html",
-                "ptk/browser/assets/css/*.css",
-                "ptk/browser/assets/js/*.js",
-                "ptk/browser/assets/images/*",
-                "ptk/packages/*/*.js",
-                "ptk/packages/*/*.css",
-                "ptk/packages/*/*.map",
-                "ptk/packages/*/*.png",
-                "ptk/packages/*/*.svg",
-                "ptk/packages/*/*.woff",
-                "ptk/packages/*/*.woff2",
-                "ptk/packages/*/*.ttf",
-                "ptk/packages/*/*.eot",
-                "ptk/packages/*/*.html"
+                "ptk/inject.js",
+                "ptk/automationBridge.js",
+                "ptk/ptkAgentAutomation.js",
+                "ptk/content/spa_hash_hook.js",
+                "ptk/content/dialog_suppressor.js",
+                "ptk/content/iast.js",
+                "ptk/content/iast_agent_bootstrap.js",
+                "ptk/content/iast_comprehensive_bootstrap.js",
+                "ptk/content/iast_runtime_plan.js",
+                "ptk/browser/assets/icons/icon_rec.png",
+                "ptk/browser/assets/icons/icon_play.png",
+                "ptk/browser/assets/icons/pause.png",
+                "ptk/browser/assets/icons/play.png",
+                "ptk/browser/assets/icons/forward.png",
+                "ptk/browser/assets/icons/stop.png"
             ],
             "matches": [
                 "<all_urls>"

@@ -1,11 +1,16 @@
 /* Author: Denis Podgurskii */
 
 jQuery(function () {
+    const extensionOrigin = window.location.origin
+    const macroFrame = document.getElementById('macro_frame')
+    const trafficFrame = document.getElementById('traffic_frame')
+
     $('.menu .item').tab()
 
     $('.parent_url').on('change', function (evt) {
-        document.getElementById('macro_frame').contentWindow.postMessage({ url: $('.parent_url').val() }, '*')
-        document.getElementById('traffic_frame').contentWindow.postMessage({ url: $('.parent_url').val() }, '*')
+        const message = { channel: 'ptk_recording_url', url: $('.parent_url').val() }
+        macroFrame.contentWindow.postMessage(message, extensionOrigin)
+        trafficFrame.contentWindow.postMessage(message, extensionOrigin)
     })
 
     $('.button.traffic').on('click', function (evt) {
@@ -13,7 +18,9 @@ jQuery(function () {
     })
 
     window.addEventListener('message', function (msg) {
-        if (msg.data.url)
+        const trustedFrame = msg.source === macroFrame.contentWindow || msg.source === trafficFrame.contentWindow
+        if (msg.origin !== extensionOrigin || !trustedFrame) return
+        if (msg.data?.channel === 'ptk_recording_url' && typeof msg.data.url === 'string')
             $('.parent_url').val(msg.data.url)
     })
 })

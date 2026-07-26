@@ -4,6 +4,8 @@ import { ptk_controller_macro } from "../../../controller/macro.js"
 import { ptk_jwtHelper } from "../../../background/utils.js"
 import * as rutils from "../js/rutils.js"
 import { PRO_UI_VISIBLE } from "./releaseFeatureFlags.js"
+import { escapeUiText, renderDataTableText, renderPreformattedJson } from "./safeUiText.js"
+import { captureReportEngineSnapshots } from "./report/reportingContract.js"
 const controller = new ptk_controller_index()
 const macro_controller = new ptk_controller_macro()
 const jwtHelper = new ptk_jwtHelper()
@@ -743,10 +745,10 @@ async function refreshDashboardScanState(activeTab = null) {
 }
 
 function getDashboardCachedActiveTab() {
-    if (controller.activeTab?.url && typeof controller.activeTab?.tabId !== 'undefined' && !isExtensionUrl(controller.activeTab.url)) {
+    if (rutils.isInspectableTabUrl(controller.activeTab?.url) && typeof controller.activeTab?.tabId !== 'undefined') {
         return controller.activeTab
     }
-    if (controller.url && typeof controller.tabId !== 'undefined' && !isExtensionUrl(controller.url)) {
+    if (rutils.isInspectableTabUrl(controller.url) && typeof controller.tabId !== 'undefined') {
         return { url: controller.url, tabId: controller.tabId }
     }
     return null
@@ -1023,33 +1025,27 @@ function requestTabAnalysisOnce() {
 }
 
 async function resolveActiveTab(result) {
-    if (result?.activeTab?.url && typeof result?.activeTab?.tabId !== 'undefined' && !isExtensionUrl(result.activeTab.url)) {
+    if (rutils.isInspectableTabUrl(result?.activeTab?.url) && typeof result?.activeTab?.tabId !== 'undefined') {
         return result.activeTab
     }
     try {
         const tabs = await browser.tabs.query({ currentWindow: true })
         const active = tabs && tabs.length ? tabs.find((tab) => tab.active) : null
-        if (active?.url && typeof active?.id !== 'undefined' && !isExtensionUrl(active.url)) {
+        if (rutils.isInspectableTabUrl(active?.url) && typeof active?.id !== 'undefined') {
             return { url: active.url, tabId: active.id }
         }
         if (controller._lastAppTabId) {
             const last = tabs.find((tab) => tab.id === controller._lastAppTabId)
-            if (last?.url && !isExtensionUrl(last.url)) {
+            if (rutils.isInspectableTabUrl(last?.url)) {
                 return { url: last.url, tabId: last.id }
             }
         }
-        const fallback = tabs.find((tab) => tab?.url && !isExtensionUrl(tab.url))
+        const fallback = tabs.find((tab) => rutils.isInspectableTabUrl(tab?.url))
         if (fallback?.url && typeof fallback?.id !== 'undefined') {
             return { url: fallback.url, tabId: fallback.id }
         }
     } catch (_) { }
     return null
-}
-
-function isExtensionUrl(url) {
-    if (!url) return false
-    const base = browser.runtime.getURL('')
-    return url.startsWith(base)
 }
 
 function setReloadWarning($el, show) {
@@ -1114,7 +1110,7 @@ async function updateDashboardReloadWarning(result) {
         return false
     }
     controller.tabId = activeTab.tabId
-    if (activeTab.url && !isExtensionUrl(activeTab.url)) {
+    if (rutils.isInspectableTabUrl(activeTab.url)) {
         controller._lastAppTabId = activeTab.tabId
         controller._lastAppTabUrl = activeTab.url
     }
@@ -1285,8 +1281,13 @@ jQuery(function () {
     })
 
 $(document).on("click", "#generate_report", function () {
-        const openReport = () => {
-            const url = browser.runtime.getURL("/ptk/browser/report.html?full_report")
+        const $button = $(this)
+        if ($button.hasClass('loading')) return false
+        const openReport = (snapshotId = null) => {
+            const query = snapshotId
+                ? `?full_report&report_snapshot=${encodeURIComponent(snapshotId)}`
+                : '?full_report'
+            const url = browser.runtime.getURL(`/ptk/browser/report.html${query}`)
             return browser.windows.create({ type: 'popup', url }).catch(() => {
                 return browser.tabs.create({ url })
             })
@@ -1302,9 +1303,7 @@ $(document).on("click", "#generate_report", function () {
         const technologies = tabMatches ? (tabData.technologies || controller.tab?.technologies || []) : []
         const cves = tabMatches ? (tabData.cves || controller.tab?.cves || []) : []
         const waf = tabMatches ? (tabData.waf || controller.tab?.waf || null) : null
-        browser.storage.local.set({
-            "tab_full_info":
-            {
+        const dashboardSnapshot = {
                 "tabId": activeTabId,
                 "url": controller.url,
                 "technologies": technologies,
@@ -1315,10 +1314,22 @@ $(document).on("click", "#generate_report", function () {
                 "storage": storage,
                 "cookies": cookies
             }
-        }).then(function () {
-            return openReport()
-        }).catch(() => {
-            return openReport()
+        $button.addClass('loading disabled')
+        ;(async () => {
+            const engineSnapshots = await captureReportEngineSnapshots(getExportController)
+            const reportSnapshot = {
+                ...dashboardSnapshot,
+                engineSnapshots
+            }
+            const stored = await controller.createReportSnapshot(reportSnapshot)
+            if (!stored?.success || !stored?.snapshotId) {
+                console.warn('[PTK Report] Unable to create the background-owned report snapshot.', stored?.error || stored)
+                await openReport()
+                return
+            }
+            await openReport(stored.snapshotId)
+        })().finally(() => {
+            $button.removeClass('loading disabled')
         })
         return false
 
@@ -1427,6 +1438,12 @@ $(document).on("click", "#generate_report", function () {
 
     resolveActiveTab().then((activeTab) => {
         const initOpts = activeTab?.tabId ? { tabId: activeTab.tabId, url: activeTab.url } : {}
+        if (activeTab?.tabId) {
+            controller.tabId = activeTab.tabId
+            controller.url = activeTab.url
+            controller._lastAppTabId = activeTab.tabId
+            controller._lastAppTabUrl = activeTab.url
+        }
         return controller.init(initOpts).then((result) => handleDashboardInit(result, activeTab))
     }).catch(() => {
         controller.init().then((result) => handleDashboardInit(result, null)).catch(() => {})
@@ -1442,7 +1459,6 @@ $(document).on("click", "#generate_report", function () {
             controller.url = url
             controller._lastAppTabId = tabId
             controller._lastAppTabUrl = url
-            rutils.updateDashboardTab(tabId, url)
             controller.init({ tabId, url }).then((result) => handleDashboardInit(result, { tabId, url })).catch(() => {})
         }
     })
@@ -1500,9 +1516,10 @@ function bindCookies() {
         var groupColumn = 0;
         let params = {
             data: dt,
-            columnDefs: [{
-                "visible": false, "targets": groupColumn
-            }],
+            columnDefs: [
+                { "visible": false, "targets": groupColumn },
+                { "targets": [0, 1, 2, 3], "render": renderDataTableText }
+            ],
             "order": [[groupColumn, 'asc']],
             "drawCallback": function (settings) {
                 var api = this.api();
@@ -1512,7 +1529,7 @@ function bindCookies() {
                 api.column(groupColumn, { page: 'current' }).data().each(function (group, i) {
                     if (last !== group) {
                         $(rows).eq(i).before(
-                            '<tr class="group" ><td colspan="3"><div class="ui black ribbon label">' + group + '</div></td></tr>'
+                            '<tr class="group" ><td colspan="3"><div class="ui black ribbon label">' + escapeUiText(group) + '</div></td></tr>'
                         );
                         last = group;
                     }
@@ -1525,7 +1542,7 @@ function bindCookies() {
         let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(dt), jwtHelper.sessionRegex)
         if (jwtToken) {
             let jwt = JSON.parse(decodedToken)
-            tokens.push(['cookie', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
+            tokens.push(['cookie', renderPreformattedJson(jwt["payload"]), jwtToken[1]])
         }
     }
     $('.loader.storage').hide()
@@ -1541,7 +1558,8 @@ function bindHeaders() {
             }
         })
         let params = {
-            data: dt
+            data: dt,
+            columnDefs: [{ "targets": [0, 1], "render": renderDataTableText }]
         }
 
         bindTable('#tbl_headers', params)
@@ -1549,7 +1567,7 @@ function bindHeaders() {
         let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(dt), jwtHelper.headersRegex)
         if (jwtToken) {
             let jwt = JSON.parse(decodedToken)
-            tokens.push(['headers', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
+            tokens.push(['headers', renderPreformattedJson(jwt["payload"]), jwtToken[1]])
         }
         bindTokens()
         updateGenerateReport(controller.scans)
@@ -1582,7 +1600,14 @@ async function bindTechnologies(force = false) {
         }
         return a[0].localeCompare(b[0])
     })
-    let params = { "data": dt, "columns": [{ width: "45%" }, { width: "30%" }, { width: "25%" }] }
+    let params = {
+        "data": dt,
+        "columns": [
+            { width: "45%", render: renderDataTableText },
+            { width: "30%", render: renderDataTableText },
+            { width: "25%", render: renderDataTableText }
+        ]
+    }
 
     bindTable('#tbl_technologies', params)
     $('.loader.technologies').hide()
@@ -1607,7 +1632,10 @@ async function bindCVEs(force = false) {
     if (!dt.length && !force) {
         return
     }
-    let params = { "data": dt }
+    let params = {
+        "data": dt,
+        columnDefs: [{ "targets": [0, 1, 2, 3], "render": renderDataTableText }]
+    }
     bindTable('#tbl_cves', params)
     $('.loader.cves').hide()
     updateGenerateReport(controller.scans)
@@ -1687,7 +1715,7 @@ $(document).on("bind_localStorage", function (e, item) {
         let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(filtered), jwtHelper.storageRegex)
         if (jwtToken) {
             let jwt = JSON.parse(decodedToken)
-            tokens.push(['localStorage', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
+            tokens.push(['localStorage', renderPreformattedJson(jwt["payload"]), jwtToken[1]])
         }
         $('#localStorageText').text(output.replace(/\\r?\\n/g, '<br/>'))
     }
@@ -1713,7 +1741,7 @@ $(document).on("bind_sessionStorage", function (e, item) {
         let { jwtToken, decodedToken } = jwtHelper.checkJWT(JSON.stringify(filtered), jwtHelper.storageRegex)
         if (jwtToken) {
             let jwt = JSON.parse(decodedToken)
-            tokens.push(['sessionStorage', '<pre>' + JSON.stringify(jwt["payload"], null, 2) + '</pre>', jwtToken[1]])
+            tokens.push(['sessionStorage', renderPreformattedJson(jwt["payload"]), jwtToken[1]])
         }
         $('#sessionStorageText').text(output.replace(/\\r?\\n/g, '<br/>'))
     }

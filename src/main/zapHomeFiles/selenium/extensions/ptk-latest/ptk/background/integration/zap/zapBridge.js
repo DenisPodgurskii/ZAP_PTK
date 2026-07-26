@@ -107,7 +107,13 @@ function createBatchId() {
     if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
         return globalThis.crypto.randomUUID()
     }
-    return `ptk-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
+    if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+        const bytes = new Uint8Array(16)
+        globalThis.crypto.getRandomValues(bytes)
+        const token = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
+        return `ptk-${token}`
+    }
+    throw new Error('secure_random_unavailable')
 }
 
 function sleep(ms) {
@@ -1245,7 +1251,7 @@ class ZapBridge {
             return
         }
         const closeRequestId = toNonEmptyString(control.closeRequestId)
-            || `${monitor.zapid || 'zap'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+            || `${monitor.zapid || 'zap'}-${createBatchId()}`
         if (monitor.closeRequest?.id && monitor.closeRequest.id !== closeRequestId && monitor.closeRequest.acked === true) {
             this._debugLog('[PTK ZAP] Ignoring superseded close request after acknowledgement:', {
                 zapid: monitor.zapid,

@@ -35,6 +35,56 @@
 
     var frameInfo = {}
     var windowIndex = window.opener ? 1 : 0
+    const SENSITIVE_PLACEHOLDER = '${PTK_SECRET}'
+    let captureSensitiveInputs = false
+
+    function isSensitiveInput(element) {
+        if (!element || typeof element !== 'object') return false
+        const type = String(element.type || '').toLowerCase()
+        if (type === 'password') return true
+        const autocomplete = String(element.autocomplete || element.getAttribute?.('autocomplete') || '').toLowerCase()
+        if (['current-password', 'new-password', 'one-time-code'].includes(autocomplete)) return true
+        const identity = [element.name, element.id, element.getAttribute?.('aria-label')]
+            .filter(Boolean)
+            .join(' ')
+        return /(?:pass(?:word|phrase)?|secret|token|api[-_ ]?key|authorization|credential|otp|one[-_ ]?time)/i.test(identity)
+    }
+
+    function protectRecordedValue(element, value) {
+        return !captureSensitiveInputs && isSensitiveInput(element)
+            ? SENSITIVE_PLACEHOLDER
+            : value
+    }
+
+    function isExpectedParentMessage(event) {
+        if (!event || event.source !== window.parent) return false
+        if (!document.referrer) return true
+        try {
+            const expectedOrigin = new URL(document.referrer).origin
+            return expectedOrigin === 'null' || event.origin === expectedOrigin
+        } catch (e) {
+            return false
+        }
+    }
+
+    function normalizeFrameInfo(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+        const normalizeEntry = (entry) => {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+            const result = {
+                index: Number.isInteger(entry.index) && entry.index >= 0 ? entry.index : 0
+            }
+            for (const key of ['name', 'id', 'title', 'src']) {
+                result[key] = typeof entry[key] === 'string' ? entry[key].slice(0, 2048) : ''
+            }
+            return result
+        }
+        const result = normalizeEntry(value)
+        if (!result) return null
+        const stack = Array.isArray(value.stack) ? value.stack.slice(0, 16) : [value]
+        result.stack = stack.map(normalizeEntry).filter(Boolean)
+        return result
+    }
 
     class ptk_event {
         constructor(e) {
@@ -55,7 +105,7 @@
             this.props = {
                 elementType: t.type, id: t.id, name: e.name,
                 action: t.action, method: t.method, href: t.href, tagName: t.tagName,
-                value: t.value != undefined ? t.value : t.innerText, checked: t.checked,
+                value: protectRecordedValue(t, t.value != undefined ? t.value : t.innerText), checked: t.checked,
                 form: t.form ? { id: t.form.id, name: t.form.name } : undefined,
                 src: t.src, title: t.title
             }
@@ -332,7 +382,7 @@
             super(e)
             this.eventType = EventTypes.KeyPress
             this.eventTypeName = "SetValue"
-            this.data = this.keychar()
+            this.data = protectRecordedValue(this.target(), this.keychar())
         }
     }
 
@@ -483,8 +533,12 @@
             browser.storage.local.get(['ptk_recording', 'ptk_recording_items', 'ptk_recording_timing', 'ptk_recording_log', 'ptk_double_click']).then(function (result) {
 
                 this.doubleClick = result.ptk_double_click
+                captureSensitiveInputs = result.ptk_recording?.captureSensitiveInputs === true
+                this.sessionId = typeof result.ptk_recording?.sessionId === 'string'
+                    ? result.ptk_recording.sessionId
+                    : null
+                this.testcase = new ptk_testcase(result.ptk_recording_items, result.ptk_recording_log)
                 if (!isIframe) {
-                    this.testcase = new ptk_testcase(result.ptk_recording_items, result.ptk_recording_log)
                     if (this.testcase.items.length == 0) {
                         let evtNavigate = new ptk_event_navigate(result.ptk_recording?.startUrl)
                         evtNavigate.eventDuration = evtNavigate.eventStart - gstartTime
@@ -524,7 +578,11 @@
                     src: frames[i].src ? frames[i].src : ""
                 }
                 item.stack = parentStack.concat([item])
-                frames[item.index].contentWindow.postMessage({ channel: "frameInfo", item: item, testcase: this.testcase }, '*')
+                frames[item.index].contentWindow.postMessage({
+                    channel: "frameInfo",
+                    sessionId: this.sessionId,
+                    item: item
+                }, '*')
             }
         }
 
@@ -788,7 +846,9 @@
             let last = this.testcase.peek()
 
             if (last && last.eventType == EventTypes.KeyPress && last.xpath == evt.xpath) {
-                last.data = last.data + evt.keychar()
+                last.data = evt.data === SENSITIVE_PLACEHOLDER
+                    ? SENSITIVE_PLACEHOLDER
+                    : last.data + evt.keychar()
                 last.eventStart = (new Date()).getTime()
                 this.testcase.poke(last)
                 this.testcase.sync()
@@ -848,7 +908,7 @@
             if (t.type == 'password' && t.value == '') return
 
             let evt = new ptk_event_keypress(e)
-            evt.data = t.value
+            evt.data = protectRecordedValue(t, t.value)
 
             let last = this.testcase.peek()
             if (last && last.eventType == EventTypes.KeyPress && last.xpath == evt.xpath) {
@@ -861,7 +921,7 @@
 
         onpaste(e) {
             let evt = new ptk_event_keypress(e)
-            evt.data = e.clipboardData.getData('Text')
+            evt.data = protectRecordedValue(e.target, e.clipboardData.getData('Text'))
             this.testcase.append(evt)
         }
 
@@ -881,17 +941,15 @@
     if (!window.ptk_recorder) window.ptk_recorder = new ptk_recorder()
 
     window.addEventListener("message", (event) => {
-        if (!isIframe && event.data.channel == 'sync') {
-            if (window.ptk_recorder?.testcase) window.ptk_recorder.testcase.sync(event.data.items, event.data.log)
-        }
-        else if (isIframe && event.data.channel == 'frameInfo') {
-            frameInfo = event.data.item
-            if (!Array.isArray(frameInfo?.stack)) {
-                frameInfo.stack = [frameInfo]
-            }
-            window.ptk_recorder.testcase = new ptk_testcase(event.data.testcase.items, event.data.testcase.log)
-            window.ptk_recorder?.broadcastFrameInfo(frameInfo.stack)
-        }
+        const data = event?.data
+        if (!isIframe || !data || typeof data !== 'object' || Array.isArray(data)) return
+        if (data.channel !== 'frameInfo' || !isExpectedParentMessage(event)) return
+        if (!window.ptk_recorder?.sessionId || data.sessionId !== window.ptk_recorder.sessionId) return
+
+        const approvedFrameInfo = normalizeFrameInfo(data.item)
+        if (!approvedFrameInfo) return
+        frameInfo = approvedFrameInfo
+        window.ptk_recorder.broadcastFrameInfo(frameInfo.stack)
     })
 
     browser.storage.onChanged.addListener(function (changes, namespace) {

@@ -2,6 +2,7 @@
 
 import { ptk_controller_macro } from "../../../controller/macro.js"
 const controller = new ptk_controller_macro()
+const extensionOrigin = window.location.origin
 
 jQuery(function () {
     if ($('.menu .item[data-tab]').length) {
@@ -94,7 +95,7 @@ jQuery(function () {
                 let tab = tabs[0]
                 if (tab && !tab.url.startsWith('chrome://')) {
                     $form.form('set value', 'url', tab.url)
-                    window.parent.postMessage({ url: tab.url }, '*');
+                    window.parent.postMessage({ channel: 'ptk_recording_url', url: tab.url }, extensionOrigin)
                 }
             })
 
@@ -322,7 +323,8 @@ jQuery(function () {
 })
 
 window.addEventListener('message', function (msg) {
-    if (msg.data.url)
+    if (msg.origin !== extensionOrigin || msg.source !== window.parent) return
+    if (msg.data?.channel === 'ptk_recording_url' && typeof msg.data.url === 'string')
         $('[name="url"]').val(msg.data.url)
 })
 

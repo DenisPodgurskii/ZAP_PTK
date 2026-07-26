@@ -1,5 +1,10 @@
 /* Author: Denis Podgurskii */
 import { ptk_logger, ptk_utils } from "./utils.js"
+import { DastRequestCaptureStore } from "./dast/services/dastRequestCaptureStore.js"
+import {
+    encodeMultipartHeaderParameter,
+    normalizeMultipartBoundary
+} from "./requestBuilder/multipartEncoding.js"
 
 /*
 {frames: new Map[ frameId: new Map [requestId: [item: {request: object, response: object} ] ] ] }
@@ -37,17 +42,36 @@ export class ptk_proxy {
         this.maxTabsCount = settings.max_tabs
         this.maxRequestsPerTab = settings.max_requests_per_tab
 
-        this.tabs = {}
+        this.captureStore = new DastRequestCaptureStore({
+            maxTabsCount: this.maxTabsCount,
+            maxRequestsPerTab: this.maxRequestsPerTab
+        })
+        this.tabs = this.captureStore.tabs
         this._createdTab = null
         this._activeTab = null
         this._previousTab = null
         this._dashboardTab = null
-        this.tabUrlMap = new Map()
-        this._tabActivity = new Map()
+        this.tabUrlMap = this.captureStore.tabUrlMap
+        this._tabActivity = this.captureStore._tabActivity
 
         this.addMessageListiners()
         this.addListiners()
         this.restoreActiveTabFromBrowser()
+    }
+
+    _getCaptureStore() {
+        if (!this.captureStore) {
+            this.captureStore = new DastRequestCaptureStore({
+                maxTabsCount: this.maxTabsCount,
+                maxRequestsPerTab: this.maxRequestsPerTab
+            })
+        }
+        this.captureStore.maxTabsCount = this.maxTabsCount
+        this.captureStore.maxRequestsPerTab = this.maxRequestsPerTab
+        this.tabs = this.captureStore.tabs
+        this.tabUrlMap = this.captureStore.tabUrlMap
+        this._tabActivity = this.captureStore._tabActivity
+        return this.captureStore
     }
 
     /* Listeners */
@@ -226,17 +250,15 @@ export class ptk_proxy {
     }
 
     onMessage(message, sender, sendResponse) {
+        if (message?.channel !== "ptk_popup2background_tabs") return undefined
+        if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+            return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
+        }
+        const activeTabId = this.activeTab?.tabId
+        let tab = activeTabId ? this.getTab(activeTabId) : null
 
-        if (!ptk_utils.isTrustedOrigin(sender))
-            return Promise.reject({ success: false, error: 'Error origin value' })
-
-        if (message.channel == "ptk_popup2background_tabs") {
-            const activeTabId = this.activeTab?.tabId
-            let tab = activeTabId ? this.getTab(activeTabId) : null
-
-            if (this["msg_" + message.type]) {
-                return this["msg_" + message.type](message, tab)
-            }
+        if (this["msg_" + message.type]) {
+            return this["msg_" + message.type](message, tab)
         }
     }
 
@@ -314,7 +336,7 @@ export class ptk_proxy {
 
     msg_clear(message, tab) {
         const resolved = this.resolveTabContext(tab)
-        if (resolved.tabId != null) delete this.tabs[resolved.tabId]
+        if (resolved.tabId != null) this.clearTab(resolved.tabId)
         return Promise.resolve({ result: true })
     }
 
@@ -368,20 +390,21 @@ export class ptk_proxy {
     }
 
     _serializeSyntheticMultipartFormData(formData = null, boundary = '') {
-        if (!formData || typeof formData !== 'object' || !boundary) return ''
+        const safeBoundary = normalizeMultipartBoundary(boundary)
+        if (!formData || typeof formData !== 'object' || !safeBoundary) return ''
         const parts = []
         Object.entries(formData).forEach(([name, value]) => {
             const values = Array.isArray(value) ? value : [value]
             values.forEach((entry) => {
                 parts.push(
-                    `--${boundary}\r\n`
-                    + `Content-Disposition: form-data; name="${String(name).replace(/"/g, '\\"')}"\r\n`
+                    `--${safeBoundary}\r\n`
+                    + `Content-Disposition: form-data; name="${encodeMultipartHeaderParameter(name)}"\r\n`
                     + `\r\n`
                     + `${String(entry ?? '')}\r\n`
                 )
             })
         })
-        return parts.join('') + `--${boundary}--`
+        return parts.join('') + `--${safeBoundary}--`
     }
 
     _extractRequestBodyText(request = null) {
@@ -548,59 +571,15 @@ export class ptk_proxy {
     }
 
     getRequestDetails(tab, frameId, requestId, options = {}) {
-        if (!tab?.frames?.has(frameId) || !tab.frames.get(frameId)?.has(requestId)) {
-            throw new Error('request_not_found')
-        }
-        const requestEntries = tab.frames.get(frameId).get(requestId)
-        let request = this._pickBestRequestEntry(requestEntries, options)
-        if (!request) {
-            throw new Error('request_not_found')
-        }
-        let r = JSON.parse(JSON.stringify(request))
-        if (request.requestBody?.raw) {
-            const decodedBody = this._decodeRawRequestBody(request.requestBody.raw)
-            if (decodedBody) {
-                r.requestBody.raw = decodedBody
-            }
-        }
-        const hasPerRequestHeaders = Array.isArray(request.requestHeaders) && request.requestHeaders.length > 0
-        if (!hasPerRequestHeaders && tab?.tabInfo?.requestHeaders) {
-            let rH = tab.tabInfo.requestHeaders
-            r.requestHeaders = Object.keys(rH).map(key => {
-                // let h = rH[key].split(':')
-                // if (h.length > 2) return { name: key, value: rH[key] }
-                //console.log( { key: rH[key]})
-                return { name: key, value: rH[key] }
-            })
-        }
-        r.__hasPerRequestHeaders = hasPerRequestHeaders
-        r.__requestHeadersCount = Array.isArray(r.requestHeaders) ? r.requestHeaders.length : 0
-        return r
+        return this._getCaptureStore().getRequestDetails(tab, frameId, requestId, options)
     }
 
     getRawRequestWithMeta(tab, frameId, requestId, options = {}) {
-        if (!tab) throw new Error('tab_not_found')
-        let request = this.getRequestDetails(tab, frameId, requestId, options)
-        let path = request.method + ' ' + request.url + ' HTTP/1.1'
-        const bodyText = this._extractRequestBodyText(request)
-        const normalizedHeaders = this._normalizeRawRequestHeaders(request.requestHeaders, bodyText)
-        let headers = Array.isArray(normalizedHeaders)
-            ? normalizedHeaders.map(x => x.name + ": " + x.value)
-            : []
-        let rawRequest = path + '\r\n' + headers.join('\r\n')
-
-        rawRequest += "\r\n\r\n" + bodyText
-        return {
-            raw: rawRequest,
-            meta: {
-                hasPerRequestHeaders: !!request.__hasPerRequestHeaders,
-                requestHeadersCount: Number(request.__requestHeadersCount || 0)
-            }
-        }
+        return this._getCaptureStore().getRawRequestWithMeta(tab, frameId, requestId, options)
     }
 
     getRawRequest(tab, frameId, requestId, options = {}) {
-        return this.getRawRequestWithMeta(tab, frameId, requestId, options).raw
+        return this._getCaptureStore().getRawRequest(tab, frameId, requestId, options)
     }
 
     setTab(tabId, params, t) {
@@ -621,7 +600,7 @@ export class ptk_proxy {
         )
 
         if (shouldAdoptRequestContext) {
-            this.tabUrlMap.set(tabId, params.url)
+            this._getCaptureStore().rememberTabUrl(tabId, params.url)
             this.activeTab = {
                 tabId,
                 url: this.getUiUrl(tabId, params.url),
@@ -634,149 +613,23 @@ export class ptk_proxy {
     }
 
     getTab(tabId) {
-        if (tabId in this.tabs && this.tabs[tabId] instanceof ptk_tab) return this.tabs[tabId]
-        return null
+        return this._getCaptureStore().getTab(tabId)
     }
 
     collectZapAutomationSeedRequests(tabId, options = {}) {
-        const tab = this.getTab(tabId)
-        if (!tab?.frames || typeof tab.frames.forEach !== 'function') return []
-
-        const sinceMs = Number.isFinite(Number(options?.sinceMs)) ? Number(options.sinceMs) : 0
-        const maxRequests = Number.isFinite(Number(options?.maxRequests))
-            ? Math.max(0, Number(options.maxRequests))
-            : 200
-        const targetOrigin = (() => {
-            try {
-                const raw = options?.targetUrl || options?.pageUrl || ''
-                return raw ? new URL(raw).origin : null
-            } catch (_) {
-                return null
-            }
-        })()
-
-        const isStateChanging = (method) => ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method || '').toUpperCase())
-        const sameOrigin = (url) => {
-            if (!targetOrigin) return true
-            try {
-                return new URL(url).origin === targetOrigin
-            } catch (_) {
-                return false
-            }
-        }
-
-        const entries = []
-        tab.frames.forEach((frameMap, frameId) => {
-            if (!frameMap || typeof frameMap.forEach !== 'function') return
-            frameMap.forEach((events, requestId) => {
-                if (!Array.isArray(events) || !events.length) return
-                let details = null
-                let rawBundle = null
-                try {
-                    details = this.getRequestDetails(tab, frameId, requestId)
-                    if (!details?.url || !sameOrigin(details.url)) return
-                    const seenAt = Math.max(
-                        ...events.map((event) => Number(event?.__ptkSeenAtMs || event?.timeStamp || 0)).filter(Number.isFinite),
-                        0
-                    )
-                    if (sinceMs > 0 && seenAt > 0 && seenAt < sinceMs) return
-                    rawBundle = this.getRawRequestWithMeta(tab, frameId, requestId, {
-                        expectedUrl: details.url,
-                        expectedMethod: details.method
-                    })
-                } catch (_) {
-                    return
-                }
-
-                const method = String(details?.method || '').toUpperCase()
-                const bodyText = (() => {
-                    if (typeof details?.requestBody?.raw === 'string') return details.requestBody.raw
-                    if (details?.requestBody?.formData) return JSON.stringify(details.requestBody.formData)
-                    return ''
-                })()
-                entries.push({
-                    tabId,
-                    frameId,
-                    requestId,
-                    url: details.url,
-                    ui_url: details.ui_url || details.url,
-                    method,
-                    type: details.type || 'xmlhttprequest',
-                    statusCode: details.statusCode || 200,
-                    requestHeaders: details.requestHeaders || [],
-                    requestBody: details.requestBody || null,
-                    raw: rawBundle?.raw || '',
-                    seenAt: Math.max(
-                        ...events.map((event) => Number(event?.__ptkSeenAtMs || event?.timeStamp || 0)).filter(Number.isFinite),
-                        0
-                    ),
-                    stateChanging: isStateChanging(method),
-                    hasBody: !!bodyText
-                })
-            })
-        })
-
-        const deduped = []
-        const seen = new Set()
-        entries
-            .sort((left, right) => {
-                const leftScore = scoreZapAutomationSeedUrl(left.url, left)
-                const rightScore = scoreZapAutomationSeedUrl(right.url, right)
-                if (leftScore !== rightScore) return rightScore - leftScore
-                if (left.stateChanging !== right.stateChanging) return left.stateChanging ? -1 : 1
-                if (left.hasBody !== right.hasBody) return left.hasBody ? -1 : 1
-                return Number(left.seenAt || 0) - Number(right.seenAt || 0)
-            })
-            .forEach((entry) => {
-                const key = `${entry.method}|${entry.url}|${String(entry.raw || '').slice(-512)}`
-                if (seen.has(key)) return
-                seen.add(key)
-                deduped.push(entry)
-            })
-
-        return maxRequests > 0 ? deduped.slice(0, maxRequests) : deduped
+        return this._getCaptureStore().collectZapAutomationSeedRequests(tabId, options)
     }
 
     updateTab(tabId, params, t) {
-        if (!ptk_utils.isURL(params.url)) return
-
-        try {
-            if (tabId in this.tabs && this.tabs[tabId] instanceof ptk_tab) {
-                this.tabs[tabId].setParams(params, t)
-                ptk_logger.log("Tab updated ", { tabId: tabId })
-            } else {
-                this.tabs[tabId] = new ptk_tab(tabId, params, t)
-                this.reduceTabs(this.maxTabsCount, tabId)
-                ptk_logger.log("Tab added ", { tabId: tabId })
-            }
-            this.trackTabActivity(tabId)
-            this.tabs[tabId].reduceTabSize(this.maxRequestsPerTab)
-        } catch (e) {
-            ptk_logger.log(e, "Could not update a tab", "error")
-        }
+        return this._getCaptureStore().updateTab(tabId, params, t)
     }
 
     clearTab(tabId) {
-        delete this.tabs[tabId]
-        this.forgetTab(tabId)
+        return this._getCaptureStore().clearTab(tabId)
     }
 
     reduceTabs(maxTabs, newTabId) {
-        let tabsCount = Object.keys(this.tabs).length
-        if (tabsCount <= maxTabs) return
-        let removeKey = [], count = 0
-        Object.keys(this.tabs).forEach(key => {
-            if ((tabsCount - count) > maxTabs && key != newTabId) {
-                removeKey.push(key)
-                count++
-            }
-        })
-        if (removeKey.length > 0) {
-            removeKey.forEach((tabId) => {
-                delete this.tabs[tabId]
-                this.forgetTab(tabId)
-            })
-        }
+        return this._getCaptureStore().reduceTabs(maxTabs, newTabId)
     }
 
     set activeTab(s) {
@@ -812,43 +665,27 @@ export class ptk_proxy {
     }
 
     getUiUrl(tabId, fallback = '') {
-        return this.tabUrlMap.get(tabId) || fallback
+        return this._getCaptureStore().getUiUrl(tabId, fallback)
     }
 
     resolveTabContext(tab) {
-        if (tab instanceof ptk_tab) {
-            return { tab: tab, tabId: tab.tabId }
-        }
-        const fallbackId = this.getLastTrackedTabId()
-        if (fallbackId == null) return { tab: null, tabId: null }
-        return { tab: this.tabs[fallbackId], tabId: fallbackId }
+        return this._getCaptureStore().resolveTabContext(tab)
     }
 
     trackTabActivity(tabId) {
-        if (tabId == null) return
-        this._tabActivity.set(String(tabId), Date.now())
+        return this._getCaptureStore().trackTabActivity(tabId)
     }
 
     getTabActivity(tabId) {
-        if (tabId == null) return 0
-        return this._tabActivity.get(String(tabId)) || 0
+        return this._getCaptureStore().getTabActivity(tabId)
     }
 
     forgetTab(tabId) {
-        if (tabId == null) return
-        this._tabActivity.delete(String(tabId))
+        return this._getCaptureStore().forgetTab(tabId)
     }
 
     getLastTrackedTabId() {
-        let latestId = null
-        let latestTs = -1
-        this._tabActivity.forEach((ts, tabId) => {
-            if (ts >= latestTs && this.tabs[tabId] instanceof ptk_tab) {
-                latestTs = ts
-                latestId = isNaN(Number(tabId)) ? tabId : Number(tabId)
-            }
-        })
-        return latestId
+        return this._getCaptureStore().getLastTrackedTabId()
     }
 }
 
