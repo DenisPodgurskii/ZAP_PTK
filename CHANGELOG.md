@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## Unreleased
 ### Fixed
 - Bug which breaks sites using Akamai Bot Manager 
+- Ensure Top 10 alert tags have expected URLs.
+
+### Changed
+- Depends on the Common Library add-on.
 
 ## 0.7.0 - 2026-06-29
 ### Changed

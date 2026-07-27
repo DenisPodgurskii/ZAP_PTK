@@ -6,10 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.core.scanner.Alert;
+import org.zaproxy.addon.commonlib.CommonAlertTag;
 
 /** Unit tests for {@link PtkExampleAlerts}: alert count and field verification. */
 class PtkExampleAlertsTest {
@@ -102,10 +104,15 @@ class PtkExampleAlertsTest {
         assertTrue(reference.contains("owasp.org"), "Reference should include OWASP link");
         assertTrue(reference.contains("cwe.mitre.org"), "Reference should include CWE link");
 
-        assertNotNull(alert.getTags());
-        assertTrue(alert.getTags().containsKey("OWASP_2025_A05"), "Expected OWASP 2025 A05 tag");
-        assertTrue(alert.getTags().containsKey("OWASP_2021_A03"), "Expected OWASP 2021 A03 tag");
-        assertTrue(alert.getTags().containsKey("TOOL_PTK"), "Expected TOOL_PTK tag");
+        Map<String, String> tags = alert.getTags();
+        assertNotNull(tags);
+        assertEquals(
+                CommonAlertTag.OWASP_2025_A05_INJECTION.getValue(),
+                tags.get(CommonAlertTag.OWASP_2025_A05_INJECTION.getTag()));
+        assertEquals(
+                CommonAlertTag.OWASP_2021_A03_INJECTION.getValue(),
+                tags.get(CommonAlertTag.OWASP_2021_A03_INJECTION.getTag()));
+        assertEquals(PtkAlertBuilder.TAG_TOOL_PTK_URL, tags.get(PtkAlertBuilder.TAG_TOOL_PTK));
 
         assertTrue(alert instanceof ExampleAlert, "Alert should be an ExampleAlert");
         ExampleAlert exampleAlert = (ExampleAlert) alert;
@@ -154,10 +161,15 @@ class PtkExampleAlertsTest {
         assertTrue(reference.contains("owasp.org"), "Reference should include OWASP link");
         assertTrue(reference.contains("cwe.mitre.org"), "Reference should include CWE link");
 
-        assertNotNull(alert.getTags());
-        assertTrue(alert.getTags().containsKey("OWASP_2025_A05"), "Expected OWASP 2025 A05 tag");
-        assertTrue(alert.getTags().containsKey("OWASP_2021_A03"), "Expected OWASP 2021 A03 tag");
-        assertTrue(alert.getTags().containsKey("TOOL_PTK"), "Expected TOOL_PTK tag");
+        Map<String, String> tags = alert.getTags();
+        assertNotNull(tags);
+        assertEquals(
+                CommonAlertTag.OWASP_2025_A05_INJECTION.getValue(),
+                tags.get(CommonAlertTag.OWASP_2025_A05_INJECTION.getTag()));
+        assertEquals(
+                CommonAlertTag.OWASP_2021_A03_INJECTION.getValue(),
+                tags.get(CommonAlertTag.OWASP_2021_A03_INJECTION.getTag()));
+        assertEquals(PtkAlertBuilder.TAG_TOOL_PTK_URL, tags.get(PtkAlertBuilder.TAG_TOOL_PTK));
 
         assertTrue(alert instanceof ExampleAlert, "Alert should be an ExampleAlert");
         ExampleAlert exampleAlert = (ExampleAlert) alert;
