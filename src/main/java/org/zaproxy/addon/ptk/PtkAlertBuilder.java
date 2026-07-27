@@ -10,7 +10,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.parosproxy.paros.core.scanner.Alert;
+import org.zaproxy.addon.commonlib.CommonAlertTag;
 import org.zaproxy.addon.ptk.model.PtkAttack;
 import org.zaproxy.addon.ptk.model.PtkFinding;
 import org.zaproxy.addon.ptk.model.PtkFindingSourceSink;
@@ -42,6 +45,13 @@ public final class PtkAlertBuilder {
     /** URL for the TOOL_PTK tag. */
     public static final String TAG_TOOL_PTK_URL =
             "https://www.zaproxy.org/docs/desktop/addons/owasp-ptk/";
+
+    private static final Map<String, String> OWASP_TAG_URLS =
+            Stream.of(CommonAlertTag.values())
+                    .filter(t -> t.getTag().startsWith("OWASP_"))
+                    .collect(
+                            Collectors.toUnmodifiableMap(
+                                    CommonAlertTag::getTag, CommonAlertTag::getValue));
 
     private PtkAlertBuilder() {}
 
@@ -455,15 +465,19 @@ public final class PtkAlertBuilder {
 
     static Map<String, String> owaspToZapTags(PtkModuleMetadata meta) {
         Map<String, String> tags = new LinkedHashMap<>();
-        if (meta == null || meta.getOwasp() == null) return tags;
+        if (meta == null || meta.getOwasp() == null) {
+            return tags;
+        }
         for (String ptkOwasp : meta.getOwasp()) {
-            if (ptkOwasp == null) continue;
+            if (ptkOwasp == null) {
+                continue;
+            }
             Matcher m = OWASP_PTK_PATTERN.matcher(ptkOwasp);
             if (m.find()) {
                 String num = m.group(1);
                 String year = m.group(2);
                 String zapTag = "OWASP_" + year + "_A" + (num.length() == 1 ? "0" + num : num);
-                tags.put(zapTag, "");
+                tags.put(zapTag, OWASP_TAG_URLS.getOrDefault(zapTag, ""));
             }
         }
         return tags;

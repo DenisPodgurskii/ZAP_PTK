@@ -47,8 +47,8 @@ zapAddOn {
             addOns {
                 if (diagnosticBuild) {
                     register("automation")
-                    register("commonlib")
                 }
+                register("commonlib")
                 register("selenium")
                 register("client") {
                     version.set(">=0.28.0")
@@ -88,8 +88,8 @@ configurations {
 dependencies {
     if (diagnosticBuild) {
         zapAddOn("org.zaproxy.addon:automation:0.60.0")
-        zapAddOn("org.zaproxy.addon:commonlib:1.40.0")
     }
+    zapAddOn("org.zaproxy.addon:commonlib:1.40.0")
     zapAddOn("org.zaproxy.addon:client:0.28.0")
     zapAddOn("org.zaproxy.addon:selenium:15.49.0")
     compileOnly("org.projectlombok:lombok:1.18.34")

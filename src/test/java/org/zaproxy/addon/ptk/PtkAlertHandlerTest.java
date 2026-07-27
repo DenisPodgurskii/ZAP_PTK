@@ -11,6 +11,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.core.scanner.Alert;
+import org.zaproxy.addon.commonlib.CommonAlertTag;
 import org.zaproxy.addon.ptk.model.PtkFinding;
 import org.zaproxy.addon.ptk.model.PtkFindingBatch;
 
@@ -125,6 +127,14 @@ class PtkAlertHandlerTest {
         assertTrue(alert.getOtherInfo().contains("Source:"));
         assertTrue(alert.getOtherInfo().contains("Sink:"));
         assertTrue(alert.getOtherInfo().contains("Code:"));
+        Map<String, String> tags = alert.getTags();
+        assertNotNull(tags);
+        assertEquals(
+                CommonAlertTag.OWASP_2025_A05_INJECTION.getValue(),
+                tags.get(CommonAlertTag.OWASP_2025_A05_INJECTION.getTag()));
+        assertEquals(
+                CommonAlertTag.OWASP_2021_A03_INJECTION.getValue(),
+                tags.get(CommonAlertTag.OWASP_2021_A03_INJECTION.getTag()));
     }
 
     @Test
@@ -148,10 +158,15 @@ class PtkAlertHandlerTest {
         assertTrue(alert.getReference().contains("owasp.org"));
         assertTrue(alert.getReference().contains("cwe.mitre.org"));
         assertEquals(693, alert.getCweId());
-        assertNotNull(alert.getTags());
-        assertTrue(
-                alert.getTags().containsKey("OWASP_2025_A02")
-                        || alert.getTags().containsKey("OWASP_2021_A05"));
+        Map<String, String> tags = alert.getTags();
+        assertNotNull(tags);
+        assertEquals(
+                CommonAlertTag.OWASP_2025_A02_SEC_MISCONFIG.getValue(),
+                tags.get(CommonAlertTag.OWASP_2025_A02_SEC_MISCONFIG.getTag()));
+        assertEquals(
+                CommonAlertTag.OWASP_2021_A05_SEC_MISCONFIG.getValue(),
+                tags.get(CommonAlertTag.OWASP_2021_A05_SEC_MISCONFIG.getTag()));
+        assertEquals(PtkAlertBuilder.TAG_TOOL_PTK_URL, tags.get(PtkAlertBuilder.TAG_TOOL_PTK));
     }
 
     @Test
