@@ -17,16 +17,12 @@ export class ptk_decoder_manager {
     }
 
     onMessage(message, sender, sendResponse) {
-        
-        if (!ptk_utils.isTrustedOrigin(sender))
-            return Promise.reject({ success: false, error: 'Error origin value' })
-
-        if (message.channel == "ptk_popup2background_decoder") {
-            if (this["msg_" + message.type]) {
-                return this["msg_" + message.type](message)
-            }
-            return Promise.resolve()
+        if (message?.channel !== "ptk_popup2background_decoder") return undefined
+        if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+            return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
         }
+        if (this["msg_" + message.type]) return this["msg_" + message.type](message)
+        return Promise.resolve()
     }
 
     async msg_init(message) {

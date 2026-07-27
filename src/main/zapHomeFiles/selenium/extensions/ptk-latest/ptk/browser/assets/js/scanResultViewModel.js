@@ -650,17 +650,106 @@ function normalizeOpportunity(entry) {
     if (!entry || typeof entry !== "object") return null
     return {
         id: entry.id || null,
+        suppressKey: entry.suppressKey || null,
         source: entry.source || null,
         title: entry.title || "Opportunity",
         type: entry.type || null,
         routeKey: entry.routeKey || null,
         path: entry.path || null,
         paramKey: entry.paramKey || null,
+        score: Number.isFinite(entry.score) ? Number(entry.score) : 0,
         priority: Number.isFinite(entry.priority) ? Number(entry.priority) : 0,
         confidence: entry.confidence || "low",
         confidenceRank: Number.isFinite(entry.confidenceRank) ? Number(entry.confidenceRank) : 1,
         suggestedChecks: Array.isArray(entry.suggestedChecks) ? entry.suggestedChecks : [],
-        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : [],
+        engineSignals: Array.isArray(entry.engineSignals) ? entry.engineSignals : [],
+        why: Array.isArray(entry.why) ? entry.why : [],
+        manualSteps: Array.isArray(entry.manualSteps) ? entry.manualSteps : [],
+        createdByRule: entry.createdByRule || null
+    }
+}
+
+function normalizeRecommendationSignal(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        code: entry.code || null,
+        label: entry.label || null,
+        weight: Number.isFinite(Number(entry.weight)) ? Number(entry.weight) : 0
+    }
+}
+
+function normalizeRecommendationModule(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        engine: entry.engine || null,
+        moduleId: entry.moduleId || null,
+        name: entry.name || null,
+        tier: entry.tier || null,
+        category: entry.category || null,
+        severity: entry.severity || null,
+        vulnId: entry.vulnId || null,
+        tags: Array.isArray(entry.tags) ? entry.tags : [],
+        description: entry.description || null,
+        recommendationSummary: entry.recommendationSummary || null,
+        links: entry.links && typeof entry.links === "object" ? { ...entry.links } : {},
+        surfaceHints: Array.isArray(entry.surfaceHints) ? entry.surfaceHints : [],
+        matchScore: Number.isFinite(Number(entry.matchScore)) ? Number(entry.matchScore) : 0,
+        matchReasons: Array.isArray(entry.matchReasons) ? entry.matchReasons : []
+    }
+}
+
+function normalizeRecommendationAction(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        label: entry.label || null,
+        status: entry.status || "coming_soon",
+        moduleIds: Array.isArray(entry.moduleIds) ? entry.moduleIds : []
+    }
+}
+
+function normalizeRecommendationEvidenceSummary(entry) {
+    if (!entry || typeof entry !== "object") return null
+    const sourceEngines = (Array.isArray(entry.sourceEngines) ? entry.sourceEngines : [])
+        .map((engine) => String(engine || "").trim())
+        .filter(Boolean)
+    const observations = (Array.isArray(entry.observations) ? entry.observations : [])
+        .map((observation) => String(observation || "").trim())
+        .filter(Boolean)
+    return {
+        method: entry.method || null,
+        path: entry.path || null,
+        routeKey: entry.routeKey || null,
+        routeFamilyKey: entry.routeFamilyKey || null,
+        paramKey: entry.paramKey || null,
+        sourceEngines,
+        evidenceCount: Number.isFinite(Number(entry.evidenceCount)) ? Number(entry.evidenceCount) : 0,
+        observations
+    }
+}
+
+function normalizeRecommendation(entry) {
+    if (!entry || typeof entry !== "object") return null
+    const sourceEngines = (Array.isArray(entry.sourceEngines) ? entry.sourceEngines : [])
+        .map((engine) => String(engine || "").trim())
+        .filter(Boolean)
+    return {
+        id: entry.id || null,
+        surfaceType: entry.surfaceType || null,
+        title: entry.title || "Recommended attack path",
+        priority: Number.isFinite(Number(entry.priority)) ? Number(entry.priority) : 0,
+        confidence: entry.confidence || "low",
+        sourceEngines,
+        evidenceSummary: normalizeRecommendationEvidenceSummary(entry.evidenceSummary),
+        routeKey: entry.routeKey || null,
+        routeFamilyKey: entry.routeFamilyKey || null,
+        paramKey: entry.paramKey || null,
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : [],
+        signals: Array.isArray(entry.signals) ? entry.signals.map(normalizeRecommendationSignal).filter(Boolean) : [],
+        freeGuidance: Array.isArray(entry.freeGuidance) ? entry.freeGuidance : [],
+        matchedModules: Array.isArray(entry.matchedModules) ? entry.matchedModules.map(normalizeRecommendationModule).filter(Boolean) : [],
+        proActions: Array.isArray(entry.proActions) ? entry.proActions.map(normalizeRecommendationAction).filter(Boolean) : []
     }
 }
 
@@ -671,6 +760,7 @@ function normalizeExplorerSummary(summary = {}) {
         graphqlCount: Number.isFinite(summary.graphqlCount) ? Number(summary.graphqlCount) : 0,
         hiddenParamCount: Number.isFinite(summary.hiddenParamCount) ? Number(summary.hiddenParamCount) : 0,
         surfaceCount: Number.isFinite(summary.surfaceCount) ? Number(summary.surfaceCount) : 0,
+        gadgetCount: Number.isFinite(summary.gadgetCount) ? Number(summary.gadgetCount) : 0,
         enginesPresent: Array.isArray(summary.enginesPresent) ? summary.enginesPresent : []
     }
 }
@@ -775,6 +865,22 @@ function normalizeExplorerSurface(entry) {
     }
 }
 
+function normalizeExplorerGadget(entry) {
+    if (!entry || typeof entry !== "object") return null
+    return {
+        id: entry.id || null,
+        routeKey: entry.routeKey || null,
+        path: entry.path || null,
+        gadgetType: entry.gadgetType || null,
+        label: entry.label || null,
+        hintNames: Array.isArray(entry.hintNames) ? entry.hintNames : [],
+        enginesPresent: Array.isArray(entry.enginesPresent) ? entry.enginesPresent : [],
+        pageUrls: Array.isArray(entry.pageUrls) ? entry.pageUrls : [],
+        adminLike: entry.adminLike === true,
+        evidenceRefs: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : []
+    }
+}
+
 function normalizeExplorer(explorer) {
     if (!explorer || typeof explorer !== "object") return null
     return {
@@ -793,6 +899,9 @@ function normalizeExplorer(explorer) {
             : [],
         surfaces: Array.isArray(explorer.surfaces)
             ? explorer.surfaces.map(normalizeExplorerSurface).filter(Boolean)
+            : [],
+        gadgets: Array.isArray(explorer.gadgets)
+            ? explorer.gadgets.map(normalizeExplorerGadget).filter(Boolean)
             : []
     }
 }
@@ -851,13 +960,17 @@ function normalizeAnalysis(analysis, topLevelVersion = null) {
         opportunities: Array.isArray(analysis.opportunities)
             ? analysis.opportunities.map(normalizeOpportunity).filter(Boolean)
             : [],
+        recommendations: Array.isArray(analysis.recommendations)
+            ? analysis.recommendations.map(normalizeRecommendation).filter(Boolean)
+            : [],
         explorer: normalizeExplorer(analysis.explorer) || {
             summary: normalizeExplorerSummary({}),
             routes: [],
             endpoints: [],
             graphql: [],
             hiddenParams: [],
-            surfaces: []
+            surfaces: [],
+            gadgets: []
         },
         meta,
         diff

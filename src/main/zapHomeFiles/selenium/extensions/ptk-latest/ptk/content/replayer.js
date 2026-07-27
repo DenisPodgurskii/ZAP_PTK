@@ -26,6 +26,17 @@
     if (isIframe)
         windowIndex = window.top.opener ? 1 : 0
 
+    function isExpectedParentMessage(event) {
+        if (!event || event.source !== window.parent) return false
+        if (!document.referrer) return true
+        try {
+            const expectedOrigin = new URL(document.referrer).origin
+            return expectedOrigin === 'null' || event.origin === expectedOrigin
+        } catch (e) {
+            return false
+        }
+    }
+
 
     class ptk_replayer {
         constructor() {
@@ -41,6 +52,9 @@
                     this.step = result.ptk_replay_step
                     this.regex = result.ptk_replay_regex
                     this.replayEnvelope = result.ptk_replay || null
+                    this.sessionId = typeof result.ptk_replay?.sessionId === 'string'
+                        ? result.ptk_replay.sessionId
+                        : null
                     this.overlayPlan = result.ptk_replay?.overlayPlan || null
                     this.paused = false
                     this.forward = false
@@ -60,7 +74,11 @@
                         this._initNetworkTracking()
                         this.bootstrapControl()
                     } else if (!isIframe && windowIndex) {
-                        window.opener.postMessage({ channel: "child2opener", message: 'init' }, '*')
+                        window.opener.postMessage({
+                            channel: "child2opener",
+                            message: 'init',
+                            sessionId: this.sessionId
+                        }, '*')
                     }
                 }.bind(this))
         }
@@ -123,7 +141,12 @@
                     await this.doStep(this.step, effectiveItem)
                 }
             } else if (!isIframe && this.childWindow) {
-                this.childWindow.postMessage({ channel: "2child", message: 'doStep', step: this.step, item: effectiveItem }, '*')
+                this.childWindow.postMessage({
+                    channel: "2child",
+                    message: 'doStep',
+                    sessionId: this.sessionId,
+                    step: this.step
+                }, '*')
             }
         }
 
@@ -158,7 +181,12 @@
 
             if (!frameWindow) return
             item.ElementPath = elementPath
-            frameWindow.postMessage({ channel: "2frame", message: 'doStep', step: this.step, item: item }, '*')
+            frameWindow.postMessage({
+                channel: "2frame",
+                message: 'doStep',
+                sessionId: this.sessionId,
+                step: this.step
+            }, '*')
         }
 
         getFrameElement(locator, doc) {
@@ -255,6 +283,27 @@
             } else {
                 this.debugLog('missing_handler', { step: this.step, eventType })
             }
+        }
+
+        async getApprovedMessageItem(data) {
+            if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+            if (!this.sessionId || data.sessionId !== this.sessionId) return null
+            if (!Number.isSafeInteger(data.step) || data.step < 1) return null
+
+            const result = await browser.storage.local.get([
+                'ptk_replay',
+                'ptk_replay_items',
+                'ptk_replay_step'
+            ])
+            if (result.ptk_replay?.mode !== 'replay') return null
+            if (result.ptk_replay.sessionId !== this.sessionId) return null
+            if (result.ptk_replay_step !== data.step) return null
+            if (!Array.isArray(result.ptk_replay_items)) return null
+
+            const itemIndex = data.step - 1
+            if (itemIndex < 0 || itemIndex >= result.ptk_replay_items.length) return null
+            const resolution = this.resolveOverlayItem(data.step, result.ptk_replay_items[itemIndex])
+            return resolution.skip ? null : resolution.item
         }
 
         getOverlayEntry(step) {
@@ -390,6 +439,11 @@
         setvalue(item) { this.type(item) }
         async type(item) {
             this.debugLog('type', { step: this.step })
+            if ((item?.Data || item?.data) === '${PTK_SECRET}') {
+                this.logEvent(null, 'Sensitive value was not recorded. Use “Record authentication” to create a replayable authentication macro.')
+                this.pause()
+                return
+            }
             let element = await this.waitForElement(item, this.getStepTimeout(item))
             if (element) {
                 const beforeUrl = window.location.href
@@ -828,17 +882,11 @@
         getElementByLocator(locator) {
             if (!locator) return null
             const value = String(locator)
-            const escapeCss = (input) => {
-                if (window.CSS && typeof window.CSS.escape === 'function') {
-                    return window.CSS.escape(input)
-                }
-                return String(input).replace(/"/g, '\\"')
-            }
             if (value.startsWith('id=')) {
                 return document.getElementById(value.slice(3))
             }
             if (value.startsWith('name=')) {
-                return document.querySelector(`[name="${escapeCss(value.slice(5))}"]`)
+                return document.getElementsByName(value.slice(5))[0] || null
             }
             if (value.startsWith('linkText=')) {
                 const raw = value.slice(9)
@@ -1094,18 +1142,33 @@
     window.ptk_replayer = new ptk_replayer()
 
 
-    window.addEventListener("message", (event) => {
-        if (!isIframe && event.data.channel == 'child2opener' && event.data.message == 'init') {
-            window.ptk_replayer.childWindow = event.source
+    window.addEventListener("message", async (event) => {
+        const data = event?.data
+        const replayer = window.ptk_replayer
+        if (!data || typeof data !== 'object' || Array.isArray(data) || !replayer?.sessionId) return
+
+        if (!isIframe && data.channel === 'child2opener' && data.message === 'init') {
+            if (data.sessionId !== replayer.sessionId || !event.source || event.source === window) return
+            if (replayer.childWindow && replayer.childWindow !== event.source) return
+            replayer.childWindow = event.source
+            return
         }
-        if (isIframe && event.data.channel == '2frame' && event.data.message == 'doStep') {
-            window.ptk_replayer.doStep(event.data.step, event.data.item)
+
+        if (isIframe && data.channel === '2frame' && data.message === 'doStep') {
+            if (!isExpectedParentMessage(event)) return
+            const item = await replayer.getApprovedMessageItem(data)
+            if (item) await replayer.doStep(data.step, item)
+            return
         }
-        if (!isIframe && event.data.channel == '2child' && event.data.message == 'doStep') {
-            if (event.data.item.ElementPath.includes('//IFRAME')) {
-                window.ptk_replayer.executeFrame(event.data.item)
+
+        if (!isIframe && data.channel === '2child' && data.message === 'doStep') {
+            if (!window.opener || event.source !== window.opener) return
+            const item = await replayer.getApprovedMessageItem(data)
+            if (!item) return
+            if (String(item.ElementPath || '').includes('//IFRAME')) {
+                replayer.executeFrame(item)
             } else {
-                window.ptk_replayer.doStep(event.data.step, event.data.item)
+                await replayer.doStep(data.step, item)
             }
         }
     })

@@ -34,6 +34,13 @@ function normalizeLabel(label) {
     return String(label || "").trim()
 }
 
+function secureId(prefix) {
+    if (globalThis.crypto?.randomUUID) return `${prefix}_${globalThis.crypto.randomUUID()}`
+    const bytes = new Uint8Array(16)
+    globalThis.crypto.getRandomValues(bytes)
+    return `${prefix}_${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`
+}
+
 function buildProfileSummary(profile = {}) {
     return {
         id: profile.id || null,
@@ -192,7 +199,7 @@ export class SessionProfileStore {
         }
         const timestamp = this.now()
         const profile = {
-            id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+            id: secureId("session"),
             label: normalizedLabel,
             host: normalizedHost,
             notes: String(notes || "").trim(),
@@ -219,6 +226,13 @@ export class SessionProfileStore {
             await this._persist()
         }
         return deleted
+    }
+
+    async clearAll() {
+        this._profiles = []
+        this._loaded = true
+        await this._persist()
+        return true
     }
 }
 

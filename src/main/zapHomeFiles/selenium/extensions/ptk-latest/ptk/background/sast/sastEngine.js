@@ -240,8 +240,26 @@ export class sastEngine {
     this.events = createEmitter({ async: true, replay: 1 });
   }
 
-  async fetchExternalScriptCode(scriptUrl) {
-    const res = await fetch(scriptUrl, { credentials: "include", cache: "force-cache" });
+  async fetchExternalScriptCode(scriptUrl, pageUrl = "") {
+    let script;
+    let page;
+    try {
+      script = new URL(String(scriptUrl || ""));
+      page = new URL(String(pageUrl || ""));
+    } catch {
+      throw new Error("invalid_script_url");
+    }
+    if (!["http:", "https:"].includes(script.protocol) || !["http:", "https:"].includes(page.protocol)) {
+      throw new Error("unsupported_script_protocol");
+    }
+    if (script.origin !== page.origin) {
+      throw new Error("external_script_outside_page_origin");
+    }
+    const res = await fetch(script.href, {
+      credentials: "include",
+      cache: "force-cache",
+      redirect: "error"
+    });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -722,7 +740,7 @@ export class sastEngine {
           if (this._allowFetchExternalScripts) {
             this.events.emit("progress", { message: "Parsing external scripts", file: script.src });
             try {
-              code = await this.fetchExternalScriptCode(script.src);
+              code = await this.fetchExternalScriptCode(script.src, file);
               fetchedScriptFiles.push(fileId);
             } catch (err) {
               const errorText = err?.message || String(err);
@@ -790,7 +808,7 @@ export class sastEngine {
             },
           });
         } catch (e) {
-          console.warn(`Failed to parse <script> ${fileId}:`, e);
+          console.warn("Failed to parse <script>:", fileId, e);
           parseFailures.push({
             file: fileId,
             error: e?.message || String(e)

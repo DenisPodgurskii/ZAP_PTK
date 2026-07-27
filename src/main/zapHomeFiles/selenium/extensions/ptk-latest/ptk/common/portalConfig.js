@@ -53,6 +53,18 @@ export function buildPortalUrl(endpoint, { baseUrl = null, apiBase = "/api/v1" }
     return new URL(`${resolvedApiBase}${resolvedEndpoint}`, `${resolvedBaseUrl}/`).toString()
 }
 
+export function buildStoredCredentialPortalUrl(endpoint, { apiBase = "/api/v1" } = {}) {
+    return buildPortalUrl(endpoint, { baseUrl: PORTAL_BASE_URL, apiBase })
+}
+
+export function isProductionPortalUrl(value) {
+    try {
+        return new URL(String(value || "")).origin === PORTAL_BASE_URL
+    } catch (_) {
+        return false
+    }
+}
+
 export function buildPortalPageUrl(path, { baseUrl = null } = {}) {
     const resolvedBaseUrl = normalizePortalBaseUrl(baseUrl, getPortalBaseUrl())
     const resolvedPath = normalizePathFragment(path, "")

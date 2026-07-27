@@ -157,6 +157,60 @@ class ExtensionPtkCloseContractTest {
     }
 
     @Test
+    void trustedRunnerUsesWebDriverBrowserNameInsteadOfClientWorkerUuid() {
+        assertEquals(true, ExtensionPtk.isChromiumBrowserName("MicrosoftEdge"));
+        assertEquals(true, ExtensionPtk.isChromiumBrowserName("chrome"));
+        assertEquals(true, ExtensionPtk.isChromiumBrowserName("chromium"));
+        assertEquals(false, ExtensionPtk.isChromiumBrowserName("firefox"));
+        assertEquals(
+                false, ExtensionPtk.isChromiumBrowserName("6ad8a9c8-9077-47b5-976f-346d858b5f0b"));
+    }
+
+    @Test
+    void trustedRunnerTerminalDecisionIsBoundToExactSessionAndCloseRequest() {
+        Map<String, Object> decision = new LinkedHashMap<>();
+        decision.put("trustedRunnerVerified", true);
+        decision.put("trustedRunner", "ptk-zap-control-v1");
+        decision.put("source", "webdriver_extension_runner");
+        decision.put("decision", "safe_to_close");
+        decision.put("scanState", "cancelled");
+        decision.put("terminalFinalized", true);
+        decision.put("idleVerified", true);
+        decision.put("completionStatus", "cancelled");
+        decision.put("releaseStatus", "incomplete");
+        decision.put("publisherDrained", false);
+        decision.put("sessionId", "ptk-session-1");
+        decision.put("closeRequestId", "close-1");
+        decision.put("closeRequestAck", true);
+
+        assertEquals(
+                true,
+                PtkCloseContract.isTrustedRunnerTerminalCloseDecision(
+                        decision, "ptk-session-1", "close-1"));
+        assertEquals(
+                false,
+                PtkCloseContract.isTrustedRunnerTerminalCloseDecision(
+                        decision, "ptk-session-other", "close-1"));
+        assertEquals(
+                false,
+                PtkCloseContract.isTrustedRunnerTerminalCloseDecision(
+                        decision, "ptk-session-1", "close-other"));
+
+        decision.put("trustedRunner", "attacker-controlled");
+        assertEquals(
+                false,
+                PtkCloseContract.isTrustedRunnerTerminalCloseDecision(
+                        decision, "ptk-session-1", "close-1"));
+
+        decision.put("trustedRunner", "ptk-zap-control-v1");
+        decision.put("idleVerified", false);
+        assertEquals(
+                false,
+                PtkCloseContract.isTrustedRunnerTerminalCloseDecision(
+                        decision, "ptk-session-1", "close-1"));
+    }
+
+    @Test
     void callbackRunnerRequiresEffectiveZapAutomationAndChromiumBrowser() {
         String callbackUrl = "https://zap/zapCallBackUrl/secret?zapenable=true&zapid=zap-1";
 

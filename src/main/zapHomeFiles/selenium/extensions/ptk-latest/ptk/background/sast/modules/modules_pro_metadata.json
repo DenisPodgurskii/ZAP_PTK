@@ -1,0 +1,961 @@
+{
+  "schema": "ptk-pro-module-metadata/v1",
+  "engine": "SAST",
+  "metadataVersion": "2026-06-04",
+  "moduleCount": 36,
+  "modules": [
+    {
+      "engine": "SAST",
+      "moduleId": "angularjs-expression-injection",
+      "name": "AngularJS client-side template / expression injection",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "angularjs_client_template_injection",
+      "tags": [
+        "sast",
+        "angularjs",
+        "xss",
+        "client-template-injection"
+      ],
+      "description": "Finds AngularJS code patterns where untrusted data is compiled or parsed as AngularJS expressions/templates, including $parse, $interpolate, $compile, interpolation delimiters and ng-* expression attributes.",
+      "recommendationSummary": "Avoid passing user-controlled strings to AngularJS expression or template compilation APIs. Do not server-render user input inside {{...}}, [[...]], ng-* expression attributes, or $parse/$compile/$interpolate inputs. Use text-only rendering, strict allow-lists for expression name",
+      "links": {
+        "PortSwigger AngularJS sandbox contexts": "https://portswigger.net/web-security/cross-site-scripting/contexts/angularjs-sandbox",
+        "CWE-79": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "template_rendering"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "bece67af0bb4e034"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "client-script-loader-poisoning",
+      "name": "Client Script Loader Poisoning",
+      "tier": "free",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "integrity_failure",
+      "tags": [
+        "sast",
+        "script_loader",
+        "worker",
+        "service_worker"
+      ],
+      "description": "Detects dynamic script, worker, and service-worker loader endpoints that can be influenced by attacker-controlled client-side data.",
+      "recommendationSummary": "Load workers, service workers, and helper scripts from fixed, trusted URLs only. Do not derive script loader destinations from URL parameters, storage, messages, or DOM input. Apply strict allow-lists for scheme, host, and path before invoking worker or script loader APIs.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/829.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f9c29fd71d9dad38"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "client-template-injection",
+      "name": "Client-side Template Injection",
+      "tier": "free",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "sast",
+        "template",
+        "injection"
+      ],
+      "description": "Detects dynamic client-side template compilation/rendering where attacker-controlled templates or outputs are injected into the DOM.",
+      "recommendationSummary": "Avoid compiling templates from untrusted strings; use precompiled templates. Sanitize render output before inserting into the DOM.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Template_Injection",
+        "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "template_rendering"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "540fbe14937b0005"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "cookie-manipulation",
+      "name": "DOM-based Cookie Manipulation",
+      "tier": "free",
+      "category": "auth_session",
+      "severity": "medium",
+      "vulnId": "auth_failures",
+      "tags": [
+        "sast",
+        "cookies",
+        "session"
+      ],
+      "description": "Detects cases where attacker-controlled DOM data is written into cookies (document.cookie or common wrapper functions). Can indicate session fixation, logic control, or preparation for exploit-chains.",
+      "recommendationSummary": "Avoid writing security-sensitive cookies from untrusted client-side data. Prefer server-side cookie setting and validation. For non-security cookies, validate/allow-list values, and avoid storing secrets client-side. Use HttpOnly for session cookies.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Session_fixation",
+        "CWE": "https://cwe.mitre.org/data/definitions/384.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "file_upload",
+        "jwt_token",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "74fe9850a934d917"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "dom-data-manipulation",
+      "name": "DOM Data Manipulation",
+      "tier": "free",
+      "category": "supply_chain",
+      "severity": "medium",
+      "vulnId": "integrity_failure",
+      "tags": [
+        "sast",
+        "dom",
+        "manipulation"
+      ],
+      "description": "Detects untrusted DOM data being written into form metadata (formAction/target/method/value/placeholder), inline style surfaces (style/cssText/background*), document.title, history state, or createHTMLDocument — mutations that influence UI/navigation state without covering classic href/src/action sinks already handled elsewhere.",
+      "recommendationSummary": "Validate or allow-list values before assigning them to form metadata, placeholders, or styles. Prefer safe DOM APIs (textContent, dataset) when representing user data. Keep document.title and history.pushState/replaceState inputs confined to trusted sources; normalise or encode u",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Content_Spoofing",
+        "CWE": "https://cwe.mitre.org/data/definitions/451.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "file_upload",
+        "open_redirect",
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "5fa959f488af7823"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "dom-xss",
+      "name": "DOM-based XSS",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "sast",
+        "dom",
+        "xss"
+      ],
+      "description": "Detects cases where untrusted data from the DOM (URL, element values, storage, messages, etc.) flows into HTML/JS execution sinks (e.g., innerHTML, outerHTML, document.write, string-based setTimeout, insertAdjacentHTML) without proper sanitization or encoding \\u2014 enabling DOM-based cross-site scripting.",
+      "recommendationSummary": "Prevent DOM-based XSS by never inserting untrusted strings directly into HTML or executing them as code. Prefer DOM/text APIs, safe templating, or a vetted sanitizer and apply context-aware encoding where needed. Primary: Use textContent / innerText or create DOM nodes instead of",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "313d4c49c7c03024"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "javascript-injection",
+      "name": "DOM-based JavaScript Injection",
+      "tier": "free",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "sast",
+        "javascript",
+        "code"
+      ],
+      "description": "Detects dynamic execution of attacker-controlled strings in JavaScript sinks such as eval(), Function(), string-based timers, execScript, or script.text assignments. Exploiting these flows lets attackers execute arbitrary JS without relying on HTML injection.",
+      "recommendationSummary": "Never pass untrusted strings to dynamic code execution APIs (eval, Function, string-based setTimeout/setInterval, execScript). Prefer callbacks and safe parsers: pass actual functions to timers and use JSON.parse or allow-lists for data-driven logic. Sanitize and validate any dat",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Code_Injection",
+        "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8e6085971466a038"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "link-manipulation",
+      "name": "DOM-based Link Manipulation",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "open_redirect",
+      "tags": [
+        "sast",
+        "dom",
+        "links"
+      ],
+      "description": "Detects DOM code that rewrites link destinations (href attributes) with attacker-controlled data. Manipulated links can mislead users into visiting malicious targets even if navigation is not forced automatically.",
+      "recommendationSummary": "Allow-list link destinations or map tokens to server-side known URLs; do not reflect arbitrary strings into href attributes. Ensure displayed link text matches the trusted destination so users cannot be tricked into clicking a mismatched URL. Sanitise or normalise protocol and ho",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Content_Spoofing",
+        "CWE": "https://cwe.mitre.org/data/definitions/451.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a2fbf70e33c32b77"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "network-destination-poisoning",
+      "name": "Network Destination Poisoning",
+      "tier": "free",
+      "category": "client_side",
+      "severity": "medium",
+      "vulnId": "ssrf",
+      "tags": [
+        "sast",
+        "network",
+        "beacon",
+        "eventsource",
+        "axios"
+      ],
+      "description": "Detects client-side request destinations for beacon, EventSource, and Axios that can be influenced by attacker-controlled input.",
+      "recommendationSummary": "Build beacon, EventSource, and API client destinations from fixed configuration, not user-controlled strings. Apply strict allow-lists for scheme, host, and path before constructing network destinations. Reject attacker-controlled cross-origin URLs even when requests are “read-on",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/20.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "realtime",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f05788a2fd25e99d"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "open-redirection",
+      "name": "Open Redirection",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "open_redirect",
+      "tags": [
+        "sast",
+        "redirect"
+      ],
+      "description": "Detects client-side code that can redirect users to attacker-controlled URLs (open redirects). Includes assignment/calls that control window/location/navigation, attr-based redirects, form actions and jQuery variants.",
+      "recommendationSummary": "Prevent open redirects by validating or allow-listing redirect targets, rejecting external or absolute URLs from untrusted sources, and mapping user inputs to predefined safe destinations instead of using them directly in navigation APIs.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "c2ec2d9b468af6e6"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "web-message",
+      "name": "Web Message Handling",
+      "tier": "free",
+      "category": "client_side",
+      "severity": "medium",
+      "vulnId": "postmessage_misuse",
+      "tags": [
+        "sast",
+        "postmessage"
+      ],
+      "description": "Detects unsafe postMessage usage and message event handling issues (missing origin validation, wildcard targetOrigin, tainted data flowing into DOM/code sinks).",
+      "recommendationSummary": "Always specify an exact targetOrigin and validate event.origin against a strict allow-list (exact match) before trusting event.data. Sanitize or validate structured payloads before invoking DOM APIs or dynamic execution sinks. Avoid propagating messages into navigation, cookie, o",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/11-Testing_Web_Messaging",
+        "CWE": "https://cwe.mitre.org/data/definitions/346.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "0551a17f021fbbc5"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "ajax-request-header",
+      "name": "Ajax Request Header Manipulation",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "token_leak",
+      "tags": [
+        "sast",
+        "ajax",
+        "request"
+      ],
+      "description": "Detects untrusted data flowing into XMLHttpRequest headers, open/send parameters, and related eval helpers for Ajax requests.",
+      "recommendationSummary": "Whitelist header names and validate values before invoking setRequestHeader or building fetch headers. Avoid copying sensitive data (cookies, auth tokens) into request headers client-side. Sanitize message payloads and enforce strict origin checks when constructing headers from p",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/csrf",
+        "CWE": "https://cwe.mitre.org/data/definitions/201.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "5e941d2ee8e40adb"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "browser-privileged-surface-review",
+      "name": "Browser Privileged Surface Discovery",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "low",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "browser",
+        "privileged",
+        "discovery"
+      ],
+      "description": "Identifies browser and service-worker APIs that often gate privileged workflows and deserve explicit review during bug bounty triage.",
+      "recommendationSummary": "Inventory every privileged browser API usage and confirm the surrounding workflow enforces authentication and authorization. Review service-worker lifecycle, push, and sync handlers for hidden routes, offline-only actions, and admin-only capabilities. Validate destination URLs an",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/668.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "efcace8cb96a058c"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "client-injection",
+      "name": "Client-side JSON / SQL / XPath Injection",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "sast",
+        "client",
+        "injection"
+      ],
+      "description": "Detects client-side SQL, XPath, and JSON misuse (string concatenation, eval of JSON, XPath without escaping) that can be influenced by untrusted input.",
+      "recommendationSummary": "Never concatenate untrusted data into SQL or XPath expressions. Use parameterized queries and escape helpers. Avoid eval for JSON parsing — prefer JSON.parse followed by strict type checks. Escape XPath fragments with a dedicated helper (e.g., escapeXPath).",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/SQL_Injection",
+        "CWE": "https://cwe.mitre.org/data/definitions/74.html"
+      },
+      "surfaceHints": [
+        "path_traversal",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e45ae30d45e41881"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "client-regex-dos",
+      "name": "Client-side Regex DoS",
+      "tier": "pro",
+      "category": "insecure_design",
+      "severity": "medium",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "regex",
+        "redos"
+      ],
+      "description": "Detects dynamic regular-expression construction from untrusted data that can trigger catastrophic backtracking.",
+      "recommendationSummary": "Avoid creating regular expressions directly from attacker-controlled input. Use strict allow-lists for accepted patterns and enforce length/complexity limits. Prefer safe parsing strategies for user-provided filters.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Regular_expression_Denial_of_Service_-_ReDoS",
+        "CWE": "https://cwe.mitre.org/data/definitions/1333.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "973d142200f1e61b"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "cross-context-channel-review",
+      "name": "Cross-context Channel Discovery",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "low",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "messaging",
+        "discovery"
+      ],
+      "description": "Identifies BroadcastChannel and MessageChannel surfaces that should be reviewed as cross-tab or cross-context trust boundaries.",
+      "recommendationSummary": "Inventory channel names and message schemas for every BroadcastChannel and MessageChannel usage. Do not assume same-origin browser contexts are equally trusted; validate message payloads and privilege boundaries explicitly. Review privileged workflows triggered from channel messa",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/923.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "ed9c44e030d623e5"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "document-domain-manipulation",
+      "name": "Document Domain Manipulation",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "dom",
+        "same-origin"
+      ],
+      "description": "Detects direct or tainted assignments to document.domain that can weaken same-origin isolation.",
+      "recommendationSummary": "Avoid using document.domain relaxation where possible; prefer explicit cross-origin communication channels. Never derive domain values from URL parameters, storage, or message payloads. If unavoidable, enforce a strict, static allow-list and validate exact host values.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/11-Testing_Web_Messaging",
+        "CWE": "https://cwe.mitre.org/data/definitions/16.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "dom_xss",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "bf483970358a9af1"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "dom-clobbering",
+      "name": "DOM Clobbering",
+      "tier": "pro",
+      "category": "supply_chain",
+      "severity": "medium",
+      "vulnId": "integrity_failure",
+      "tags": [
+        "sast",
+        "dom",
+        "clobbering"
+      ],
+      "description": "Detects DOM clobbering risks where attacker-controlled HTML or attributes create id/name collisions (e.g., form/iframe names, global ids) that shadow trusted globals or properties.",
+      "recommendationSummary": "Avoid injecting attacker-controlled HTML that includes id/name attributes. Build elements with safe DOM APIs and strict allow-lists. Sanitize dynamic HTML before insertion and prefer textContent when possible. Validate or normalise id/name attributes to avoid collisions with glob",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/DOM_Based_DOM_Clobbering",
+        "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9ea7665a66f33df8"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "dom-local-file-path-manipulation",
+      "name": "DOM Local File Path Manipulation",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "medium",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "file",
+        "client_side"
+      ],
+      "description": "Detects untrusted values flowing into FileReader read methods and local file processing paths.",
+      "recommendationSummary": "Only read user-selected files from trusted input elements and validated workflows. Do not let URL or message data choose local file objects for processing. Validate file source/context before read operations.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/73.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "file_upload",
+        "path_traversal"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3696cac45d340a89"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "dom-selector",
+      "name": "DOM Selector Injection",
+      "tier": "pro",
+      "category": "xss",
+      "severity": "medium",
+      "vulnId": "dom_xss",
+      "tags": [
+        "sast",
+        "dom",
+        "css"
+      ],
+      "description": "Detects CSS selector injection risks where untrusted data controls query selectors (document.querySelector / jQuery) and related origin checks.",
+      "recommendationSummary": "Never build selectors directly from user input. Validate against strict allow-lists or escape with CSS.escape. For cross-window messaging, verify event.origin with strict equality and validate structured payloads before using selector strings. Avoid wildcard postMessage target or",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "dom_xss",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "1191585d2b2d7000"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "graphql-client-review",
+      "name": "GraphQL Client Discovery",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "low",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "graphql",
+        "discovery"
+      ],
+      "description": "Identifies static GraphQL client endpoints and constructors so they can be triaged as attack-surface hints.",
+      "recommendationSummary": "Inventory GraphQL endpoints, transports, and client libraries used by the application. Review every discovered query, mutation, and subscription path for authz, IDOR, and introspection issues. Prefer persisted operations and server-side authorization checks for sensitive GraphQL ",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "graphql",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "ce7164c6dd4909c5"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "internal-host-and-env-discovery",
+      "name": "Internal Host and Environment Discovery",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "low",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "internal",
+        "environment",
+        "discovery"
+      ],
+      "description": "Identifies internal, localhost, RFC1918, and non-production destinations embedded in client code.",
+      "recommendationSummary": "Inventory non-production, internal, and privileged hosts referenced by the client. Review whether these destinations remain reachable from untrusted user contexts. Treat hardcoded environment hosts as candidate pivot points, not as harmless operational leftovers.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "client_discovery"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "be7f9b5eeede6ac1"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "jwt-client-misuse",
+      "name": "JWT Client Misuse",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "token_leak",
+      "tags": [
+        "sast",
+        "jwt",
+        "token"
+      ],
+      "description": "Detects unsafe handling of JWTs on the client (extraction from URL fragments, insecure storage, appending to URLs/headers).",
+      "recommendationSummary": "Do not read tokens from URL fragments/query params or store them in Web Storage. Use HttpOnly cookies and avoid reflecting tokens into URLs/headers from untrusted sources. Validate tokens server-side only.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-cheat-sheets/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html",
+        "CWE": "https://cwe.mitre.org/data/definitions/319.html"
+      },
+      "surfaceHints": [
+        "jwt_token"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "dabd07325eaa3690"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "markdown-html-rendering",
+      "name": "Markdown and Rich Content Rendering",
+      "tier": "pro",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "sast",
+        "markdown",
+        "html",
+        "xss"
+      ],
+      "description": "Detects markdown-to-HTML renderers and taint flows where untrusted markdown is rendered into DOM HTML sinks.",
+      "recommendationSummary": "Treat markdown and rich-text rendering as HTML generation, not plain text. Disable raw HTML where possible and sanitize rendered output before inserting it into DOM sinks. Prefer allow-listed markdown features and test renderer options for XSS bypasses.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "182bc8a0e8bd18bd"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "oauth-oidc-client-flows",
+      "name": "OAuth and OIDC Client Flow Discovery",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "low",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "oauth",
+        "oidc",
+        "auth"
+      ],
+      "description": "Identifies OAuth and OIDC endpoints, protocol parameters, and weak client-side persistence that are valuable during authz and redirect testing.",
+      "recommendationSummary": "Inventory authorize, token, logout, and callback flows from client code. Review how redirect_uri, state, nonce, and PKCE values are built and persisted. Do not trust client-side storage or navigation guards as the real OAuth/OIDC security boundary.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "jwt_token",
+        "open_redirect",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "26a25c2c2204fa69"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "prototype-pollution-client",
+      "name": "Client-side Prototype Pollution",
+      "tier": "pro",
+      "category": "supply_chain",
+      "severity": "high",
+      "vulnId": "integrity_failure",
+      "tags": [
+        "sast",
+        "prototype",
+        "pollution"
+      ],
+      "description": "Detects prototype manipulation in client-side code (assigning __proto__, Object.setPrototypeOf, Object.assign on Object.prototype) that can lead to arbitrary property injection.",
+      "recommendationSummary": "Avoid writing to __proto__ or mutating Object.prototype. Clone inputs defensively and validate object shapes before merging.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Prototype_Pollution",
+        "CWE": "https://cwe.mitre.org/data/definitions/915.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "prototype_pollution",
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "6638ebe707d8e192"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "proxy-override-header-poisoning",
+      "name": "Proxy Override Header Poisoning",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "high",
+      "vulnId": "request_smuggling",
+      "tags": [
+        "sast",
+        "headers",
+        "proxy",
+        "routing"
+      ],
+      "description": "Detects dangerous request-header overrides that can influence routing, method handling, or upstream authorization logic.",
+      "recommendationSummary": "Do not build proxy or routing override headers from untrusted client input. Review every use of X-Original-URL, X-Forwarded-*, and method override headers against the upstream proxy chain. Enforce trusted-header policies server-side; never rely on the browser as a safe origin for",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/444.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "cd1078e1e8e1e088"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "realtime-transport-poisoning",
+      "name": "Real-time Transport Poisoning",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "medium",
+      "vulnId": "ssrf",
+      "tags": [
+        "sast",
+        "transport",
+        "realtime"
+      ],
+      "description": "Detects dynamic client-side transport endpoints and real-time communication primitives such as WebTransport and RTCPeerConnection that should be inventoried during bug bounty triage.",
+      "recommendationSummary": "Build transport destinations from fixed configuration and strict allow-lists, not user-controlled strings. Inventory every real-time transport surface and review authentication, authorization, and tenant isolation assumptions. Treat browser-native transport constructors as privil",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/346.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "realtime",
+        "ssrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "0a2d9dde8385cba1"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "saml-sso-client-flows",
+      "name": "SAML SSO Client Flow Discovery",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "low",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "saml",
+        "sso",
+        "auth"
+      ],
+      "description": "Identifies SAML bootstrap routes, protocol parameters, and RelayState handling that are useful during authz and redirect testing.",
+      "recommendationSummary": "Inventory SAML login, ACS, and SSO bootstrap paths visible to the client. Review how RelayState is read, written, and persisted. Treat client-side SAML routing helpers as attack-surface hints, not as real authorization controls.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f133e6068ea8a63a"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "secrets",
+      "name": "Secrets & Credentials Exposure",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "high",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "sast",
+        "secrets",
+        "exposure"
+      ],
+      "description": "Detects hardcoded secrets across comments, strings, declarations, and headers (API keys, access tokens, private keys, webhooks, auth headers, and common cloud/provider credentials).",
+      "recommendationSummary": "Remove secrets from code and comments immediately; rotate exposed credentials. Use a secret manager (Vault, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault); inject at runtime via environment or secure config. Enable CI/CD secret scanning and pre-commit hooks; add server",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Source_code_disclosure",
+        "CWE-798": "https://cwe.mitre.org/data/definitions/798.html",
+        "CWE-312": "https://cwe.mitre.org/data/definitions/312.html",
+        "CWE-259": "https://cwe.mitre.org/data/definitions/259.html",
+        "CWE-522": "https://cwe.mitre.org/data/definitions/522.html"
+      },
+      "surfaceHints": [
+        "client_discovery",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3e8abca31355e5b1"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "service-worker-cache-poisoning",
+      "name": "Service Worker Cache Poisoning",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "web_cache_poisoning",
+      "tags": [
+        "sast",
+        "service_worker",
+        "cache"
+      ],
+      "description": "Detects risky fetch handlers and cache/redirect logic in Service Workers that trust request URLs.",
+      "recommendationSummary": "Validate and restrict event.request.url before cache writes or redirects. Map allowed paths explicitly and avoid wildcard cache keys.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Cache_Poisoning",
+        "CWE": "https://cwe.mitre.org/data/definitions/441.html"
+      },
+      "surfaceHints": [
+        "cache_privacy",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "7a6824e76fa9208f"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "storage-security",
+      "name": "Storage Security",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "sensitive_storage",
+      "tags": [
+        "sast",
+        "storage",
+        "token"
+      ],
+      "description": "Detects sensitive data stored in localStorage/sessionStorage/IndexedDB and tainted data persisted client-side.",
+      "recommendationSummary": "Avoid storing secrets or tokens in Web Storage/IndexedDB; prefer HttpOnly cookies or server-side session. Validate keys/values and encrypt/expire where unavoidable.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/DOM_Based_XSS",
+        "CWE": "https://cwe.mitre.org/data/definitions/922.html"
+      },
+      "surfaceHints": [
+        "jwt_token",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9f8d14c306c4487b"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "trusted-types-policy-review",
+      "name": "Trusted Types Policy Review",
+      "tier": "pro",
+      "category": "xss",
+      "severity": "low",
+      "vulnId": "dom_xss",
+      "tags": [
+        "sast",
+        "trusted-types",
+        "xss"
+      ],
+      "description": "Identifies Trusted Types policy creation points that should be reviewed as code-execution or DOM-injection trust boundaries.",
+      "recommendationSummary": "Inventory every Trusted Types policy and document exactly which sinks it is intended to protect. Avoid permissive default policies that silently allow unsafe HTML, script, or script-URL creation. Review policy callbacks as privileged code because they often become the final bypas",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "562ebf404f05520d"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "upload-object-storage-discovery",
+      "name": "Upload and Object Storage Discovery",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "low",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "upload",
+        "storage",
+        "discovery"
+      ],
+      "description": "Identifies upload-capable code paths, pre-signed storage URLs, and cloud object destinations that deserve explicit attack-surface review.",
+      "recommendationSummary": "Inventory every upload and object-storage destination exposed by the client. Review signed URL generation, content-type enforcement, overwrite rules, and bucket ACL assumptions. Validate file metadata and authorization on the server even when the client appears constrained.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/434.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cloud_storage",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3eb15677707e996c"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "webauthn-passkey-discovery",
+      "name": "WebAuthn and Passkey Discovery",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "low",
+      "vulnId": "other",
+      "tags": [
+        "sast",
+        "webauthn",
+        "passkey",
+        "auth"
+      ],
+      "description": "Identifies WebAuthn and passkey entry points that should be reviewed as privileged authentication surfaces.",
+      "recommendationSummary": "Inventory every passkey registration and authentication path exposed to the browser. Review registration, challenge fetching, and conditional mediation flows for hidden auth assumptions. Treat WebAuthn helpers as auth-flow surfaces that deserve explicit authorization and UX revie",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/287.html"
+      },
+      "surfaceHints": [
+        "authz_object"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "eccd14fe693602ad"
+    },
+    {
+      "engine": "SAST",
+      "moduleId": "websocket-url-poisoning",
+      "name": "WebSocket URL Poisoning",
+      "tier": "pro",
+      "category": "security_misconfiguration",
+      "severity": "medium",
+      "vulnId": "websocket_misconfiguration",
+      "tags": [
+        "sast",
+        "websocket",
+        "client_side"
+      ],
+      "description": "Detects dynamic WebSocket endpoint selection from untrusted client-side data.",
+      "recommendationSummary": "Build WebSocket endpoints from fixed configuration, not user-controlled values. Allow-list exact protocols/hosts/paths before constructing WebSocket URLs. Reject or normalize untrusted scheme/host components.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/20.html"
+      },
+      "surfaceHints": [
+        "realtime"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "80571c7ae9d6f787"
+    }
+  ]
+}

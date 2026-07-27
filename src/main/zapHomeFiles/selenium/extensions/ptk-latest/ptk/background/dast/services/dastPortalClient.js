@@ -1,7 +1,7 @@
 import { compressScanPayload } from "../../export/compressScanPayload.js"
 import { parseDownloadedScanPayload } from "../../export/parseDownloadedScanPayload.js"
 import {
-    buildPortalUrl as buildSharedPortalUrl,
+    buildStoredCredentialPortalUrl,
     initializePortalRuntimeConfig
 } from "../../../common/portalConfig.js"
 
@@ -19,10 +19,7 @@ export class DastPortalClient {
     }
 
     buildPortalUrl(endpoint, profile = {}) {
-        return buildSharedPortalUrl(endpoint, {
-            baseUrl: profile?.base_url || profile?.api_url || profile?.baseUrl || null,
-            apiBase: profile?.api_base || profile?.apiBase || undefined
-        })
+        return buildStoredCredentialPortalUrl(endpoint)
     }
 
     async saveScan(profile = {}, scanResult, { projectId = null } = {}) {
@@ -61,6 +58,7 @@ export class DastPortalClient {
                 "X-PTK-Compression": compressed.compression
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache",
             body: compressed.body
         })
@@ -88,6 +86,7 @@ export class DastPortalClient {
                 Accept: "application/json"
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {
@@ -123,6 +122,7 @@ export class DastPortalClient {
                 Accept: "application/json"
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {
@@ -154,6 +154,7 @@ export class DastPortalClient {
                 Accept: "application/gzip, application/x-gzip"
             },
             credentials: "omit",
+            redirect: "error",
             cache: "no-cache"
         })
             .then(async (httpResponse) => {

@@ -14,6 +14,7 @@ import { DastCandidateRunService } from "./dast/services/dastCandidateRunService
 import { DastFindingPresentationService } from "./dast/services/dastFindingPresentationService.js"
 import { collapseDastAggregatedFindings } from "./dast/services/dastFindingAggregation.js"
 import { SessionProfileStore } from "./bugbounty/sessionProfileStore.js"
+import { sensitiveArtifactStorage } from "./sensitiveArtifactStore.js"
 import { EvidencePackageStore } from "./bugbounty/evidencePackageStore.js"
 import { scanResultStore } from "./scanResultStore.js"
 import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js"
@@ -117,12 +118,17 @@ export class ptk_rattacker {
             limits: UI_SCAN_RESULT_LIMITS,
             analysisLimits: UI_ANALYSIS_LIMITS
         })
+        this.requestCaptureStore = worker?.ptk_app?.proxy?._getCaptureStore?.()
+            || worker?.ptk_app?.proxy?.captureStore
+            || worker?.ptk_app?.dastRequestCaptureStore
+            || null
         this.captureAdapter = new DastCaptureAdapter({
             engine: this.engine,
             worker,
             browserApi: browser,
             requestFilters: ptk_utils.requestFilters,
             extraInfoSpec: ptk_utils.extraInfoSpec,
+            requestStore: this.requestCaptureStore,
             getState: () => this.sessionCoordinator?.getState?.() || {}
         })
         this.engine?.setCaptureProgressProvider?.(this.captureAdapter)
@@ -150,14 +156,14 @@ export class ptk_rattacker {
             uiLimits: UI_SCAN_RESULT_LIMITS
         })
         this.sessionProfileStore = new SessionProfileStore({
-            storage: ptk_storage,
+            storage: sensitiveArtifactStorage,
             browserApi: browser
         })
         if (this.engine?.setSessionProfileStore) {
             this.engine.setSessionProfileStore(this.sessionProfileStore)
         }
         this.evidencePackageStore = new EvidencePackageStore({
-            storage: ptk_storage
+            storage: sensitiveArtifactStorage
         })
         this.candidateRunService = new DastCandidateRunService({
             settings: this.settings,
@@ -729,6 +735,9 @@ export class ptk_rattacker {
 
     onMessage(message, sender, sendResponse) {
         if (CONTENT_WS_TO_BACKGROUND_CHANNELS.has(message.channel)) {
+            if (!ptk_utils.isTrustedContentSender(sender)) {
+                return Promise.resolve({ result: false, error: 'untrusted_content_sender' })
+            }
 
             if (this["msg_" + message.type]) {
                 return this["msg_" + message.type](message)
@@ -737,6 +746,9 @@ export class ptk_rattacker {
         }
 
         if (POPUP_TO_BACKGROUND_CHANNELS.has(message.channel)) {
+            if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+                return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
+            }
             if (this["msg_" + message.type]) {
                 return this["msg_" + message.type](message)
             }
@@ -744,6 +756,9 @@ export class ptk_rattacker {
         }
 
         if (CONTENT_TO_BACKGROUND_CHANNELS.has(message.channel)) {
+            if (!ptk_utils.isTrustedContentSender(sender)) {
+                return Promise.resolve({ result: false, error: 'untrusted_content_sender' })
+            }
             if (message.type == 'user_interaction' && sender?.tab?.id && this.sessionCoordinator.isRunningForTab(sender.tab.id)) {
                 this.sessionCoordinator.unlockUserInteraction()
                 return Promise.resolve({ ok: true, unlocked: true })
@@ -776,9 +791,8 @@ export class ptk_rattacker {
                         }, patch))
                     } catch (_) { }
                 }
-                if (worker?.ptk_app?.proxy?.tabUrlMap) {
-                    worker.ptk_app.proxy.tabUrlMap.set(tabId, uiUrl)
-                }
+                this.requestCaptureStore?.rememberTabUrl?.(tabId, uiUrl)
+                    || worker?.ptk_app?.proxy?.tabUrlMap?.set?.(tabId, uiUrl)
                 const sessionRunning = this.sessionCoordinator.isRunningForTab(tabId)
                 appendSpaUrlDiagnostic({
                     phase: 'received',
@@ -1719,8 +1733,8 @@ export class ptk_rattacker {
         return effectiveSettings
     }
 
-    async stopAutomationSession(sessionId, timeoutMs = 180000) {
-        return this.sessionCoordinator.stopAutomationSession(sessionId, timeoutMs)
+    async stopAutomationSession(sessionId, timeoutMs = 180000, options = {}) {
+        return this.sessionCoordinator.stopAutomationSession(sessionId, timeoutMs, options)
     }
 
     _collectSeverityStats(scanResult = this.scanResult) {

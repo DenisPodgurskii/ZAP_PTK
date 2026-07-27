@@ -1,0 +1,1129 @@
+{
+  "schema": "ptk-pro-module-metadata/v1",
+  "engine": "IAST",
+  "metadataVersion": "2026-06-04",
+  "moduleCount": 42,
+  "modules": [
+    {
+      "engine": "IAST",
+      "moduleId": "iast_angularjs_expression_injection",
+      "name": "AngularJS expression / client-template injection",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "angularjs_client_template_injection",
+      "tags": [
+        "iast",
+        "angularjs",
+        "xss",
+        "client-template-injection"
+      ],
+      "description": "Runtime detection for AngularJS expression injection paths: interpolation templates, ng-* expression attributes and $parse inputs from query, form, cookie, storage and postMessage sources.",
+      "recommendationSummary": "Do not evaluate user-controlled AngularJS expressions. Do not render untrusted input inside AngularJS interpolation or ng-* expression attributes. Do not pass cookie, storage, message, URL or form values to $parse/$compile/$interpolate without strict allow-listing. Migrate away f",
+      "links": {
+        "PortSwigger AngularJS sandbox contexts": "https://portswigger.net/web-security/cross-site-scripting/contexts/angularjs-sandbox",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "dom_xss",
+        "template_rendering"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "2e4726f8e3da32aa"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_client_http_exfiltration",
+      "name": "Client-side HTTP exfiltration sinks",
+      "tier": "free",
+      "category": "sensitive_data",
+      "severity": "high",
+      "vulnId": "data_exfiltration",
+      "tags": [
+        "iast",
+        "http",
+        "exfiltration"
+      ],
+      "description": "Detect tainted data exfiltrated via common HTTP APIs (fetch, XHR, sendBeacon, image beacons).",
+      "recommendationSummary": "Do not send secrets or tokens to untrusted endpoints. Validate destination URLs and strip sensitive headers/body fields. Apply client-side DLP checks for outbound requests.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "file_upload",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3743c4faacad3701"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dangerous_form_scheme_execution",
+      "name": "Dangerous form target URL schemes",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "form",
+        "javascript-url",
+        "data-url"
+      ],
+      "description": "Detect tainted javascript: and data: URLs flowing into form action and formAction sinks.",
+      "recommendationSummary": "Reject javascript: and attacker-controlled data: values in form targets. Resolve form destinations through strict allow-lists.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "fd03fb9e79835ca2"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dangerous_url_scheme_execution",
+      "name": "Dangerous URL scheme execution sinks",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "javascript-url",
+        "data-url",
+        "dom",
+        "xss"
+      ],
+      "description": "Detect tainted javascript: and data: URLs flowing into executable navigation, iframe, link, and script-loading sinks.",
+      "recommendationSummary": "Reject javascript: and attacker-controlled data: URLs from untrusted input. Normalize and allow-list destinations before assigning href/src/location values. Prefer route identifiers over raw URLs for navigation.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9431eb32680beffa"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dom_link_manipulation",
+      "name": "DOM link and attribute navigation sinks",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "low",
+      "vulnId": "open_redirect",
+      "tags": [
+        "iast",
+        "link",
+        "dom"
+      ],
+      "description": "Detect tainted URLs assigned to link/navigation-related attributes (href, src, action, formaction).",
+      "recommendationSummary": "Validate and normalize URLs before assigning to link or navigation attributes. Prefer allow-listed destinations and internal routes.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "a7b3cf58667c394c"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dom_parser_xss",
+      "name": "DOM parser and unsafe HTML sinks",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "dom",
+        "xss",
+        "parser",
+        "advanced"
+      ],
+      "description": "Detect tainted HTML flowing into DOM parser and unsafe HTML APIs that frequently precede exploitable client-side execution.",
+      "recommendationSummary": "Avoid parsing or inserting untrusted HTML fragments. Prefer inert parsing only for trusted templates and sanitize before later insertion. Do not use setHTMLUnsafe with untrusted values.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "97ae95e5a0a22577"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dom_url_navigation",
+      "name": "DOM URL-based navigation sinks",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "low",
+      "vulnId": "open_redirect",
+      "tags": [
+        "iast",
+        "redirect",
+        "dom"
+      ],
+      "description": "Detect tainted data flowing into URL-based navigation APIs such as location and history.",
+      "recommendationSummary": "Allow-list navigation targets and normalize paths before use. Avoid assigning untrusted URLs to location APIs.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "7544b12c37c32b35"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dom_xss",
+      "name": "DOM XSS sinks",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "dom",
+        "xss"
+      ],
+      "description": "Runtime detection of DOM-based XSS in common HTML/DOM sinks.",
+      "recommendationSummary": "Avoid inserting untrusted strings into HTML or inline handlers. Prefer textContent or safe templating; sanitize with DOMPurify when HTML is required. Use CSP without unsafe-inline where possible.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "30a34d2657498932"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dom_xss_secondary_sources",
+      "name": "DOM XSS from secondary client-side sources",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "dom",
+        "xss",
+        "storage",
+        "cookie",
+        "hash"
+      ],
+      "description": "Detect DOM XSS sinks fed by cookies, storage, hash route, referrer, and window.name.",
+      "recommendationSummary": "Do not trust client-side persisted values (cookies/localStorage/sessionStorage/window.name/referrer). Encode before HTML insertion and avoid inline handlers. Apply strict sink-specific validation for route/referrer-driven rendering.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "f1abd13789071ca3"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_form_submission_hijack",
+      "name": "Form submission target hijack",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "form_target_manipulation",
+      "tags": [
+        "iast",
+        "form",
+        "navigation",
+        "authz"
+      ],
+      "description": "Detect attacker-controlled route, message, and request-body values changing form submission targets.",
+      "recommendationSummary": "Allow-list form submission targets. Do not derive action or formAction from untrusted route, body, or messaging input.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "b76046c75618bca6"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_iframe_navigation",
+      "name": "IFrame navigation and content sinks",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "open_redirect",
+      "tags": [
+        "iast",
+        "iframe",
+        "navigation"
+      ],
+      "description": "Detect tainted data flowing into iframe navigation sinks (src, srcdoc).",
+      "recommendationSummary": "Allow-list iframe targets and avoid writing untrusted URLs to iframe.src/srcdoc. Use sandbox attributes where possible.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Clickjacking",
+        "CWE": "https://cwe.mitre.org/data/definitions/451.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "ac95866278351883"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_js_execution",
+      "name": "Dynamic JS execution",
+      "tier": "free",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "iast",
+        "code",
+        "execution"
+      ],
+      "description": "Detect tainted payloads reaching eval/Function sinks.",
+      "recommendationSummary": "Never pass untrusted strings to eval or Function. Use safe parsers and strict allow-lists. Disable unsafe-eval in CSP.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/95.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "b470e0d3929c61bd"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_open_redirect",
+      "name": "Client-side navigation sinks",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "low",
+      "vulnId": "open_redirect",
+      "tags": [
+        "iast",
+        "redirect",
+        "navigation"
+      ],
+      "description": "Possible open redirects via navigation APIs.",
+      "recommendationSummary": "Allow-list redirect targets and reject external/absolute URLs from untrusted input. Map inputs to known routes instead of redirecting directly.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3f919305636905be"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_postmessage_misuse",
+      "name": "window.postMessage misuse",
+      "tier": "free",
+      "category": "client_side",
+      "severity": "medium",
+      "vulnId": "postmessage_misuse",
+      "tags": [
+        "iast",
+        "postmessage"
+      ],
+      "description": "Detect tainted data sent via window.postMessage to untrusted or wildcard origins.",
+      "recommendationSummary": "Use a strict targetOrigin and validate event.origin. Validate and sanitize event.data before use.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Clickjacking",
+        "CWE": "https://cwe.mitre.org/data/definitions/345.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e6a0a058942a12c6"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_prototype_pollution_impact",
+      "name": "Prototype pollution impact confirmation",
+      "tier": "free",
+      "category": "client_side",
+      "severity": "high",
+      "vulnId": "prototype_pollution",
+      "tags": [
+        "iast",
+        "prototype",
+        "pollution",
+        "runtime"
+      ],
+      "description": "Detect dangerous prototype-key writes from tainted input and confirm downstream fetch() init impact.",
+      "recommendationSummary": "Reject __proto__, constructor, and prototype keys during object merge and parsing. Use safe merge utilities and create null-prototype maps where appropriate.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Prototype_Pollution",
+        "CWE": "https://cwe.mitre.org/data/definitions/1321.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "prototype_pollution"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "33bd6c7704074992"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_response_field_dom_reachability",
+      "name": "Response-derived DOM execution reachability",
+      "tier": "free",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "response",
+        "dom",
+        "xss"
+      ],
+      "description": "Detect API and GraphQL response fields being fed into DOM HTML and parser sinks.",
+      "recommendationSummary": "Treat response fields as untrusted when rendering rich HTML or unsafe templates. Prefer text rendering or strict allow-listing for any response-driven markup.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "graphql"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "e668f9bda22015b2"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_route_controlled_navigation",
+      "name": "Route-controlled client navigation",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "route_control",
+      "tags": [
+        "iast",
+        "route",
+        "navigation",
+        "spa"
+      ],
+      "description": "Detect client-side route sources influencing history and navigation APIs.",
+      "recommendationSummary": "Do not derive navigation decisions directly from attacker-controlled route state. Normalize and allow-list client routes before mutating browser history or SPA navigation.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9265fa8306b825d6"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_source_scoped_open_redirect",
+      "name": "Open redirect from client-side taint sources",
+      "tier": "free",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "open_redirect",
+      "tags": [
+        "iast",
+        "redirect",
+        "dom",
+        "hash",
+        "postMessage"
+      ],
+      "description": "Detect client-side redirect sinks fed by common taint sources.",
+      "recommendationSummary": "Disallow absolute external URLs from untrusted sources. Resolve destinations against strict allow-lists. Treat hash route and referrer data as untrusted input.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cors_cross_origin",
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d0a038f3b1438d7c"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_storage_taint_to_exec",
+      "name": "Storage/referrer taint to execution sinks",
+      "tier": "free",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "iast",
+        "injection",
+        "storage",
+        "code_exec"
+      ],
+      "description": "Detect execution sinks when payloads originate from cookies/storage/window.name/referrer.",
+      "recommendationSummary": "Do not execute values loaded from client storage or window.name. Normalize and strictly validate route/referrer-based script parameters. Avoid dynamic code execution APIs.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/94.html"
+      },
+      "surfaceHints": [
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "41af003460f927cd"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_timer_js_execution",
+      "name": "Timer-based JS execution sinks",
+      "tier": "free",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "code_injection",
+      "tags": [
+        "iast",
+        "timer",
+        "code"
+      ],
+      "description": "Detect tainted string payloads executed via setTimeout/setInterval.",
+      "recommendationSummary": "Do not pass strings to setTimeout/setInterval. Pass functions directly and validate inputs.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/95.html"
+      },
+      "surfaceHints": [],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d838f94b1f24c781"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_blob_object_url_execution",
+      "name": "Blob and object URL execution",
+      "tier": "pro",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "blob",
+        "objecturl",
+        "worker",
+        "iframe"
+      ],
+      "description": "Detect tainted data flowing through Blob-created object URLs into script, iframe, worker, and window-opening sinks.",
+      "recommendationSummary": "Do not treat Blob/object URLs as trusted just because they are browser-generated. Constrain which payloads may become executable blobs and where those object URLs can be consumed. Prefer fixed worker/script resources over user-influenced object URLs.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/829.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cloud_storage",
+        "dom_xss"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "60e4bacf97f69118"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_client_json_parsing",
+      "name": "Client-side JSON parsing sinks",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "low",
+      "vulnId": "json_injection",
+      "tags": [
+        "iast",
+        "json",
+        "parsing"
+      ],
+      "description": "Detect tainted data parsed by JSON.parse(), which can enable client-side JSON injection or unsafe deserialization.",
+      "recommendationSummary": "Validate JSON input before parsing. Reject unexpected fields and enforce schema constraints.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Injection",
+        "CWE": "https://cwe.mitre.org/data/definitions/74.html"
+      },
+      "surfaceHints": [
+        "api_schema"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "571ff3cd1025a552"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_client_sql_injection",
+      "name": "Client-side SQL injection (WebSQL)",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "sql_injection",
+      "tags": [
+        "iast",
+        "sql",
+        "websql",
+        "injection"
+      ],
+      "description": "Detect tainted values in WebSQL database creation and SQL statement execution.",
+      "recommendationSummary": "Avoid dynamic SQL statement construction in client code. Use parameterized statements where available. Treat WebSQL usage as legacy and avoid for sensitive data paths.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/SQL_Injection",
+        "CWE": "https://cwe.mitre.org/data/definitions/89.html"
+      },
+      "surfaceHints": [
+        "sensitive_data",
+        "sql_injection"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "2e5360c7dc4107a6"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_clipboard_exfiltration",
+      "name": "Clipboard exfiltration sinks",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "data_exfiltration",
+      "tags": [
+        "iast",
+        "clipboard",
+        "exfiltration"
+      ],
+      "description": "Detect tainted sensitive data written to the clipboard.",
+      "recommendationSummary": "Avoid writing sensitive data to the clipboard. Require explicit user action and redact secrets.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+        "CWE": "https://cwe.mitre.org/data/definitions/359.html"
+      },
+      "surfaceHints": [
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "50278b19070059b6"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_csrf_like_requests",
+      "name": "Potential CSRF-prone cross-site requests",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "csrf",
+      "tags": [
+        "iast",
+        "csrf",
+        "behavioral"
+      ],
+      "description": "Heuristically detect cross-site, state-changing requests without CSRF tokens or custom auth headers.",
+      "recommendationSummary": "Require CSRF tokens or same-site cookies for state-changing requests. Verify Origin/Referer and enforce method restrictions.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/csrf",
+        "CWE": "https://cwe.mitre.org/data/definitions/352.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cors_cross_origin",
+        "csrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8f70b1dd7485a534"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_debug_logging_leaks",
+      "name": "Debug logging and console leaks",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "info_disclosure",
+      "tags": [
+        "iast",
+        "logging",
+        "console",
+        "debug"
+      ],
+      "description": "Detect tainted secrets and sensitive data written to console logs.",
+      "recommendationSummary": "Do not log secrets or PII to the console. Redact sensitive fields and disable debug logs in production.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+        "CWE": "https://cwe.mitre.org/data/definitions/215.html"
+      },
+      "surfaceHints": [
+        "client_discovery",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "3fdea44081b76bca"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_document_domain_manipulation",
+      "name": "Document domain manipulation",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "low",
+      "vulnId": "broken_access_control",
+      "tags": [
+        "iast",
+        "domain"
+      ],
+      "description": "Detect tainted values assigned to document.domain, which can relax same-origin protections.",
+      "recommendationSummary": "Avoid setting document.domain based on untrusted input. Prefer postMessage or other explicit communication mechanisms.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/DOM_Based_Document_Domain_Manipulation",
+        "CWE": "https://cwe.mitre.org/data/definitions/284.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "cors_cross_origin",
+        "file_upload"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "2e9d654cedf0a6ce"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dom_clobbering",
+      "name": "DOM clobbering candidates",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "medium",
+      "vulnId": "other",
+      "tags": [
+        "iast",
+        "dom",
+        "clobbering"
+      ],
+      "description": "Detect risky named element properties that can clobber expected object references.",
+      "recommendationSummary": "Avoid using unqualified global variables for security-sensitive references. Access elements via explicit selectors instead of named properties. Sanitize or reject attacker-controlled id/name attributes.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "dom_xss",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d312af836e73cd79"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_dynamic_import_loading",
+      "name": "Dynamic import and loader surfaces",
+      "tier": "pro",
+      "category": "supply_chain",
+      "severity": "high",
+      "vulnId": "integrity_failure",
+      "tags": [
+        "iast",
+        "script",
+        "module",
+        "worker",
+        "supply_chain"
+      ],
+      "description": "Detect tainted values reaching observable client-side code loading entry points such as script.src, Worker constructors, serviceWorker.register(), and importScripts().",
+      "recommendationSummary": "Only load scripts or modules from trusted, allow-listed origins. Keep loader specifiers and worker URLs fixed wherever possible. Use CSP and integrity controls to constrain dynamic code loading.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/829.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "file_upload",
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8f5f7c4f033b367b"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_file_reader_sensitive_flows",
+      "name": "FileReader sink coverage",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "medium",
+      "vulnId": "path_traversal",
+      "tags": [
+        "iast",
+        "filereader",
+        "client-side"
+      ],
+      "description": "Detect tainted file names or descriptors reaching FileReader read APIs.",
+      "recommendationSummary": "Do not derive local file descriptors from untrusted input. Validate file metadata before processing. Avoid exposing file-derived secrets through downstream sinks.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/06-Testing_for_Client-side_Resource_Manipulation",
+        "CWE": "https://cwe.mitre.org/data/definitions/829.html"
+      },
+      "surfaceHints": [
+        "file_upload",
+        "path_traversal"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "ceff2152e5c11c91"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_form_submit_csrf",
+      "name": "Programmatic form submission trust and CSRF",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "csrf",
+      "tags": [
+        "iast",
+        "form",
+        "csrf",
+        "submit"
+      ],
+      "description": "Detect attacker-controlled submission targets reaching HTMLFormElement.submit() and requestSubmit(), including hidden-frame target abuse.",
+      "recommendationSummary": "Do not trigger form submission from attacker-controlled routes, body fields, or message channels. Lock down form targets and target frames before calling submit()/requestSubmit(). Keep CSRF defenses server-side even when the client appears to constrain submission paths.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/csrf",
+        "CWE": "https://cwe.mitre.org/data/definitions/352.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "csrf"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "4ab1042e994c559c"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_inbound_channel_trust",
+      "name": "Inbound channel trust boundaries",
+      "tier": "pro",
+      "category": "client_side",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "broadcastchannel",
+        "messageport",
+        "worker"
+      ],
+      "description": "Detect inbound BroadcastChannel, MessagePort, and Worker messages reaching DOM, code execution, navigation, and form-target sinks.",
+      "recommendationSummary": "Treat inbound channel messages as untrusted input until validated. Validate message origin, channel identity, and payload shape before using it for DOM mutation or navigation. Avoid routing privileged form or navigation decisions directly from worker/channel messages.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/",
+        "CWE": "https://cwe.mitre.org/data/definitions/345.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "dom_xss",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "9e8650a00e4c28ce"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_indexeddb_cache_storage",
+      "name": "IndexedDB and CacheStorage persistence",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "high",
+      "vulnId": "sensitive_storage",
+      "tags": [
+        "iast",
+        "indexeddb",
+        "cache",
+        "storage"
+      ],
+      "description": "Detect tainted or sensitive values being persisted to IndexedDB and CacheStorage, and later reused in execution or request-shaping sinks.",
+      "recommendationSummary": "Do not persist executable or request-shaping state from untrusted input into IndexedDB or CacheStorage. Treat persisted browser data as untrusted on read-back, especially when it shapes script, navigation, or network destinations. Avoid storing secrets in browser-managed caches u",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Insecure_Storage",
+        "CWE": "https://cwe.mitre.org/data/definitions/922.html"
+      },
+      "surfaceHints": [
+        "cache_privacy",
+        "dom_xss",
+        "open_redirect",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "53bfb6c98c50f120"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_realtime_exfiltration",
+      "name": "Real-time channel exfiltration sinks",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "high",
+      "vulnId": "data_exfiltration",
+      "tags": [
+        "iast",
+        "websocket",
+        "webrtc",
+        "exfiltration"
+      ],
+      "description": "Detect tainted data exfiltrated via WebSocket and WebRTC data channels.",
+      "recommendationSummary": "Avoid sending sensitive data over realtime channels to untrusted endpoints. Authenticate/authorize recipients and redact secrets.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "realtime",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8129bfe66d16381d"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_response_field_form_targets",
+      "name": "Response-derived form targets",
+      "tier": "pro",
+      "category": "access_control",
+      "severity": "medium",
+      "vulnId": "open_redirect",
+      "tags": [
+        "iast",
+        "response",
+        "form",
+        "navigation"
+      ],
+      "description": "Detect API and GraphQL response fields being reused in form action and formAction targets.",
+      "recommendationSummary": "Do not let server response fields directly control form destinations. Resolve form actions through fixed routes or strict allow-lists.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html",
+        "CWE": "https://cwe.mitre.org/data/definitions/601.html"
+      },
+      "surfaceHints": [
+        "authz_object",
+        "graphql",
+        "open_redirect"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "96d5a410480c8abe"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_session_material_cross_boundary_exfiltration",
+      "name": "Session material crossing trust boundaries",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "high",
+      "vulnId": "data_exfiltration",
+      "tags": [
+        "iast",
+        "storage",
+        "cookie",
+        "session",
+        "exfiltration"
+      ],
+      "description": "Detect storage- and cookie-backed values crossing origins or messaging boundaries via network and channel sinks.",
+      "recommendationSummary": "Do not forward session material or sensitive client state to cross-origin destinations. Keep cookies and storage values out of outbound headers, beacons, and cross-context messages.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin",
+        "jwt_token",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "8e3ce411bf373f58"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_storage_backed_request_reuse",
+      "name": "Storage-backed request shaping",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "request_shaping",
+      "tags": [
+        "iast",
+        "storage",
+        "request",
+        "header"
+      ],
+      "description": "Detect values loaded from cookies and client storage being reused in request URLs and headers.",
+      "recommendationSummary": "Do not shape requests directly from client-stored session or trust data. Validate and scope any storage-backed request parameters before reuse.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+        "CWE": "https://cwe.mitre.org/data/definitions/201.html"
+      },
+      "surfaceHints": [
+        "jwt_token"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "881e3d43c5ebd172"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_storage_token_leaks",
+      "name": "Client-side token and sensitive data storage",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "high",
+      "vulnId": "sensitive_storage",
+      "tags": [
+        "iast",
+        "storage",
+        "token"
+      ],
+      "description": "Detect tainted tokens and sensitive data being persisted to client-side storage (localStorage, sessionStorage, cookies).",
+      "recommendationSummary": "Avoid storing auth tokens in local/session storage. Prefer HttpOnly cookies or server-side sessions; encrypt and expire when unavoidable.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Insecure_Storage",
+        "CWE": "https://cwe.mitre.org/data/definitions/922.html"
+      },
+      "surfaceHints": [
+        "jwt_token",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "7d8bab3853333e09"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_trusted_types_and_sanitizer_misuse",
+      "name": "Trusted Types and sanitizer misuse",
+      "tier": "pro",
+      "category": "xss",
+      "severity": "high",
+      "vulnId": "dom_xss",
+      "tags": [
+        "iast",
+        "trustedtypes",
+        "dompurify",
+        "sanitizer"
+      ],
+      "description": "Detect tainted values flowing through permissive Trusted Types policies or dangerous DOMPurify configurations.",
+      "recommendationSummary": "Keep Trusted Types policies minimal and do not pass untrusted input through privileged callbacks unchanged. Avoid permissive DOMPurify options such as allowing event attributes or javascript: URLs for untrusted content. Treat sanitizer and policy configuration as a privileged tru",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/xss/",
+        "CWE": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      "surfaceHints": [
+        "dom_xss",
+        "supply_chain"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "13648c26eb6fa892"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_web_messaging_channels",
+      "name": "Web messaging channel misuse",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "medium",
+      "vulnId": "data_exfiltration",
+      "tags": [
+        "iast",
+        "broadcastchannel",
+        "messageport"
+      ],
+      "description": "Detect tainted data sent across BroadcastChannel and MessagePort messaging boundaries.",
+      "recommendationSummary": "Verify message origins and channel names. Validate payloads and avoid forwarding secrets.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+        "CWE": "https://cwe.mitre.org/data/definitions/924.html"
+      },
+      "surfaceHints": [
+        "cors_cross_origin"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "fab0161608b0f083"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_websocket_url_poisoning",
+      "name": "WebSocket URL poisoning",
+      "tier": "pro",
+      "category": "sensitive_data",
+      "severity": "high",
+      "vulnId": "data_exfiltration",
+      "tags": [
+        "iast",
+        "websocket",
+        "exfiltration"
+      ],
+      "description": "Detect tainted WebSocket constructor URLs that can pivot data channels to attacker-controlled endpoints.",
+      "recommendationSummary": "Build WebSocket endpoints from trusted constants. Reject user-controlled ws/wss destination inputs. Enforce host allow-list before constructing WebSocket URLs.",
+      "links": {
+        "OWASP": "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/",
+        "CWE": "https://cwe.mitre.org/data/definitions/200.html"
+      },
+      "surfaceHints": [
+        "realtime",
+        "sensitive_data"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "5ae7b16b6050ece0"
+    },
+    {
+      "engine": "IAST",
+      "moduleId": "iast_xpath_injection",
+      "name": "Client-side XPath injection",
+      "tier": "pro",
+      "category": "injection",
+      "severity": "high",
+      "vulnId": "xpath_injection",
+      "tags": [
+        "iast",
+        "xpath",
+        "injection"
+      ],
+      "description": "Detect tainted XPath expressions passed to document.evaluate().",
+      "recommendationSummary": "Do not concatenate untrusted input into XPath expressions. Use strict allow-lists for selector fragments. Avoid dynamic XPath where possible.",
+      "links": {
+        "OWASP": "https://owasp.org/www-community/attacks/XPATH_Injection",
+        "CWE": "https://cwe.mitre.org/data/definitions/643.html"
+      },
+      "surfaceHints": [
+        "file_upload",
+        "path_traversal"
+      ],
+      "metadataVersion": "2026-06-04",
+      "sourceHash": "d2a56b5435e2619f"
+    }
+  ]
+}

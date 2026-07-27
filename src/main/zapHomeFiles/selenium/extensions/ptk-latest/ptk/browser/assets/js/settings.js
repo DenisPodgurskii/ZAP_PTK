@@ -1,20 +1,18 @@
 /* Author: Denis Podgurskii */
 import { ptk_controller_settings } from "../../../controller/settings.js"
-import { ptk_controller_dast } from "../../../controller/dast.js"
+import { ptk_controller_secrets } from "../../../controller/secrets.js"
 import {
     buildPortalLoginUrl,
     buildPortalRegisterUrl,
-    buildPortalUrl,
     initializePortalRuntimeConfig
 } from "../../../common/portalConfig.js"
 
 const controller = new ptk_controller_settings()
-const rattacker = new ptk_controller_dast()
+const secrets = new ptk_controller_secrets()
 const portalConfigReady = initializePortalRuntimeConfig()
 
 var loginLink, registerLink
 var profileSettings = {}
-var currentApiKey = ""
 
 function refreshPortalLinks() {
     loginLink = buildPortalLoginUrl()
@@ -67,18 +65,30 @@ jQuery(function () {
         let $form = $('#profile_form')
         $form.form('set value', "api_key", "")
         hideApiMessages()
-        currentApiKey = ""
-        if (profileSettings) profileSettings.api_key = ""
-        controller.save('profile.api_key', "").then(function () {
-            controller.restore().then(function (s) {
-                controller.on_updated_settings(s)
-            })
+        secrets.clear().then(function (result) {
+            if (result?.success) showApiInfo()
+            else showApiError(result?.message || 'Unable to clear API token.')
         })
-        showApiInfo()
     })
 
     $('.save_apikey').on('click', function () {
         activateProToken()
+    })
+
+    $('.clear_sensitive_artifacts').on('click', function () {
+        if (!window.confirm('Clear saved JWTs, Request Builder history, macros, session profiles, and evidence packages?')) return
+        browser.runtime.sendMessage({
+            channel: 'ptk_popup2background_app',
+            type: 'clear_sensitive_artifacts'
+        }).then((result) => {
+            if (!result?.success) {
+                window.alert(result?.error === 'recording_or_replay_active'
+                    ? 'Stop the active recording or replay before clearing saved testing data.'
+                    : 'Saved testing data could not be cleared.')
+                return
+            }
+            window.alert('Saved testing data was cleared.')
+        }).catch(() => window.alert('Saved testing data could not be cleared.'))
     })
 
     $('#settings_save').on('click', function () {
@@ -150,46 +160,12 @@ function setFormValueIfExists($form, key, value) {
 }
 
 function checkApiKey(showError = true, apiKeyOverride = null) {
-    let apiKey = apiKeyOverride
-    if (!apiKey) {
-        let $form = $('#profile_form'), values = $form.form('get values')
-        Object.keys(values).map((k) => { if (values[k] === 'on') values[k] = true })
-        apiKey = values['api_key']
-    }
-    apiKey = (apiKey || "").trim()
-    if (!apiKey) {
-        if (showError) showApiError("API key is empty.")
-        else hideApiMessages()
-        return Promise.resolve(false)
-    }
-    return rattacker.checkApiKey(apiKey).then(function (response) {
-        let msg = ""
-        if (typeof response == "object" && response.rules?.modules?.json) {
-            try {
-                let modules = JSON.parse(response.rules.modules.json).modules
-                let attacksNum = 0
-                let dt = new Array()
-                modules.map(item => {
-                    dt.push([item.metadata.module_name, Object.keys(item.attacks).length])
-                })
-                bindTable('#tbl_modules', { data: dt })
-                currentApiKey = apiKey
-                if (profileSettings) profileSettings.api_key = apiKey
-                updateApiTokenDisplay(apiKey)
-                showApiSuccess(msg || "API token validated successfully.")
-            }catch(er){
-                if (showError) {
-                    msg = er.message
-                    showApiError(msg)
-                    return false
-                }
-            }
+    return secrets.validate().then(function (result) {
+        if (result?.success) {
+            showApiSuccess(result.message || "API token validated successfully.", result.status)
             return true
-        } else if (showError) {
-            msg = response?.json?.message || response?.message || "Unable to validate API key."
-            showApiError(msg)
-            return false
         }
+        if (showError) showApiError(result?.message || "Unable to validate API key.")
         return false
     })
 }
@@ -209,8 +185,8 @@ function showApiError(message) {
     $('#api_error').show()
 }
 
-function showApiSuccess(message, token = null) {
-    if (token) updateApiTokenDisplay(token)
+function showApiSuccess(message, status = null) {
+    updateApiTokenDisplay(status)
     $('#api_response_success').text(message || "")
     $('#api_error').hide()
     $('#api_info').hide()
@@ -224,17 +200,8 @@ function showApiInfo() {
     $('#api_info').show()
 }
 
-function updateApiTokenDisplay(token) {
-    const masked = maskApiToken(token)
-    $('#api_token').text(masked)
-}
-
-function maskApiToken(token) {
-    if (!token) return ""
-    const visibleLength = token.length < 8 ? token.length : Math.min(10, token.length)
-    const visiblePart = token.slice(0, visibleLength)
-    const maskedPart = '*'.repeat(Math.max(0, token.length - visibleLength))
-    return visiblePart + maskedPart
+function updateApiTokenDisplay(status) {
+    $('#api_token').text(status?.fingerprint || "Configured")
 }
 
 async function activateProToken() {
@@ -248,110 +215,21 @@ async function activateProToken() {
         return
     }
 
-    const activationUrl = buildActivationUrl()
-    if (!activationUrl) {
-        showApiError("Activation endpoint is not configured. Please check PTK Pro settings.")
-        return
-    }
-
     try {
-        const response = await fetch(activationUrl, {
-            method: "POST",
-            credentials: "omit",
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            },
-            cache: "no-cache",
-            body: JSON.stringify({
-                activation_token: activationToken,
-                ptk_agent: "ptk-browser-extension"
-            })
-        })
-
-        let payload = {}
-        const rawBody = await response.text()
-        if (rawBody) {
-            try {
-                payload = JSON.parse(rawBody)
-            } catch (err) {
-                payload = { message: rawBody }
-            }
-        }
-
-        if (!response.ok || !payload?.token) {
-            let message = payload?.message || payload?.error || payload?.json?.message || "Unable to activate token."
-            showApiError(message)
+        const result = await secrets.activate(activationToken)
+        $form.form('set value', "api_key", "")
+        if (!result?.success) {
+            showApiError(result?.message || "Unable to activate token.")
             return
         }
-
-        await controller.save('profile.api_key', payload.token)
-        if (profileSettings) profileSettings.api_key = payload.token
-        currentApiKey = payload.token
-        $form.form('set value', "api_key", "")
-        showApiSuccess("API token activated successfully.", payload.token)
-        await checkApiKey(false, payload.token)
-
-        controller.restore().then(function (s) {
-            controller.on_updated_settings(s)
-        })
+        showApiSuccess(result.message || "API token activated successfully.", result.status)
     } catch (err) {
-        showApiError(err.message)
-    }
-}
-
-function buildActivationUrl() {
-    return buildPortalUrl('/tokens/activate')
-}
-
-function buildValidationUrl() {
-    return buildPortalUrl('/tokens/validate')
-}
-
-async function validateStoredToken(token) {
-    await portalConfigReady
-    const normalizedToken = (token || "").trim()
-    currentApiKey = normalizedToken
-    if (!normalizedToken) {
-        showApiInfo()
-        return
-    }
-    const validationUrl = buildValidationUrl()
-    if (!validationUrl) {
-        showApiError("Validation endpoint is not configured. Please check PTK Pro settings.")
-        return
-    }
-    hideApiMessages()
-    try {
-        const response = await fetch(validationUrl, {
-            method: 'GET',
-            credentials: 'omit',
-            headers: {
-                'Authorization': 'Bearer ' + normalizedToken,
-                'Accept': 'application/json'
-            },
-            cache: 'no-cache'
-        })
-        let payload = null
-        try {
-            payload = await response.json()
-        } catch (err) {
-            payload = null
-        }
-        if (response.ok) {
-            showApiSuccess("API token validated successfully.", normalizedToken)
-        } else {
-            const message = payload?.message || payload?.error || payload?.json?.message || "Token validation failed."
-            showApiError(message)
-        }
-    } catch (err) {
-        showApiError(err.message)
+        showApiError("Unable to activate token.")
     }
 }
 
 $(document).on("check_api_key", async function (e) {
-    let apiKey = arguments.length > 1 ? arguments[1] : null
-    checkApiKey(true, apiKey)
+    checkApiKey(true)
 })
 
 $(document).on("init_forms", function (e, s) {
@@ -387,19 +265,20 @@ $(document).on("init_forms", function (e, s) {
 
 
     profileSettings = s.profile || {}
-    currentApiKey = profileSettings.api_key || ""
-    if (!currentApiKey) {
-        showApiInfo()
-    }
 
     Object.entries(s.profile).forEach(([key, value]) => {
-        if (key === "api_key") {
-            setFormValueIfExists($profileForm, key, "")
-            validateStoredToken(value)
-            return
-        }
         setFormValueIfExists($profileForm, key, value)
     })
+    setFormValueIfExists($profileForm, "api_key", "")
+    secrets.getStatus().then(function (result) {
+        const status = result?.status
+        if (!status?.configured) showApiInfo()
+        else if (status.valid === false) showApiError("Stored API token requires validation.")
+        else showApiSuccess(
+            status.valid === true ? "API token validated successfully." : "API token is configured.",
+            status
+        )
+    }).catch(() => showApiError("Unable to read API token status."))
     portalConfigReady.finally(function () {
         refreshPortalLinks()
     })

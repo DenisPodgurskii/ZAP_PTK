@@ -1,5 +1,6 @@
 /* Author: Denis Podgurskii */
-import { ptk_logger, ptk_utils, ptk_storage, ptk_jwtHelper } from "./utils.js"
+import { ptk_logger, ptk_utils, ptk_jwtHelper } from "./utils.js"
+import { sensitiveArtifactStorage as ptk_storage } from "./sensitiveArtifactStore.js"
 import * as jose from "../packages/jose/browser/index.js"
 import CryptoES from "../packages/crypto-es/index.js"
 
@@ -22,21 +23,23 @@ export class ptk_jwt {
     }
 
     onMessage(message, sender, sendResponse) {
-
-        if (!ptk_utils.isTrustedOrigin(sender))
-            return Promise.reject({ success: false, error: 'Error origin value' })
-
-        if (message.channel == "ptk_popup2background_jwt") {
-            if (this["msg_" + message.type]) {
-                return this["msg_" + message.type](message)
-            }
-            return Promise.resolve()
+        if (message?.channel !== "ptk_popup2background_jwt") return undefined
+        if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+            return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
         }
+        if (this["msg_" + message.type]) return this["msg_" + message.type](message)
+        return Promise.resolve()
     }
 
     async msg_init(message) {
         this.storage = await ptk_storage.getItem(this.storageKey)
         let activeTab = worker.ptk_app.proxy.getDashboardTab()
+        if (!activeTab?.tabId || !ptk_utils.isURL(activeTab?.url)) {
+            activeTab = await worker.ptk_app.proxy.ensureActiveTabContext()
+            if (activeTab?.tabId && ptk_utils.isURL(activeTab?.url)) {
+                worker.ptk_app.proxy.setDashboardTab(activeTab.tabId, activeTab.url)
+            }
+        }
         let cookies = []
         if (activeTab?.tabId) cookies = await worker.ptk_app.session.getAllCookiesByTab(activeTab.tabId)
         return Promise.resolve(Object.assign({}, {

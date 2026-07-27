@@ -13,6 +13,18 @@ function normalizeString(value) {
     return typeof value === "string" ? value.trim() : ""
 }
 
+function normalizeHttpOrigin(value) {
+    const normalized = normalizeString(value)
+    if (!normalized) return null
+    try {
+        const parsed = new URL(normalized)
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null
+        return parsed.origin
+    } catch (_) {
+        return null
+    }
+}
+
 function normalizeDevLocalConfig(payload) {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
         return {}
@@ -21,6 +33,19 @@ function normalizeDevLocalConfig(payload) {
     const normalized = {}
     if (payload.automationEnabled === true || payload.automation === true) {
         normalized.automationEnabled = true
+    }
+    if (payload.automationAllowChildFrameBootstrap === true) {
+        normalized.automationAllowChildFrameBootstrap = true
+    }
+    if (Array.isArray(payload.automationChildFrameBootstrapOrigins)) {
+        const origins = Array.from(new Set(
+            payload.automationChildFrameBootstrapOrigins
+                .map(normalizeHttpOrigin)
+                .filter(Boolean)
+        ))
+        if (origins.length) {
+            normalized.automationChildFrameBootstrapOrigins = origins
+        }
     }
 
     const portalBaseUrl = normalizeString(payload.portalBaseUrl || payload.portalUrl)

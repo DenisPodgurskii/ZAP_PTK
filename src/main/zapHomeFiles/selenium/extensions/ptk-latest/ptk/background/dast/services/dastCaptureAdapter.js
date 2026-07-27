@@ -18,6 +18,7 @@ export class DastCaptureAdapter {
         browserApi = globalThis.browser,
         requestFilters = [],
         extraInfoSpec = [],
+        requestStore = null,
         getState = () => ({})
     } = {}) {
         this.engine = engine
@@ -25,6 +26,7 @@ export class DastCaptureAdapter {
         this.browserApi = browserApi
         this.requestFilters = Array.isArray(requestFilters) ? requestFilters : []
         this.extraInfoSpec = Array.isArray(extraInfoSpec) ? extraInfoSpec : []
+        this.requestStore = requestStore
         this.getState = getState
 
         this.onRemoved = this.onRemoved.bind(this)
@@ -52,11 +54,13 @@ export class DastCaptureAdapter {
         this.observedRequestsQueued = 0
         this.observedRequestsDropped = 0
         this.observedRequestsErrored = 0
+        this.observedRequestsDeduplicated = 0
         this.lastObservedRequestStartedAt = null
         this.lastObservedRequestFinishedAt = null
         this.lastObservedRequestQueuedAt = null
         this.lastObservedRequestDroppedAt = null
         this.lastObservedRequestErrorAt = null
+        this._observedRequestStates = new Map()
     }
 
     getPendingObservedRequestCount() {
@@ -71,6 +75,7 @@ export class DastCaptureAdapter {
             observedRequestsQueued: Math.max(0, Number(this.observedRequestsQueued || 0)),
             observedRequestsDropped: Math.max(0, Number(this.observedRequestsDropped || 0)),
             observedRequestsErrored: Math.max(0, Number(this.observedRequestsErrored || 0)),
+            observedRequestsDeduplicated: Math.max(0, Number(this.observedRequestsDeduplicated || 0)),
             lastObservedRequestStartedAt: this.lastObservedRequestStartedAt || null,
             lastObservedRequestFinishedAt: this.lastObservedRequestFinishedAt || null,
             lastObservedRequestQueuedAt: this.lastObservedRequestQueuedAt || null,
@@ -122,6 +127,74 @@ export class DastCaptureAdapter {
                     this._markCaptureProgressChanged()
                 }
             })
+    }
+
+    _observedResponseKey(response = {}) {
+        const requestId = String(response?.requestId || "").trim()
+        if (requestId) {
+            const tabId = Number.isInteger(response?.tabId) ? response.tabId : "tab"
+            const frameId = Number.isInteger(response?.frameId) ? response.frameId : 0
+            return `${tabId}:${frameId}:${requestId}`
+        }
+        const method = String(response?.method || "GET").toUpperCase()
+        const url = String(response?.url || response?.ui_url || "").trim()
+        return url ? `${method}:${url}` : ""
+    }
+
+    _trackObservedResponse(response, maxAttempts = 6) {
+        const key = this._observedResponseKey(response)
+        if (!key) return this._trackObservedRequest(this.enqueueObservedRequest(response, maxAttempts))
+
+        const existing = this._observedRequestStates.get(key)
+        if (existing?.queued === true) {
+            this.observedRequestsDeduplicated += 1
+            return Promise.resolve(false)
+        }
+        if (existing?.pending === true) {
+            existing.latestResponse = response
+            existing.latestMaxAttempts = Math.max(Number(existing.latestMaxAttempts || 0), Number(maxAttempts || 1))
+            existing.retryRequested = true
+            this.observedRequestsDeduplicated += 1
+            return existing.promise || Promise.resolve(false)
+        }
+
+        const state = {
+            pending: true,
+            queued: false,
+            latestResponse: response,
+            latestMaxAttempts: maxAttempts,
+            retryRequested: false,
+            promise: null
+        }
+        this._observedRequestStates.set(key, state)
+
+        const runCapture = async () => {
+            let currentResponse = response
+            let currentAttempts = maxAttempts
+            while (true) {
+                const queued = await this.enqueueObservedRequest(currentResponse, currentAttempts)
+                if (queued === true) {
+                    state.queued = true
+                    return true
+                }
+                if (state.retryRequested && state.latestResponse && state.latestResponse !== currentResponse) {
+                    currentResponse = state.latestResponse
+                    currentAttempts = state.latestMaxAttempts || currentAttempts
+                    state.retryRequested = false
+                    continue
+                }
+                return false
+            }
+        }
+
+        state.promise = this._trackObservedRequest(runCapture())
+            .finally(() => {
+                state.pending = false
+                if (state.queued !== true) {
+                    this._observedRequestStates.delete(key)
+                }
+            })
+        return state.promise
     }
 
     addListeners() {
@@ -177,7 +250,7 @@ export class DastCaptureAdapter {
     _buildResponseEnvelopeFromTabRequest(tabId, frameId, requestId, requestDetails) {
         const url = requestDetails?.url || null
         if (!url) return null
-        const uiUrl = requestDetails?.ui_url || this.worker?.ptk_app?.proxy?.getUiUrl?.(tabId, url) || url
+        const uiUrl = requestDetails?.ui_url || this.requestStore?.getUiUrl?.(tabId, url) || url
         return {
             tabId,
             frameId,
@@ -514,7 +587,7 @@ export class DastCaptureAdapter {
     seedRequestsFromTab(tabId, maxRequests = 200) {
         if (this.state?.zapManaged === true) return
         if (!this.engine?.isRunning || !this.state.acceptIncomingRequests) return
-        const tab = this.worker?.ptk_app?.proxy?.getTab?.(tabId)
+        const tab = this.requestStore?.getTab?.(tabId)
         if (!tab?.frames || typeof tab.frames.forEach !== "function") return
 
         const entries = []
@@ -534,7 +607,7 @@ export class DastCaptureAdapter {
                 const key = `${item.frameId}:${item.requestId}`
                 if (selectedKeys.has(key)) continue
                 try {
-                    const details = this.worker?.ptk_app?.proxy?.getRequestDetails?.(tab, item.frameId, item.requestId)
+                    const details = this.requestStore?.getRequestDetails?.(tab, item.frameId, item.requestId)
                     const method = String(details?.method || "").toUpperCase()
                     if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
                         selected.push(item)
@@ -546,12 +619,12 @@ export class DastCaptureAdapter {
 
         selected.forEach(({ frameId, requestId }) => {
             try {
-                const details = this.worker?.ptk_app?.proxy?.getRequestDetails?.(tab, frameId, requestId)
+                const details = this.requestStore?.getRequestDetails?.(tab, frameId, requestId)
                 const envelope = this._buildResponseEnvelopeFromTabRequest(tabId, frameId, requestId, details)
                 if (!envelope) return
-                const rawBundle = this.worker?.ptk_app?.proxy?.getRawRequestWithMeta
-                    ? this.worker.ptk_app.proxy.getRawRequestWithMeta(tab, frameId, requestId)
-                    : { raw: this.worker?.ptk_app?.proxy?.getRawRequest?.(tab, frameId, requestId), meta: {} }
+                const rawBundle = this.requestStore?.getRawRequestWithMeta
+                    ? this.requestStore.getRawRequestWithMeta(tab, frameId, requestId)
+                    : { raw: this.requestStore?.getRawRequest?.(tab, frameId, requestId), meta: {} }
                 let rawRequest = rawBundle?.raw || ""
                 const hasPerRequestHeaders = !!rawBundle?.meta?.hasPerRequestHeaders
                 const hasBody = /\r?\n\r?\n[\s\S]+/.test(String(rawRequest || ""))
@@ -596,12 +669,11 @@ export class DastCaptureAdapter {
             }
         }
 
-        const proxy = this.worker?.ptk_app?.proxy
         const maxRequests = Number.isFinite(Number(options?.maxRequests))
             ? Math.max(0, Number(options.maxRequests))
             : 200
-        const proxyEntries = typeof proxy?.collectZapAutomationSeedRequests === "function"
-            ? proxy.collectZapAutomationSeedRequests(tabId, {
+        const proxyEntries = typeof this.requestStore?.collectZapAutomationSeedRequests === "function"
+            ? this.requestStore.collectZapAutomationSeedRequests(tabId, {
                 targetUrl: options?.targetUrl || options?.pageUrl || null,
                 sinceMs: options?.sinceMs || 0,
                 maxRequests
@@ -727,18 +799,18 @@ export class DastCaptureAdapter {
         const attempts = this._isStateChangingRequest(response) ? Math.max(requestedAttempts, 6) : requestedAttempts
         for (let attempt = 0; attempt < attempts; attempt++) {
             try {
-                const tab = this.worker?.ptk_app?.proxy?.getTab?.(response.tabId)
+                const tab = this.requestStore?.getTab?.(response.tabId)
                 if (!tab) throw new Error("tab_not_ready")
-                const details = this.worker?.ptk_app?.proxy?.getRequestDetails?.(tab, response.frameId, response.requestId, {
+                const details = this.requestStore?.getRequestDetails?.(tab, response.frameId, response.requestId, {
                     expectedUrl: response.url,
                     expectedMethod: response.method
                 }) || null
-                const rawBundle = this.worker?.ptk_app?.proxy?.getRawRequestWithMeta
-                    ? this.worker.ptk_app.proxy.getRawRequestWithMeta(tab, response.frameId, response.requestId, {
+                const rawBundle = this.requestStore?.getRawRequestWithMeta
+                    ? this.requestStore.getRawRequestWithMeta(tab, response.frameId, response.requestId, {
                         expectedUrl: response.url,
                         expectedMethod: response.method
                     })
-                    : { raw: this.worker?.ptk_app?.proxy?.getRawRequest?.(tab, response.frameId, response.requestId), meta: {} }
+                    : { raw: this.requestStore?.getRawRequest?.(tab, response.frameId, response.requestId), meta: {} }
                 let rawRequest = rawBundle?.raw || ""
                 if (!String(rawRequest || "").trim() && response?.url) {
                     try {
@@ -836,6 +908,7 @@ export class DastCaptureAdapter {
             return false
         }
         if (!this._isAttackableRequestType(response)) return false
+        if (this._isPtkGeneratedObservedResponse(response)) return false
         if (this.state.requireUserInteractionBeforeCapture && !this.state.userInteractionUnlocked) {
             if (allowHtmlDiscoveryBypass && this._isSameOriginHtmlDocumentResponse(response)) {
                 return true
@@ -849,15 +922,31 @@ export class DastCaptureAdapter {
         return true
     }
 
+    _isPtkGeneratedObservedResponse(response = {}) {
+        try {
+            const tab = this.requestStore?.getTab?.(response.tabId)
+            if (!tab) return false
+            const details = this.requestStore?.getRequestDetails?.(tab, response.frameId, response.requestId, {
+                expectedUrl: response.url,
+                expectedMethod: response.method
+            })
+            return this._isPtkGeneratedCapturedRequest({
+                requestHeaders: details?.requestHeaders || []
+            })
+        } catch (_) {
+            return false
+        }
+    }
+
     onResponseStarted(response) {
         if (!this._shouldCaptureResponse(response)) return
-        this._trackObservedRequest(this.enqueueObservedRequest(response))
+        this._trackObservedResponse(response)
     }
 
     onHeadersReceived(response) {
         if (!this._shouldCaptureResponse(response, { allowHtmlDiscoveryBypass: true })) return
         try {
-            this._trackObservedRequest(this.enqueueObservedRequest(response, 2))
+            this._trackObservedResponse(response, 2)
             if (this.state.enableSyntheticRedirectRequests) {
                 this._enqueueRedirect(response)
             }
@@ -866,7 +955,7 @@ export class DastCaptureAdapter {
 
     onCompleted(response) {
         if (!this._shouldCaptureResponse(response, { allowHtmlDiscoveryBypass: true })) return
-        this._trackObservedRequest(this.enqueueObservedRequest(response, 2))
+        this._trackObservedResponse(response, 2)
     }
 }
 

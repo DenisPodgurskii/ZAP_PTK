@@ -183,15 +183,23 @@ export function updateDashboardTab(tabId, url) {
     }).then(() => true).catch(() => false);
 }
 
+export function isInspectableTabUrl(url) {
+    if (typeof url !== 'string' || !url) return false;
+    try {
+        const protocol = new URL(url).protocol;
+        return protocol === 'http:' || protocol === 'https:' || protocol === 'file:';
+    } catch (_) {
+        return false;
+    }
+}
+
 export function registerDashboardTabListener({ onTabChange, debounceMs = 200 } = {}) {
-    const base = browser.runtime.getURL('');
-    const isExtensionUrl = (url) => !!url && url.startsWith(base);
     let lastTabId = null;
     let lastUrl = null;
     let timerId = null;
 
     const emit = (tab) => {
-        if (!tab?.tabId || !tab?.url || isExtensionUrl(tab.url)) return;
+        if (!tab?.tabId || !isInspectableTabUrl(tab.url)) return;
         if (tab.tabId === lastTabId && tab.url === lastUrl) return;
         lastTabId = tab.tabId;
         lastUrl = tab.url;
@@ -207,7 +215,7 @@ export function registerDashboardTabListener({ onTabChange, debounceMs = 200 } =
 
     const onActivated = async (info) => {
         const tab = await browser.tabs.get(info.tabId).catch(() => null);
-        if (!tab?.url || isExtensionUrl(tab.url)) return;
+        if (!isInspectableTabUrl(tab?.url)) return;
         emit({ tabId: tab.id, url: tab.url });
     };
 
@@ -215,7 +223,7 @@ export function registerDashboardTabListener({ onTabChange, debounceMs = 200 } =
         if (!windowId || windowId === browser.windows.WINDOW_ID_NONE) return;
         const tabs = await browser.tabs.query({ windowId }).catch(() => null);
         const active = tabs && tabs.length ? tabs.find((t) => t.active) : null;
-        if (active?.url && !isExtensionUrl(active.url)) {
+        if (isInspectableTabUrl(active?.url)) {
             emit({ tabId: active.id, url: active.url });
         }
     };
@@ -226,7 +234,7 @@ export function registerDashboardTabListener({ onTabChange, debounceMs = 200 } =
 
     const onUpdated = (tabId, info, tab) => {
         if (!info?.url) return;
-        if (!tab?.url || isExtensionUrl(tab.url)) return;
+        if (!isInspectableTabUrl(tab?.url)) return;
         emit({ tabId, url: tab.url });
     };
 
@@ -237,11 +245,11 @@ export function registerDashboardTabListener({ onTabChange, debounceMs = 200 } =
     browser.windows.getLastFocused({ populate: true }).then((win) => {
         const tabs = win?.tabs || [];
         const active = tabs.find((t) => t.active);
-        if (active?.url && !isExtensionUrl(active.url)) {
+        if (isInspectableTabUrl(active?.url)) {
             emit({ tabId: active.id, url: active.url });
             return;
         }
-        const fallback = tabs.find((t) => t?.url && !isExtensionUrl(t.url));
+        const fallback = tabs.find((t) => isInspectableTabUrl(t?.url));
         if (fallback?.url) emit({ tabId: fallback.id, url: fallback.url });
     }).catch(() => {});
 
@@ -365,7 +373,7 @@ $("#attack_details_dialog_wrapper").prepend(
         <div class="content" id="dialogResponseHtmlContent" style="min-height: 400px;height: 90%;padding:0px">
             <object id="dialogResponseHtmlContentObj" type="text/html" data="" style="overflow:hidden;height:100%;width:100%; min-height: 400px;" height="100%">
             </object>
-            <iframe id="dialogResponseHtmlContentFrame" src="" style="overflow:hidden;height:100%;width:100%; min-height: 400px;" height="100%"></iframe>
+            <iframe id="dialogResponseHtmlContentFrame" title="Rendered HTTP response" src="" sandbox="" referrerpolicy="no-referrer" style="overflow:hidden;height:100%;width:100%; min-height: 400px;" height="100%"></iframe>
         </div>
     </div>
     `

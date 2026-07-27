@@ -1,6 +1,7 @@
 /* Author: Denis Podgurskii */
 import { ptk_controller_session } from "../../../controller/session.js"
 import { registerDashboardTabListener, updateDashboardTab } from "../js/rutils.js"
+import { renderDataTableText } from "./safeUiText.js"
 const controller = new ptk_controller_session()
 
 jQuery(function () {
@@ -282,7 +283,7 @@ function bindAllCookies(index) {
                 return `<i class="expandchild plus square large icon" index='${data}'></i>`
             },
             "className": "expandbtn cookie_column_first"
-        }, { title: "Domain", "className": "expandbtn cookie_column_second" }, { title: "Name", "className": "expandbtn cookie_column_third" }],
+        }, { title: "Domain", "className": "expandbtn cookie_column_second", render: renderDataTableText }, { title: "Name", "className": "expandbtn cookie_column_third", render: renderDataTableText }],
     }
     bindTable('#tbl_cookies', params)
 
@@ -403,7 +404,7 @@ function bindBlockedCookies() {
                     render: function (data, type, row) {
                         return `<div class="ui  small fluid button clear" style="width:50px"><i class="trash alternate icon blocked_rule" title="Remove this rule" index='${data}'></i></div>`
                     }, "className": "cookie_column_first"
-                }, { title: "Domain", "className": "cookie_column_second" }, { title: "Name", "className": "cookie_column_third" }]
+                }, { title: "Domain", "className": "cookie_column_second", render: renderDataTableText }, { title: "Name", "className": "cookie_column_third", render: renderDataTableText }]
             }
             bindTable('#tbl_blocked_cookies', params)
         }
@@ -422,7 +423,7 @@ function bindReadonlyCookies() {
                     render: function (data, type, row) {
                         return `<div class="ui  small fluid button clear" style="width:50px"><i class="trash alternate icon readonly_rule" title="Remove this rule" index='${data}'></i></div>`
                     }, "className": "cookie_column_first"
-                }, { title: "Domain", "className": "cookie_column_second" }, { title: "Name", "className": "cookie_column_third" }]
+                }, { title: "Domain", "className": "cookie_column_second", render: renderDataTableText }, { title: "Name", "className": "cookie_column_third", render: renderDataTableText }]
             }
             bindTable('#tbl_readonly_cookies', params)
         }

@@ -17,16 +17,12 @@ export class ptk_portscanner {
     }
 
     onMessage(message, sender, sendResponse) {
-
-        if (!ptk_utils.isTrustedOrigin(sender))
-            return Promise.reject({ success: false, error: 'Error origin value' })
-
-        if (message.channel == "ptk_popup2background_portscanner") {
-            if (this["msg_" + message.type]) {
-                return this["msg_" + message.type](message)
-            }
-            return Promise.resolve()
+        if (message?.channel !== "ptk_popup2background_portscanner") return undefined
+        if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+            return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
         }
+        if (this["msg_" + message.type]) return this["msg_" + message.type](message)
+        return Promise.resolve()
     }
 
 

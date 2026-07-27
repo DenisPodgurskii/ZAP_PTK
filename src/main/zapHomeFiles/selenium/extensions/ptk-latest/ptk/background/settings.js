@@ -5,6 +5,7 @@ import { ptk_utils } from "./utils.js"
 export class ptk_settings {
     constructor(settings) {
         this.default = settings
+        this._secretProvider = null
         this.reset()
         this._ready = false
         this._readyPromise = null
@@ -13,7 +14,31 @@ export class ptk_settings {
     }
 
     reset() {
-        Object.assign(this, this.default)
+        for (const key of Object.keys(this)) {
+            if (key === 'default' || key.startsWith('_')) continue
+            delete this[key]
+        }
+        Object.assign(this, JSON.parse(JSON.stringify(this.default || {})))
+        this._attachSecretAccessor()
+    }
+
+    attachSecretProvider(provider) {
+        this._secretProvider = provider || null
+        this._attachSecretAccessor()
+    }
+
+    _attachSecretAccessor() {
+        if (!this.profile || typeof this.profile !== 'object') this.profile = {}
+        if (!this._secretProvider) return
+        Object.defineProperty(this.profile, 'api_key', {
+            configurable: true,
+            enumerable: false,
+            get: () => this._secretProvider?.getTokenSync?.() || ''
+        })
+    }
+
+    _isSecretPath(path) {
+        return String(path || '').trim().toLowerCase() === 'profile.api_key'
     }
 
     // Get a clean copy of settings for storage (excludes internal properties)
@@ -22,7 +47,7 @@ export class ptk_settings {
         for (const key in this) {
             // Skip internal properties and methods
             if (key === 'default' || key.startsWith('_') || typeof this[key] === 'function') continue
-            result[key] = this[key]
+            result[key] = JSON.parse(JSON.stringify(this[key]))
         }
         return result
     }
@@ -53,19 +78,18 @@ export class ptk_settings {
     }
 
     onMessage(message, sender, sendResponse) {
-
-        if (!ptk_utils.isTrustedOrigin(sender))
-            return Promise.reject({ success: false, error: 'Error origin value' })
-
-        if (message.channel == "ptk_popup2background_settings") {
-            if (this["msg_" + message.type]) {
-                return this["msg_" + message.type](message)
-            }
-            return Promise.resolve({ result: false })
+        if (message?.channel !== "ptk_popup2background_settings") return undefined
+        if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+            return Promise.resolve({ result: false, error: 'untrusted_extension_sender' })
         }
+        if (this["msg_" + message.type]) return this["msg_" + message.type](message)
+        return Promise.resolve({ result: false })
     }
 
     msg_update_settings(message) {
+        if (this._isSecretPath(message?.path)) {
+            return Promise.resolve({ success: false, error: 'secret_path_not_allowed' })
+        }
         return this.updateSettings(message.path, message.value).then(function () {
             return Promise.resolve({ settings: this.toStorageObject() })
         }.bind(this))
@@ -85,6 +109,7 @@ export class ptk_settings {
 
 
     async updateSettings(path, value) {
+        if (this._isSecretPath(path)) throw new Error('secret_path_not_allowed')
         ptk_utils.jsonSetValueByPath(this, path, value)
         return browser.storage.local.set({ "pentestkit8_settings": this.toStorageObject() })
     }
@@ -92,8 +117,10 @@ export class ptk_settings {
     async getSettings(path) {
         // Wait for settings to be loaded from storage before returning
         await this.waitForReady()
-        let result = this
+        if (this._isSecretPath(path)) return undefined
+        let result = this.toStorageObject()
         if (path) result = ptk_utils.jsonGetValueByPath(this, path)
+        if (result && typeof result === 'object') return JSON.parse(JSON.stringify(result))
         return result
     }
 
@@ -105,6 +132,7 @@ export class ptk_settings {
     mergeSettings(source) {
         if (!source) return this
         const result = this.deepMerge(this, source)
+        this._attachSecretAccessor()
         return result
     }
 

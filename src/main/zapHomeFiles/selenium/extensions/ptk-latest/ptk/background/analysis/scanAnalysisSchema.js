@@ -123,6 +123,57 @@ function validateExplorerBucket(explorer, bucket, errors) {
     return value.length
 }
 
+function validateRecommendationArray(value, path, errors) {
+    if (value === undefined) return 0
+    if (!Array.isArray(value)) {
+        pushError(errors, path, "not_array")
+        return 0
+    }
+    value.forEach((item, index) => {
+        const itemPath = `${path}[${index}]`
+        if (!isObject(item)) {
+            pushError(errors, itemPath, "not_object")
+            return
+        }
+        if (typeof item.id !== "string" || !item.id.trim()) {
+            pushError(errors, `${itemPath}.id`, "missing_or_not_string")
+        }
+        if (typeof item.surfaceType !== "string" || !item.surfaceType.trim()) {
+            pushError(errors, `${itemPath}.surfaceType`, "missing_or_not_string")
+        }
+        if (typeof item.title !== "string" || !item.title.trim()) {
+            pushError(errors, `${itemPath}.title`, "missing_or_not_string")
+        }
+        if (item.priority !== undefined && !Number.isFinite(Number(item.priority))) {
+            pushError(errors, `${itemPath}.priority`, "not_numeric")
+        }
+        if (item.confidence !== undefined && !["low", "medium", "high"].includes(String(item.confidence).toLowerCase())) {
+            pushError(errors, `${itemPath}.confidence`, "invalid_confidence")
+        }
+        validateEvidenceRefs(item.evidenceRefs, `${itemPath}.evidenceRefs`, errors)
+        if (!Array.isArray(item.evidenceRefs) || item.evidenceRefs.length === 0) {
+            pushError(errors, `${itemPath}.evidenceRefs`, "missing_or_empty")
+        }
+        ;["signals", "freeGuidance", "matchedModules", "proActions", "sourceEngines"].forEach((field) => {
+            if (item[field] !== undefined && !Array.isArray(item[field])) {
+                pushError(errors, `${itemPath}.${field}`, "not_array")
+            }
+        })
+        if (item.evidenceSummary !== undefined && item.evidenceSummary !== null && !isObject(item.evidenceSummary)) {
+            pushError(errors, `${itemPath}.evidenceSummary`, "not_object_or_null")
+        }
+        if (isObject(item.evidenceSummary)) {
+            if (item.evidenceSummary.sourceEngines !== undefined && !Array.isArray(item.evidenceSummary.sourceEngines)) {
+                pushError(errors, `${itemPath}.evidenceSummary.sourceEngines`, "not_array")
+            }
+            if (item.evidenceSummary.observations !== undefined && !Array.isArray(item.evidenceSummary.observations)) {
+                pushError(errors, `${itemPath}.evidenceSummary.observations`, "not_array")
+            }
+        }
+    })
+    return value.length
+}
+
 export function validateAnalysisExplorerV1(explorer = null) {
     const errors = []
     const buckets = {}
@@ -169,6 +220,7 @@ export function validateScanAnalysisV1(analysis = null) {
         ...error,
         path: error.path.startsWith("analysis.") ? error.path : `analysis.${error.path}`
     })))
+    const recommendationCount = validateRecommendationArray(analysis.recommendations, "analysis.recommendations", errors)
     return {
         ok: errors.length === 0,
         schema: "ptk-scan-analysis-v1",
@@ -176,6 +228,9 @@ export function validateScanAnalysisV1(analysis = null) {
         explorer: {
             ok: explorer.ok,
             buckets: explorer.buckets || {}
+        },
+        recommendations: {
+            count: recommendationCount
         },
         errorCount: errors.length,
         errors: errors.slice(0, 50)

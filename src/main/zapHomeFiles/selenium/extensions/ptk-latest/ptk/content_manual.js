@@ -7,53 +7,16 @@ const isFirefox = typeof InstallTrigger !== 'undefined';
 const isChrome = !!window.chrome && !!window.chrome.runtime;
 //console.log({ isChrome, isFirefox });
 
+const shared = window.PTK_CONTENT_SHARED || {};
 const INJECT_SCRIPT_ID = 'ptk-inject-bridge';
-const DIALOG_SUPPRESSOR_SCRIPT_ID = 'ptk-dialog-suppressor';
 const runtime = (typeof browser !== 'undefined' && browser?.runtime)
     ? browser.runtime
     : (typeof chrome !== 'undefined' && chrome?.runtime ? chrome.runtime : null);
-const sharedIastBridgeActive = window.__PTK_SHARED_IAST_CONTENT_BRIDGE__ === true;
-const PTK_IAST_PAGE_TO_CONTENT_EVENT = 'ptk:iast:page-to-content:v1';
-const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
 
-const PTK_SPA_ATTACK_TAB_MARKER = 'ptk_spa_attack_tab';
-const PTK_SPA_DIALOG_PARAM = 'ptk_dast=1';
 const PTK_AGENT_AUTOMATION_SCRIPT_ID = 'ptk-agent-automation-layer';
-const PTK_SPA_URL_NOTIFIER_KEY = '__PTK_SPA_URL_NOTIFIER_INSTALLED__';
-const ZAP_CALLBACK_PATH_REGEX = /^\/zapCallBackUrl\/[^/?#]+/i;
-
-function shouldSuppressSpaDialogs() {
-    if (typeof window === 'undefined') return false
-    if (typeof window.name === 'string' && window.name.includes(PTK_SPA_ATTACK_TAB_MARKER)) return true
-    try {
-        return String(window.location.href || '').includes(PTK_SPA_DIALOG_PARAM)
-    } catch (_) {
-        return false
-    }
-}
-
-function injectDialogSuppressor() {
-    try {
-        const existing = document.getElementById(DIALOG_SUPPRESSOR_SCRIPT_ID)
-        if (existing) return
-        const src = runtimeGetURL('ptk/content/dialog_suppressor.js')
-        if (!src) return
-        const script = document.createElement('script')
-        script.id = DIALOG_SUPPRESSOR_SCRIPT_ID
-        script.src = src
-        script.async = false
-        script.onload = () => script.remove()
-        script.onerror = () => script.remove()
-        const parent = document.head || document.documentElement
-        parent && parent.appendChild(script)
-    } catch (_) { }
-}
-
-if (shouldSuppressSpaDialogs()) {
-    injectDialogSuppressor()
-}
 
 function runtimeGetURL(path) {
+    if (typeof shared.runtimeGetURL === 'function') return shared.runtimeGetURL(path);
     if (!runtime?.getURL) return null;
     try {
         return runtime.getURL(path);
@@ -62,113 +25,14 @@ function runtimeGetURL(path) {
     }
 }
 
-function isZapCallbackPageUrl(rawUrl) {
-    if (typeof rawUrl !== 'string' || !rawUrl) return false;
-    try {
-        const parsed = new URL(rawUrl);
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-        return ZAP_CALLBACK_PATH_REGEX.test(parsed.pathname);
-    } catch (_) {
-        return false;
-    }
-}
-
 function sendRuntimeMessage(payload) {
+    if (typeof shared.sendRuntimeMessage === 'function') return shared.sendRuntimeMessage(payload);
     if (!runtime?.sendMessage) return Promise.resolve();
     try {
         return runtime.sendMessage(payload);
     } catch (_) {
         return Promise.resolve();
     }
-}
-
-function parseIastBridgeEventDetail(detail) {
-    if (!detail) return null;
-    if (typeof detail === 'object') return detail;
-    if (typeof detail !== 'string') return null;
-    try {
-        const parsed = JSON.parse(detail);
-        return parsed && typeof parsed === 'object' ? parsed : null;
-    } catch (_) {
-        return null;
-    }
-}
-
-function dispatchIastBridgeToPage(payload) {
-    if (!payload || typeof payload !== 'object') return;
-    try {
-        window.dispatchEvent(new CustomEvent(PTK_IAST_CONTENT_TO_PAGE_EVENT, {
-            detail: JSON.stringify(payload)
-        }));
-    } catch (_) { }
-}
-
-function handleIastPageBridgePayload(data) {
-    data = data || {};
-
-    if (data?.ptk_iast) {
-        const type = data?.ptk_iast === 'runtime_signal' ? 'runtime_signal' : 'finding_report';
-        browser.runtime.sendMessage({
-            channel: "ptk_content_iast2background_iast",
-            type,
-            finding: type === 'finding_report' ? data.finding : undefined,
-            signal: type === 'runtime_signal' ? data.signal : undefined
-        }).catch(e => e);
-        return true;
-    }
-
-    if (data?.channel === 'ptk_iast_agent_ready') {
-        browser.runtime.sendMessage({
-            channel: "ptk_content_iast2background_iast",
-            type: "agent_ready"
-        }).catch(e => e);
-        return true;
-    }
-
-    if (data?.channel === 'ptk_iast_agent_failed') {
-        browser.runtime.sendMessage({
-            channel: "ptk_content_iast2background_iast",
-            type: "agent_failed",
-            error: data?.error || null
-        }).catch(e => e);
-        return true;
-    }
-
-    if (data?.channel === 'ptk_iast_runtime_health') {
-        browser.runtime.sendMessage({
-            channel: "ptk_content_iast2background_iast",
-            type: "runtime_health",
-            health: data?.health && typeof data.health === 'object' ? data.health : null
-        }).catch(e => e);
-        return true;
-    }
-
-    if (data?.channel === 'ptk_content_iast_request_modules') {
-        browser.runtime.sendMessage({
-            channel: 'ptk_content_iast2background_request_modules'
-        }).then(resp => {
-            dispatchIastBridgeToPage({
-                channel: 'ptk_background_iast2content_modules',
-                active: resp?.active !== false,
-                reason: resp?.reason || null,
-                iastModules: resp?.iastModules || null,
-                iastModulesSignature: resp?.iastModulesSignature || null,
-                scanStrategy: resp?.scanStrategy || null
-            });
-        }).catch(err => {
-            try {
-                console.warn('[PTK IAST] content failed to fetch modules', err);
-            } catch (_) { }
-            dispatchIastBridgeToPage({
-                channel: 'ptk_background_iast2content_modules',
-                active: true,
-                iastModules: null
-            });
-        });
-        return true;
-    }
-
-    return false;
 }
 
 function normalizeAutomationBridgeResponse(type, response) {
@@ -206,37 +70,7 @@ function normalizeAutomationBridgeResponse(type, response) {
     return response
 }
 
-let ptkUserInteractionSent = false;
-let ptkUserInteractionHooked = false;
-
-function notifyDastUserInteraction(reason = 'interaction') {
-    if (ptkUserInteractionSent) return;
-    ptkUserInteractionSent = true;
-    sendRuntimeMessage({
-        channel: "ptk_content2rattacker",
-        type: "user_interaction",
-        reason,
-        location: window.location?.href || "",
-        ts: Date.now()
-    }).catch(() => { });
-}
-
-function setupDastUserInteractionHook() {
-    if (ptkUserInteractionHooked) return;
-    ptkUserInteractionHooked = true;
-    const events = ["click", "keydown", "submit", "touchstart", "pointerdown"];
-    const handler = (event) => {
-        if (!event?.isTrusted) return;
-        notifyDastUserInteraction(event.type || "interaction");
-    };
-    events.forEach((eventName) => {
-        try {
-            window.addEventListener(eventName, handler, { capture: true, passive: true });
-        } catch (_) { }
-    });
-}
-
-setupDastUserInteractionHook();
+shared.installDastUserInteractionHook?.({ topFrameOnly: false });
 
 function dumpStorageFiltered(storage) {
     const out = {}
@@ -298,7 +132,6 @@ function ensureInjectBridge() {
         script.onload = () => {
             script.dataset.ptkInjectLoaded = 'true';
             onLoad();
-            try { script.remove(); } catch (_) {}
         };
         script.onerror = onError;
         const injectUrl = runtimeGetURL('ptk/inject.js');
@@ -320,320 +153,6 @@ setInterval(function () {
         type: "ping"
     }).catch(e => e)
 }, 20000);
-
-// Notify background about SPA URL changes (hash/history) so ui_url stays in sync
-;(() => {
-    // only top frame to avoid duplicate events
-    try {
-        if (window.top !== window.self) return
-    } catch (_) { }
-    if (window[PTK_SPA_URL_NOTIFIER_KEY]) return
-    const sourceScript = 'content_manual.js'
-    window[PTK_SPA_URL_NOTIFIER_KEY] = sourceScript
-
-    let lastHref = null
-    const notify = (reason = 'unknown') => {
-        const href = location.href
-        if (isZapCallbackPageUrl(href)) return
-        if (href === lastHref) return
-        const previousHref = lastHref
-        lastHref = href
-        const diagnostic = {
-            phase: 'content.notify',
-            sourceScript,
-            reason,
-            url: href,
-            previousUrl: previousHref || null,
-            readyState: document.readyState || null,
-            visibilityState: document.visibilityState || null,
-            hasHash: href.includes('#'),
-            hasHashQuery: /#.*\?/.test(href),
-            sentAt: Date.now()
-        }
-        sendRuntimeMessage({
-            channel: "ptk_content2rattacker",
-            type: "spa_url_changed",
-            url: href,
-            diagnostic
-        }).catch(() => { })
-        collectSastPayload().then((sastPayload) => {
-            sendRuntimeMessage({
-                channel: "ptk_content_sast2background_sast",
-                type: "spa_url_changed",
-                url: href,
-                diagnostic,
-                sastPayload
-            }).catch(e => {
-                // try { console.warn('[PTK][SPA][content] failed to send spa_url_changed to SAST', e) } catch (_) { }
-            })
-        }).catch(() => { })
-    }
-
-    const wrapHistory = (fn) => {
-        if (typeof Proxy === 'function' && typeof Reflect !== 'undefined') {
-            return new Proxy(fn, {
-                apply(target, thisArg, args) {
-                    const ret = Reflect.apply(target, thisArg, args)
-                    notify(`history.${target?.name || 'state'}`)
-                    return ret
-                }
-            })
-        }
-        const wrapper = function () {
-            const ret = fn.apply(this, arguments)
-            notify(`history.${fn?.name || 'state'}`)
-            return ret
-        }
-        try {
-            Object.defineProperty(wrapper, 'toString', {
-                value: fn.toString.bind(fn),
-                writable: true,
-                configurable: true
-            })
-        } catch (_) {}
-        return wrapper
-    }
-
-    try {
-        history.pushState = wrapHistory(history.pushState)
-        history.replaceState = wrapHistory(history.replaceState)
-    } catch (e) { }
-
-    window.addEventListener('hashchange', () => notify('hashchange'), false)
-    window.addEventListener('popstate', () => notify('popstate'), false)
-
-    // poll as a safety net in case events are missed
-    setInterval(() => notify('poll'), 500)
-
-    setTimeout(() => notify('initial'), 0)
-})();
-
-
-async function collectSastPayload() {
-    const currentScripts = Array.from(document.scripts)
-        .filter(isExecutableSastScriptElement)
-        .map(s => ({
-            src: normalizeSastScriptSrc(s.src || null),
-            code: s.src ? null : normalizeSastScriptCode(s.innerText || s.textContent || '')
-        }))
-        .filter(script => {
-            if (!script.src) return true;
-            return isSameOriginSastScriptUrl(script.src);
-        });
-
-    const scripts = [];
-    const seen = new Set();
-    const addScript = (script) => {
-        if (!script || (script.src && !isSameOriginSastScriptUrl(script.src))) return;
-        const src = normalizeSastScriptSrc(script.src || null);
-        const code = src && typeof script.code === 'string'
-            ? normalizeSastScriptCode(script.code)
-            : (src ? null : normalizeSastScriptCode(script.code || ''));
-        const normalized = {
-            src,
-            code
-        };
-        if (!normalized.src && !String(normalized.code || '').trim()) return;
-        const key = makeSastScriptKey(normalized);
-        if (!key || seen.has(key)) return;
-        seen.add(key);
-        scripts.push(normalized);
-    };
-
-    currentScripts.forEach(addScript);
-    getPtkEarlySastScriptRegistry().forEach(addScript);
-
-    return {
-        scripts: await hydrateSameOriginSastScripts(scripts),
-        html: collectSastInlineHandlers(),
-        file: document.URL
-    };
-}
-
-const SAST_INLINE_HANDLER_ATTRIBUTES = Object.freeze([
-    'onclick', 'ondblclick', 'onmousedown', 'onmouseup', 'onmouseover', 'onmouseout',
-    'onmousemove', 'onmouseenter', 'onmouseleave', 'onkeydown', 'onkeyup', 'onkeypress',
-    'oninput', 'onchange', 'onfocus', 'onblur', 'onsubmit', 'onreset', 'onselect',
-    'oncontextmenu', 'onwheel', 'ondrag', 'ondrop', 'onload', 'onunload', 'onabort',
-    'onerror', 'onresize', 'onscroll'
-]);
-
-const SAST_INLINE_HANDLER_ATTRIBUTE_SET = new Set(SAST_INLINE_HANDLER_ATTRIBUTES);
-const SAST_INLINE_HANDLER_SELECTOR = SAST_INLINE_HANDLER_ATTRIBUTES.map((attr) => `[${attr}]`).join(',');
-const SAST_JAVASCRIPT_URL_ATTRIBUTES = Object.freeze(['href', 'xlink:href', 'action', 'formaction', 'src', 'data']);
-const SAST_JAVASCRIPT_URL_ATTRIBUTE_SET = new Set(SAST_JAVASCRIPT_URL_ATTRIBUTES);
-const SAST_EXTERNAL_SCRIPT_MAX_COUNT = 24;
-const SAST_EXTERNAL_SCRIPT_MAX_BYTES = 1024 * 1024;
-
-function normalizeSastInlineHandlerKey(value) {
-    return String(value || '').trim().replace(/\s+/g, ' ').replace(/;+\s*$/g, '');
-}
-
-function collectSastInlineHandlers() {
-    if (typeof document?.querySelectorAll !== 'function') return [];
-
-    let elements = [];
-    try {
-        const urlSelectors = ['[href]', '[xlink\\:href]', '[action]', '[formaction]', '[src]', '[data]'];
-        elements = Array.from(document.querySelectorAll([SAST_INLINE_HANDLER_SELECTOR, ...urlSelectors].filter(Boolean).join(',')));
-    } catch (_) {
-        return [];
-    }
-
-    const snippets = [];
-    const seen = new Set();
-
-    for (const element of elements) {
-        const attrNames = typeof element?.getAttributeNames === 'function'
-            ? element.getAttributeNames()
-            : Array.from(element?.attributes || [], (attr) => attr?.name).filter(Boolean);
-        for (const rawName of attrNames) {
-            const attrName = String(rawName || '').trim().toLowerCase();
-            if (!SAST_INLINE_HANDLER_ATTRIBUTE_SET.has(attrName)) continue;
-            const value = typeof element?.getAttribute === 'function'
-                ? element.getAttribute(attrName)
-                : null;
-            if (typeof value !== 'string') continue;
-            const key = normalizeSastInlineHandlerKey(value);
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
-            snippets.push(value);
-        }
-        for (const rawName of attrNames) {
-            const attrName = String(rawName || '').trim().toLowerCase();
-            if (!SAST_JAVASCRIPT_URL_ATTRIBUTE_SET.has(attrName)) continue;
-            const value = typeof element?.getAttribute === 'function'
-                ? element.getAttribute(attrName)
-                : null;
-            if (typeof value !== 'string' || !/^\s*javascript\s*:/i.test(value)) continue;
-            const snippet = value.replace(/^\s*javascript\s*:/i, '').trim();
-            const key = normalizeSastInlineHandlerKey(snippet);
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
-            snippets.push(snippet);
-        }
-    }
-
-    return snippets;
-}
-
-function isExecutableSastScriptElement(scriptEl) {
-    if (!scriptEl) return false;
-    const rawType = String(scriptEl.type || '').trim().toLowerCase();
-    if (!rawType) return true;
-    if (rawType === 'module') return true;
-    return /^(?:text|application)\/(?:javascript|ecmascript|x-javascript|x-ecmascript)$/i.test(rawType);
-}
-
-function isSameOriginSastScriptUrl(src) {
-    if (!src) return true;
-    try {
-        const scriptUrl = new URL(src, document.URL);
-        const pageUrl = new URL(document.URL);
-        return scriptUrl.protocol === 'http:' || scriptUrl.protocol === 'https:'
-            ? scriptUrl.origin === pageUrl.origin
-            : false;
-    } catch (_) {
-        return false;
-    }
-}
-
-function normalizeSastScriptCode(value) {
-    if (typeof value !== 'string') return '';
-    const maxCodeChars = 512 * 1024;
-    return value.length > maxCodeChars ? value.slice(0, maxCodeChars) : value;
-}
-
-function normalizeSastScriptSrc(src) {
-    if (!src) return null;
-    try {
-        return new URL(src, document.URL).href;
-    } catch (_) {
-        return String(src || '') || null;
-    }
-}
-
-function makeSastScriptKey(script) {
-    const src = normalizeSastScriptSrc(script?.src || null);
-    if (src) return `src:${src}`;
-    const code = normalizeSastScriptCode(script?.code || '');
-    return code ? `inline:${code}` : '';
-}
-
-async function hydrateSameOriginSastScripts(scripts) {
-    if (!Array.isArray(scripts) || typeof fetch !== 'function') return scripts;
-    let fetched = 0;
-    const hydrated = [];
-    for (const script of scripts) {
-        if (
-            script?.src &&
-            !String(script.code || '').trim() &&
-            fetched < SAST_EXTERNAL_SCRIPT_MAX_COUNT &&
-            isSameOriginSastScriptUrl(script.src)
-        ) {
-            fetched += 1;
-            try {
-                const response = await fetch(script.src, { credentials: 'include', cache: 'force-cache' });
-                if (response?.ok) {
-                    const text = await response.text();
-                    const code = normalizeSastScriptCode(text);
-                    if (text.length > SAST_EXTERNAL_SCRIPT_MAX_BYTES || code.length < text.length) {
-                        hydrated.push({
-                            ...script,
-                            code: null,
-                            truncated: true,
-                            originalLength: text.length,
-                            truncationLimit: Math.min(SAST_EXTERNAL_SCRIPT_MAX_BYTES, code.length || SAST_EXTERNAL_SCRIPT_MAX_BYTES)
-                        });
-                        continue;
-                    }
-                    hydrated.push({ ...script, code });
-                    continue;
-                }
-            } catch (_) { }
-        }
-        hydrated.push(script);
-    }
-    return hydrated;
-}
-
-function getPtkEarlySastScriptRegistry() {
-    try {
-        return Array.isArray(window.__PTK_SAST_EARLY_SCRIPT_REGISTRY__)
-            ? window.__PTK_SAST_EARLY_SCRIPT_REGISTRY__
-            : [];
-    } catch (_) {
-        return [];
-    }
-}
-
-function collectScaResources() {
-    const urls = new Set()
-    const pushUrl = (value) => {
-        const next = String(value || '').trim()
-        if (!/^https?:\/\//i.test(next)) return
-        urls.add(next)
-    }
-
-    try {
-        Array.from(document.scripts || []).forEach((script) => pushUrl(script?.src))
-    } catch (_) { }
-
-    try {
-        Array.from(document.querySelectorAll('link[href]')).forEach((link) => pushUrl(link?.href))
-    } catch (_) { }
-
-    try {
-        const entries = performance?.getEntriesByType ? performance.getEntriesByType('resource') : []
-        Array.from(entries || []).forEach((entry) => pushUrl(entry?.name))
-    } catch (_) { }
-
-    try {
-        pushUrl(document.URL)
-    } catch (_) { }
-
-    return { resources: Array.from(urls) }
-}
 
 (() => {
     // SAST payload collection is triggered explicitly by background requests.
@@ -708,44 +227,6 @@ if (runtime?.onMessage) runtime.onMessage.addListener(function (message, sender,
         })
     }
 
-    if (message.channel == "ptk_background2content_sast") {
-        if (message.type == "collect_scripts") {
-            collectSastPayload().then((payload) => {
-                sendRuntimeMessage({
-                    channel: "ptk_content_sast2background_sast",
-                    type: "scripts_collected",
-                    requestId: message.requestId || null,
-                    ...payload
-                }).catch(e => e)
-            }).catch(() => { })
-            return Promise.resolve({ ok: true })
-        }
-        if (message.type == "sast_set_hash") {
-            const targetHash = typeof message.hash === "string" ? message.hash : "";
-            if (window.location.hash !== targetHash) {
-                window.location.hash = targetHash;
-            }
-            return Promise.resolve({ ok: true, url: document.URL });
-        }
-        if (message.type == "sast_wait_ready") {
-            const delayMs = Number(message.delayMs || 300);
-            const waitReady = () => new Promise((resolve) => {
-                if (document.readyState === "complete") return resolve();
-                const onReady = () => {
-                    window.removeEventListener("load", onReady);
-                    resolve();
-                };
-                window.addEventListener("load", onReady);
-            });
-            return waitReady().then(() => new Promise((resolve) => setTimeout(resolve, delayMs)))
-                .then(() => ({ ok: true, url: document.URL }));
-        }
-    }
-
-    if (message.channel == "ptk_background2content_sca" && message.type == "collect_resources") {
-        return Promise.resolve(collectScaResources())
-    }
-
     if (message.channel == "ptk_background2content" && message.type == "init") {
         const requestId = message.requestId || `ptk-wappalyzer-${Date.now()}-${Math.random().toString(36).slice(2)}`
         const payload = {
@@ -772,35 +253,6 @@ if (runtime?.onMessage) runtime.onMessage.addListener(function (message, sender,
         })
 
         return Promise.resolve()
-    }
-
-    if (!sharedIastBridgeActive && message.channel == "ptk_background_iast2content") {
-        if (message.type == "clean iast result") {
-            localStorage.removeItem('ptk_iast_buffer');
-        }
-        if (message.type == "ping") {
-            return Promise.resolve({ ok: true })
-        }
-    }
-
-    if (!sharedIastBridgeActive && message.channel == "ptk_background_iast2content_modules" && message.iastModules) {
-        dispatchIastBridgeToPage({
-            channel: 'ptk_background_iast2content_modules',
-            active: message.active !== false,
-            reason: message.reason || null,
-            iastModules: message.iastModules,
-            iastModulesSignature: message.iastModulesSignature || null,
-            scanStrategy: message.scanStrategy || null
-        })
-        return Promise.resolve({ ok: true })
-    }
-
-    if (!sharedIastBridgeActive && message.channel == "ptk_background_iast2content_token_origin") {
-        dispatchIastBridgeToPage({
-            channel: 'ptk_background_iast2content_token_origin',
-            tokens: Array.isArray(message.tokens) ? message.tokens : []
-        })
-        return Promise.resolve({ ok: true })
     }
 
     if (message.channel == "ptk_popup2content") {
@@ -845,9 +297,6 @@ const ptkAutomationVersion = (() => {
         return 'unknown'
     }
 })();
-
-// Storage key for settings (must match automation.js and settings.js)
-const SETTINGS_KEY = 'pentestkit8_settings'
 
 // Automation state
 let automationEnabled = false
@@ -929,66 +378,37 @@ async function enableAutomationIfAllowed(reason = 'settings') {
     return automationEnabled
 }
 
-// Dynamic enable/disable via storage.onChanged
-;(async function initAutomation() {
-    // Check if browser API is available (content script context)
-    if (typeof browser === 'undefined' || !browser?.storage?.local) {
-        return
+async function reconcileAutomationState(reason = 'runtime_refresh') {
+    if (isCypressRunnerFrame()) return false
+    const authorization = await requestManualAutomationAuthorization(reason)
+    if (authorization?.allowed === true) {
+        enableAutomation()
+        return true
     }
-
-    let enabled = false
-    let initialAuthorization = null
-
-    // Initial check - use settings key with automation.enable
-    // When automation is enabled, we inject in ALL frames (including Cypress AUT iframe)
-    try {
-        const result = await browser.storage.local.get(SETTINGS_KEY)
-        enabled = result?.[SETTINGS_KEY]?.automation?.enable === true
-        if (enabled && isCypressRunnerFrame()) {
-            return
-        }
-        if (enabled) {
-            initialAuthorization = await requestManualAutomationAuthorization('initial')
-            if (initialAuthorization?.allowed === true) {
-                enableAutomation()
-            }
-        }
-    } catch (e) {
-        // Silently fail - automation stays disabled
-    }
-
-    // Only install the disabled bridge when automation is explicitly ON in settings.
-    // Setting window.PTK_AUTOMATION on every page—even when automation is off—can
-    // trigger bot-detection systems (e.g. Akamai Bot Manager) and break login flows.
-    if (!automationEnabled && enabled && shouldInstallDisabledAutomationBridgeForDenial(initialAuthorization)) {
+    disableAutomation()
+    if (shouldInstallDisabledAutomationBridgeForDenial(authorization)) {
         installDisabledAutomationBridgeForTopFrame()
     }
+    return false
+}
 
-    // Listen for settings changes (no page reload needed)
-    browser.storage.onChanged.addListener((changes, areaName) => {
-        if (areaName !== 'local') return
-        if (!changes[SETTINGS_KEY]) return
-
-        const newEnabled = changes[SETTINGS_KEY]?.newValue?.automation?.enable === true
-        const oldEnabled = changes[SETTINGS_KEY]?.oldValue?.automation?.enable === true
-
-        if (newEnabled && !oldEnabled) {
-            if (!isCypressRunnerFrame()) {
-                requestManualAutomationAuthorization('settings_enabled').then((authorization) => {
-                    if (authorization?.allowed === true) {
-                        enableAutomation()
-                    } else if (shouldInstallDisabledAutomationBridgeForDenial(authorization)) {
-                        installDisabledAutomationBridgeForTopFrame()
-                    }
-                }).catch(() => {
-                    installDisabledAutomationBridgeForTopFrame()
-                })
-            }
-        } else if (!newEnabled && oldEnabled) {
-            disableAutomation()
-        }
-    })
+// Settings and secrets stay in trusted extension contexts. The content script
+// asks the background only for the current automation authorization decision.
+;(async function initAutomation() {
+    if (typeof browser === 'undefined' || !browser?.runtime?.sendMessage) return
+    try {
+        await reconcileAutomationState('initial')
+    } catch (_) {
+        installDisabledAutomationBridgeForTopFrame()
+    }
 })();
+
+runtime?.onMessage?.addListener?.((message) => {
+    if (message?.channel === 'ptk_background2content_runtime' && message?.type === 'refresh_profile') {
+        return reconcileAutomationState('settings_changed').catch(() => false)
+    }
+    return undefined
+})
 
 function enableAutomation() {
     if (isCypressRunnerFrame()) return
@@ -1124,11 +544,6 @@ async function handleManualAutomationActivationRequest(data = {}) {
     }
 }
 
-window.addEventListener(PTK_IAST_PAGE_TO_CONTENT_EVENT, (event) => {
-    if (sharedIastBridgeActive) return
-    handleIastPageBridgePayload(parseIastBridgeEventDetail(event?.detail))
-}, false)
-
 window.addEventListener("message", (event) => {
     const data = event.data || {}
 
@@ -1154,10 +569,6 @@ window.addEventListener("message", (event) => {
 
     // Note: ptk-automation messages are handled conditionally via automationMessageHandler
     // when automation is enabled in settings
-
-    if (!sharedIastBridgeActive && handleIastPageBridgePayload(data)) {
-        return
-    }
 
     if (data?.ptk_ws) {
         browser.runtime.sendMessage({
@@ -1248,12 +659,7 @@ function installPtkAutomationBridge(version, nonce, automationEnabledState) {
         script.dataset.ptkExtensionOrigin = new URL(bridgeUrl).origin
     } catch (_) { }
     if (automationEnabledState === true) {
-        script.onload = () => {
-            try { script.remove(); } catch (_) {}
-            injectPtkAgentAutomationLayer()
-        }
-    } else {
-        script.onload = () => { try { script.remove(); } catch (_) {} }
+        script.onload = () => injectPtkAgentAutomationLayer()
     }
     const parent = document.documentElement || document.head || document.body
     parent.appendChild(script)

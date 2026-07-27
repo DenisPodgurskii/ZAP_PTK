@@ -1,86 +1,38 @@
 /* Author: Denis Podgurskii */
-import { ptk_controller_settings } from "../../../controller/settings.js"
-import { ptk_controller_dast } from "../../../controller/dast.js"
+import { ptk_controller_secrets } from '../../../controller/secrets.js'
 
+const secrets = new ptk_controller_secrets()
 
-const controller = new ptk_controller_settings()
-const rattacker = new ptk_controller_dast()
-
+function renderStatus(result) {
+    const status = result?.status || {}
+    const message = result?.message
+        || (status.configured ? `API token configured (${status.fingerprint || 'fingerprint unavailable'})` : 'No API key found')
+    $('#api_response').text(message)
+}
 
 jQuery(function () {
-
-    $('.clear_apikey').on('click', function () {
-        let $form = $('#profile_form') 
-        $form.form('set value', "api_key", "")
-        controller.save('profile.api_key', "")
+    $('.clear_apikey').on('click', async function () {
+        $('#profile_form').form('set value', 'api_key', '')
+        renderStatus(await secrets.clear())
     })
 
-    $('.save_apikey').on('click', function () {
-
-        let $form = $('#profile_form'), values = $form.form('get values')
-        Object.keys(values).map((k) => { if (values[k] === 'on') values[k] = true })
-
-        rattacker.checkApiKey(values['api_key']).then(function (response) {
-            let msg = ""
-            if (typeof response == "object" && response.rules?.modules?.json) {
-                let modules = JSON.parse(response.rules.modules.json).modules
-                let attacksNum = 0
-                modules.map(item => {
-                    attacksNum += Object.keys(item.attacks).length
-                }) 
-                msg = "Number of attacks modules: " + modules.length
-                msg += "\r\n\r\nNumber of attacks: " + attacksNum
-                controller.save('profile.api_key', values["api_key"])
-            } else {
-                msg = 'Error: ' + response
-            }
-            $('#api_response').text(msg)
-            //console.log(response)
-        })
-
-        controller.restore().then(function (s) {
-            controller.on_updated_settings(s)
-        })
-    })
-
-
-    // $('.test_apikey').on('click', function () {
-
-    //     let $form = $('#profile_form'), values = $form.form('get values')
-    //     Object.keys(values).map((k) => { if (values[k] === 'on') values[k] = true })
-    //     rattacker.checkApiKey(values['api_key']).then(function (response) {
-    //         let msg = ""
-    //         if (typeof response == "object" && response.rules?.modules?.json) {
-    //             let modules = JSON.parse(response.rules.modules.json).modules
-    //             let attacksNum = 0
-    //             modules.map(item => {
-    //                 attacksNum += Object.keys(item.attacks).length
-    //             }) 
-    //             msg = "Number of attacks modules: " + modules.length
-    //             msg += "\r\n\r\nNumber of attacks: " + attacksNum
-    //         } else {
-    //             msg = 'Error: ' + response
-    //         }
-    //         $('#api_response').text(msg)
-    //         console.log(response)
-    //     })
-    // })
-
-    $('#settings_reset').on('click', function () {
-        controller.reset().then(function (s) {
-            $(document).trigger("init_forms", s.settings)
-        })
-    })
-
-})
-
-
-$(document).on("init_forms", function (e, s) {
-
-    Object.entries(s.profile).forEach(([key, value]) => {
-        if (['api_key'].includes(key)) {
-            $('#profile_form').form('set value', key, value)
+    $('.save_apikey').on('click', async function () {
+        const values = $('#profile_form').form('get values')
+        const activationToken = String(values?.api_key || '').trim()
+        if (!activationToken) {
+            $('#api_response').text('Activation token is required.')
+            return
         }
+        const result = await secrets.activate(activationToken)
+        $('#profile_form').form('set value', 'api_key', '')
+        renderStatus(result)
     })
 
+    $('#settings_reset').on('click', async function () {
+        renderStatus(await secrets.clear())
+    })
+
+    secrets.getStatus().then(renderStatus).catch(() => {
+        $('#api_response').text('Unable to read API token status.')
+    })
 })

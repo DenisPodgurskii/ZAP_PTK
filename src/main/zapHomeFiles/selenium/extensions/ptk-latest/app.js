@@ -5,6 +5,8 @@ import "./ptk/packages/browser-polyfill/browser-polyfill.min.js"
 
 import defaultSettings from "./ptk/settings.default.js"
 import { ptk_settings } from "./ptk/background/settings.js"
+import { SecretStore } from "./ptk/background/secretStore.js"
+import { sensitiveArtifactStorage } from "./ptk/background/sensitiveArtifactStore.js"
 import { ptk_proxy } from "./ptk/background/proxy.js"
 import { ptk_dashboard } from "./ptk/background/dashboard.js"
 import { ptk_dast } from "./ptk/background/dast.js"
@@ -13,12 +15,13 @@ import { ptk_decoder_manager } from "./ptk/background/decoder.js"
 import { ptk_sca } from "./ptk/background/sca.js"
 import { ptk_session } from "./ptk/background/session.js"
 import { ptk_recorder } from "./ptk/background/recorder.js"
-import { ptk_ruleManager } from "./ptk/background/utils.js"
+import { ptk_ruleManager, ptk_utils } from "./ptk/background/utils.js"
 import { ptk_portscanner } from "./ptk/background/portscanner.js"
 import { ptk_jwt } from "./ptk/background/jwt.js"
 import { ptk_iast } from "./ptk/background/iast.js"
 import { ptk_sast } from "./ptk/background/sast.js"
 import { ptk_automation } from "./ptk/background/automation.js"
+import { zapBridge } from "./ptk/background/integration/zap/index.js"
 import { loadDevLocalConfig } from "./ptk/common/devLocalConfig.js"
 import { initializePortalRuntimeConfig } from "./ptk/common/portalConfig.js"
 import {
@@ -105,11 +108,14 @@ browser.runtime.onStartup.addListener(() => {
 export class ptk_app {
     constructor(settings) {
         this.settings = new ptk_settings(settings)
+        this.secretStore = new SecretStore()
         this.updated = false
         this._pendingUpdate = false
         this._bootstrapped = false
+        this.devLocalConfig = {}
 
         this.proxy = new ptk_proxy(this.settings.proxy)
+        worker.ptk_app = this
         this.request_manager = new ptk_request_manager(this.settings.rbuilder)
         ptk_ruleManager.resetSession()
         this.dast = new ptk_dast(this.settings.rattacker)
@@ -123,7 +129,7 @@ export class ptk_app {
         this.iast = new ptk_iast()
         this.sast = new ptk_sast()
         this.automation = new ptk_automation()
-        this.automation.init(this)
+        this.automation.init(this, { zapBridge })
         this.recorder = new ptk_recorder(this.settings.recorder)
         this.recorder.addMessageListeners()
 
@@ -150,6 +156,7 @@ export class ptk_app {
     }
 
     async bootstrap() {
+        await sensitiveArtifactStorage.clearExpired().catch(() => {})
         const bootstrapStartedAt = Date.now()
         logZapLifecycle('app.bootstrap.start', {
             isFirefox: worker.isFirefox,
@@ -157,6 +164,7 @@ export class ptk_app {
         })
         await initializePortalRuntimeConfig()
         const devLocal = await loadDevLocalConfig()
+        this.devLocalConfig = devLocal && typeof devLocal === "object" ? devLocal : {}
         const devAutomationDefaults = devLocal?.automationEnabled === true
             ? {
                 automation: {
@@ -170,8 +178,20 @@ export class ptk_app {
 
         const result = await browser.storage.local.get('pentestkit8_settings')
         if (result.pentestkit8_settings) {
-            this.settings.mergeSettings(result.pentestkit8_settings)
+            const persistedSettings = JSON.parse(JSON.stringify(result.pentestkit8_settings))
+            const legacyToken = typeof persistedSettings?.profile?.api_key === 'string'
+                ? persistedSettings.profile.api_key
+                : ''
+            if (persistedSettings?.profile) delete persistedSettings.profile.api_key
+            this.settings.mergeSettings(persistedSettings)
+            await this.secretStore.initialize({ legacyToken })
+            this.settings.attachSecretProvider(this.secretStore)
+            if (legacyToken) {
+                await browser.storage.local.set({ "pentestkit8_settings": this.settings.toStorageObject() })
+            }
         } else {
+            await this.secretStore.initialize()
+            this.settings.attachSecretProvider(this.secretStore)
             await this.settings.resetSettings()
             if (devAutomationDefaults) {
                 this.settings.mergeSettings(devAutomationDefaults)
@@ -213,8 +233,20 @@ export class ptk_app {
         return (Array.isArray(names) ? names : [names]).map((name) => this[name] || null)
     }
 
+    async broadcastRuntimeProfileRefresh() {
+        if (!browser?.tabs?.query || !browser?.tabs?.sendMessage) return false
+        const tabs = await browser.tabs.query({})
+        await Promise.allSettled((tabs || [])
+            .filter((tab) => Number.isInteger(tab?.id))
+            .map((tab) => browser.tabs.sendMessage(tab.id, {
+                channel: 'ptk_background2content_runtime',
+                type: 'refresh_profile'
+            })))
+        return true
+    }
+
     onMessage(message, sender, sendResponse) {
-        if (message?.channel === "ptk_extension_zap_runner" && message?.type === "scan_callback_tabs") {
+        if (message?.channel === "ptk_extension_zap_runner") {
             if (!isTrustedZapRunnerSender(sender)) {
                 const metadata = zapRunnerSenderMetadata(sender)
                 console.warn(
@@ -229,6 +261,56 @@ export class ptk_app {
                     ok: false,
                     observed: false,
                     reason: 'untrusted_runner_sender',
+                    requestId: message.requestId
+                })
+            }
+
+            if (message?.type === "close_session_status") {
+                return this.ready.then(() => {
+                    const snapshot = this.automation?.getZapSessionControlSnapshot?.(
+                        message.sessionId,
+                        message.zapid
+                    )
+                    return {
+                        ...(snapshot || { ok: false, error: 'zap_session_not_found' }),
+                        trustedRunner: 'ptk-zap-control-v1',
+                        requestId: message.requestId
+                    }
+                }).catch((error) => ({
+                    ok: false,
+                    reason: error?.message || String(error),
+                    requestId: message.requestId
+                }))
+            }
+
+            if (message?.type === "close_session_if_idle") {
+                return this.ready.then(async () => {
+                    const result = await this.automation?.requestZapSessionCloseIfIdle?.(
+                        message.sessionId,
+                        message.zapid,
+                        {
+                            closeRequestId: message.closeRequestId,
+                            timeoutMs: message.timeoutMs
+                        }
+                    )
+                    return {
+                        ...(result || { ok: false, error: 'zap_session_close_unavailable' }),
+                        trustedRunner: 'ptk-zap-control-v1',
+                        requestId: message.requestId
+                    }
+                }).catch((error) => ({
+                    ok: false,
+                    reason: error?.message || String(error),
+                    trustedRunner: 'ptk-zap-control-v1',
+                    requestId: message.requestId
+                }))
+            }
+
+            if (message?.type !== "scan_callback_tabs") {
+                return Promise.resolve({
+                    ok: false,
+                    observed: false,
+                    reason: 'unknown_runner_message',
                     requestId: message.requestId
                 })
             }
@@ -317,6 +399,10 @@ export class ptk_app {
             return undefined
         }
 
+        if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+            return Promise.resolve({ success: false, error: 'untrusted_extension_sender' })
+        }
+
         return this.ready.then(() => {
             if (message.type == "on_updated_settings") {
                 if (this.proxy) {
@@ -326,7 +412,7 @@ export class ptk_app {
                 if (this.dast) {
                     this.dast.loadProModules()
                 }
-                return true
+                return this.broadcastRuntimeProfileRefresh().then(() => true)
             }
 
             if (message.type == "reloadptk") {
@@ -347,6 +433,35 @@ export class ptk_app {
             if (message.type == "release_note_read") {
                 this.settings.updateSettings("release_note", { show: false })
                 return { ok: true }
+            }
+
+            if (message.type == "clear_sensitive_artifacts") {
+                if (this.recorder?.mode) {
+                    return { success: false, error: 'recording_or_replay_active' }
+                }
+                return sensitiveArtifactStorage.clearAll().then(async () => {
+                    await browser.storage.local.remove([
+                        'ptk_jwt',
+                        'ptk_rbuilder',
+                        'ptk_recorder',
+                        'ptk_bugbounty_session_profiles_v1',
+                        'ptk_bugbounty_evidence_packages_v1',
+                        'ptk_recording',
+                        'ptk_recording_items',
+                        'ptk_recording_timing',
+                        'ptk_recording_log',
+                        'ptk_replay',
+                        'ptk_replay_items',
+                        'ptk_replay_step',
+                        'ptk_replay_regex'
+                    ])
+                    this.jwt.storage = {}
+                    this.request_manager.storage = []
+                    this.recorder.storage = { savedMacro: '', recording: {} }
+                    await this.dast?.sessionProfileStore?.clearAll?.()
+                    await this.dast?.evidencePackageStore?.clearAll?.()
+                    return { success: true }
+                })
             }
 
             if (message.type == "ping") {

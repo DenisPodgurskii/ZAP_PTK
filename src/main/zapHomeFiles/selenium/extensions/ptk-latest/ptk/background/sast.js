@@ -39,21 +39,24 @@ const SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_PAGES = 100;
 const SAST_PAGE_SOURCE_CRAWL_DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 
 function decodeSastHtmlEntities(value) {
-  return String(value || "")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => {
-      const code = parseInt(hex, 16);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
-    })
-    .replace(/&#([0-9]+);/g, (match, raw) => {
-      const code = parseInt(raw, 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
-    });
+  const named = {
+    amp: "&",
+    quot: "\"",
+    apos: "'",
+    lt: "<",
+    gt: ">"
+  };
+  return String(value || "").replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|quot|apos|lt|gt);/g, (match, entity) => {
+    if (entity[0] !== "#") return named[entity] ?? match;
+    const isHex = entity[1]?.toLowerCase() === "x";
+    const codePoint = parseInt(entity.slice(isHex ? 2 : 1), isHex ? 16 : 10);
+    if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return match;
+    try {
+      return String.fromCodePoint(codePoint);
+    } catch (_) {
+      return match;
+    }
+  });
 }
 
 function canonicalSastPageUrl(rawUrl) {
@@ -356,7 +359,8 @@ export class ptk_sast {
     this.progressState = createSastProgressState();
     this.transport = new SastTransport({
       asyncSession: this.asyncSession,
-      eventHandler: this.handleTransportEvent.bind(this)
+      eventHandler: this.handleTransportEvent.bind(this),
+      disableRemote: settings?.disableRemoteWorker === true || settings?.disableRemote === true
     });
     this.sessionCoordinator = new SastSessionCoordinator({
       transport: this.transport,
@@ -711,11 +715,16 @@ export class ptk_sast {
   onCompleted(response) { }
 
   onMessage(message, sender, sendResponse) {
-    if (this.transport.handleExternalMessage(message)) {
+    if (message?.channel === "ptk_offscreen2background_sast") {
+      if (!ptk_utils.isTrustedExtensionPageSender(sender)) return;
+      this.transport.handleExternalMessage(message);
       return;
     }
 
     if (message.channel == "ptk_popup2background_sast") {
+      if (!ptk_utils.isTrustedExtensionPageSender(sender)) {
+        return Promise.resolve({ result: false, error: "untrusted_extension_sender" });
+      }
       if (this["msg_" + message.type]) {
         return this["msg_" + message.type](message);
       }
@@ -723,6 +732,7 @@ export class ptk_sast {
     }
 
     if (message.channel == "ptk_content_sast2background_sast") {
+      if (!ptk_utils.isTrustedContentSender(sender)) return;
       if (message.type == "scripts_collected") {
         const requestId = message.requestId || null;
         if (requestId && this.asyncSession.resolveScriptRequest(requestId, message)) {
@@ -1617,9 +1627,11 @@ export class ptk_sast {
     if (hasContent) {
       this._rebuildGroupsFromFindings();
       this.updateScanResult();
-      try {
-        applyScanAnalysis(this.scanResult, { force: true });
-      } catch (_) { }
+      if (opts?.skipPostStopAnalysis !== true) {
+        try {
+          applyScanAnalysis(this.scanResult, { force: true });
+        } catch (_) { }
+      }
       await this._flushPersistScanResult();
     }
     this.removeListeners();

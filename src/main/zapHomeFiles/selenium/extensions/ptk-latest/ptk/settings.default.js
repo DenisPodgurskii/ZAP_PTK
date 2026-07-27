@@ -73,9 +73,7 @@ const defaultSettings = {
     traffic: {
         format: "har"
     },
-    profile: {
-        api_key: ""
-    },
+    profile: {},
     history: {
         route: "index",
         hash: ""

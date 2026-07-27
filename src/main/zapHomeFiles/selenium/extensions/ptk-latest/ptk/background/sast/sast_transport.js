@@ -9,12 +9,14 @@ export class SastTransport {
     browserApi = browser,
     chromeApi = typeof chrome !== "undefined" ? chrome : null,
     WorkerCtor = typeof Worker !== "undefined" ? Worker : null,
+    disableRemote = false,
   } = {}) {
     this.asyncSession = asyncSession;
     this.eventHandler = typeof eventHandler === "function" ? eventHandler : null;
     this.browserApi = browserApi;
     this.chromeApi = chromeApi;
     this.WorkerCtor = WorkerCtor;
+    this.disableRemote = disableRemote === true;
     this.sastWorker = null;
     this.offscreenInitPromise = null;
   }
@@ -63,14 +65,14 @@ export class SastTransport {
   }
 
   async ensureOffscreenDocument() {
-    if (worker.isFirefox) return;
-    if (typeof this.chromeApi === "undefined" || !this.chromeApi?.offscreen?.createDocument) return;
+    if (worker.isFirefox) return false;
+    if (typeof this.chromeApi === "undefined" || !this.chromeApi?.offscreen?.createDocument) return false;
 
     if (!this.offscreenInitPromise) {
       this.offscreenInitPromise = (async () => {
         if (this.chromeApi.offscreen.hasDocument) {
           const has = await this.chromeApi.offscreen.hasDocument();
-          if (has) return;
+          if (has) return true;
         }
 
         await this.chromeApi.offscreen.createDocument({
@@ -78,13 +80,29 @@ export class SastTransport {
           reasons: ["IFRAME_SCRIPTING"],
           justification: "Run CPU-heavy SAST engine outside the MV3 service worker",
         });
+        return true;
       })();
     }
 
     return this.offscreenInitPromise;
   }
 
+  async tryEnsureOffscreenDocument(reason = "unknown") {
+    try {
+      return await this.ensureOffscreenDocument() === true;
+    } catch (err) {
+      this.offscreenInitPromise = null;
+      console.error("Failed to initialize SAST offscreen document", {
+        reason,
+        error: err?.message || String(err)
+      });
+      return false;
+    }
+  }
+
   async startRemoteScan({ scanId, scanStrategyCode, opts } = {}) {
+    if (this.disableRemote) return false;
+
     if (worker.isFirefox) {
       this.ensureFirefoxWorker();
       if (!this.sastWorker) return false;
@@ -97,7 +115,9 @@ export class SastTransport {
       return true;
     }
 
-    await this.ensureOffscreenDocument();
+    if (!await this.tryEnsureOffscreenDocument("start_scan")) {
+      return false;
+    }
     try {
       await this.browserApi.runtime.sendMessage({
         channel: "ptk_bg2offscreen_sast",
@@ -114,6 +134,8 @@ export class SastTransport {
   }
 
   async scanCodeRemote({ scanId, scripts, html, file, generation = null, collectionId = null, timeoutMs = 30000 } = {}) {
+    if (this.disableRemote) return null;
+
     if (worker.isFirefox) {
       if (!this.sastWorker) return null;
       this.sastWorker.postMessage({
@@ -128,7 +150,9 @@ export class SastTransport {
       return this.asyncSession.waitForScanResult(file, timeoutMs);
     }
 
-    await this.ensureOffscreenDocument();
+    if (!await this.tryEnsureOffscreenDocument("scan_code")) {
+      return null;
+    }
     try {
       await this.browserApi.runtime.sendMessage({
         channel: "ptk_bg2offscreen_sast",
@@ -148,6 +172,7 @@ export class SastTransport {
 
   stopRemoteScan(scanId) {
     if (!scanId) return;
+    if (this.disableRemote) return;
     if (worker.isFirefox) {
       if (this.sastWorker) {
         this.sastWorker.postMessage({ type: "stop_scan", scanId });

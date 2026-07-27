@@ -1807,7 +1807,7 @@ export class ptk_module {
     _looksDate(value) {
         const text = String(value ?? '').trim()
         if (!text) return false
-        return /^\d{4}-\d{2}-\d{2}(?:[tT ][0-9:.+-Zz]+)?$/.test(text)
+        return /^\d{4}-\d{2}-\d{2}(?:[tT ][0-9:.+Zz-]+)?$/.test(text)
     }
 
     _looksEmail(value) {

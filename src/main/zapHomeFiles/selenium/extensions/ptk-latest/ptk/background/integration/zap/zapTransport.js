@@ -7,8 +7,9 @@ import {
     logZapLifecycle
 } from '../../../common/zapLifecycle.js'
 
-const CALLBACK_PATH_REGEX = /^\/zapCallBackUrl\/([^/?#]+)/i
-const CALLBACK_URL_REGEX = /^https?:\/\/[^/?#]+\/zapCallBackUrl\/([^/?#]+)/i
+const TRUSTED_ZAP_ORIGIN = 'https://zap'
+const CALLBACK_PATH_REGEX = /^\/zapCallBackUrl\/([A-Za-z0-9_-]+)(?:\/|$)/i
+const CALLBACK_URL_REGEX = /^https:\/\/zap\/zapCallBackUrl\/([A-Za-z0-9_-]+)(?:[/?#]|$)/i
 const RETRY_DELAYS_MS = [250, 1000, 4000]
 const TARGET_PARAM_KEYS = ['url', 'target', 'targetUrl', 'scanUrl', 'startUrl', 'site']
 const DETECTION_DEDUPE_WINDOW_MS = 3000
@@ -24,7 +25,7 @@ const CALLBACK_PROGRESS_RETRY_DELAYS_MS = [250]
 const CALLBACK_ALERT_POST_TIMEOUT_MS = 10000
 const CALLBACK_CONTROL_POST_TIMEOUT_MS = 2500
 const CALLBACK_CONTROL_RETRY_DELAYS_MS = []
-const QUICKSTART_URL_REGEX = /^https?:\/\/zap\/OTHER\/quickstartlaunch\/other\/startPage\//i
+const QUICKSTART_URL_REGEX = /^https:\/\/zap\/OTHER\/quickstartlaunch\/other\/startPage\//i
 const QUICKSTART_PROBE_COOLDOWN_MS = 5000
 const QUICKSTART_SCRIPT_FETCH_LIMIT = 8
 const QUICKSTART_SCRIPT_BODY_MAX = 250000
@@ -201,7 +202,7 @@ function parseCallbackUrl(rawUrl) {
 
     try {
         const parsed = new URL(rawUrl)
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        if (parsed.origin !== TRUSTED_ZAP_ORIGIN) {
             return null
         }
         const match = parsed.pathname.match(CALLBACK_PATH_REGEX)
@@ -215,6 +216,19 @@ function parseCallbackUrl(rawUrl) {
         }
     } catch (_) {
         return null
+    }
+}
+
+function isTrustedCallbackEndpoint(rawUrl, endpoint = null) {
+    if (typeof rawUrl !== 'string' || !rawUrl) return false
+    try {
+        const parsed = new URL(rawUrl)
+        if (parsed.origin !== TRUSTED_ZAP_ORIGIN || parsed.search || parsed.hash) return false
+        const match = parsed.pathname.match(/^\/zapCallBackUrl\/[A-Za-z0-9_-]+\/ptk\/(config|alert|progress|control)$/i)
+        if (!match) return false
+        return !endpoint || match[1].toLowerCase() === endpoint
+    } catch (_) {
+        return false
     }
 }
 
@@ -246,7 +260,7 @@ function extractTargetUrl(rawUrl) {
 
 function extractCallbackCandidate(text) {
     const body = String(text || '')
-    const fullMatch = body.match(/https?:\/\/[^"'\\s<>]+\/zapCallBackUrl\/[^"'\\s<>]+/i)
+    const fullMatch = body.match(/https:\/\/zap\/zapCallBackUrl\/[A-Za-z0-9_-]+(?:\?[^"'\\s<>]*)?/i)
     if (fullMatch && fullMatch[0]) {
         return fullMatch[0]
     }
@@ -259,11 +273,11 @@ function extractCallbackCandidate(text) {
     return null
 }
 
-function buildCallbackCandidateUrl(origin, secret, zapid = null) {
-    if (!origin || !secret) return null
+function buildCallbackCandidateUrl(secret, zapid = null) {
+    if (!secret) return null
 
     try {
-        const url = new URL(`${origin}/zapCallBackUrl/${secret}`)
+        const url = new URL(`${TRUSTED_ZAP_ORIGIN}/zapCallBackUrl/${secret}`)
         url.searchParams.set('zapenable', 'true')
         if (toNonEmptyString(zapid)) {
             url.searchParams.set('zapid', zapid)
@@ -285,7 +299,7 @@ function extractQuickstartScriptUrls(html, pageUrl) {
         if (!src) continue
         try {
             const absolute = new URL(src, pageUrl).toString()
-            if (!/^https?:\/\/zap\//i.test(absolute)) continue
+            if (!/^https:\/\/zap\//i.test(absolute)) continue
             if (seen.has(absolute)) continue
             seen.add(absolute)
             urls.push(absolute)
@@ -337,12 +351,12 @@ function deriveCallbackFromQuickstartUrl(rawUrl) {
             // Accept callback path.
             const pathMatch = value.match(/^\/?zapCallBackUrl\/([^/?#]+)/i)
             if (pathMatch && pathMatch[1]) {
-                return buildCallbackCandidateUrl(parsed.origin, pathMatch[1], parsed.searchParams.get('zapid'))
+                return buildCallbackCandidateUrl(pathMatch[1], parsed.searchParams.get('zapid'))
             }
 
             // Accept secret-only values.
             if (/^[A-Za-z0-9_-]{6,}$/.test(value)) {
-                return buildCallbackCandidateUrl(parsed.origin, value, parsed.searchParams.get('zapid'))
+                return buildCallbackCandidateUrl(value, parsed.searchParams.get('zapid'))
             }
         }
     } catch (_) {
@@ -655,7 +669,7 @@ class ZapTransport {
             this._onBeforeRequest = this._onBeforeRequest || this._handleWebRequestBefore.bind(this)
             try {
                 browser.webRequest.onBeforeRequest.addListener(this._onBeforeRequest, {
-                    urls: ['*://zap/zapCallBackUrl/*'],
+                    urls: ['https://zap/zapCallBackUrl/*'],
                     types: ['main_frame']
                 })
             } catch (err) {
@@ -890,6 +904,9 @@ class ZapTransport {
         if (!url) {
             throw new Error(errorCode)
         }
+        if (!isTrustedCallbackEndpoint(url)) {
+            throw new Error(`${errorCode}_untrusted_endpoint`)
+        }
         const timeoutMs = Number.isFinite(Number(options?.timeoutMs))
             ? Math.max(250, Number(options.timeoutMs))
             : CONFIG_DIRECT_FETCH_TIMEOUT_MS
@@ -904,7 +921,10 @@ class ZapTransport {
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify(obj)
+                    body: JSON.stringify(obj),
+                    credentials: 'omit',
+                    redirect: 'error',
+                    cache: 'no-store'
                 }, timeoutMs)
 
                 const acceptedStatusZero = response.status === 0 && response.type !== 'opaque'
@@ -939,6 +959,14 @@ class ZapTransport {
             detectedAt: Number.isFinite(Number(payload.detectedAt)) ? Number(payload.detectedAt) : Date.now()
         }
         if (!route.configUrl || !route.alertsUrl || !route.progressUrl) {
+            return null
+        }
+        if (
+            !isTrustedCallbackEndpoint(route.configUrl, 'config')
+            || !isTrustedCallbackEndpoint(route.alertsUrl, 'alert')
+            || !isTrustedCallbackEndpoint(route.progressUrl, 'progress')
+            || (route.controlUrl && !isTrustedCallbackEndpoint(route.controlUrl, 'control'))
+        ) {
             return null
         }
         if (route.zapid) {
@@ -1053,7 +1081,6 @@ class ZapTransport {
         if (!zapid) {
             throw new Error('zap_progress_missing_zapid')
         }
-
         const body = {
             zapid,
             browserid: this.browserid,
@@ -1241,6 +1268,14 @@ class ZapTransport {
                 diagnostics: [{ kind: 'missing_zapid' }]
             }
         }
+        if (!isTrustedCallbackEndpoint(configUrl, 'config')) {
+            return {
+                ptkConfigFetchFailed: true,
+                error: 'zap_config_url_untrusted',
+                elapsedMs: 0,
+                diagnostics: [{ kind: 'untrusted_config_url' }]
+            }
+        }
 
         const startedAt = Date.now()
         const diagnostics = []
@@ -1283,7 +1318,8 @@ class ZapTransport {
                     },
                     body: JSON.stringify(requestBody),
                     cache: 'no-store',
-                    credentials: 'include'
+                    credentials: 'omit',
+                    redirect: 'error'
                 }, CONFIG_DIRECT_FETCH_TIMEOUT_MS)
 
                 const responseMeta = {
@@ -1854,16 +1890,7 @@ class ZapTransport {
     }
 
     _buildBaseUrl(url, secret) {
-        let origin = 'https://zap'
-        try {
-            const parsed = new URL(url)
-            if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.host) {
-                origin = parsed.origin
-            }
-        } catch (_) {
-            // Keep default origin.
-        }
-        return `${origin}/zapCallBackUrl/${secret}`
+        return `${TRUSTED_ZAP_ORIGIN}/zapCallBackUrl/${secret}`
     }
 
     _logCaughtUrl(source, payload = {}) {
@@ -1914,7 +1941,12 @@ class ZapTransport {
 
         try {
             debugLog('[PTK ZAP] Probing quickstart content for callback URL...')
-            const response = await fetch(url, { method: 'GET', cache: 'no-store' })
+            const response = await fetch(url, {
+                method: 'GET',
+                cache: 'no-store',
+                credentials: 'omit',
+                redirect: 'error'
+            })
             const text = await response.text()
             const body = String(text || '').slice(0, 400000)
 
@@ -1924,7 +1956,12 @@ class ZapTransport {
                 const scripts = extractQuickstartScriptUrls(body, url).slice(0, QUICKSTART_SCRIPT_FETCH_LIMIT)
                 for (const scriptUrl of scripts) {
                     try {
-                        const scriptResponse = await fetch(scriptUrl, { method: 'GET', cache: 'no-store' })
+                        const scriptResponse = await fetch(scriptUrl, {
+                            method: 'GET',
+                            cache: 'no-store',
+                            credentials: 'omit',
+                            redirect: 'error'
+                        })
                         if (!scriptResponse.ok) continue
                         const scriptBody = (await scriptResponse.text()).slice(0, QUICKSTART_SCRIPT_BODY_MAX)
                         candidate = extractCallbackCandidate(scriptBody)

@@ -231,6 +231,13 @@
               </div>
             </div>
           </div>
+          <div class="row" style="border-bottom: solid 1px #cecece;">
+            <div class="six wide column">Clear saved JWTs, Request Builder history, macros, session profiles, and evidence packages</div>
+            <div class="four wide column"><code><b>Manual action</b></code></div>
+            <div class="two wide column">
+              <button type="button" class="ui small secondary button clear_sensitive_artifacts">Clear data</button>
+            </div>
+          </div>
         </div>
       </form>
 
@@ -241,7 +248,7 @@
             <div class="two wide column" style="padding-top: 8px;padding-left:16px">Activation token</div>
             <div class="eight wide column">
               <div class="ui toggle text">
-                <input type="password" name="api_key">
+                <input type="password" name="api_key" autocomplete="off">
               </div>
             </div>
             <!-- <div class="two wide column" style="padding: 2px;">
@@ -265,7 +272,7 @@
               <div class="ui positive message" id="api_success" style="display: none;">
                 <div class="header">
                   API key success<br /><br />
-                  <div>Current API token: <code id="api_token"></code></div><br />
+                  <div>Token fingerprint: <code id="api_token"></code></div><br />
                 </div>
                 <span id="api_token"></span>
               </div>

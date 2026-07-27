@@ -1,9 +1,19 @@
 /* Author: Denis Podgurskii */
 
-import { ptk_logger, ptk_notifications, ptk_utils, ptk_storage } from "./utils.js"
+import { ptk_logger, ptk_notifications, ptk_utils } from "./utils.js"
+import { sensitiveArtifactStorage as ptk_storage } from "./sensitiveArtifactStore.js"
 import { ptk_exporter } from "./exporter.js"
 
 const worker = self
+
+function createRecorderSessionId() {
+    if (globalThis.crypto?.randomUUID) {
+        return globalThis.crypto.randomUUID()
+    }
+    const bytes = new Uint8Array(24)
+    globalThis.crypto.getRandomValues(bytes)
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
+}
 
 export class ptk_recorder {
     constructor(settings) {
@@ -392,11 +402,13 @@ export class ptk_recorder {
     }
 
     onMessage(message, sender) {
-        
-        if (!ptk_utils.isTrustedOrigin(sender))
-            return Promise.reject({ success: false, error: 'Error origin value' })
-
         if (message.channel == "ptk_popup2background_recorder") {
+            const trustedExtensionPage = ptk_utils.isTrustedExtensionPageSender(sender)
+            const trustedContentControl = ptk_utils.isTrustedContentSender(sender)
+                && (message.type === 'stop_recording' || message.type === 'stop_replay')
+            if (!trustedExtensionPage && !trustedContentControl) {
+                return Promise.resolve({ success: false, error: 'untrusted_extension_sender' })
+            }
             if (this["msg_" + message.type]) {
                 return this["msg_" + message.type](message)
             }
@@ -404,6 +416,9 @@ export class ptk_recorder {
         }
 
         if (message.channel == "ptk_content2background_recorder") {
+            if (!ptk_utils.isTrustedContentSender(sender)) {
+                return Promise.resolve({ success: false, error: 'untrusted_content_sender' })
+            }
             if (this["msg_" + message.type]) {
                 return this["msg_" + message.type](message, sender)
             }
@@ -630,6 +645,8 @@ export class ptk_recorder {
             this.mode = 'recording'
             this.bootstrap = bootstrap
             this.cleanCookieOnStart = cleanCookie
+            this.sessionId = createRecorderSessionId()
+            this.captureSensitiveInputs = cleanCookie === true || bootstrap?.captureSensitiveInputs === true
 
             this.recording = {
                 startUrl: startUrl, frames: [], items: [], requests: [], recordingRequests: []
@@ -643,7 +660,12 @@ export class ptk_recorder {
             browser.storage.local.set({
                 "ptk_recording_items": [],
                 "ptk_recording_timing": [],
-                "ptk_recording": { mode: "recording", startUrl: startUrl },
+                "ptk_recording": {
+                    mode: "recording",
+                    startUrl: startUrl,
+                    sessionId: this.sessionId,
+                    captureSensitiveInputs: this.captureSensitiveInputs
+                },
                 "ptk_recording_log": "",
                 "ptk_recording_confirm_required": true,
                 "ptk_path_to_icons": this.pathToIcons,
@@ -743,6 +765,7 @@ export class ptk_recorder {
                 ? options.sessionProfile
                 : null
             this.cleanCookieOnStart = cleanCookie || !!sessionProfile
+            this.sessionId = createRecorderSessionId()
 
             this.replay = {
                 startUrl: startUrl, replayStep: 0, replayEvents: items, validateRegex: validateRegex
@@ -762,6 +785,7 @@ export class ptk_recorder {
                 "ptk_replay": {
                     mode: "replay",
                     startUrl: startUrl,
+                    sessionId: this.sessionId,
                     overlayPlan: overlay,
                     session: sessionProfile
                         ? {
@@ -791,6 +815,7 @@ export class ptk_recorder {
         this.openerTabId = -1
         this.tabs = []
         this.replay = null
+        this.sessionId = null
         this.detachAllDebuggers()
         this.removeListiners()
         browser.storage.local.set({
@@ -818,6 +843,8 @@ export class ptk_recorder {
         this.tabs = []
         this.replay = null
         this.recording = null
+        this.sessionId = null
+        this.captureSensitiveInputs = false
         this.bootstrap = null
         this.savedMacro = ""
         this.cancelled = false
