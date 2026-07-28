@@ -401,6 +401,9 @@ class EngineAdapter {
             if (options?.zapTiming && typeof options.zapTiming === 'object') {
                 iastOpts.zapTiming = options.zapTiming
             }
+            if (options?.targetUrl) {
+                iastOpts.targetUrl = options.targetUrl
+            }
             const started = await iast.runBackgroundScan(tabId, host, options?.policyCode || 'SMART', iastOpts)
             if (started === false) {
                 const activeTabId = Number(iast?.scanResult?.tabId)
@@ -4911,7 +4914,7 @@ export class ptk_automation {
             if (mergedOptions.runCve == null && runCve != null) {
                 mergedOptions.runCve = runCve
             }
-            if (engineName === 'DAST' && mergedOptions.targetUrl == null && session.targetUrl) {
+            if ((engineName === 'DAST' || engineName === 'IAST') && mergedOptions.targetUrl == null && session.targetUrl) {
                 mergedOptions.targetUrl = session.targetUrl
             }
             if (session.source === 'zap') {

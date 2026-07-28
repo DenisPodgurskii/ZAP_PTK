@@ -18,7 +18,7 @@ const ptkAutomationManifest = (() => {
 const ptkAutomationVersion = ptkAutomationManifest?.version || 'unknown';
 const isPtkAutomationAgentManifest = (() => {
     const background = ptkAutomationManifest?.background || {};
-    return ptkAutomationManifest?.name === 'PTK Automation Agent'
+    return ptkAutomationManifest?.name === 'OWASP Penetration Testing Kit Automation'
         || background?.service_worker === 'app_automation.js'
         || background?.page === 'ptk/background_automation.html';
 })();
