@@ -25,6 +25,10 @@ import { zapBridge } from "./ptk/background/integration/zap/index.js"
 import { loadDevLocalConfig } from "./ptk/common/devLocalConfig.js"
 import { initializePortalRuntimeConfig } from "./ptk/common/portalConfig.js"
 import {
+    buildIastPreNavigationOptions,
+    isTrustedAutomationControlSender
+} from "./ptk/common/automationPreNavigation.js"
+import {
     armZapStartupPending,
     ensureZapStartupState,
     getZapStartupSnapshot,
@@ -201,6 +205,7 @@ export class ptk_app {
 
         await this.applyPendingLifecycleFlags()
         this.settings.markReady()
+        await this.iast.restorePreparedAutomationArm()
         this._bootstrapped = true
 
         if (this.proxy) {
@@ -246,6 +251,31 @@ export class ptk_app {
     }
 
     onMessage(message, sender, sendResponse) {
+        if (message?.channel === 'ptk_extension_automation_control') {
+            if (!isTrustedAutomationControlSender(sender)) {
+                return Promise.resolve({ ok: false, error: 'untrusted_automation_control_sender' })
+            }
+            if (message?.type !== 'arm_iast_for_navigation') {
+                return Promise.resolve({ ok: false, error: 'unknown_automation_control_operation' })
+            }
+            return this.ready.then(async () => {
+                if (this.devLocalConfig?.automationEnabled !== true) {
+                    return { ok: false, error: 'automation_disabled' }
+                }
+                const { scanStrategy, opts } = buildIastPreNavigationOptions(message)
+                return this.iast.prepareAutomationNavigation({
+                    tabId: sender.tab.id,
+                    targetUrl: message.targetUrl,
+                    scanStrategy,
+                    opts
+                })
+            }).catch((error) => ({
+                ok: false,
+                error: error?.code || error?.message || String(error),
+                message: error?.message || String(error)
+            }))
+        }
+
         if (message?.channel === "ptk_extension_zap_runner") {
             if (!isTrustedZapRunnerSender(sender)) {
                 const metadata = zapRunnerSenderMetadata(sender)

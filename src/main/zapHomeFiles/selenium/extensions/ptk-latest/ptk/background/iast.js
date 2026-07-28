@@ -41,11 +41,54 @@ const lastIastModuleDeliveryByTab = new Map()
 const inFlightIastModuleSendByTab = new Map()
 const IAST_BUFFER_MAX_ENTRIES = 200
 const IAST_BUFFER_ACK_MAX_ENTRIES = 2000
+const IAST_PRE_NAVIGATION_ARM_STORAGE_KEY = 'ptk_iast_pre_navigation_arm'
+const IAST_PRE_NAVIGATION_ARM_MAX_TTL_MS = 60000
 
 function normalizeIastBackgroundStrategy(value = 'SMART') {
     return String(value || '').trim().toUpperCase() === 'COMPREHENSIVE'
         ? 'COMPREHENSIVE'
         : 'SMART'
+}
+
+function normalizeIastPreNavigationTarget(targetUrl = '') {
+    try {
+        const parsed = new URL(String(targetUrl || '').trim())
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+        if (parsed.username || parsed.password) return null
+        parsed.hash = ''
+        const pathname = parsed.pathname || '/'
+        const pathPrefix = pathname === '/'
+            ? '/'
+            : pathname.endsWith('/')
+                ? pathname
+                : `${pathname}/`
+        return {
+            url: parsed.href,
+            origin: parsed.origin,
+            host: parsed.host,
+            hostname: parsed.hostname,
+            protocol: parsed.protocol,
+            pathname,
+            pathPrefix
+        }
+    } catch (_) {
+        return null
+    }
+}
+
+function isIastPreNavigationUrlInScope(preparedTarget = null, candidateUrl = '') {
+    if (!preparedTarget || typeof preparedTarget !== 'object') return false
+    try {
+        const candidate = new URL(String(candidateUrl || ''))
+        if (candidate.protocol !== 'http:' && candidate.protocol !== 'https:') return false
+        if (candidate.origin !== preparedTarget.origin) return false
+        const candidatePath = candidate.pathname || '/'
+        if (preparedTarget.pathname === '/' || preparedTarget.pathPrefix === '/') return true
+        return candidatePath === preparedTarget.pathname
+            || candidatePath.startsWith(preparedTarget.pathPrefix)
+    } catch (_) {
+        return false
+    }
 }
 
 function buildIastAgentScriptFiles(scanStrategy = 'SMART', { isFirefox = false } = {}) {
@@ -98,13 +141,21 @@ function buildIastAgentScriptRegistrationScope({ host = '', targetUrl = '' } = {
     const matchHost = formatIastRegistrationMatchHost(normalized.hostname)
     if (!matchHost) return null
 
-    const scope = {
-        matches: [
-            `http://${matchHost}/*`,
-            `https://${matchHost}/*`
-        ]
-    }
-    if (normalized.hostWithPort && normalized.hostWithPort !== normalized.hostname) {
+    const preparedTarget = normalizeIastPreNavigationTarget(targetUrl)
+    const scope = preparedTarget
+        ? { matches: [`${preparedTarget.protocol}//${matchHost}/*`] }
+        : {
+            matches: [
+                `http://${matchHost}/*`,
+                `https://${matchHost}/*`
+            ]
+        }
+    if (preparedTarget) {
+        const pathGlob = preparedTarget.pathname === '/'
+            ? '/*'
+            : `${preparedTarget.pathPrefix}*`
+        scope.includeGlobs = [`${preparedTarget.origin}${pathGlob}`]
+    } else if (normalized.hostWithPort && normalized.hostWithPort !== normalized.hostname) {
         scope.includeGlobs = [
             `http://${normalized.hostWithPort}/*`,
             `https://${normalized.hostWithPort}/*`
@@ -616,6 +667,44 @@ function getPortalApiKey() {
     return String(worker?.ptk_app?.settings?.profile?.api_key || '').trim()
 }
 
+function resolveIastRulepackLoadOptions(effectiveOpts = {}) {
+    const customRulepack = effectiveOpts?.rulepack && typeof effectiveOpts.rulepack === 'object'
+        ? effectiveOpts.rulepack
+        : null
+    const selectedPortalPolicy = !customRulepack
+        ? getIastSelectedPortalPolicy()
+        : null
+    const shouldUsePortal = !customRulepack && (
+        effectiveOpts?.preferPortal === true
+        || !!effectiveOpts?.policyId
+        || !!selectedPortalPolicy?.id
+    )
+    if (shouldUsePortal && !getPortalApiKey()) {
+        const err = new Error('missing_api_key')
+        err.code = 'missing_api_key'
+        throw err
+    }
+    const rulepackLoadOptions = customRulepack
+        ? { rulepack: customRulepack }
+        : selectedPortalPolicy
+            ? {
+                preferPortal: true,
+                policyId: effectiveOpts?.policyId || selectedPortalPolicy?.id || null,
+                policyName: effectiveOpts?.policyName || selectedPortalPolicy?.name || null,
+                apiKey: getPortalApiKey()
+            }
+            : {
+                variant: effectiveOpts?.variant || null,
+                preferPortal: effectiveOpts?.preferPortal === true,
+                policyId: effectiveOpts?.policyId ?? null,
+                policyName: effectiveOpts?.policyName || null,
+                portal: effectiveOpts?.portal && typeof effectiveOpts.portal === 'object'
+                    ? effectiveOpts.portal
+                    : undefined
+            }
+    return { customRulepack, rulepackLoadOptions }
+}
+
 function buildIastRulepackCacheKey(options = {}) {
     const requestedVariant = options?.variant ? String(options.variant).trim() : ''
     const portalOptions = buildPortalRulepackLoadOptions(options)
@@ -929,7 +1018,10 @@ export class ptk_iast {
         this.exportChunkStore = new ExportChunkStore({ prefix: "iast" })
         this.importTransfers = new Map()
         this._iastBufferAckedIds = new Set()
-        this.resetScanResult()
+        this.preparedAutomationArm = null
+        this._preparedAutomationArmRestorePromise = null
+        this._preparedAutomationPendingMessages = []
+        this.resetScanResult({ preservePreparedAutomationArm: true })
         this.modulesCatalog = null
         this.currentRulepackOverride = null
         this.currentRulepackLoadOptions = null
@@ -1055,8 +1147,11 @@ export class ptk_iast {
         }
     }
 
-    resetScanResult() {
-        this.unregisterScript()
+    resetScanResult({ preservePreparedAutomationArm = false } = {}) {
+        if (!preservePreparedAutomationArm) {
+            this.unregisterScript()
+            this.preparedAutomationArm = null
+        }
         this.detachDevtoolsDebugger()
         this.isScanRunning = false
         if (this.currentScanId) {
@@ -1085,6 +1180,167 @@ export class ptk_iast {
         } catch (err) {
             console.warn('[PTK IAST] Failed to load default modules', err)
             return []
+        }
+    }
+
+    async _readPreparedAutomationArmStorage() {
+        try {
+            if (!browser?.storage?.session?.get) return null
+            const stored = await browser.storage.session.get(IAST_PRE_NAVIGATION_ARM_STORAGE_KEY)
+            return stored?.[IAST_PRE_NAVIGATION_ARM_STORAGE_KEY] || null
+        } catch (_) {
+            return null
+        }
+    }
+
+    async _writePreparedAutomationArmStorage(value = null) {
+        try {
+            if (!browser?.storage?.session) return false
+            if (value && browser.storage.session.set) {
+                await browser.storage.session.set({
+                    [IAST_PRE_NAVIGATION_ARM_STORAGE_KEY]: value
+                })
+                return true
+            }
+            if (browser.storage.session.remove) {
+                await browser.storage.session.remove(IAST_PRE_NAVIGATION_ARM_STORAGE_KEY)
+                return true
+            }
+        } catch (_) { }
+        return false
+    }
+
+    _isPreparedAutomationArmUsable(arm = null, { tabId = null, candidateUrl = null } = {}) {
+        if (!arm || typeof arm !== 'object') return false
+        if (Number(arm.expiresAt || 0) <= Date.now()) return false
+        if (tabId !== null && tabId !== undefined) {
+            const normalizedTabId = this._normalizeTabId(tabId)
+            if (normalizedTabId === null || normalizedTabId !== this._normalizeTabId(arm.tabId)) return false
+        }
+        if (candidateUrl && !isIastPreNavigationUrlInScope(arm.target, candidateUrl)) return false
+        return Boolean(arm.target && arm.rulepackLoadOptions && arm.rulepackSignature)
+    }
+
+    async restorePreparedAutomationArm() {
+        if (this._isPreparedAutomationArmUsable(this.preparedAutomationArm)) {
+            return this.preparedAutomationArm
+        }
+        if (this._preparedAutomationArmRestorePromise) {
+            return this._preparedAutomationArmRestorePromise
+        }
+        this._preparedAutomationArmRestorePromise = (async () => {
+            const stored = await this._readPreparedAutomationArmStorage()
+            if (!this._isPreparedAutomationArmUsable(stored)) {
+                if (stored) await this._writePreparedAutomationArmStorage(null)
+                this.preparedAutomationArm = null
+                return null
+            }
+            this.preparedAutomationArm = stored
+            this.currentRulepackLoadOptions = cloneIastValue(stored.rulepackLoadOptions, {})
+            this.currentRulepackOverride = stored.rulepackLoadOptions?.rulepack || null
+            iastScanStrategy = normalizeIastBackgroundStrategy(stored.scanStrategy)
+            return stored
+        })().finally(() => {
+            this._preparedAutomationArmRestorePromise = null
+        })
+        return this._preparedAutomationArmRestorePromise
+    }
+
+    async getPreparedAutomationArm(tabId = null, candidateUrl = null) {
+        const arm = await this.restorePreparedAutomationArm()
+        if (!this._isPreparedAutomationArmUsable(arm, { tabId, candidateUrl })) {
+            if (arm && Number(arm.expiresAt || 0) <= Date.now()) {
+                await this.clearPreparedAutomationArm({ clearBuffer: true })
+            }
+            return null
+        }
+        return arm
+    }
+
+    async clearPreparedAutomationArm({ clearBuffer = false, preserveRegistration = false } = {}) {
+        const arm = this.preparedAutomationArm || await this._readPreparedAutomationArmStorage()
+        this.preparedAutomationArm = null
+        this._preparedAutomationPendingMessages = []
+        await this._writePreparedAutomationArmStorage(null)
+        if (arm?.tabId != null) {
+            clearIastModuleSendTracking(Number(arm.tabId))
+            if (clearBuffer) await this._clearIastBufferForTab(arm.tabId)
+        }
+        if (!preserveRegistration && !this.isScanRunning) {
+            await this.unregisterScript()
+        }
+        return arm || null
+    }
+
+    async prepareAutomationNavigation({ tabId, targetUrl, scanStrategy = 'SMART', opts = {} } = {}) {
+        if (this.isScanRunning) {
+            const err = new Error('iast_scan_already_running')
+            err.code = 'iast_scan_already_running'
+            throw err
+        }
+        const normalizedTabId = this._normalizeTabId(tabId)
+        const target = normalizeIastPreNavigationTarget(targetUrl)
+        if (normalizedTabId === null) {
+            const err = new Error('invalid_iast_pre_navigation_tab')
+            err.code = 'invalid_iast_pre_navigation_tab'
+            throw err
+        }
+        if (!target) {
+            const err = new Error('invalid_iast_pre_navigation_target')
+            err.code = 'invalid_iast_pre_navigation_target'
+            throw err
+        }
+
+        await this.clearPreparedAutomationArm({ clearBuffer: true })
+        const normalizedStrategy = normalizeIastBackgroundStrategy(scanStrategy)
+        const { customRulepack, rulepackLoadOptions } = resolveIastRulepackLoadOptions(opts || {})
+        const loadedRulepack = await loadIastModules(rulepackLoadOptions)
+        validateIastActivationRulepack(loadedRulepack, { label: 'IAST pre-navigation arm' })
+        const now = Date.now()
+        const requestedTtl = Number(opts?.armTtlMs || opts?.ttlMs || IAST_PRE_NAVIGATION_ARM_MAX_TTL_MS)
+        const ttlMs = Math.max(1000, Math.min(
+            Number.isFinite(requestedTtl) ? requestedTtl : IAST_PRE_NAVIGATION_ARM_MAX_TTL_MS,
+            IAST_PRE_NAVIGATION_ARM_MAX_TTL_MS
+        ))
+        const arm = {
+            version: 1,
+            tabId: normalizedTabId,
+            target,
+            scanStrategy: normalizedStrategy,
+            rulepackLoadOptions: cloneIastValue(rulepackLoadOptions, {}),
+            rulepackSignature: buildIastModulesSignature(loadedRulepack, normalizedStrategy),
+            createdAt: now,
+            expiresAt: now + ttlMs
+        }
+
+        this.preparedAutomationArm = arm
+        this.currentRulepackOverride = customRulepack
+        this.currentRulepackLoadOptions = cloneIastValue(rulepackLoadOptions, {})
+        iastScanStrategy = normalizedStrategy
+        clearIastModuleSendTracking(normalizedTabId)
+        await this._clearIastBufferForTab(normalizedTabId)
+        await this._writePreparedAutomationArmStorage(arm)
+
+        const registered = await this.registerScript(normalizedStrategy, { targetUrl: target.url })
+        if (!registered) {
+            await this.clearPreparedAutomationArm({ clearBuffer: true })
+            const err = new Error('iast_pre_navigation_registration_failed')
+            err.code = 'iast_pre_navigation_registration_failed'
+            throw err
+        }
+
+        return {
+            ok: true,
+            armed: true,
+            tabId: normalizedTabId,
+            targetUrl: target.url,
+            scope: {
+                origin: target.origin,
+                pathPrefix: target.pathPrefix
+            },
+            scanStrategy: normalizedStrategy,
+            rulepackSignature: arm.rulepackSignature,
+            expiresAt: arm.expiresAt
         }
     }
 
@@ -1300,8 +1556,11 @@ export class ptk_iast {
         }
     }
 
-    async reset() {
-        this.resetScanResult()
+    async reset({ preservePreparedAutomationArm = false } = {}) {
+        if (!preservePreparedAutomationArm) {
+            await this.clearPreparedAutomationArm({ clearBuffer: true })
+        }
+        this.resetScanResult({ preservePreparedAutomationArm })
         await ptk_storage.setItem(this.storageKey, {})
     }
 
@@ -1383,7 +1642,10 @@ export class ptk_iast {
 
     async _appendIastBufferMessage(message = {}, sender = {}) {
         const tabId = this._normalizeTabId(sender?.tab?.id)
-        if (!this.isTrackedScanTab(tabId)) {
+        const preparedArm = !this.isTrackedScanTab(tabId)
+            ? await this.getPreparedAutomationArm(tabId, sender?.url || sender?.tab?.url || null)
+            : null
+        if (!this.isTrackedScanTab(tabId) && !preparedArm) {
             return {
                 ok: false,
                 reason: this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
@@ -1428,6 +1690,22 @@ export class ptk_iast {
         if (!key) return { ok: false, reason: 'missing_tab', messages: [] }
 
         const entries = await this._readIastBufferEntries(key)
+        const preparedArm = !this.isTrackedScanTab(sender?.tab?.id)
+            ? await this.getPreparedAutomationArm(
+                sender?.tab?.id,
+                sender?.url || sender?.tab?.url || null
+            )
+            : null
+        if (preparedArm) {
+            return {
+                ok: true,
+                pending: true,
+                reason: 'prepared_scan_pending',
+                count: entries.length,
+                messages: []
+            }
+        }
+
         await this._removeIastBufferKeys([key])
 
         if (!this.isTrackedScanTab(sender?.tab?.id)) {
@@ -1456,6 +1734,90 @@ export class ptk_iast {
         if (filtered.length !== entries.length) {
             await this._writeIastBufferEntries(key, filtered)
         }
+    }
+
+    _ingestPreparedIastBufferPayload(payload = {}, entry = {}) {
+        if (!payload || typeof payload !== 'object') return false
+        const tabId = this._normalizeTabId(entry?.tabId)
+        const bufferId = payload?.__ptkIastBufferId || payload?.bufferId || entry?.id || null
+        if (payload.ptk_iast === 'finding_report' && payload.finding) {
+            try {
+                const finding = createFindingFromIAST(payload.finding, {
+                    scanId: this.scanResult.scanId,
+                    host: this.scanResult.host,
+                    tabId
+                })
+                this._applyRelatedTabEvidence(finding, tabId)
+                this.addOrUpdateFinding(finding)
+                this._incrementIastAutomationTelemetry('findingReportsAccepted', {
+                    lastSenderTabId: tabId
+                })
+                this._rememberIastBufferAck(bufferId)
+                return true
+            } catch (error) {
+                console.warn('[PTK IAST] Failed to adopt prepared finding', error?.message || String(error))
+                return false
+            }
+        }
+        if (payload.ptk_iast === 'runtime_signal' && payload.signal) {
+            this.addOrUpdateRuntimeSignal(this._applyRelatedTabRuntimeSignal(payload.signal, tabId))
+            this._incrementIastAutomationTelemetry('runtimeSignalsAccepted', {
+                lastSenderTabId: tabId
+            })
+            this._rememberIastBufferAck(bufferId)
+            return true
+        }
+        return false
+    }
+
+    _rememberPreparedIastPayload(payload = {}, sender = {}) {
+        const cloned = this._cloneIastBufferPayload(payload)
+        if (!cloned || typeof cloned !== 'object') return false
+        this._preparedAutomationPendingMessages.push({
+            id: cloned?.__ptkIastBufferId || cloned?.bufferId || null,
+            message: cloned,
+            tabId: this._normalizeTabId(sender?.tab?.id),
+            frameId: Number.isInteger(Number(sender?.frameId)) ? Number(sender.frameId) : 0,
+            url: sender?.url || sender?.tab?.url || null,
+            createdAt: Date.now()
+        })
+        if (this._preparedAutomationPendingMessages.length > IAST_BUFFER_MAX_ENTRIES) {
+            this._preparedAutomationPendingMessages = this._preparedAutomationPendingMessages.slice(-IAST_BUFFER_MAX_ENTRIES)
+        }
+        return true
+    }
+
+    async _drainPreparedIastBufferForTab(tabId) {
+        const normalizedTabId = this._normalizeTabId(tabId)
+        if (normalizedTabId === null) return { accepted: 0, total: 0 }
+        const prefix = `ptk_iast_buffer:${normalizedTabId}:`
+        let allItems = {}
+        try {
+            allItems = await browser.storage.local.get(null)
+        } catch (_) {
+            const fallbackKey = this._iastBufferStorageKeyForParts(normalizedTabId, 0)
+            allItems = { [fallbackKey]: await this._readIastBufferEntries(fallbackKey) }
+        }
+        const keys = Object.keys(allItems || {}).filter(key => key.startsWith(prefix))
+        const storedEntries = keys.flatMap(key => Array.isArray(allItems[key]) ? allItems[key] : [])
+        const pendingEntries = this._preparedAutomationPendingMessages
+            .filter(entry => this._normalizeTabId(entry?.tabId) === normalizedTabId)
+        const entriesById = new Map()
+        const entriesWithoutId = []
+        for (const entry of [...storedEntries, ...pendingEntries]) {
+            const id = entry?.id || entry?.message?.__ptkIastBufferId || entry?.message?.bufferId || null
+            if (id) entriesById.set(String(id), entry)
+            else entriesWithoutId.push(entry)
+        }
+        const entries = [...entriesById.values(), ...entriesWithoutId]
+        let accepted = 0
+        for (const entry of entries) {
+            if (this._ingestPreparedIastBufferPayload(entry?.message, entry)) accepted += 1
+        }
+        await this._removeIastBufferKeys(keys)
+        this._preparedAutomationPendingMessages = this._preparedAutomationPendingMessages
+            .filter(entry => this._normalizeTabId(entry?.tabId) !== normalizedTabId)
+        return { accepted, total: entries.length }
     }
 
     _normalizeTabId(tabId) {
@@ -1603,6 +1965,16 @@ export class ptk_iast {
         if (info?.status === 'loading' || typeof info?.url === 'string') {
             clearIastModuleSendTracking(tabId)
         }
+        const arm = this.preparedAutomationArm
+        const nextUrl = typeof info?.url === 'string' ? info.url : (tab?.url || '')
+        if (
+            arm
+            && this._normalizeTabId(arm.tabId) === this._normalizeTabId(tabId)
+            && /^https?:/i.test(nextUrl)
+            && !isIastPreNavigationUrlInScope(arm.target, nextUrl)
+        ) {
+            await this.clearPreparedAutomationArm({ clearBuffer: true })
+        }
     }
 
     removeListeners() {
@@ -1613,6 +1985,9 @@ export class ptk_iast {
 
     onRemoved(tabId, info) {
         clearIastModuleSendTracking(tabId)
+        if (this._normalizeTabId(this.preparedAutomationArm?.tabId) === this._normalizeTabId(tabId)) {
+            void this.clearPreparedAutomationArm({ clearBuffer: true })
+        }
         if (this.relatedScanTabs?.has?.(Number(tabId))) {
             this.releaseRelatedScanTab(tabId)
             return
@@ -1673,7 +2048,13 @@ export class ptk_iast {
 
             if (message.type == 'check') {
                 //console.log('check iast')
-                if (this.isTrackedScanTab(sender?.tab?.id))
+                if (
+                    this.isTrackedScanTab(sender?.tab?.id)
+                    || this._isPreparedAutomationArmUsable(this.preparedAutomationArm, {
+                        tabId: sender?.tab?.id,
+                        candidateUrl: sender?.url || sender?.tab?.url || null
+                    })
+                )
                     return Promise.resolve({ loadAgent: true })
                 else
                     return Promise.resolve({ loadAgent: false })
@@ -1737,6 +2118,15 @@ export class ptk_iast {
                     } catch (e) {
                         console.warn('[PTK IAST][background] createFindingFromIAST failed', e)
                     }
+                } else if (this._isPreparedAutomationArmUsable(this.preparedAutomationArm, {
+                    tabId: senderTabId,
+                    candidateUrl: sender?.url || sender?.tab?.url || null
+                })) {
+                    // The paired iast_buffer_append message owns persistence until
+                    // startSession adopts this exact tab. Do not acknowledge or
+                    // classify the startup finding as dropped.
+                    this._rememberPreparedIastPayload(message, sender)
+                    return
                 } else {
                     const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
                     this._incrementIastAutomationTelemetry(
@@ -1759,6 +2149,12 @@ export class ptk_iast {
                     })
                     this.addOrUpdateRuntimeSignal(this._applyRelatedTabRuntimeSignal(message.signal, senderTabId))
                     this._ackIastBufferMessage(sender, message?.bufferId).catch(() => { })
+                } else if (this._isPreparedAutomationArmUsable(this.preparedAutomationArm, {
+                    tabId: senderTabId,
+                    candidateUrl: sender?.url || sender?.tab?.url || null
+                })) {
+                    this._rememberPreparedIastPayload(message, sender)
+                    return
                 } else {
                     const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
                     this._incrementIastAutomationTelemetry(
@@ -1844,7 +2240,13 @@ export class ptk_iast {
             ;(async () => {
                 try {
                     const tabId = sender?.tab?.id
-                    if (!this.isTrackedScanTab(tabId)) {
+                    const preparedArm = !this.isTrackedScanTab(tabId)
+                        ? await this.getPreparedAutomationArm(
+                            tabId,
+                            sender?.url || sender?.tab?.url || null
+                        )
+                        : null
+                    if (!this.isTrackedScanTab(tabId) && !preparedArm) {
                         const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
                         sendResponse && sendResponse({
                             active: false,
@@ -1855,14 +2257,20 @@ export class ptk_iast {
                         })
                         return
                     }
-                    const modules = await loadIastModules(this.currentRulepackLoadOptions || {})
+                    const moduleLoadOptions = preparedArm?.rulepackLoadOptions
+                        || this.currentRulepackLoadOptions
+                        || {}
+                    const effectiveStrategy = preparedArm?.scanStrategy
+                        || this.scanResult?.settings?.iastScanStrategy
+                        || iastScanStrategy
+                    const modules = await loadIastModules(moduleLoadOptions)
                     if (!modules) {
                         console.warn('[PTK IAST BG] No IAST modules available for request')
                         sendResponse && sendResponse({
                             active: true,
                             iastModules: null,
                             iastModulesSignature: null,
-                            scanStrategy: iastScanStrategy
+                            scanStrategy: effectiveStrategy
                         })
                         return
                     }
@@ -1870,8 +2278,8 @@ export class ptk_iast {
                     sendResponse && sendResponse({
                         active: true,
                         iastModules: modules,
-                        iastModulesSignature: buildIastModulesSignature(modules, iastScanStrategy),
-                        scanStrategy: iastScanStrategy
+                        iastModulesSignature: buildIastModulesSignature(modules, effectiveStrategy),
+                        scanStrategy: effectiveStrategy
                     })
                 } catch (err) {
                     console.warn('[PTK IAST BG] Failed to load IAST modules', err)
@@ -1879,7 +2287,7 @@ export class ptk_iast {
                         active: true,
                         iastModules: null,
                         iastModulesSignature: null,
-                        scanStrategy: iastScanStrategy,
+                        scanStrategy: preparedArm?.scanStrategy || iastScanStrategy,
                         error: err?.message || String(err)
                     })
                 }
@@ -2428,40 +2836,7 @@ export class ptk_iast {
         const zapTiming = (effectiveOpts?.zapTiming && typeof effectiveOpts.zapTiming === 'object')
             ? Object.assign({}, effectiveOpts.zapTiming)
             : null
-        const customRulepack = (effectiveOpts && typeof effectiveOpts === 'object' && effectiveOpts.rulepack && typeof effectiveOpts.rulepack === 'object')
-            ? effectiveOpts.rulepack
-            : null
-        const selectedPortalPolicy = !customRulepack
-            ? getIastSelectedPortalPolicy()
-            : null
-        const shouldUsePortal = !customRulepack && (
-            effectiveOpts?.preferPortal === true
-            || !!effectiveOpts?.policyId
-            || !!selectedPortalPolicy?.id
-        )
-        if (shouldUsePortal && !getPortalApiKey()) {
-            const err = new Error('missing_api_key')
-            err.code = 'missing_api_key'
-            throw err
-        }
-        const rulepackLoadOptions = customRulepack
-            ? { rulepack: customRulepack }
-            : selectedPortalPolicy
-                ? {
-                    preferPortal: true,
-                    policyId: effectiveOpts?.policyId || selectedPortalPolicy?.id || null,
-                    policyName: effectiveOpts?.policyName || selectedPortalPolicy?.name || null,
-                    apiKey: getPortalApiKey()
-                }
-            : {
-                variant: effectiveOpts?.variant || null,
-                preferPortal: effectiveOpts?.preferPortal === true,
-                policyId: effectiveOpts?.policyId ?? null,
-                policyName: effectiveOpts?.policyName || null,
-                portal: effectiveOpts?.portal && typeof effectiveOpts.portal === 'object'
-                    ? effectiveOpts.portal
-                    : undefined
-            }
+        const { customRulepack, rulepackLoadOptions } = resolveIastRulepackLoadOptions(effectiveOpts)
         const loadedRulepack = await loadIastModules(rulepackLoadOptions)
         const rulepackSelection = buildIastRulepackSelectionSummary(loadedRulepack, rulepackLoadOptions)
         const policyState = getIastPortalPolicyState()
@@ -2474,24 +2849,45 @@ export class ptk_iast {
             packStatus
         })
         const policyMeta = loadedRulepack?.policy && typeof loadedRulepack.policy === 'object' ? loadedRulepack.policy : null
-        this.reset()
+        let tabUrl = effectiveOpts?.targetUrl || zapTiming?.targetUrl || null
+        if (!tabUrl && browser?.tabs?.get) {
+            try {
+                tabUrl = (await browser.tabs.get(tabId))?.url || null
+            } catch (_) { }
+        }
+        const preparedArm = await this.getPreparedAutomationArm(tabId, tabUrl)
+        const requestedRulepackSignature = buildIastModulesSignature(
+            loadedRulepack,
+            normalizeIastBackgroundStrategy(scanStrategy)
+        )
+        if (preparedArm && preparedArm.rulepackSignature !== requestedRulepackSignature) {
+            await this.clearPreparedAutomationArm({ clearBuffer: true })
+            const err = new Error('iast_pre_navigation_policy_mismatch')
+            err.code = 'iast_pre_navigation_policy_mismatch'
+            throw err
+        }
+        const adoptsPreparedArm = Boolean(preparedArm)
+        await this.reset({ preservePreparedAutomationArm: adoptsPreparedArm })
         this.currentRulepackOverride = customRulepack
         this.currentRulepackLoadOptions = Object.assign({}, rulepackLoadOptions, zapTiming ? { zapTiming } : {})
         clearIastModuleSendTracking(tabId)
-        this.agentReadyTabs.delete(tabId)
+        if (!adoptsPreparedArm) this.agentReadyTabs.delete(tabId)
         this.agentFailedTabs.delete(tabId)
         this.isScanRunning = true
         this.scanningRequest = false
-        await this._clearIastBufferForTab(tabId)
-        browser.tabs.sendMessage(tabId, {
-            channel: "ptk_background_iast2content",
-            type: "clean iast result"
-        }).catch(() => { })
+        if (!adoptsPreparedArm) {
+            await this._clearIastBufferForTab(tabId)
+            browser.tabs.sendMessage(tabId, {
+                channel: "ptk_background_iast2content",
+                type: "clean iast result"
+            }).catch(() => { })
+        }
         const scanId = ptk_utils.UUID()
         const started = new Date().toISOString()
         this.scanResult = this.getScanResultSchema({ scanId, host, startedAt: started })
         this.scanResult.tabId = tabId
         this.scanResult.host = host
+        this.scanResult.targetUrl = tabUrl || null
         this.scanResult.startedAt = started
         this.scanResult.finishedAt = null
         this.scanResult.settings = Object.assign({}, this.scanResult.settings || {}, {
@@ -2528,11 +2924,24 @@ export class ptk_iast {
             }),
             noise: computeIastNoiseTelemetry(this.scanResult)
         }
+        if (adoptsPreparedArm) {
+            const adoptedBuffer = await this._drainPreparedIastBufferForTab(tabId)
+            this.scanResult.iastTelemetry.automation.preNavigationArm = {
+                adopted: true,
+                createdAt: preparedArm.createdAt,
+                expiresAt: preparedArm.expiresAt,
+                bufferedMessages: adoptedBuffer.total,
+                acceptedMessages: adoptedBuffer.accepted
+            }
+            await this.clearPreparedAutomationArm({ preserveRegistration: true })
+        }
         this.broadcastScanUpdate()
-        await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
-            host: this.scanResult.host,
-            targetUrl: this.scanResult.targetUrl || zapTiming?.targetUrl || null
-        })
+        if (!adoptsPreparedArm) {
+            await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
+                host: this.scanResult.host,
+                targetUrl: this.scanResult.targetUrl || zapTiming?.targetUrl || null
+            })
+        }
         this.addListeners()
         const devtoolsStartedAt = Date.now()
         await this.attachDevtoolsDebugger(tabId)
