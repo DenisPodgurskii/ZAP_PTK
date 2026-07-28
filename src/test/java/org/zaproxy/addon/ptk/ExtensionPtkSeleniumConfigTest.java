@@ -1,11 +1,16 @@
 package org.zaproxy.addon.ptk;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.zaproxy.zap.extension.selenium.Browser;
 
 /** Tests PTK's ZAP Selenium browser registration coverage. */
@@ -22,11 +27,54 @@ class ExtensionPtkSeleniumConfigTest {
     }
 
     @Test
+    void chromiumArgumentConfigurationUsesOnlyBaseBrowserKeys() throws Exception {
+        List<?> browsers = readBrowserList("PTK_CHROMIUM_ARGUMENT_BROWSERS");
+
+        assertTrue(browsers.contains(Browser.CHROME));
+        assertTrue(browsers.contains(Browser.EDGE));
+        assertFalse(browsers.contains(Browser.CHROME_HEADLESS));
+        assertFalse(browsers.contains(Browser.EDGE_HEADLESS));
+    }
+
+    @Test
     void firefoxRegistrationIncludesHeadedAndHeadlessBrowsers() throws Exception {
         List<?> browsers = readBrowserList("PTK_FIREFOX_BROWSERS");
 
         assertTrue(browsers.contains(Browser.FIREFOX));
         assertTrue(browsers.contains(Browser.FIREFOX_HEADLESS));
+    }
+
+    @Test
+    void firefoxXpiIsAValidArtifactForHeadedAndHeadlessBrowsers(@TempDir Path tempDir)
+            throws Exception {
+        Path xpi = Files.createFile(tempDir.resolve("ptk-latest.xpi"));
+
+        assertTrue(ExtensionPtk.isPtkExtensionPathPresent(xpi, Browser.FIREFOX));
+        assertTrue(ExtensionPtk.isPtkExtensionPathPresent(xpi, Browser.FIREFOX_HEADLESS));
+        assertFalse(ExtensionPtk.isPtkExtensionPathPresent(xpi, Browser.CHROME));
+    }
+
+    @Test
+    void chromiumUnpackedDirectoryIsAValidArtifactForHeadedAndHeadlessBrowsers(
+            @TempDir Path tempDir) throws Exception {
+        Path unpacked = Files.createDirectory(tempDir.resolve("ptk-latest"));
+
+        assertTrue(ExtensionPtk.isPtkExtensionPathPresent(unpacked, Browser.CHROME));
+        assertTrue(ExtensionPtk.isPtkExtensionPathPresent(unpacked, Browser.CHROME_HEADLESS));
+        assertTrue(ExtensionPtk.isPtkExtensionPathPresent(unpacked, Browser.EDGE));
+        assertTrue(ExtensionPtk.isPtkExtensionPathPresent(unpacked, Browser.EDGE_HEADLESS));
+        assertFalse(ExtensionPtk.isPtkExtensionPathPresent(unpacked, Browser.FIREFOX));
+    }
+
+    @Test
+    void reflectiveFailureDiagnosticsExposeUnderlyingCause() {
+        InvocationTargetException wrapper =
+                new InvocationTargetException(
+                        new IllegalArgumentException("unsupported Selenium browser key"));
+
+        assertEquals(
+                "IllegalArgumentException: unsupported Selenium browser key",
+                ExtensionPtk.describeExceptionForLog(wrapper));
     }
 
     @Test
