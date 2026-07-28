@@ -745,6 +745,8 @@ public class ExtensionPtk extends ExtensionAdaptor
             List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
     private static final List<Browser> PTK_CHROMIUM_BROWSERS =
             List.of(Browser.CHROME, Browser.CHROME_HEADLESS, Browser.EDGE, Browser.EDGE_HEADLESS);
+    private static final List<Browser> PTK_CHROMIUM_ARGUMENT_BROWSERS =
+            List.of(Browser.CHROME, Browser.EDGE);
     private static final List<Browser> PTK_FIREFOX_BROWSERS =
             List.of(Browser.FIREFOX, Browser.FIREFOX_HEADLESS);
     private static final char[] CHROMIUM_EXTENSION_ID_ALPHABET = "abcdefghijklmnop".toCharArray();
@@ -1510,20 +1512,20 @@ public class ExtensionPtk extends ExtensionAdaptor
             }
             logConfiguredPtkExtensions(extensions);
         } catch (Exception e) {
-            LOGGER.warn("PTK Selenium extension config failed: {}", e.getMessage());
+            LOGGER.warn("PTK Selenium extension config failed: {}", describeExceptionForLog(e));
         }
     }
 
     private static boolean ensurePtkSeleniumBrowserArguments(SeleniumOptions options) {
         boolean changed = false;
-        for (Browser browser : PTK_CHROMIUM_BROWSERS) {
+        for (Browser browser : PTK_CHROMIUM_ARGUMENT_BROWSERS) {
             try {
                 changed |= ensurePtkSeleniumBrowserArguments(options, browser);
             } catch (ReflectiveOperationException | RuntimeException e) {
                 LOGGER.warn(
                         "PTK Selenium browser argument config failed browser={} reason={}",
                         browser,
-                        e.getMessage());
+                        describeExceptionForLog(e));
             }
         }
         return changed;
@@ -1600,8 +1602,7 @@ public class ExtensionPtk extends ExtensionAdaptor
 
     private static boolean ensureBrowserExtension(
             List<BrowserExtension> extensions, Path path, Browser browser, String label) {
-        boolean exists =
-                browser == Browser.FIREFOX ? Files.isRegularFile(path) : Files.isDirectory(path);
+        boolean exists = isPtkExtensionPathPresent(path, browser);
         if (!exists) {
             LOGGER.warn("PTK {} extension config skipped; path not found path={}", label, path);
             return false;
@@ -1632,6 +1633,35 @@ public class ExtensionPtk extends ExtensionAdaptor
         return true;
     }
 
+    static boolean isPtkExtensionPathPresent(Path path, Browser browser) {
+        if (path == null || browser == null) {
+            return false;
+        }
+        if (browser == Browser.FIREFOX || browser == Browser.FIREFOX_HEADLESS) {
+            return Files.isRegularFile(path);
+        }
+        return Files.isDirectory(path);
+    }
+
+    static String describeExceptionForLog(Throwable error) {
+        if (error == null) {
+            return "unknown";
+        }
+        Throwable cause = error;
+        for (int depth = 0; depth < 16; depth++) {
+            Throwable next = cause.getCause();
+            if (next == null || next == cause) {
+                break;
+            }
+            cause = next;
+        }
+        String message = cause.getMessage();
+        if (message == null || message.isBlank()) {
+            return cause.getClass().getSimpleName();
+        }
+        return cause.getClass().getSimpleName() + ": " + message;
+    }
+
     private static void logConfiguredPtkExtensions(List<BrowserExtension> extensions) {
         for (BrowserExtension extension : extensions) {
             if (extension == null || extension.getPath() == null) {
@@ -1650,16 +1680,12 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
     }
 
-    private static SeleniumOptions getSeleniumOptions(ExtensionSelenium extensionSelenium) {
-        try {
-            Method getOptionsMethod = ExtensionSelenium.class.getDeclaredMethod("getOptions");
-            getOptionsMethod.setAccessible(true);
-            Object value = getOptionsMethod.invoke(extensionSelenium);
-            return value instanceof SeleniumOptions ? (SeleniumOptions) value : null;
-        } catch (ReflectiveOperationException | RuntimeException e) {
-            LOGGER.warn("PTK failed to access Selenium options: {}", e.getMessage());
-            return null;
-        }
+    private static SeleniumOptions getSeleniumOptions(ExtensionSelenium extensionSelenium)
+            throws ReflectiveOperationException {
+        Method getOptionsMethod = ExtensionSelenium.class.getDeclaredMethod("getOptions");
+        getOptionsMethod.setAccessible(true);
+        Object value = getOptionsMethod.invoke(extensionSelenium);
+        return value instanceof SeleniumOptions ? (SeleniumOptions) value : null;
     }
 
     private PtkResourcesLoader.LoadedPtkResources getLoadedResources() {

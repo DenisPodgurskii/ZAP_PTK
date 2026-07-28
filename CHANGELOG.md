@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 - Bug which breaks sites using Akamai Bot Manager 
 - Ensure Top 10 alert tags have expected URLs.
+- Avoid false Selenium configuration warnings on a clean ZAP profile for Chromium headless browsers and the Firefox headless XPI.
 
 ### Changed
 - Depends on the Common Library add-on.
