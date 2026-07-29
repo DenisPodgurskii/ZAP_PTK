@@ -27,16 +27,6 @@ class ExtensionPtkSeleniumConfigTest {
     }
 
     @Test
-    void chromiumArgumentConfigurationUsesOnlyBaseBrowserKeys() throws Exception {
-        List<?> browsers = readBrowserList("PTK_CHROMIUM_ARGUMENT_BROWSERS");
-
-        assertTrue(browsers.contains(Browser.CHROME));
-        assertTrue(browsers.contains(Browser.EDGE));
-        assertFalse(browsers.contains(Browser.CHROME_HEADLESS));
-        assertFalse(browsers.contains(Browser.EDGE_HEADLESS));
-    }
-
-    @Test
     void firefoxRegistrationIncludesHeadedAndHeadlessBrowsers() throws Exception {
         List<?> browsers = readBrowserList("PTK_FIREFOX_BROWSERS");
 
@@ -75,15 +65,6 @@ class ExtensionPtkSeleniumConfigTest {
         assertEquals(
                 "IllegalArgumentException: unsupported Selenium browser key",
                 ExtensionPtk.describeExceptionForLog(wrapper));
-    }
-
-    @Test
-    void chromiumArgumentsBypassBrowserUpdateEndpoints() throws Exception {
-        List<?> arguments = readBrowserList("PTK_CHROMIUM_BACKGROUND_ARGS");
-
-        assertTrue(
-                arguments.contains(
-                        "--proxy-bypass-list=edge.microsoft.com;*.dl.delivery.mp.microsoft.com;update.googleapis.com;dl.google.com;*.gvt1.com"));
     }
 
     @Test

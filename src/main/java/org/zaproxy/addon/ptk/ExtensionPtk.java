@@ -745,23 +745,10 @@ public class ExtensionPtk extends ExtensionAdaptor
             List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
     private static final List<Browser> PTK_CHROMIUM_BROWSERS =
             List.of(Browser.CHROME, Browser.CHROME_HEADLESS, Browser.EDGE, Browser.EDGE_HEADLESS);
-    private static final List<Browser> PTK_CHROMIUM_ARGUMENT_BROWSERS =
-            List.of(Browser.CHROME, Browser.EDGE);
     private static final List<Browser> PTK_FIREFOX_BROWSERS =
             List.of(Browser.FIREFOX, Browser.FIREFOX_HEADLESS);
     private static final char[] CHROMIUM_EXTENSION_ID_ALPHABET = "abcdefghijklmnop".toCharArray();
     private static final String PTK_ZAP_RUNNER_PATH = "/ptk/internal/zap-runner.html";
-    private static final List<String> PTK_CHROMIUM_BACKGROUND_ARGS =
-            List.of(
-                    "--disable-background-networking",
-                    "--disable-component-update",
-                    "--disable-domain-reliability",
-                    "--disable-default-apps",
-                    "--disable-features=AutofillServerCommunication,OptimizationHints,OptimizationHintsFetching,OptimizationTargetPrediction,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn",
-                    "--proxy-bypass-list=edge.microsoft.com;*.dl.delivery.mp.microsoft.com;update.googleapis.com;dl.google.com;*.gvt1.com",
-                    "--disable-sync",
-                    "--no-default-browser-check",
-                    "--no-first-run");
     private static final int PTK_BROWSER_BACKGROUND_PROXY_LISTENER_ORDER = 0;
     private static final String PTK_BACKGROUND_TRAFFIC_EMPTY_RESPONSE =
             "HTTP/1.1 204 No Content\r\n"
@@ -1497,7 +1484,6 @@ public class ExtensionPtk extends ExtensionAdaptor
                 LOGGER.warn("PTK Selenium extension config skipped; Selenium options unavailable");
                 return;
             }
-            ensurePtkSeleniumBrowserArguments(options);
             List<BrowserExtension> extensions = new ArrayList<>(options.getBrowserExtensions());
             boolean changed = false;
             for (Browser browser : PTK_CHROMIUM_BROWSERS) {
@@ -1514,90 +1500,6 @@ public class ExtensionPtk extends ExtensionAdaptor
         } catch (Exception e) {
             LOGGER.warn("PTK Selenium extension config failed: {}", describeExceptionForLog(e));
         }
-    }
-
-    private static boolean ensurePtkSeleniumBrowserArguments(SeleniumOptions options) {
-        boolean changed = false;
-        for (Browser browser : PTK_CHROMIUM_ARGUMENT_BROWSERS) {
-            try {
-                changed |= ensurePtkSeleniumBrowserArguments(options, browser);
-            } catch (ReflectiveOperationException | RuntimeException e) {
-                LOGGER.warn(
-                        "PTK Selenium browser argument config failed browser={} reason={}",
-                        browser,
-                        describeExceptionForLog(e));
-            }
-        }
-        return changed;
-    }
-
-    private static boolean ensurePtkSeleniumBrowserArguments(
-            SeleniumOptions options, Browser browser) throws ReflectiveOperationException {
-        String browserId = browser.getId();
-        List<Object> arguments = getSeleniumBrowserArguments(options, browserId);
-        Set<String> existing = ConcurrentHashMap.newKeySet();
-        for (Object argument : arguments) {
-            String value = getBrowserArgumentValue(argument);
-            if (value != null && !value.isBlank()) {
-                existing.add(value);
-            }
-        }
-        boolean changed = false;
-        for (String argument : PTK_CHROMIUM_BACKGROUND_ARGS) {
-            if (existing.add(argument)) {
-                arguments.add(newBrowserArgument(argument));
-                changed = true;
-            }
-        }
-        if (changed) {
-            setSeleniumBrowserArguments(options, browserId, arguments);
-            LOGGER.debug(
-                    "PTK Selenium browser arguments configured browser={} added={}",
-                    browser,
-                    PTK_CHROMIUM_BACKGROUND_ARGS.size());
-        }
-        return changed;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static List<Object> getSeleniumBrowserArguments(
-            SeleniumOptions options, String browserId) throws ReflectiveOperationException {
-        Method method =
-                SeleniumOptions.class.getDeclaredMethod("getBrowserArguments", String.class);
-        method.setAccessible(true);
-        Object value = method.invoke(options, browserId);
-        if (value instanceof List<?> arguments) {
-            return new ArrayList<>((List<Object>) arguments);
-        }
-        return new ArrayList<>();
-    }
-
-    private static void setSeleniumBrowserArguments(
-            SeleniumOptions options, String browserId, List<Object> arguments)
-            throws ReflectiveOperationException {
-        Method method =
-                SeleniumOptions.class.getDeclaredMethod(
-                        "setBrowserArguments", String.class, List.class);
-        method.setAccessible(true);
-        method.invoke(options, browserId, arguments);
-    }
-
-    private static Object newBrowserArgument(String argument) throws ReflectiveOperationException {
-        Class<?> argumentClass =
-                Class.forName("org.zaproxy.zap.extension.selenium.internal.BrowserArgument");
-        return argumentClass
-                .getConstructor(String.class, boolean.class)
-                .newInstance(argument, true);
-    }
-
-    private static String getBrowserArgumentValue(Object argument)
-            throws ReflectiveOperationException {
-        if (argument == null) {
-            return null;
-        }
-        Method method = argument.getClass().getMethod("getArgument");
-        Object value = method.invoke(argument);
-        return value == null ? null : String.valueOf(value);
     }
 
     private static boolean ensureBrowserExtension(
