@@ -129,7 +129,8 @@ export class ptk_rattacker {
             requestFilters: ptk_utils.requestFilters,
             extraInfoSpec: ptk_utils.extraInfoSpec,
             requestStore: this.requestCaptureStore,
-            getState: () => this.sessionCoordinator?.getState?.() || {}
+            getState: () => this.sessionCoordinator?.getState?.() || {},
+            isTrackedTab: (tabId) => this.sessionCoordinator?.isRunningForTab?.(tabId) === true
         })
         this.engine?.setCaptureProgressProvider?.(this.captureAdapter)
         this.sessionCoordinator = new DastSessionCoordinator({
@@ -201,6 +202,23 @@ export class ptk_rattacker {
         this._candidateRunStateScopeKey = null
         this._uiSnapshotRevision = 0
         this._uiSnapshotCache = null
+        this.scopedTabCoordinator = null
+    }
+
+    setScopedTabCoordinator(coordinator) {
+        this.scopedTabCoordinator = coordinator || null
+        return this
+    }
+
+    _registerScopedTabSession(tabId, settings = {}) {
+        const targetUrl = settings?.targetUrl || settings?.zapTiming?.targetUrl || null
+        return this.scopedTabCoordinator?.registerSession?.('DAST', {
+            primaryTabId: tabId,
+            targetUrl,
+            scopeMode: settings?.zapManaged === true && targetUrl ? 'path' : 'origin',
+            onEnroll: (meta) => this.sessionCoordinator.registerRelatedTab(meta.tabId, meta),
+            onRelease: (meta) => this.sessionCoordinator.releaseRelatedTab(meta.tabId)
+        })
     }
 
     _cleanupImportTransfers(now = Date.now()) {
@@ -764,7 +782,11 @@ export class ptk_rattacker {
                 return Promise.resolve({ ok: true, unlocked: true })
             }
 
-            if (message.type == 'xss_confirmed' && this.scanResult.host == (new URL(message.data.origin)).host) {
+            if (
+                message.type == 'xss_confirmed'
+                && this.sessionCoordinator.isRunningForTab(sender?.tab?.id)
+                && this.scanResult.host == (new URL(message.data.origin)).host
+            ) {
                 this.checkConfirmedAttack(message.data)
             }
 
@@ -1643,11 +1665,13 @@ export class ptk_rattacker {
         const started = this.sessionCoordinator.runBackgroundScan(tabId, host, domains, effectiveSettings)
         if (started) {
             this._setAuthoritativeScanResult(this.engine.scanResult)
+            this._registerScopedTabSession(tabId, effectiveSettings)?.catch?.(() => { })
         }
         return started
     }
 
     async stopBackgroundScan(options = {}) {
+        this.scopedTabCoordinator?.unregisterSession?.('DAST')
         const scanResult = await this.sessionCoordinator.stopBackgroundScan(options)
         if (scanResult) {
             this._setAuthoritativeScanResult(scanResult, {
@@ -1671,7 +1695,7 @@ export class ptk_rattacker {
 
     async startAutomationSession({ sessionId, tabId, host, domains, settings, policyCode, hooks }) {
         const effectiveSettings = await this._resolveDastRunSettings(settings || {})
-        return this.sessionCoordinator.startAutomationSession({
+        const result = await this.sessionCoordinator.startAutomationSession({
             sessionId,
             tabId,
             host,
@@ -1680,6 +1704,8 @@ export class ptk_rattacker {
             policyCode,
             hooks
         })
+        await this._registerScopedTabSession(tabId, effectiveSettings)
+        return result
     }
 
     async _resolveDastRunSettings(settings = {}) {
@@ -1734,6 +1760,7 @@ export class ptk_rattacker {
     }
 
     async stopAutomationSession(sessionId, timeoutMs = 180000, options = {}) {
+        this.scopedTabCoordinator?.unregisterSession?.('DAST')
         return this.sessionCoordinator.stopAutomationSession(sessionId, timeoutMs, options)
     }
 

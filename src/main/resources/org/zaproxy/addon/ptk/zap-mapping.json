@@ -90,7 +90,9 @@
             "jwt_1": 4,
             "jwt_2": 5,
             "jwt_3": 6,
-            "jwt_4": 7
+            "jwt_4": 7,
+            "jwt_probe_no_form": 8,
+            "jwt_probe_no_json": 9
           }
         },
         {

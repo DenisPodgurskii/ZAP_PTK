@@ -1,6 +1,11 @@
 /* Author: Denis Podgurskii */
 import { ptk_utils, ptk_ruleManager } from "../utils.js"
 import { RequestBuilderModel } from "./model.js"
+import {
+    IsolatedRedirectCookieJar,
+    isRedirectStatus,
+    redirectRequestTransition
+} from "./isolatedRedirectSession.js"
 
 const worker = globalThis.self || globalThis
 
@@ -153,6 +158,8 @@ export class RequestBuilderTransport {
         this.useListeners = false
         this.trackWithListeners = false
         this.trackingRequest = null
+        this.isolatedRedirectSession = false
+        this.isolatedPreserveRawHeaders = false
     }
 
     addListeners() {
@@ -221,7 +228,6 @@ export class RequestBuilderTransport {
                     storedHeaders,
                     { strictCookieOverride: stored?.strictCookieOverride === true }
                 )
-                RequestBuilderTransport._storedHeaderMap.delete(reqIdHeader)
             }
         }
 
@@ -244,7 +250,423 @@ export class RequestBuilderTransport {
         return { responseHeaders: response.responseHeaders }
     }
 
+    static _exactUrlRegex(value) {
+        const parsed = new URL(value)
+        parsed.hash = ''
+        return `^${parsed.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`
+    }
+
+    static _nextRuleId() {
+        const values = new Uint32Array(1)
+        globalThis.crypto.getRandomValues(values)
+        return 1000 + (values[0] % 2147482000)
+    }
+
+    static async _addExactSessionRule(url, headers, ruleId) {
+        if (worker.isFirefox) return
+        const parsed = new URL(url)
+        const requestHeaders = (Array.isArray(headers) ? headers : [])
+            .filter((header) => header?.name)
+            .map((header) => ({
+                header: String(header.name),
+                operation: 'set',
+                value: String(header.value ?? '')
+            }))
+        if (!requestHeaders.length) return
+        const condition = {
+            regexFilter: RequestBuilderTransport._exactUrlRegex(parsed.toString()),
+            requestDomains: [parsed.hostname],
+            resourceTypes: ['xmlhttprequest', 'other']
+        }
+        if (chrome?.runtime?.id) condition.initiatorDomains = [chrome.runtime.id]
+        await chrome.declarativeNetRequest.updateSessionRules({
+            addRules: [{
+                id: Number(ruleId),
+                priority: 1,
+                action: {
+                    type: 'modifyHeaders',
+                    requestHeaders
+                },
+                condition
+            }]
+        })
+    }
+
+    _isolatedRedirectHeaders(baseHeaders, {
+        currentUrl,
+        previousUrl = null,
+        method,
+        body,
+        cookieHeader,
+        ptkReqId,
+        ptkSource,
+        schema
+    }) {
+        const current = new URL(currentUrl)
+        const previous = previousUrl ? new URL(previousUrl) : null
+        const crossOrigin = previous && previous.origin !== current.origin
+        const bodyless = body === null || method === 'GET' || method === 'HEAD'
+        const removeNames = new Set(['cookie', 'x-ptk-reqid', 'x-ptk-source'])
+        if (bodyless) {
+            removeNames.add('content-length')
+            removeNames.add('content-type')
+            removeNames.add('transfer-encoding')
+        }
+        if (previous && previous.host !== current.host) {
+            removeNames.add('host')
+        }
+        if (crossOrigin) {
+            ;[
+                'authorization',
+                'proxy-authorization',
+                'origin',
+                'referer'
+            ].forEach((name) => removeNames.add(name))
+        }
+
+        const map = new Map()
+        ;(Array.isArray(baseHeaders) ? baseHeaders : []).forEach((header) => {
+            const name = String(header?.name || '')
+            const key = name.toLowerCase()
+            if (!name || removeNames.has(key)) return
+            map.set(key, { name, value: String(header?.value ?? '') })
+        })
+        if (cookieHeader) map.set('cookie', { name: 'Cookie', value: cookieHeader })
+        map.set('x-ptk-reqid', { name: 'X-PTK-ReqId', value: ptkReqId })
+        map.set('x-ptk-source', { name: 'X-PTK-Source', value: ptkSource })
+
+        const fetchHeaders = Object.fromEntries(
+            Array.from(map.values()).map((header) => [header.name, header.value])
+        )
+        this._ensureContentLength(schema, fetchHeaders, body)
+        const allRuleHeaders = Object.entries(fetchHeaders).map(([name, value]) => ({ name, value }))
+        const ruleHeaders = schema?.opts?.override_headers !== false
+            ? allRuleHeaders
+            : allRuleHeaders.filter((header) => [
+                'cookie',
+                'x-ptk-reqid',
+                'x-ptk-source'
+            ].includes(String(header?.name || '').toLowerCase()))
+        return {
+            fetchHeaders,
+            ruleHeaders,
+            needsDnr: this._isolatedRedirectNeedsDnr(currentUrl, ruleHeaders, schema)
+        }
+    }
+
+    _isolatedRedirectNeedsDnr(currentUrl, headers, schema) {
+        if (worker.isFirefox || schema?.opts?.use_dnr === false) return false
+        if (schema?.opts?.force_dnr === true) return true
+
+        const headerList = Array.isArray(headers) ? headers : []
+        const names = new Set(headerList.map((header) => String(header?.name || '').toLowerCase()))
+        if (names.has('cookie')) return true
+
+        const hostHeader = headerList.find(
+            (header) => String(header?.name || '').toLowerCase() === 'host'
+        )?.value
+        if (hostHeader) {
+            try {
+                if (String(hostHeader) !== new URL(currentUrl).host) return true
+            } catch (_) {
+                return true
+            }
+        }
+
+        return ['origin', 'referer', 'user-agent'].some((name) => names.has(name))
+    }
+
+    async _sendIsolatedRedirectRequest(schema) {
+        schema.opts = schema.opts || {}
+        schema.request = schema.request || {}
+        const rbSchema = schema
+        rbSchema.response = rbSchema.response || {}
+
+        const initialUrl = new URL(schema.request.url).toString()
+        const rawInitialHeaders = Array.isArray(schema.request.headers)
+            ? schema.request.headers.map((header) => ({ ...header }))
+            : []
+        const explicitCookie = rawInitialHeaders.find(
+            (header) => String(header?.name || '').toLowerCase() === 'cookie'
+        )?.value || (
+            Array.isArray(schema.request.cookies)
+                ? schema.request.cookies
+                    .filter((cookie) => cookie?.name)
+                    .map((cookie) => `${cookie.name}=${cookie.value || ''}`)
+                    .join('; ')
+                : ''
+        )
+        const preserveBrowserHeaders = this.isolatedPreserveRawHeaders === true
+            || schema?.opts?.preserve_browser_headers === true
+        const cacheValidatorNames = new Set([
+            'if-none-match',
+            'if-modified-since',
+            'if-match',
+            'if-unmodified-since'
+        ])
+        const browserManagedHeaderNames = new Set([
+            'accept-encoding',
+            'connection',
+            'content-length',
+            'host',
+            'origin',
+            'referer',
+            'upgrade-insecure-requests',
+            'user-agent'
+        ])
+        const initialHeaders = rawInitialHeaders.filter((header) => {
+            const name = String(header?.name || '').toLowerCase()
+            if (!name || cacheValidatorNames.has(name)) return false
+            if (preserveBrowserHeaders) return true
+            return !browserManagedHeaderNames.has(name)
+                && !name.startsWith('sec-fetch-')
+                && !name.startsWith('sec-ch-ua')
+        })
+        const jar = new IsolatedRedirectCookieJar()
+        if (explicitCookie) jar.seedRequestCookieHeader(initialUrl, explicitCookie)
+
+        let preparedBody = null
+        const initialMethod = String(schema.request.method || 'GET').toUpperCase()
+        if (schema.request.body && !initialMethod.match(/(^GET|^HEAD)/)) {
+            if (typeof schema.request.body.text === 'string') {
+                preparedBody = schema.request.body.text
+            } else if (Array.isArray(schema.request.body.params)) {
+                preparedBody = RequestBuilderModel._isMultipartBody(schema.request.body)
+                    ? RequestBuilderModel.serializeMultipartParams(schema.request.body.params, schema.request.body.boundary)
+                    : (
+                        RequestBuilderModel._hasRawUrlencodedParams(schema.request.body.params)
+                            ? RequestBuilderModel.serializeUrlencodedParams(schema.request.body.params)
+                            : new URLSearchParams(schema.request.body.params.map((item) => `${item.name}=${item.value}`).join('&')).toString()
+                    )
+                schema.request.body.text = preparedBody
+            }
+        }
+
+        const parsedMaxRedirects = Number(schema.opts.max_redirects)
+        const maxRedirects = Number.isFinite(parsedMaxRedirects)
+            ? Math.max(0, Math.min(20, Math.trunc(parsedMaxRedirects)))
+            : 10
+        const timeoutMs = Number(schema.opts.requestTimeoutMs)
+        const controller = timeoutMs > 0 ? new AbortController() : null
+        const timeoutId = controller
+            ? setTimeout(() => controller.abort(), timeoutMs)
+            : null
+        const startTime = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now()
+        const requestTimestamp = Number(
+            rbSchema.request.timestamp
+            ?? rbSchema.request.timeStamp
+            ?? rbSchema.request.ts
+        )
+        rbSchema.request.timestamp = Number.isFinite(requestTimestamp) && requestTimestamp >= 0
+            ? Math.round(requestTimestamp)
+            : Date.now()
+        const ptkSource = String(schema.opts.ptk_source || 'rbuilder')
+        const retryOnTransportFailure = schema?.opts?.retry_on_transport_failure === true
+        const parsedRetryCount = Number(schema?.opts?.transport_retry_count)
+        const maxTransportRetries = Number.isFinite(parsedRetryCount)
+            ? Math.max(0, Math.trunc(parsedRetryCount))
+            : (retryOnTransportFailure ? 1 : 0)
+        const parsedRetryDelay = Number(schema?.opts?.transport_retry_delay_ms)
+        const transportRetryDelayMs = Number.isFinite(parsedRetryDelay)
+            ? Math.max(0, parsedRetryDelay)
+            : 75
+        const sleep = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
+        const isRetriableTransportFailure = (error) => {
+            if (!error || controller?.signal?.aborted) return false
+            const name = String(error?.name || '')
+            const message = String(error?.message || '')
+            if (name === 'AbortError') return false
+            return name === 'TypeError'
+                || /failed to fetch/i.test(message)
+                || /networkerror/i.test(message)
+        }
+        const visited = new Set()
+        let currentUrl = initialUrl
+        let previousUrl = null
+        let currentMethod = initialMethod
+        let currentBody = preparedBody
+        let redirectCount = 0
+        let transportAttempts = 0
+        let transportRetryCount = 0
+        let listenersAdded = false
+
+        const responseHeadersFromFetch = (response) => {
+            const headers = []
+            for (const pair of response.headers.entries()) {
+                headers.push({ name: pair[0], value: pair[1] })
+            }
+            return headers
+        }
+        const headerValue = (headers, name) => {
+            const wanted = String(name).toLowerCase()
+            return (Array.isArray(headers) ? headers : []).find(
+                (header) => String(header?.name || '').toLowerCase() === wanted
+            )?.value || ''
+        }
+        const setFailure = (error) => {
+            rbSchema.response = rbSchema.response || {}
+            rbSchema.response.statusLine = error?.message || 'Request failed'
+            rbSchema.response.transportAttempts = transportAttempts
+            rbSchema.response.transportRetried = transportRetryCount > 0
+            rbSchema.response.transportRetryCount = transportRetryCount
+            rbSchema.response.redirectCount = redirectCount
+            if (error?.name) rbSchema.response.errorName = String(error.name)
+            if (error?.message) rbSchema.response.errorMessage = String(error.message)
+            return rbSchema
+        }
+
+        const execute = async () => {
+            try {
+                this.trackingRequest = new Map()
+                this.addListeners()
+                listenersAdded = true
+                while (true) {
+                    const visitKey = `${currentMethod} ${currentUrl}`
+                    if (visited.has(visitKey)) throw new Error('redirect_loop_detected')
+                    visited.add(visitKey)
+
+                    let response
+                    let ptkReqId = null
+                    let hopRetryCount = 0
+                    while (true) {
+                        ptkReqId = ptk_utils.attackParamId()
+                        const cookieHeader = jar.cookieHeaderFor(currentUrl)
+                        const { fetchHeaders, ruleHeaders, needsDnr } = this._isolatedRedirectHeaders(initialHeaders, {
+                            currentUrl,
+                            previousUrl,
+                            method: currentMethod,
+                            body: currentBody,
+                            cookieHeader,
+                            ptkReqId,
+                            ptkSource,
+                            schema
+                        })
+                        if (worker.isFirefox) {
+                            RequestBuilderTransport._storedHeaderMap.set(ptkReqId, {
+                                headers: ruleHeaders,
+                                ts: Date.now(),
+                                source: ptkSource,
+                                strictCookieOverride: true
+                            })
+                        }
+                        const params = {
+                            method: currentMethod,
+                            credentials: 'omit',
+                            redirect: 'manual',
+                            cache: 'no-cache',
+                            keepalive: schema.opts.keepalive === true,
+                            headers: fetchHeaders
+                        }
+                        if (currentBody !== null && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
+                            params.body = currentBody
+                        }
+                        if (controller) params.signal = controller.signal
+
+                        const fetchAttempt = async () => {
+                            let ruleId = null
+                            try {
+                                transportAttempts += 1
+                                if (needsDnr) {
+                                    ruleId = RequestBuilderTransport._nextRuleId()
+                                    await RequestBuilderTransport._addExactSessionRule(currentUrl, ruleHeaders, ruleId)
+                                }
+                                return await fetch(currentUrl, params)
+                            } finally {
+                                if (ruleId) await ptk_ruleManager.removeSessionRule(ruleId)
+                            }
+                        }
+
+                        try {
+                            response = needsDnr
+                                ? await RequestBuilderTransport._withDnrLock(fetchAttempt)
+                                : await fetchAttempt()
+                            break
+                        } catch (error) {
+                            const shouldRetry = retryOnTransportFailure
+                                && hopRetryCount < maxTransportRetries
+                                && isRetriableTransportFailure(error)
+                            if (!shouldRetry) throw error
+                            hopRetryCount += 1
+                            transportRetryCount += 1
+                            await sleep(transportRetryDelayMs * hopRetryCount)
+                        } finally {
+                            RequestBuilderTransport._storedHeaderMap.delete(ptkReqId)
+                        }
+                    }
+
+                    const trackingRequest = this.trackingRequest.get(`ptk:${ptkReqId}`) || null
+                    const trackedResponse = trackingRequest?.response || null
+                    const headers = trackedResponse?.responseHeaders || responseHeadersFromFetch(response)
+                    const statusCode = Number(trackedResponse?.statusCode ?? response.status)
+                    const statusLine = trackedResponse?.statusLine || (
+                        response.statusText
+                            ? `${schema.request.protocolVersion || 'HTTP/1.1'} ${statusCode} ${response.statusText}`
+                            : `${schema.request.protocolVersion || 'HTTP/1.1'} ${statusCode}`
+                    )
+                    jar.absorbResponseHeaders(currentUrl, headers)
+
+                    if (isRedirectStatus(statusCode)) {
+                        const location = headerValue(headers, 'location')
+                        if (!location) {
+                            rbSchema.response.body = await response.text()
+                            rbSchema.response.headers = headers
+                            rbSchema.response.statusCode = statusCode
+                            rbSchema.response.statusLine = statusLine
+                            break
+                        }
+                        if (redirectCount >= maxRedirects) throw new Error('redirect_limit_exceeded')
+                        const nextUrl = new URL(location, currentUrl)
+                        if (!['http:', 'https:'].includes(nextUrl.protocol)) {
+                            throw new Error(`unsupported_redirect_protocol:${nextUrl.protocol}`)
+                        }
+                        const transition = redirectRequestTransition(statusCode, currentMethod, currentBody)
+                        previousUrl = currentUrl
+                        currentUrl = nextUrl.toString()
+                        currentMethod = transition.method
+                        currentBody = transition.body
+                        redirectCount += 1
+                        continue
+                    }
+
+                    rbSchema.response.body = await response.text()
+                    rbSchema.response.headers = headers
+                    rbSchema.response.statusCode = statusCode
+                    rbSchema.response.statusLine = statusLine
+                    break
+                }
+
+                rbSchema.response.length = typeof rbSchema.response.body === 'string'
+                    ? rbSchema.response.body.length
+                    : null
+                const endTime = (typeof performance !== 'undefined' && performance.now)
+                    ? performance.now()
+                    : Date.now()
+                rbSchema.response.timeMs = Math.round(endTime - startTime)
+                rbSchema.response.transportAttempts = transportAttempts
+                rbSchema.response.transportRetried = transportRetryCount > 0
+                rbSchema.response.transportRetryCount = transportRetryCount
+                rbSchema.response.redirectCount = redirectCount
+                rbSchema.response.redirected = redirectCount > 0
+                rbSchema.response.url = currentUrl
+                return rbSchema
+            } catch (error) {
+                return setFailure(error)
+            } finally {
+                clearTimeout(timeoutId)
+                this.trackingRequest = null
+                if (listenersAdded) this.removeListeners()
+            }
+        }
+
+        return execute()
+    }
+
     async sendRequest(schema) {
+        if (this.isolatedRedirectSession === true && schema?.opts?.follow_redirect !== false) {
+            return this._sendIsolatedRedirectRequest(schema)
+        }
         const shouldUseTrackingListeners = this.useListeners || this.trackWithListeners
         if (shouldUseTrackingListeners) this.addListeners()
         let ruleId = null
@@ -543,6 +965,7 @@ export class RequestBuilderTransport {
                 return rbSchema
             } finally {
                 clearTimeout(timeoutId)
+                if (ptkReqId) RequestBuilderTransport._storedHeaderMap.delete(ptkReqId)
                 self.trackingRequest = null
                 if (shouldUseTrackingListeners) self.removeListeners()
                 if (ruleId) {

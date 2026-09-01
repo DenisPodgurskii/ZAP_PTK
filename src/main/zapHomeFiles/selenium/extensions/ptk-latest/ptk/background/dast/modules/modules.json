@@ -510,7 +510,7 @@
               "tracking": {
                 "enabled": true,
                 "mode": "followup_get",
-                "marker": "<script>alert(ptk_xss_1)</script>",
+                "marker": "<script>alert(987101)</script>",
                 "confidence": 90
               }
             },
@@ -519,7 +519,7 @@
           "action": {
             "params": [
               {
-                "value": "<script>alert(ptk_xss_1)</script>",
+                "value": "<script>alert(987101)</script>",
                 "position": "after",
                 "operation": "add"
               }
@@ -570,7 +570,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script>alert\\(ptk_xss_1\\)\\s*<\\/script>"
+              "regex": "<script>alert\\(987101\\)\\s*<\\/script>"
             },
             "extensions": {}
           }
@@ -584,7 +584,7 @@
               "tracking": {
                 "enabled": true,
                 "mode": "followup_get",
-                "marker": "</noscript><script>alert(ptk_xss_2)</script>",
+                "marker": "</noscript><script>alert(987102)</script>",
                 "confidence": 90
               }
             },
@@ -593,7 +593,7 @@
           "action": {
             "params": [
               {
-                "value": "</noscript><script>alert(ptk_xss_2)</script>",
+                "value": "</noscript><script>alert(987102)</script>",
                 "position": "after",
                 "operation": "add"
               }
@@ -644,7 +644,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<\\/noscript><script>alert\\(ptk_xss_2\\)\\s*<\\/script>"
+              "regex": "<\\/noscript><script>alert\\(987102\\)\\s*<\\/script>"
             },
             "extensions": {}
           }
@@ -658,7 +658,7 @@
               "tracking": {
                 "enabled": true,
                 "mode": "followup_get",
-                "marker": "<svg><animate onbegin=alert(ptk_xss_3) attributeName=x dur=1s>",
+                "marker": "<svg><animate onbegin=alert(987103) attributeName=x dur=1s>",
                 "confidence": 88
               }
             },
@@ -667,7 +667,7 @@
           "action": {
             "params": [
               {
-                "value": "<svg><animate onbegin=alert(ptk_xss_3) attributeName=x dur=1s>",
+                "value": "<svg><animate onbegin=alert(987103) attributeName=x dur=1s>",
                 "position": "after",
                 "operation": "add"
               }
@@ -718,7 +718,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<svg><animate onbegin=alert\\(ptk_xss_3\\) attributeName=x dur=1s>"
+              "regex": "<svg><animate onbegin=alert\\(987103\\) attributeName=x dur=1s>"
             },
             "extensions": {}
           }
@@ -868,7 +868,7 @@
               "tracking": {
                 "enabled": true,
                 "mode": "followup_get",
-                "marker": "\"><img src=x onerror=alert(ptk_xss_attr_1)>",
+                "marker": "\"><img src=x onerror=alert(987104)>",
                 "confidence": 90
               }
             },
@@ -877,7 +877,7 @@
           "action": {
             "params": [
               {
-                "value": "\"><img src=x onerror=alert(ptk_xss_attr_1)>",
+                "value": "\"><img src=x onerror=alert(987104)>",
                 "position": "after",
                 "operation": "add"
               }
@@ -918,7 +918,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<img src=x onerror=alert\\(ptk_xss_attr_1\\)>"
+              "regex": "<img src=x onerror=alert\\(987104\\)>"
             },
             "extensions": {}
           }
@@ -932,7 +932,7 @@
               "tracking": {
                 "enabled": true,
                 "mode": "followup_get",
-                "marker": "<svg/onload=alert(ptk_xss_poly_1)>",
+                "marker": "<svg/onload=alert(987105)>",
                 "confidence": 88
               }
             },
@@ -941,7 +941,7 @@
           "action": {
             "params": [
               {
-                "value": "<svg/onload=alert(ptk_xss_poly_1)>",
+                "value": "<svg/onload=alert(987105)>",
                 "position": "after",
                 "operation": "add"
               }
@@ -992,7 +992,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<svg(?:/|\\s)[^>]*onload=alert\\(ptk_xss_poly_1\\)"
+              "regex": "<svg(?:/|\\s)[^>]*onload=alert\\(987105\\)"
             },
             "extensions": {}
           }
@@ -1006,7 +1006,7 @@
               "tracking": {
                 "enabled": true,
                 "mode": "followup_get",
-                "marker": "\";alert(ptk_xss_jsstring_1);//",
+                "marker": "\";alert(987106);//",
                 "confidence": 86
               }
             },
@@ -1015,7 +1015,7 @@
           "action": {
             "params": [
               {
-                "value": "\";alert(ptk_xss_jsstring_1);//",
+                "value": "\";alert(987106);//",
                 "position": "after",
                 "operation": "add"
               }
@@ -1066,7 +1066,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,500}alert\\(ptk_xss_jsstring_1\\)"
+              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,500}alert\\(987106\\)"
             },
             "extensions": {}
           }
@@ -1080,7 +1080,7 @@
               "tracking": {
                 "enabled": true,
                 "mode": "followup_get",
-                "marker": "`;alert(ptk_xss_tpl_1);//",
+                "marker": "`;alert(987107);//",
                 "confidence": 86
               }
             },
@@ -1089,7 +1089,7 @@
           "action": {
             "params": [
               {
-                "value": "`;alert(ptk_xss_tpl_1);//",
+                "value": "`;alert(987107);//",
                 "position": "after",
                 "operation": "add"
               }
@@ -1140,7 +1140,7 @@
             "taxonomy": {},
             "docs": {},
             "constants": {
-              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,500}alert\\(ptk_xss_tpl_1\\)"
+              "regex": "<script[^>]*>(?:(?!<\\/script>)[\\s\\S]){0,500}alert\\(987107\\)"
             },
             "extensions": {}
           }
@@ -5081,6 +5081,182 @@
           }
         },
         {
+          "id": "jwt_probe_no_form",
+          "name": "JWT Probe (Form body JWT removed)",
+          "runtime": {
+            "hooks": [],
+            "confirmation": {},
+            "config": {}
+          },
+          "action": {
+            "params": [
+              {
+                "value": "",
+                "regex": "(ey[A-Za-z0-9_=-]+)\\.([A-Za-z0-9_=-]+)\\.([A-Za-z0-9_-]{2,})"
+              }
+            ]
+          },
+          "validation": {
+            "rule": false
+          },
+          "condition": {
+            "and": [
+              {
+                "<": [
+                  {
+                    "var": "original.response.statusCode"
+                  },
+                  500
+                ]
+              },
+              {
+                "regex": [
+                  {
+                    "filter": [
+                      {
+                        "var": "original.request.headers"
+                      },
+                      {
+                        "in": [
+                          {
+                            "var": "name"
+                          },
+                          [
+                            "Content-Type",
+                            "content-type"
+                          ]
+                        ]
+                      }
+                    ]
+                  },
+                  "application\\/x-www-form-urlencoded|multipart\\/form-data"
+                ]
+              },
+              {
+                "regex": [
+                  {
+                    "var": "original.request.body.params"
+                  },
+                  {
+                    "var": "attack.metadata.regex"
+                  }
+                ]
+              }
+            ]
+          },
+          "target": {
+            "params": [
+              {
+                "location": "form"
+              }
+            ]
+          },
+          "requestGrouping": "bulk",
+          "metadata": {
+            "taxonomy": {},
+            "docs": {
+              "description": "Remove JWT values from form body parameters to prove that the body carrier is required."
+            },
+            "constants": {},
+            "extensions": {}
+          }
+        },
+        {
+          "id": "jwt_probe_no_json",
+          "name": "JWT Probe (JSON body JWT removed)",
+          "runtime": {
+            "hooks": [],
+            "confirmation": {},
+            "config": {}
+          },
+          "action": {
+            "params": [
+              {
+                "value": "",
+                "regex": "(ey[A-Za-z0-9_=-]+)\\.([A-Za-z0-9_=-]+)\\.([A-Za-z0-9_-]{2,})"
+              }
+            ]
+          },
+          "validation": {
+            "rule": false
+          },
+          "condition": {
+            "and": [
+              {
+                "<": [
+                  {
+                    "var": "original.response.statusCode"
+                  },
+                  500
+                ]
+              },
+              {
+                "regex": [
+                  {
+                    "filter": [
+                      {
+                        "var": "original.request.headers"
+                      },
+                      {
+                        "in": [
+                          {
+                            "var": "name"
+                          },
+                          [
+                            "Content-Type",
+                            "content-type"
+                          ]
+                        ]
+                      }
+                    ]
+                  },
+                  "application\\/(?:[a-z0-9.+-]*\\+)?json"
+                ]
+              },
+              {
+                "or": [
+                  {
+                    "regex": [
+                      {
+                        "var": "original.request.body.text"
+                      },
+                      {
+                        "var": "attack.metadata.regex"
+                      }
+                    ]
+                  },
+                  {
+                    "regex": [
+                      {
+                        "var": "original.request.body.json"
+                      },
+                      {
+                        "var": "attack.metadata.regex"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "target": {
+            "params": [
+              {
+                "location": "json"
+              }
+            ]
+          },
+          "requestGrouping": "bulk",
+          "metadata": {
+            "taxonomy": {},
+            "docs": {
+              "description": "Remove JWT values from JSON body leaves to prove that the body carrier is required."
+            },
+            "constants": {},
+            "extensions": {}
+          }
+        },
+        {
           "id": "jwt_1",
           "name": "JWT None Algorithm (Cookie)",
           "runtime": {
@@ -5543,7 +5719,7 @@
                     {
                       "var": "attack.metadata.attacked.location"
                     },
-                    "body"
+                    "form"
                   ]
                 },
                 {
@@ -5554,7 +5730,7 @@
                           "var": "attack.request.body.params"
                         },
                         {
-                          "var": "attack.metadata.regex"
+                          "var": "attack.metadata.constants.regex"
                         }
                       ]
                     },
@@ -5564,7 +5740,7 @@
                           "var": "attack.request.body.text"
                         },
                         {
-                          "var": "attack.metadata.regex"
+                          "var": "attack.metadata.constants.regex"
                         }
                       ]
                     }
@@ -5619,7 +5795,7 @@
                             {
                               "var": "module.executed.0.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_form"
                           ]
                         },
                         {
@@ -5677,7 +5853,7 @@
                             {
                               "var": "module.executed.1.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_form"
                           ]
                         },
                         {
@@ -5735,7 +5911,7 @@
                             {
                               "var": "module.executed.2.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_form"
                           ]
                         },
                         {
@@ -5793,7 +5969,7 @@
                             {
                               "var": "module.executed.3.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_form"
                           ]
                         },
                         {
@@ -5851,7 +6027,7 @@
                             {
                               "var": "module.executed.4.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_form"
                           ]
                         },
                         {
@@ -5958,8 +6134,7 @@
                         "var": "module.executed"
                       },
                       [
-                        "jwt_probe_no_authz",
-                        "jwt_probe_no_both"
+                        "jwt_probe_no_form"
                       ],
                       {
                         "var": "original.response"
@@ -5973,7 +6148,7 @@
                           {
                             "var": "module.executed.0.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_form"
                         ]
                       },
                       {
@@ -6031,7 +6206,7 @@
                           {
                             "var": "module.executed.1.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_form"
                         ]
                       },
                       {
@@ -6089,7 +6264,7 @@
                           {
                             "var": "module.executed.2.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_form"
                         ]
                       },
                       {
@@ -6147,7 +6322,7 @@
                           {
                             "var": "module.executed.3.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_form"
                         ]
                       },
                       {
@@ -6205,7 +6380,7 @@
                           {
                             "var": "module.executed.4.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_form"
                         ]
                       },
                       {
@@ -7639,7 +7814,7 @@
                           "var": "attack.request.body.text"
                         },
                         {
-                          "var": "attack.metadata.regex"
+                          "var": "attack.metadata.constants.regex"
                         }
                       ]
                     },
@@ -7649,7 +7824,7 @@
                           "var": "attack.request.body.json"
                         },
                         {
-                          "var": "attack.metadata.regex"
+                          "var": "attack.metadata.constants.regex"
                         }
                       ]
                     }
@@ -7704,7 +7879,7 @@
                             {
                               "var": "module.executed.0.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_json"
                           ]
                         },
                         {
@@ -7762,7 +7937,7 @@
                             {
                               "var": "module.executed.1.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_json"
                           ]
                         },
                         {
@@ -7820,7 +7995,7 @@
                             {
                               "var": "module.executed.2.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_json"
                           ]
                         },
                         {
@@ -7878,7 +8053,7 @@
                             {
                               "var": "module.executed.3.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_json"
                           ]
                         },
                         {
@@ -7936,7 +8111,7 @@
                             {
                               "var": "module.executed.4.metadata.id"
                             },
-                            "jwt_probe_no_both"
+                            "jwt_probe_no_json"
                           ]
                         },
                         {
@@ -8058,7 +8233,7 @@
                           {
                             "var": "module.executed.0.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_json"
                         ]
                       },
                       {
@@ -8116,7 +8291,7 @@
                           {
                             "var": "module.executed.1.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_json"
                         ]
                       },
                       {
@@ -8174,7 +8349,7 @@
                           {
                             "var": "module.executed.2.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_json"
                         ]
                       },
                       {
@@ -8232,7 +8407,7 @@
                           {
                             "var": "module.executed.3.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_json"
                         ]
                       },
                       {
@@ -8290,7 +8465,7 @@
                           {
                             "var": "module.executed.4.metadata.id"
                           },
-                          "jwt_probe_no_both"
+                          "jwt_probe_no_json"
                         ]
                       },
                       {
@@ -8693,9 +8868,7 @@
                             {
                               "var": "value"
                             },
-                            {
-                              "var": "attack.metadata.regex"
-                            },
+                            "'unsafe-inline'",
                             "i"
                           ]
                         },
@@ -8704,9 +8877,7 @@
                             {
                               "var": "value"
                             },
-                            {
-                              "var": "attack.metadata.regex2"
-                            },
+                            "'unsafe-eval'",
                             "i"
                           ]
                         },
@@ -8715,9 +8886,7 @@
                             {
                               "var": "value"
                             },
-                            {
-                              "var": "attack.metadata.regex3"
-                            },
+                            "script-src[^;]*\\*",
                             "i"
                           ]
                         },
@@ -8726,9 +8895,7 @@
                             {
                               "var": "value"
                             },
-                            {
-                              "var": "attack.metadata.regex4"
-                            },
+                            "style-src[^;]*\\*",
                             "i"
                           ]
                         }
@@ -9136,35 +9303,24 @@
                               {
                                 "var": "value"
                               },
-                              {
-                                "var": "attack.metadata.regex"
-                              },
+                              "max-age\\s*=\\s*(\\d+)",
                               "i"
                             ]
                           }
                         },
                         {
-                          "and": [
+                          "<": [
                             {
-                              "regex": [
+                              "ptkRegexCaptureNumber": [
                                 {
                                   "var": "value"
                                 },
-                                {
-                                  "var": "attack.metadata.regex"
-                                },
+                                "max-age\\s*=\\s*(\\d+)",
                                 "i",
-                                "hstsAge"
+                                1
                               ]
                             },
-                            {
-                              "<": [
-                                {
-                                  "var": "captures.hstsAge.1"
-                                },
-                                15552000
-                              ]
-                            }
+                            15552000
                           ]
                         },
                         {
@@ -9274,9 +9430,7 @@
                         {
                           "var": "value"
                         },
-                        {
-                          "var": "attack.metadata.regex"
-                        },
+                        "\\/\\d|apache|nginx|iis|tomcat|gunicorn|caddy|lighttpd|express|kestrel|uvicorn|envoy|cloudflare|openresty|jetty",
                         "i"
                       ]
                     }
@@ -9791,9 +9945,7 @@
                                 {
                                   "var": "value"
                                 },
-                                {
-                                  "var": "attack.metadata.regex"
-                                },
+                                "(?<![a-z-])(vibrate|document-write|interest-cohort)\\s*=",
                                 "i"
                               ]
                             },
@@ -9802,9 +9954,7 @@
                                 {
                                   "var": "value"
                                 },
-                                {
-                                  "var": "attack.metadata.regex2"
-                                },
+                                "geolocation\\s*=\\s*\\*",
                                 "i"
                               ]
                             }
@@ -10084,9 +10234,7 @@
                         {
                           "var": "value"
                         },
-                        {
-                          "var": "attack.metadata.regex"
-                        },
+                        "\\*",
                         "i"
                       ]
                     }
@@ -10219,9 +10367,7 @@
                             {
                               "var": "value"
                             },
-                            {
-                              "var": "attack.metadata.regex"
-                            },
+                            "true",
                             "i"
                           ]
                         }
@@ -10351,38 +10497,77 @@
           "action": {},
           "validation": {
             "rule": {
-              "some": [
+              "or": [
                 {
-                  "var": "original.response.headers"
+                  "some": [
+                    {
+                      "var": "original.response.headers"
+                    },
+                    {
+                      "and": [
+                        {
+                          "regex": [
+                            {
+                              "var": "name"
+                            },
+                            {
+                              "var": "attack.metadata.regex"
+                            },
+                            "i"
+                          ]
+                        },
+                        {
+                          "or": [
+                            {
+                              "!": {
+                                "regex": [
+                                  {
+                                    "var": "value"
+                                  },
+                                  ";\\s*httponly\\b",
+                                  "i"
+                                ]
+                              }
+                            },
+                            {
+                              "!": {
+                                "regex": [
+                                  {
+                                    "var": "value"
+                                  },
+                                  ";\\s*samesite\\s*=\\s*(lax|strict)",
+                                  "i"
+                                ]
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
                 },
                 {
                   "and": [
                     {
-                      "regex": [
-                        {
-                          "var": "name"
-                        },
-                        "^set-cookie$",
-                        "i"
-                      ]
+                      "var": "original.response.isHttps"
                     },
                     {
-                      "or": [
+                      "some": [
                         {
-                          "!": {
-                            "regex": [
-                              {
-                                "var": "value"
-                              },
-                              ";\\s*httponly\\b",
-                              "i"
-                            ]
-                          }
+                          "var": "original.response.headers"
                         },
                         {
                           "and": [
                             {
-                              "var": "original.response.isHttps"
+                              "regex": [
+                                {
+                                  "var": "name"
+                                },
+                                {
+                                  "var": "attack.metadata.regex"
+                                },
+                                "i"
+                              ]
                             },
                             {
                               "!": {
@@ -10396,17 +10581,6 @@
                               }
                             }
                           ]
-                        },
-                        {
-                          "!": {
-                            "regex": [
-                              {
-                                "var": "value"
-                              },
-                              ";\\s*samesite\\s*=\\s*(lax|strict)",
-                              "i"
-                            ]
-                          }
                         }
                       ]
                     }
@@ -10421,7 +10595,9 @@
           "metadata": {
             "taxonomy": {},
             "docs": {},
-            "constants": {},
+            "constants": {
+              "regex": "^set-cookie$"
+            },
             "extensions": {}
           }
         },

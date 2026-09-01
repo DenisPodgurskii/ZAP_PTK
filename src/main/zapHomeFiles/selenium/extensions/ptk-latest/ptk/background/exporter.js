@@ -1,18 +1,28 @@
 /* Author: Denis Podgurskii */
 
 import { ptk_utils } from "./utils.js"
+import { flowFromRecording } from './macro/flow.js'
+import { serializeMacroDocument } from './macro/formatRegistry.js'
 
 export class ptk_exporter {
 
     constructor(recording, settings) {
         this.items = recording.items
         this.request = recording.recordingRequests
-        this.settings = settings
+        // DriverClick is the canonical format for newly exported PTK macros.
+        // OnClick and Javascript remain supported by the importer/replayer for
+        // backwards compatibility with existing .rec files.
+        this.settings = Object.assign({}, settings, {
+            event_type: "driverclick",
+            format: settings?.export_format || settings?.format || 'xml'
+        })
+        this.flowResult = null
     }
 
     render() {
-        if (this['render_' + this.settings.format]) return this['render_' + this.settings.format]()
-        else throw 'No render methond for ' + this.settings.format
+        if (this.settings.format === 'har') return this.render_har()
+        this.flowResult = flowFromRecording({ items: this.items, recordingRequests: this.request }, this.settings)
+        return serializeMacroDocument(this.flowResult.flow, this.settings.format, this.settings).text
     }
 
     /* xml */

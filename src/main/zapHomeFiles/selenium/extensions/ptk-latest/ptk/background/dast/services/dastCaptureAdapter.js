@@ -19,7 +19,8 @@ export class DastCaptureAdapter {
         requestFilters = [],
         extraInfoSpec = [],
         requestStore = null,
-        getState = () => ({})
+        getState = () => ({}),
+        isTrackedTab = null
     } = {}) {
         this.engine = engine
         this.worker = worker
@@ -28,6 +29,7 @@ export class DastCaptureAdapter {
         this.extraInfoSpec = Array.isArray(extraInfoSpec) ? extraInfoSpec : []
         this.requestStore = requestStore
         this.getState = getState
+        this.isTrackedTab = typeof isTrackedTab === "function" ? isTrackedTab : null
 
         this.onRemoved = this.onRemoved.bind(this)
         this.onCompleted = this.onCompleted.bind(this)
@@ -277,6 +279,24 @@ export class DastCaptureAdapter {
             || type === "other"
             || type === "ping"
         )
+    }
+
+    _isEngineAllowedResponse(response) {
+        if (typeof this.engine?.isAllowed !== "function") return true
+        try {
+            return this.engine.isAllowed(response) === true
+        } catch (_) {
+            return false
+        }
+    }
+
+    _isRecordedStrongTopFrameResponseDuplicate(response) {
+        if (typeof this.engine?.isRecordedStrongTopFrameResponseDuplicate !== "function") return false
+        try {
+            return this.engine.isRecordedStrongTopFrameResponseDuplicate(response) === true
+        } catch (_) {
+            return false
+        }
     }
 
     _isHtmlLinkDiscoveryEnabled() {
@@ -904,10 +924,15 @@ export class DastCaptureAdapter {
     }
 
     _shouldCaptureResponse(response, { allowHtmlDiscoveryBypass = false } = {}) {
-        if (!(this.engine?.isRunning && this.state.acceptIncomingRequests && this.engine.tabId === response?.tabId)) {
+        const trackedTab = this.isTrackedTab
+            ? this.isTrackedTab(response?.tabId)
+            : this.engine?.tabId === response?.tabId
+        if (!(this.engine?.isRunning && this.state.acceptIncomingRequests && trackedTab)) {
             return false
         }
         if (!this._isAttackableRequestType(response)) return false
+        if (!this._isEngineAllowedResponse(response)) return false
+        if (this._isRecordedStrongTopFrameResponseDuplicate(response)) return false
         if (this._isPtkGeneratedObservedResponse(response)) return false
         if (this.state.requireUserInteractionBeforeCapture && !this.state.userInteractionUnlocked) {
             if (allowHtmlDiscoveryBypass && this._isSameOriginHtmlDocumentResponse(response)) {

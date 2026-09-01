@@ -398,10 +398,16 @@ export class ptk_sast {
       stopHeartbeat: this.sessionCoordinator.stopHeartbeat.bind(this.sessionCoordinator)
     });
     this.importTransfers = new Map();
+    this.scopedTabCoordinator = null;
     this.resetScanResult();
 
     this.addMessageListeners();
     this.transport.ensureFirefoxWorker();
+  }
+
+  setScopedTabCoordinator(coordinator) {
+    this.scopedTabCoordinator = coordinator || null;
+    return this;
   }
 
   _cleanupImportTransfers(now = Date.now()) {
@@ -739,7 +745,7 @@ export class ptk_sast {
           return;
         }
         if (this.multiPageScanActive) return;
-        if (this.isScanRunning && this.activeTabId == sender.tab.id) {
+        if (this.isScanRunning && this.sessionCoordinator.isTrackedScanTab(sender.tab.id)) {
           this.scanCode(message.scripts, message.html, message.file).catch(e => console.error("SAST scanCode failed", e));
         }
       }
@@ -1504,6 +1510,14 @@ export class ptk_sast {
     const zapTargetUrl = typeof opts?.zapTiming?.targetUrl === "string" && opts.zapTiming.targetUrl
       ? opts.zapTiming.targetUrl
       : null;
+    const scopedTargetUrl = zapTargetUrl || baseUrl;
+    await this.scopedTabCoordinator?.registerSession?.('SAST', {
+      primaryTabId: tabId,
+      targetUrl: scopedTargetUrl,
+      scopeMode: opts?.zapManaged === true && zapTargetUrl ? 'path' : 'origin',
+      onEnroll: (meta) => this.sessionCoordinator.registerRelatedScanTab(meta.tabId, meta),
+      onRelease: (meta) => this.sessionCoordinator.releaseRelatedScanTab(meta.tabId)
+    });
     const deferZapCallbackCollection = opts?.zapManaged === true
       && isZapCallbackPageUrl(baseUrl)
       && zapTargetUrl
@@ -1593,6 +1607,7 @@ export class ptk_sast {
   }
 
   async stopBackgroundScan(opts = {}) {
+    this.scopedTabCoordinator?.unregisterSession?.('SAST');
     const discardResults = !!opts?.discardResults;
     const scanId = this.scanResult?.scanId || null;
     if (scanId) {

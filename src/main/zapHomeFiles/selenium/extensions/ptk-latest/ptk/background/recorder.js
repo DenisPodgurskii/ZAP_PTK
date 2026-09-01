@@ -3,6 +3,7 @@
 import { ptk_logger, ptk_notifications, ptk_utils } from "./utils.js"
 import { sensitiveArtifactStorage as ptk_storage } from "./sensitiveArtifactStore.js"
 import { ptk_exporter } from "./exporter.js"
+import { normalizeFlow } from './macro/flow.js'
 
 const worker = self
 
@@ -13,6 +14,51 @@ function createRecorderSessionId() {
     const bytes = new Uint8Array(24)
     globalThis.crypto.getRandomValues(bytes)
     return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
+}
+
+function replayItemSummary(item, index) {
+    return {
+        WindowIndex: Number.isInteger(Number(item?.WindowIndex)) ? Number(item.WindowIndex) : 0,
+        EventType: String(item?.EventType || ''),
+        EventTypeName: String(item?.EventTypeName || item?.EventType || ''),
+        PtkStepId: String(item?.PtkStepId || ''),
+        PtkStepType: String(item?.PtkStepType || ''),
+        Step: Number.isSafeInteger(Number(item?.Step)) ? Number(item.Step) : index + 1,
+        Enable: item?.Enable === 0 ? 0 : 1,
+        Optional: item?.Optional === 1 ? 1 : 0
+    }
+}
+
+const REPLAY_RESULT_STATUSES = new Set(['running', 'completed', 'failed', 'stopped'])
+const REPLAY_TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped'])
+
+function boundedReplayText(value, maxLength = 300) {
+    return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, maxLength)
+}
+
+function normalizeReplayResult(value, sessionId, fallbackTotal = 0) {
+    const status = REPLAY_RESULT_STATUSES.has(value?.status) ? value.status : 'failed'
+    const totalSteps = Math.max(0, Math.min(10000, Number(value?.totalSteps || fallbackTotal) || 0))
+    const completedSteps = Math.max(0, Math.min(totalSteps, Number(value?.completedSteps || 0) || 0))
+    const currentStep = Math.max(0, Math.min(totalSteps, Number(value?.currentStep || 0) || 0))
+    const error = status === 'failed' ? {
+        code: boundedReplayText(value?.error?.code || 'replay_failed', 100),
+        message: boundedReplayText(value?.error?.message || 'Replay failed.', 300),
+        stepType: boundedReplayText(value?.error?.stepType || '', 80)
+    } : null
+    return {
+        status,
+        sessionId,
+        currentStepId: boundedReplayText(value?.currentStepId || '', 128),
+        currentStep,
+        completedSteps,
+        totalSteps,
+        warnings: Array.isArray(value?.warnings)
+            ? value.warnings.slice(0, 50).map((entry) => boundedReplayText(entry, 300))
+            : [],
+        error,
+        updatedAt: Date.now()
+    }
 }
 
 export class ptk_recorder {
@@ -30,10 +76,13 @@ export class ptk_recorder {
         this.cleanCookieOnStart = false
 
         this.storageKey = 'ptk_recorder'
-        this.storage = { 'savedMacro': '', 'recording': {} }
+        this.storage = { 'savedMacro': '', 'savedFlow': null, 'savedFormat': 'xml', 'recording': {} }
         this.debuggerTargets = new Set()
         this.lastActiveTabId = null
         this.activeReplayTabId = null
+        this.pendingReplayTabs = new Set()
+        this.scanOwnedReplay = null
+        this.replayResult = null
 
         this.reset()
     }
@@ -94,9 +143,14 @@ export class ptk_recorder {
     }
 
     onCreated(tab) {
-        if (this.mode != null) {
-            this.tabs.push(tab.id)
+        if (this.mode == null) return
+        if (this.mode === 'replay' && this.scanOwnedReplay) {
+            if (Number.isInteger(tab?.id) && this.isTracking(tab?.openerTabId)) {
+                this.pendingReplayTabs.add(tab.id)
+            }
+            return
         }
+        this.tabs.push(tab.id)
     }
 
     onActivated(info) {
@@ -115,7 +169,15 @@ export class ptk_recorder {
 
     onUpdated(tabId, info, tab) {
 
-        if (info.status != "complete" || !this.isTracking(tabId)) return
+        if (info.status != "complete") return
+        if (this.mode === 'replay' && this.scanOwnedReplay && this.pendingReplayTabs.has(tabId)) {
+            if (!tab?.url || tab.url === 'about:blank') return
+            this.pendingReplayTabs.delete(tabId)
+            if (!this.isReplayUrlInScope(tab.url)) return
+            if (!this.tabs.includes(tabId)) this.tabs.push(tabId)
+        }
+        if (!this.isTracking(tabId)) return
+        if (this.mode === 'replay' && this.scanOwnedReplay && tab?.url && !this.isReplayUrlInScope(tab.url)) return
         this.injectScriptsForTab(tabId, tab?.url).catch(e => console.warn(e))
     }
 
@@ -127,26 +189,96 @@ export class ptk_recorder {
 
         if (tabUrl != 'about:blank' && this.trackerJS) {
             if (this.cleanCookieOnStart) {
-                await browser.scripting.executeScript({
-                    func: () => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) { } },
-                    target: { tabId: tabId, allFrames: true }
-                }).catch(() => {})
+                await this.executeRecorderCode(tabId, `try { localStorage.clear(); sessionStorage.clear(); } catch (e) { }`, true).catch(() => {})
                 this.cleanCookieOnStart = false
             }
             const popuJSPath = this.popupJS
-            await browser.scripting.executeScript({ files: [this.trackerJS], target: { tabId: tabId, allFrames: false } })
-            await browser.scripting.executeScript({ files: [popuJSPath], target: { tabId: tabId, allFrames: false } }).catch(e => e)
-            await browser.scripting.executeScript({ files: [file], target: { tabId: tabId, allFrames: true } })
+            await this.executeRecorderFiles(tabId, [this.trackerJS], false)
+            await this.executeRecorderFiles(tabId, [popuJSPath], false).catch(e => e)
+            await this.executeRecorderFiles(tabId, [file], true)
             return
         }
 
-        await browser.scripting.executeScript({ files: [file], target: { tabId: tabId, allFrames: true } }).catch(e => e)
+        await this.executeRecorderFiles(tabId, [file], true).catch(e => e)
+    }
+
+    async executeRecorderFiles(tabId, files, allFrames) {
+        const normalizedFiles = (Array.isArray(files) ? files : []).filter(Boolean)
+        if (!normalizedFiles.length) return false
+        const manifestVersion = Number(browser?.runtime?.getManifest?.()?.manifest_version || 2)
+        if (!worker.isFirefox && manifestVersion >= 3 && browser?.scripting?.executeScript) {
+            await browser.scripting.executeScript({
+                files: normalizedFiles,
+                target: { tabId, allFrames: allFrames === true }
+            })
+            return true
+        }
+        if (browser?.tabs?.executeScript) {
+            const frameIds = await this.recorderFrameIds(tabId, allFrames)
+            for (const file of normalizedFiles) {
+                for (const frameId of frameIds) {
+                    try {
+                        await browser.tabs.executeScript(tabId, {
+                            file,
+                            frameId,
+                            matchAboutBlank: true,
+                            runAt: 'document_idle'
+                        })
+                    } catch (error) {
+                        if (frameId === 0) throw error
+                    }
+                }
+            }
+            return true
+        }
+        throw new Error('recorder_script_injection_unavailable')
+    }
+
+    async executeRecorderCode(tabId, code, allFrames) {
+        const manifestVersion = Number(browser?.runtime?.getManifest?.()?.manifest_version || 2)
+        if (!worker.isFirefox && manifestVersion >= 3 && browser?.scripting?.executeScript) {
+            await browser.scripting.executeScript({
+                func: () => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) { } },
+                target: { tabId, allFrames: allFrames === true }
+            })
+            return true
+        }
+        if (browser?.tabs?.executeScript) {
+            const frameIds = await this.recorderFrameIds(tabId, allFrames)
+            for (const frameId of frameIds) {
+                try {
+                    await browser.tabs.executeScript(tabId, {
+                        code,
+                        frameId,
+                        matchAboutBlank: true,
+                        runAt: 'document_idle'
+                    })
+                } catch (error) {
+                    if (frameId === 0) throw error
+                }
+            }
+            return true
+        }
+        throw new Error('recorder_code_injection_unavailable')
+    }
+
+    async recorderFrameIds(tabId, allFrames) {
+        if (allFrames !== true || !browser?.webNavigation?.getAllFrames) return [0]
+        try {
+            const frames = await browser.webNavigation.getAllFrames({ tabId })
+            const ids = (Array.isArray(frames) ? frames : [])
+                .map((frame) => Number(frame?.frameId))
+                .filter((frameId) => Number.isInteger(frameId) && frameId >= 0)
+            return [...new Set([0, ...ids])]
+        } catch (_) {
+            return [0]
+        }
     }
 
     onRemoved(tabId, info) {
         if (tabId == this.openerTabId) {
-            if (this.mode == "recording") this.stopRecording(info)
-            else if (this.mode == "replay") this.stopReplay(info)
+            if (this.mode == "recording") this.stopRecording(info).catch(() => {})
+            else if (this.mode == "replay") this.stopReplay(info).catch(() => {})
         }
     }
 
@@ -298,6 +430,74 @@ export class ptk_recorder {
         await browser.tabs.update(this.openerTabId, { url: startUrl })
     }
 
+    async startInTab(tab, startUrl) {
+        if (!tab || !Number.isInteger(tab.id)) throw new Error('Invalid replay target tab')
+        this.openerWinId = tab.windowId
+        this.openerTabId = tab.id
+        this.lastActiveTabId = tab.id
+        this.activeReplayTabId = tab.id
+        await browser.tabs.update(tab.id, { active: true, url: startUrl })
+    }
+
+    isReplayUrlInScope(value) {
+        if (!this.scanOwnedReplay?.scopeOrigin) return true
+        try {
+            return new URL(String(value || '')).origin === this.scanOwnedReplay.scopeOrigin
+        } catch (_) {
+            return false
+        }
+    }
+
+    async prepareScanOwnedReplay(options, startUrl, items) {
+        const requested = options?.scanOwned === true
+            || options?.suppressConfirmation === true
+            || Number.isInteger(options?.targetTabId)
+            || !!options?.scopeOrigin
+        if (!requested) return null
+        if (options?.scanOwned !== true
+            || options?.suppressConfirmation !== true
+            || options?.source !== 'dashboard_manage_scans'
+            || !Number.isInteger(options?.targetTabId)) {
+            throw new Error('invalid_scan_owned_replay_request')
+        }
+        let scopeUrl
+        try {
+            scopeUrl = new URL(String(options.scopeOrigin || ''))
+        } catch (_) {
+            throw new Error('invalid_scan_owned_replay_scope')
+        }
+        if (!['http:', 'https:'].includes(scopeUrl.protocol) || scopeUrl.origin !== String(options.scopeOrigin || '')) {
+            throw new Error('invalid_scan_owned_replay_scope')
+        }
+        const tab = await browser.tabs.get(options.targetTabId)
+        let tabOrigin
+        try {
+            tabOrigin = new URL(String(tab?.url || '')).origin
+        } catch (_) {
+            throw new Error('scan_owned_replay_target_out_of_scope')
+        }
+        if (tabOrigin !== scopeUrl.origin) throw new Error('scan_owned_replay_target_out_of_scope')
+        const replayUrls = [startUrl]
+        for (const item of Array.isArray(items) ? items : []) {
+            const type = String(item?.PtkStepType || item?.EventTypeName || item?.EventType || '').toLowerCase()
+            if ((type === 'navigate' || type === 'waitfornavigation' || type === 'waitforurl') && item?.Data) {
+                replayUrls.push(item.Data)
+            }
+        }
+        for (const value of replayUrls) {
+            let parsed
+            try {
+                parsed = new URL(String(value || ''))
+            } catch (_) {
+                throw new Error('scan_owned_replay_invalid_url')
+            }
+            if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== scopeUrl.origin) {
+                throw new Error('scan_owned_replay_url_out_of_scope')
+            }
+        }
+        return { tab, scopeOrigin: scopeUrl.origin, source: options.source }
+    }
+
     async recordSelectWindow(tab) {
         if (!tab) return
         const targetOptions = []
@@ -427,15 +627,33 @@ export class ptk_recorder {
     }
 
     async msg_init(message) {
-        this.storage = await ptk_storage.getItem(this.storageKey)
-        this.recording = this.storage['recording']
-        return Promise.resolve({ savedMacro: this.storage['savedMacro'], recording: this.storage['recording'] })
+        if (this.stopRecordingPromise) await this.stopRecordingPromise
+        const storage = await ptk_storage.getItem(this.storageKey) || {}
+        this.storage = storage
+        if (this.mode !== 'recording') this.recording = storage['recording']
+        return Promise.resolve({
+            savedMacro: storage['savedMacro'],
+            savedFlow: storage['savedFlow'],
+            savedFormat: storage['savedFormat'],
+            recording: storage['recording']
+        })
     }
 
     msg_save_macro(message) {
-        this.storage['savedMacro'] = message.macro
-        ptk_storage.setItem(this.storageKey, this.storage)
-        return Promise.resolve({ success: true })
+        try {
+            const nextStorage = {
+                ...(this.storage || {}),
+                savedMacro: typeof message.macro === 'string' ? message.macro : '',
+                savedFlow: message.flow ? normalizeFlow(message.flow) : null,
+                savedFormat: typeof message.format === 'string' ? message.format : 'xml'
+            }
+            return ptk_storage.setItem(this.storageKey, nextStorage).then(() => {
+                this.storage = nextStorage
+                return { success: true }
+            })
+        } catch (error) {
+            return Promise.resolve({ success: false, error: error?.code || 'invalid_macro_flow' })
+        }
     }
 
     msg_analyse(message) {
@@ -455,26 +673,30 @@ export class ptk_recorder {
         return Promise.resolve({ success: true })
     }
 
-    msg_stop_replay(message) {
-        this.stopReplay(message)
+    async msg_stop_replay(message) {
+        if (message?.sessionId && message.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, error: 'stale_replay_session' })
+        }
+        await this.stopReplay(message)
         return Promise.resolve({ success: true })
     }
 
     //External access
-    msg_start_recording(message) {
+    async msg_start_recording(message) {
         if (this.mode != null) {
             ptk_notifications.notify("Recording/playback already started", "Stop recording before start a new one");
             return Promise.resolve({ success: false, error: 'recording_or_replay_already_started' })
         }
-        ptk_storage.setItem(this.storageKey, {})
+        await ptk_storage.setItem(this.storageKey, {})
         this.startRecording(message.clean_cookie, message.url, message.bootstrap)
         return Promise.resolve({ success: true })
     }
 
     //External access
-    msg_stop_recording(message) {
-        this.stopRecording(message)
-        return Promise.resolve({ success: true, bootstrap: this.bootstrap })
+    async msg_stop_recording(message) {
+        const bootstrap = this.bootstrap
+        await this.stopRecording(message)
+        return Promise.resolve({ success: true, bootstrap })
     }
 
     //External access
@@ -492,17 +714,25 @@ export class ptk_recorder {
     }
 
     async msg_replay(message) {
-        await this.startReplay(
-            message.clean_cookie,
-            message.url,
-            message.events,
-            message.validate_regex,
-            {
-                overlay: message?.overlay || null,
-                sessionProfile: message?.session_profile || null
-            }
-        )
-        return Promise.resolve({ success: true })
+        try {
+            return await this.startReplay(
+                message.clean_cookie,
+                message.url,
+                message.events,
+                message.validate_regex,
+                {
+                    overlay: message?.overlay || null,
+                    sessionProfile: message?.session_profile || null,
+                    targetTabId: Number.isInteger(message?.target_tab_id) ? message.target_tab_id : null,
+                    scopeOrigin: message?.scope_origin || '',
+                    suppressConfirmation: message?.suppress_confirmation === true,
+                    scanOwned: message?.scan_owned === true,
+                    source: message?.source || ''
+                }
+            )
+        } catch (error) {
+            return { success: false, error: error?.message || 'replay_start_failed' }
+        }
     }
 
     async msg_select_window(message) {
@@ -520,7 +750,10 @@ export class ptk_recorder {
         if (message?.target) targets.unshift(message.target)
         const uniqTargets = [...new Set(targets.filter(Boolean))]
 
-        const tabs = await browser.tabs.query({ windowId: this.openerWinId })
+        const allTabs = await browser.tabs.query({ windowId: this.openerWinId })
+        const tabs = this.scanOwnedReplay
+            ? allTabs.filter((tab) => this.isReplayUrlInScope(tab?.url))
+            : allTabs
         const matchTab = (target) => {
             if (target.startsWith('title=')) {
                 const title = target.slice(6)
@@ -552,9 +785,245 @@ export class ptk_recorder {
         })
     }
 
-    async msg_get_active_replay_tab(message) {
+    async msg_get_active_replay_tab(message, sender) {
+        const tabId = sender?.tab?.id
+        if (this.mode !== 'replay' || !this.sessionId || message?.sessionId !== this.sessionId
+            || !Number.isInteger(tabId) || !this.isTracking(tabId)) {
+            return Promise.resolve({ success: false, error: 'invalid_replay_sender' })
+        }
         return Promise.resolve({
+            success: true,
             activeReplayTabId: this.activeReplayTabId
+        })
+    }
+
+    async msg_replay_outcome(message, sender) {
+        const tabId = sender?.tab?.id
+        const frameId = Number(sender?.frameId)
+        if (this.mode !== 'replay' || !this.sessionId || message?.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, error: 'invalid_session' })
+        }
+        if (!Number.isInteger(tabId) || frameId !== 0 || tabId !== this.openerTabId || !this.isTracking(tabId)) {
+            return Promise.resolve({ success: false, error: 'invalid_replay_outcome_sender' })
+        }
+        if (REPLAY_TERMINAL_STATUSES.has(this.replayResult?.status)) {
+            return Promise.resolve({ success: false, error: 'replay_already_terminal', result: this.replayResult })
+        }
+        const result = normalizeReplayResult(message?.outcome, this.sessionId, this.replay?.replayEvents?.length || 0)
+        this.replayResult = result
+        await browser.storage.local.set({
+            ptk_replay_result: result,
+            ptk_replay_last_result: result,
+            ...(REPLAY_TERMINAL_STATUSES.has(result.status) ? { ptk_replay_step: -1 } : {})
+        })
+        if (REPLAY_TERMINAL_STATUSES.has(result.status) && this.scanOwnedReplay) {
+            const completedSessionId = this.sessionId
+            setTimeout(() => {
+                if (this.mode === 'replay' && this.sessionId === completedSessionId) {
+                    this.stopReplay({ reason: result.status, preserveResult: true }).catch(() => {})
+                }
+            }, 250)
+        }
+        return Promise.resolve({ success: true, result })
+    }
+
+    async msg_claim_confirmation(message, sender) {
+        const tabId = sender?.tab?.id
+        const frameId = Number(sender?.frameId)
+        if ((this.mode !== 'recording' && this.mode !== 'replay')
+            || !this.sessionId
+            || message?.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, show: false, error: 'invalid_session' })
+        }
+        if (!Number.isInteger(tabId) || frameId !== 0 || !this.isTracking(tabId)) {
+            return Promise.resolve({ success: false, show: false, error: 'invalid_confirmation_sender' })
+        }
+        if (this.confirmationClaimed) {
+            return Promise.resolve({ success: true, show: false, mode: this.mode })
+        }
+        this.confirmationClaimed = true
+        await browser.storage.local.remove(['ptk_recording_confirm_required']).catch(() => {})
+        return Promise.resolve({ success: true, show: true, mode: this.mode })
+    }
+
+    async msg_get_replay_context(message, sender) {
+        const tabId = sender?.tab?.id
+        if (this.mode !== 'replay' || !this.sessionId || message?.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, error: 'invalid_session' })
+        }
+        if (!Number.isInteger(tabId) || Number(sender?.frameId) !== 0 || !this.isTracking(tabId)) {
+            return Promise.resolve({ success: false, error: 'invalid_replay_tab' })
+        }
+        return Promise.resolve({
+            success: true,
+            tabId,
+            isOpener: tabId === this.openerTabId,
+            activeReplayTabId: this.activeReplayTabId
+        })
+    }
+
+    async msg_get_replay_payload(message, sender) {
+        const tabId = sender?.tab?.id
+        const frameId = Number(sender?.frameId)
+        if (this.mode !== 'replay' || !this.sessionId || message?.sessionId !== this.sessionId
+            || !this.scanOwnedReplay || !Array.isArray(this.replay?.replayEvents)) {
+            return Promise.resolve({ success: false, error: 'invalid_scan_owned_replay_session' })
+        }
+        if (!Number.isInteger(tabId) || !Number.isInteger(frameId) || frameId < 0 || !this.isTracking(tabId)) {
+            return Promise.resolve({ success: false, error: 'invalid_replay_sender' })
+        }
+        const tab = await browser.tabs.get(tabId).catch(() => null)
+        if (!tab || !this.isReplayUrlInScope(tab.url)) {
+            return Promise.resolve({ success: false, error: 'replay_sender_out_of_scope' })
+        }
+        return Promise.resolve({
+            success: true,
+            items: this.replay.replayEvents,
+            regex: this.replay.validateRegex || ''
+        })
+    }
+
+    async msg_get_recording_context(message, sender) {
+        const tabId = sender?.tab?.id
+        if (this.mode !== 'recording' || !this.sessionId || message?.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, error: 'invalid_session' })
+        }
+        if (!Number.isInteger(tabId) || Number(sender?.frameId) !== 0 || !this.isTracking(tabId)) {
+            return Promise.resolve({ success: false, error: 'invalid_recording_tab' })
+        }
+        return Promise.resolve({
+            success: true,
+            tabId,
+            windowIndex: tabId === this.openerTabId ? 0 : 1
+        })
+    }
+
+    async msg_get_frame_identity(message, sender) {
+        if (!this.sessionId || message?.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, error: 'invalid_session' })
+        }
+        if (this.mode !== 'recording' && this.mode !== 'replay') {
+            return Promise.resolve({ success: false, error: 'inactive_session' })
+        }
+        const tabId = sender?.tab?.id
+        const frameId = Number(sender?.frameId)
+        if (!Number.isInteger(tabId) || !Number.isInteger(frameId) || frameId < 1 || !this.isTracking(tabId)) {
+            return Promise.resolve({ success: false, error: 'invalid_frame_sender' })
+        }
+        return Promise.resolve({
+            success: true,
+            tabId,
+            frameId,
+            windowIndex: tabId === this.openerTabId ? 0 : 1
+        })
+    }
+
+    async msg_register_replay_child(message, sender) {
+        const tabId = sender?.tab?.id
+        if (this.mode !== 'replay' || !this.sessionId || message?.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, error: 'invalid_session' })
+        }
+        if (!Number.isInteger(tabId) || Number(sender?.frameId) !== 0 || tabId === this.openerTabId || !this.isTracking(tabId)) {
+            return Promise.resolve({ success: false, error: 'invalid_child_tab' })
+        }
+        return Promise.resolve({ success: true, tabId })
+    }
+
+    async _isDirectChildFrame(sender, targetFrameId) {
+        const tabId = sender?.tab?.id
+        const senderFrameId = Number(sender?.frameId)
+        if (!Number.isInteger(tabId) || !Number.isInteger(senderFrameId)) return false
+        if (!Number.isInteger(targetFrameId) || targetFrameId < 1) return false
+        try {
+            const targetFrame = await browser.webNavigation.getFrame({ tabId, frameId: targetFrameId })
+            return !!targetFrame && Number(targetFrame.parentFrameId) === senderFrameId
+        } catch (_) {
+            return false
+        }
+    }
+
+    _normalizeFrameInfo(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+        const normalizeEntry = (entry) => {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+            const result = {
+                index: Number.isInteger(entry.index) && entry.index >= 0 ? entry.index : 0
+            }
+            for (const key of ['name', 'id', 'title', 'src']) {
+                result[key] = typeof entry[key] === 'string' ? entry[key].slice(0, 2048) : ''
+            }
+            return result
+        }
+        const result = normalizeEntry(value)
+        if (!result) return null
+        const stack = Array.isArray(value.stack) ? value.stack.slice(0, 16) : [value]
+        result.stack = stack.map(normalizeEntry).filter(Boolean)
+        return result
+    }
+
+    async msg_relay_frame_info(message, sender) {
+        if (this.mode !== 'recording' || !this.sessionId || message?.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, error: 'invalid_session' })
+        }
+        const tabId = sender?.tab?.id
+        const targetFrameId = Number(message?.targetFrameId)
+        if (!Number.isInteger(tabId) || !this.isTracking(tabId) || !(await this._isDirectChildFrame(sender, targetFrameId))) {
+            return Promise.resolve({ success: false, error: 'unrelated_frame' })
+        }
+        const frameInfo = this._normalizeFrameInfo(message?.frameInfo)
+        if (!frameInfo) {
+            return Promise.resolve({ success: false, error: 'invalid_frame_info' })
+        }
+        const response = await browser.tabs.sendMessage(tabId, {
+            channel: 'ptk_background2content_recorder',
+            type: 'frame_info',
+            sessionId: this.sessionId,
+            frameInfo
+        }, { frameId: targetFrameId }).catch(() => null)
+        return Promise.resolve({ success: response !== null })
+    }
+
+    async msg_relay_replay_step(message, sender) {
+        if (this.mode !== 'replay' || !this.sessionId || message?.sessionId !== this.sessionId) {
+            return Promise.resolve({ success: false, error: 'invalid_session' })
+        }
+        const step = Number(message?.step)
+        const routeDepth = Number(message?.routeDepth || 0)
+        if (!Number.isSafeInteger(step) || step < 1 || !Number.isSafeInteger(routeDepth) || routeDepth < 0 || routeDepth > 16) {
+            return Promise.resolve({ success: false, error: 'invalid_step' })
+        }
+        const replayState = await browser.storage.local.get(['ptk_replay', 'ptk_replay_step'])
+        if (replayState.ptk_replay?.sessionId !== this.sessionId || replayState.ptk_replay_step !== step) {
+            return Promise.resolve({ success: false, error: 'stale_step' })
+        }
+
+        const senderTabId = sender?.tab?.id
+        const targetTabId = Number(message?.targetTabId)
+        const targetFrameId = Number(message?.targetFrameId || 0)
+        if (!Number.isInteger(senderTabId) || !this.isTracking(senderTabId) || !Number.isInteger(targetTabId) || !this.isTracking(targetTabId)) {
+            return Promise.resolve({ success: false, error: 'untracked_tab' })
+        }
+
+        let allowed = false
+        if (targetTabId === senderTabId && targetFrameId > 0) {
+            allowed = await this._isDirectChildFrame(sender, targetFrameId)
+        } else if (Number(sender?.frameId) === 0 && senderTabId === this.openerTabId && targetFrameId === 0) {
+            allowed = targetTabId === this.activeReplayTabId && targetTabId !== this.openerTabId
+        }
+        if (!allowed) {
+            return Promise.resolve({ success: false, error: 'unrelated_replay_target' })
+        }
+
+        const response = await browser.tabs.sendMessage(targetTabId, {
+            channel: 'ptk_background2content_recorder',
+            type: 'replay_step',
+            sessionId: this.sessionId,
+            step,
+            routeDepth
+        }, { frameId: targetFrameId }).catch(() => null)
+        return Promise.resolve({
+            success: response?.success === true,
+            errorCode: boundedReplayText(response?.errorCode || (response ? 'replay_step_failed' : 'replay_target_unavailable'), 100)
         })
     }
 
@@ -646,6 +1115,7 @@ export class ptk_recorder {
             this.bootstrap = bootstrap
             this.cleanCookieOnStart = cleanCookie
             this.sessionId = createRecorderSessionId()
+            this.confirmationClaimed = false
             this.captureSensitiveInputs = cleanCookie === true || bootstrap?.captureSensitiveInputs === true
 
             this.recording = {
@@ -680,7 +1150,9 @@ export class ptk_recorder {
         }
     }
 
-    stopRecording(params) {
+    async stopRecording(params) {
+        if (this.stopRecordingPromise) return this.stopRecordingPromise
+        const recording = this.recording
         worker.ptk_recorder_active = false
         this.mode = null
         this.openerWinId = -1
@@ -694,26 +1166,28 @@ export class ptk_recorder {
             return
         }
 
-        browser.storage.local.get(["ptk_recording_items", "ptk_recording_timing"]).then(async function (result) {
+        this.stopRecordingPromise = (async () => {
+            const result = await browser.storage.local.get(["ptk_recording_items", "ptk_recording_timing"])
             if (!result) return
+            if (!recording) throw new Error('recording_state_missing')
 
-            let a = this.recording.requests
+            let a = recording.requests
             let b = result.ptk_recording_timing || []
 
-            for (let l = 0; l < this.recording.recordingRequests.length; l++) {
+            for (let l = 0; l < recording.recordingRequests.length; l++) {
 
                 for (let k = 0; k < a.length; k++) {
                     let r = a[k].request
                     let u = r.urlFragment ? r.url + r.urlFragment : r.url
-                    if (this.recording.recordingRequests[l].request.url == u) {
-                        this.recording.recordingRequests[l].response.body = a[k].response.body
-                        this.recording.recordingRequests[l].response.base64Encoded = a[k].response.base64Encoded
+                    if (recording.recordingRequests[l].request.url == u) {
+                        recording.recordingRequests[l].response.body = a[k].response.body
+                        recording.recordingRequests[l].response.base64Encoded = a[k].response.base64Encoded
                         if (r.postData) {
-                            if (this.recording.recordingRequests[l]?.request?.requestBody) {
-                                this.recording.recordingRequests[l].request.requestBody.postData = r.postData
-                                this.recording.recordingRequests[l].request.requestBody.postDataEntries = r.postDataEntries
+                            if (recording.recordingRequests[l]?.request?.requestBody) {
+                                recording.recordingRequests[l].request.requestBody.postData = r.postData
+                                recording.recordingRequests[l].request.requestBody.postDataEntries = r.postDataEntries
                             } else {
-                                console.warn('No request body for postData', this.recording.recordingRequests[l]?.request)
+                                console.warn('No request body for postData', recording.recordingRequests[l]?.request)
                             }
                         }
                         a.splice(k, 1)
@@ -722,17 +1196,17 @@ export class ptk_recorder {
                 }
 
                 for (let k = 0; k < b.length; k++) {
-                    if (this.recording.recordingRequests[l].request.url == b[k].name) {
-                        this.recording.recordingRequests[l].timing = b[k]
+                    if (recording.recordingRequests[l].request.url == b[k].name) {
+                        recording.recordingRequests[l].timing = b[k]
                         b.splice(k, 1)
                         break
                     }
                 }
             }
-            this.recording.requests = []
-            this.recording.items = result.ptk_recording_items
+            recording.requests = []
+            recording.items = result.ptk_recording_items || []
 
-            browser.storage.local.remove([
+            await browser.storage.local.remove([
                 "ptk_recording",
                 "ptk_recording_items",
                 "ptk_recording_timing",
@@ -741,20 +1215,29 @@ export class ptk_recorder {
                 "ptk_path_to_icons",
                 "ptk_double_click"
             ])
-            this.storage['recording'] = JSON.parse(JSON.stringify(this.recording))
+            this.recording = recording
+            this.storage['recording'] = JSON.parse(JSON.stringify(recording))
             this.storage['savedMacro'] = ''
+            this.storage['savedFlow'] = null
+            this.storage['savedFormat'] = 'xml'
             await ptk_storage.setItem(this.storageKey, this.storage)
-            browser.runtime.sendMessage({
+            await browser.runtime.sendMessage({
                 channel: "ptk_background2popup_recorder",
                 type: "recording_completed",
-                recording: JSON.parse(JSON.stringify(this.recording))
+                recording: JSON.parse(JSON.stringify(recording))
             }).catch(e => ptk_logger.log(e, "Could send recording completed", "warning"))
-
-        }.bind(this))
+        })()
+        try {
+            await this.stopRecordingPromise
+        } finally {
+            this.stopRecordingPromise = null
+        }
     }
 
     async startReplay(cleanCookie, startUrl, items, validateRegex, options = {}) {
         if (this.mode == null) {
+
+            const scanOwned = await this.prepareScanOwnedReplay(options, startUrl, items)
 
             worker.ptk_recorder_active = true
             this.mode = 'replay'
@@ -766,10 +1249,18 @@ export class ptk_recorder {
                 : null
             this.cleanCookieOnStart = cleanCookie || !!sessionProfile
             this.sessionId = createRecorderSessionId()
+            this.confirmationClaimed = false
+            this.scanOwnedReplay = scanOwned
 
             this.replay = {
                 startUrl: startUrl, replayStep: 0, replayEvents: items, validateRegex: validateRegex
             }
+            this.replayResult = normalizeReplayResult({
+                status: 'running',
+                currentStep: 0,
+                completedSteps: 0,
+                totalSteps: items.length
+            }, this.sessionId, items.length)
 
             if (sessionProfile?.snapshot) {
                 await this.applySessionProfileSnapshot(startUrl, sessionProfile)
@@ -778,14 +1269,19 @@ export class ptk_recorder {
             }
             this.addListiners()
             let self = this
-            return browser.storage.local.set({
-                "ptk_replay_items": items,
+            const persistedReplayItems = scanOwned
+                ? items.map(replayItemSummary)
+                : items
+            await browser.storage.local.set({
+                "ptk_replay_items": persistedReplayItems,
                 "ptk_replay_step": 0,
                 "ptk_replay_regex": validateRegex,
                 "ptk_replay": {
                     mode: "replay",
                     startUrl: startUrl,
                     sessionId: this.sessionId,
+                    scanOwned: !!scanOwned,
+                    source: scanOwned?.source || null,
                     overlayPlan: overlay,
                     session: sessionProfile
                         ? {
@@ -795,20 +1291,58 @@ export class ptk_recorder {
                         }
                         : null
                 },
+                "ptk_replay_result": this.replayResult,
+                "ptk_replay_last_result": this.replayResult,
                 "ptk_recording_log": "",
-                "ptk_recording_confirm_required": true,
+                "ptk_recording_confirm_required": !scanOwned,
                 "ptk_path_to_icons": this.pathToIcons
-            }).then(function () {
-                self.startInActiveTab(startUrl).catch((e) => {
-                    console.warn('Failed to start replay in active tab', e)
-                })
             })
+            try {
+                if (scanOwned) await self.startInTab(scanOwned.tab, startUrl)
+                else await self.startInActiveTab(startUrl)
+            } catch (error) {
+                await self.stopReplay({ reason: 'replay_start_failed' })
+                throw error
+            }
+            return { success: true, sessionId: this.sessionId, targetTabId: this.openerTabId }
         } else {
             ptk_notifications.notify("Recording/playback already started", "Stop recording before start a new one");
+            return { success: false, error: 'recording_or_replay_already_started' }
         }
     }
 
-    stopReplay(params) {
+    async cancelReplayInTabs(tabIds, sessionId) {
+        if (!sessionId) return
+        await Promise.all(tabIds.map(async (tabId) => {
+            let frameIds = [0]
+            try {
+                const frames = await browser.webNavigation.getAllFrames({ tabId })
+                frameIds = [...new Set((Array.isArray(frames) ? frames : [])
+                    .map((frame) => Number(frame?.frameId))
+                    .filter((frameId) => Number.isInteger(frameId) && frameId >= 0))]
+                if (!frameIds.includes(0)) frameIds.unshift(0)
+            } catch (_) { }
+            await Promise.all(frameIds.map((frameId) => browser.tabs.sendMessage(tabId, {
+                channel: 'ptk_background2content_recorder',
+                type: 'replay_cancel',
+                sessionId
+            }, { frameId }).catch(() => null)))
+        }))
+    }
+
+    async stopReplay(params = {}) {
+        const sessionId = this.sessionId
+        if (sessionId && !REPLAY_TERMINAL_STATUSES.has(this.replayResult?.status)) {
+            this.replayResult = normalizeReplayResult({
+                status: 'stopped',
+                currentStep: this.replayResult?.currentStep || 0,
+                completedSteps: this.replayResult?.completedSteps || 0,
+                totalSteps: this.replayResult?.totalSteps || this.replay?.replayEvents?.length || 0
+            }, sessionId, this.replay?.replayEvents?.length || 0)
+            await browser.storage.local.set({ ptk_replay_last_result: this.replayResult }).catch(() => {})
+        }
+        const replayTabIds = [...new Set([this.openerTabId, ...this.tabs]
+            .filter((tabId) => Number.isInteger(tabId) && tabId >= 0))]
         worker.ptk_recorder_active = false
         this.mode = null
         this.openerWinId = -1
@@ -816,24 +1350,28 @@ export class ptk_recorder {
         this.tabs = []
         this.replay = null
         this.sessionId = null
+        this.activeReplayTabId = null
+        this.pendingReplayTabs.clear()
+        this.scanOwnedReplay = null
+        this.replayResult = null
         this.detachAllDebuggers()
         this.removeListiners()
-        browser.storage.local.set({
+        await browser.storage.local.set({
             "ptk_replay_step": -1,
             "ptk_replay": null
-        }).then(() => {
-            browser.storage.local.remove([
-                "ptk_replay_items",
-                "ptk_replay_step",
-                "ptk_replay_regex",
-                "ptk_replay",
-                "ptk_recording_log",
-                "ptk_recording_confirm_required",
-                "ptk_path_to_icons",
-                "ptk_double_click"
-            ])
         }).catch(() => {})
-        return
+        await this.cancelReplayInTabs(replayTabIds, sessionId)
+        await browser.storage.local.remove([
+            "ptk_replay_items",
+            "ptk_replay_step",
+            "ptk_replay_regex",
+            "ptk_replay",
+            "ptk_replay_result",
+            "ptk_recording_log",
+            "ptk_recording_confirm_required",
+            "ptk_path_to_icons",
+            "ptk_double_click"
+        ]).catch(() => {})
     }
 
     reset() {
@@ -844,8 +1382,14 @@ export class ptk_recorder {
         this.replay = null
         this.recording = null
         this.sessionId = null
+        this.activeReplayTabId = null
+        this.pendingReplayTabs = new Set()
+        this.scanOwnedReplay = null
+        this.replayResult = null
         this.captureSensitiveInputs = false
         this.bootstrap = null
+        this.stopRecordingPromise = null
+        this.confirmationClaimed = false
         this.savedMacro = ""
         this.cancelled = false
         this.detachAllDebuggers()
@@ -859,6 +1403,8 @@ export class ptk_recorder {
                 "ptk_replay_step",
                 "ptk_replay_regex",
                 "ptk_replay",
+                "ptk_replay_result",
+                "ptk_replay_last_result",
                 "ptk_recording_log"
             ])
         this.removeListiners()

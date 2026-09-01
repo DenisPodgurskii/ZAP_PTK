@@ -57,7 +57,7 @@ function detectDomXss(marker) {
     return null
 }
 
-async function setHashParam(param, payload) {
+function setHashParam(param, payload) {
     const url = new URL(window.location.href)
 
     let hash = url.hash || '#/'
@@ -79,8 +79,6 @@ async function setHashParam(param, payload) {
     const newHash = basePath + '?' + params.toString()
 
     window.location.hash = newHash
-
-    await new Promise(r => setTimeout(r, 500))
 }
 
 window.addEventListener('message', (event) => {
@@ -169,6 +167,13 @@ function simpleHash(str) {
     return String(hash)
 }
 
+function sleep(ms) {
+    const delayMs = Number.isFinite(Number(ms))
+        ? Math.max(0, Number(ms))
+        : 0
+    return new Promise(resolve => setTimeout(resolve, delayMs))
+}
+
 function detectDomReflection(marker) {
     if (!marker) return null
 
@@ -220,6 +225,61 @@ function buildSinkKey(context) {
         context.outerHTML ? simpleHash(context.outerHTML) : ''
     ]
     return parts.join('|')
+}
+
+async function waitForDomXssEvidence(marker, { maxWaitMs = 1300, pollMs = 50 } = {}) {
+    const boundedWaitMs = Number.isFinite(Number(maxWaitMs))
+        ? Math.max(0, Math.min(5000, Number(maxWaitMs)))
+        : 1300
+    const boundedPollMs = Number.isFinite(Number(pollMs))
+        ? Math.max(1, Math.min(250, Number(pollMs)))
+        : 50
+    const deadline = Date.now() + boundedWaitMs
+    let context = null
+    let executed = false
+    let observer = null
+
+    const sampleEvidence = () => {
+        if (!context) context = detectDomReflection(marker)
+        if (!executed) {
+            executed = xssExecutionEvents.some(event => event && event.id === marker)
+        }
+    }
+
+    try {
+        if (
+            typeof MutationObserver !== 'undefined'
+            && typeof document !== 'undefined'
+            && document.documentElement
+        ) {
+            observer = new MutationObserver(() => sampleEvidence())
+            observer.observe(document.documentElement, {
+                subtree: true,
+                childList: true,
+                attributes: true,
+                characterData: true
+            })
+        }
+
+        do {
+            sampleEvidence()
+
+            const remainingMs = deadline - Date.now()
+            if (remainingMs <= 0) break
+            await sleep(Math.min(boundedPollMs, remainingMs))
+        } while (true)
+    } finally {
+        if (observer) observer.disconnect()
+    }
+
+    const reflected = !!context
+    return {
+        vulnerable: reflected || executed,
+        reflected,
+        executed,
+        sinkKey: context ? buildSinkKey(context) : null,
+        context: context || undefined
+    }
 }
 
 async function runSpaParamTest({ param, payload, checks = [], markerDomain, markerToken }) {
@@ -287,24 +347,20 @@ async function runSpaParamTest({ param, payload, checks = [], markerDomain, mark
             } catch (_) { }
         }
 
-        await setHashParam(param, payload)
+        setHashParam(param, payload)
         const expectedHref = window.location.href
 
-        await new Promise(r => setTimeout(r, 800))
+        let domXssEvidence = null
+        if (checks.includes('dom_xss')) {
+            domXssEvidence = await waitForDomXssEvidence(effectiveMarker, { maxWaitMs: 1300, pollMs: 50 })
+        } else {
+            await sleep(1300)
+        }
 
         const result = {}
 
         if (checks.includes('dom_xss')) {
-            const context = detectDomReflection(effectiveMarker)
-            const sinkKey = buildSinkKey(context)
-            const executed = xssExecutionEvents.some(ev => ev.id === effectiveMarker)
-            result.dom_xss = {
-                vulnerable: !!context,
-                reflected: !!context,
-                executed: !!executed,
-                sinkKey: sinkKey || null,
-                context: context || undefined
-            }
+            result.dom_xss = domXssEvidence
         }
 
         if (checks.includes('dom_redirect')) {

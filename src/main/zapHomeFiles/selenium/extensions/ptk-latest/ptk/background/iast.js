@@ -41,8 +41,97 @@ const lastIastModuleDeliveryByTab = new Map()
 const inFlightIastModuleSendByTab = new Map()
 const IAST_BUFFER_MAX_ENTRIES = 200
 const IAST_BUFFER_ACK_MAX_ENTRIES = 2000
-const IAST_PRE_NAVIGATION_ARM_STORAGE_KEY = 'ptk_iast_pre_navigation_arm'
-const IAST_PRE_NAVIGATION_ARM_MAX_TTL_MS = 60000
+const IAST_TOKEN_ORIGIN_TTL_MS = 2 * 60 * 1000
+const IAST_TOKEN_ORIGIN_MAX_ENTRIES = 500
+const IAST_TOKEN_ORIGIN_MAX_VALUE_CHARS = 16 * 1024
+const IAST_TOKEN_ORIGIN_WAIT_MS = 200
+const IAST_NAVIGATION_CORRELATION_TTL_MS = 8000
+const IAST_NAVIGATION_COMPLETED_TTL_MS = 3000
+const IAST_NAVIGATION_CORRELATION_MAX = 128
+const IAST_NAVIGATION_FINDING_MAX_BYTES = 256 * 1024
+
+function normalizeIastNavigationCorrelationUrl(value = '') {
+    try {
+        const parsed = new URL(String(value || '').trim())
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+        if (parsed.username || parsed.password) return null
+        parsed.hash = ''
+        return parsed.href
+    } catch (_) {
+        return null
+    }
+}
+
+function normalizeIastNavigationSourceOrigin(value = '') {
+    try {
+        const parsed = new URL(String(value || '').trim())
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+        return parsed.origin
+    } catch (_) {
+        return null
+    }
+}
+
+function isIastCorrelatedNavigationSink(sinkId = '', navigationType = '') {
+    const normalizedSink = String(sinkId || '')
+    if (navigationType === 'replace') {
+        return normalizedSink === 'nav.location.replace'
+            || normalizedSink.startsWith('nav.location.replace.')
+            || normalizedSink === 'nav.navigation.navigate'
+            || normalizedSink.startsWith('nav.navigation.navigate.')
+    }
+    if (navigationType === 'push') {
+        return normalizedSink === 'nav.location.assign'
+            || normalizedSink.startsWith('nav.location.assign.')
+            || normalizedSink === 'nav.location.href'
+            || normalizedSink.startsWith('nav.location.href.')
+            || normalizedSink === 'nav.navigation.navigate'
+            || normalizedSink.startsWith('nav.navigation.navigate.')
+    }
+    return false
+}
+
+function normalizeIastNavigationCandidate(message = {}, sender = {}, scanId = null, now = Date.now()) {
+    const candidate = message?.candidate && typeof message.candidate === 'object' ? message.candidate : null
+    const finding = message?.finding && typeof message.finding === 'object' ? message.finding : null
+    const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null
+    const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
+    const senderOrigin = normalizeIastNavigationSourceOrigin(sender?.url || message?.context?.url || '')
+    const sourceOrigin = normalizeIastNavigationSourceOrigin(candidate?.sourceOrigin || candidate?.sourceUrl || '')
+    const requestUrl = normalizeIastNavigationCorrelationUrl(candidate?.requestUrl || candidate?.destination || '')
+    const navigationType = String(candidate?.navigationType || '')
+    const sinkId = String(finding?.sinkId || '')
+    if (tabId === null || !senderOrigin || senderOrigin !== sourceOrigin || !requestUrl || !finding) return null
+    if (!['push', 'replace'].includes(navigationType)) return null
+    if (!isIastCorrelatedNavigationSink(sinkId, navigationType)) return null
+    try {
+        if (JSON.stringify(finding).length > IAST_NAVIGATION_FINDING_MAX_BYTES) return null
+    } catch (_) {
+        return null
+    }
+    return {
+        tabId,
+        frameId,
+        sourceOrigin,
+        sourceUrl: String(candidate?.sourceUrl || sender?.url || ''),
+        requestUrl,
+        destination: String(candidate?.destination || candidate?.requestUrl || ''),
+        navigationType,
+        methodEvidence: String(candidate?.methodEvidence || ''),
+        scanId: String(scanId || ''),
+        finding,
+        createdAt: now,
+        expiresAt: now + IAST_NAVIGATION_CORRELATION_TTL_MS
+    }
+}
+
+function isIastNavigationResponseMatch(candidate, response) {
+    if (!candidate || !response) return false
+    if (!['main_frame', 'sub_frame'].includes(String(response.type || ''))) return false
+    if (Number(response.tabId) !== candidate.tabId) return false
+    if (Number(response.frameId || 0) !== candidate.frameId) return false
+    return normalizeIastNavigationCorrelationUrl(response.url) === candidate.requestUrl
+}
 
 function normalizeIastBackgroundStrategy(value = 'SMART') {
     return String(value || '').trim().toUpperCase() === 'COMPREHENSIVE'
@@ -50,7 +139,7 @@ function normalizeIastBackgroundStrategy(value = 'SMART') {
         : 'SMART'
 }
 
-function normalizeIastPreNavigationTarget(targetUrl = '') {
+function normalizeIastRegistrationTarget(targetUrl = '') {
     try {
         const parsed = new URL(String(targetUrl || '').trim())
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
@@ -76,23 +165,8 @@ function normalizeIastPreNavigationTarget(targetUrl = '') {
     }
 }
 
-function isIastPreNavigationUrlInScope(preparedTarget = null, candidateUrl = '') {
-    if (!preparedTarget || typeof preparedTarget !== 'object') return false
-    try {
-        const candidate = new URL(String(candidateUrl || ''))
-        if (candidate.protocol !== 'http:' && candidate.protocol !== 'https:') return false
-        if (candidate.origin !== preparedTarget.origin) return false
-        const candidatePath = candidate.pathname || '/'
-        if (preparedTarget.pathname === '/' || preparedTarget.pathPrefix === '/') return true
-        return candidatePath === preparedTarget.pathname
-            || candidatePath.startsWith(preparedTarget.pathPrefix)
-    } catch (_) {
-        return false
-    }
-}
-
-function buildIastAgentScriptFiles(scanStrategy = 'SMART', { isFirefox = false } = {}) {
-    const prefix = isFirefox ? 'content/' : 'ptk/content/'
+function buildIastAgentScriptFiles(scanStrategy = 'SMART') {
+    const prefix = 'ptk/content/'
     const bootstrap = `${prefix}iast_agent_bootstrap.js`
     const strategy = normalizeIastBackgroundStrategy(scanStrategy)
     return strategy === 'COMPREHENSIVE'
@@ -141,20 +215,20 @@ function buildIastAgentScriptRegistrationScope({ host = '', targetUrl = '' } = {
     const matchHost = formatIastRegistrationMatchHost(normalized.hostname)
     if (!matchHost) return null
 
-    const preparedTarget = normalizeIastPreNavigationTarget(targetUrl)
-    const scope = preparedTarget
-        ? { matches: [`${preparedTarget.protocol}//${matchHost}/*`] }
+    const registrationTarget = normalizeIastRegistrationTarget(targetUrl)
+    const scope = registrationTarget
+        ? { matches: [`${registrationTarget.protocol}//${matchHost}/*`] }
         : {
             matches: [
                 `http://${matchHost}/*`,
                 `https://${matchHost}/*`
             ]
         }
-    if (preparedTarget) {
-        const pathGlob = preparedTarget.pathname === '/'
+    if (registrationTarget) {
+        const pathGlob = registrationTarget.pathname === '/'
             ? '/*'
-            : `${preparedTarget.pathPrefix}*`
-        scope.includeGlobs = [`${preparedTarget.origin}${pathGlob}`]
+            : `${registrationTarget.pathPrefix}*`
+        scope.includeGlobs = [`${registrationTarget.origin}${pathGlob}`]
     } else if (normalized.hostWithPort && normalized.hostWithPort !== normalized.hostname) {
         scope.includeGlobs = [
             `http://${normalized.hostWithPort}/*`,
@@ -162,6 +236,55 @@ function buildIastAgentScriptRegistrationScope({ host = '', targetUrl = '' } = {
         ]
     }
     return scope
+}
+
+function isIastNavigationUrlInScope(rawUrl = '', { host = '', targetUrl = '' } = {}) {
+    const candidate = normalizeIastRegistrationTarget(rawUrl)
+    if (!candidate) return false
+
+    const registrationTarget = normalizeIastRegistrationTarget(targetUrl)
+    if (registrationTarget) {
+        if (candidate.origin !== registrationTarget.origin) return false
+        if (registrationTarget.pathname === '/') return true
+        return candidate.pathname === registrationTarget.pathname
+            || candidate.pathname.startsWith(registrationTarget.pathPrefix)
+    }
+
+    const normalizedHost = normalizeIastRegistrationHost({ host })
+    if (!normalizedHost) return false
+    if (normalizedHost.hostWithPort && normalizedHost.hostWithPort !== normalizedHost.hostname) {
+        return candidate.host.toLowerCase() === normalizedHost.hostWithPort
+    }
+    return candidate.hostname.toLowerCase() === normalizedHost.hostname
+}
+
+function shouldReinjectIastAgentForTabUpdate({
+    isFirefox = false,
+    isRelatedTab = false,
+    isScanRunning = false,
+    isTrackedTab = false,
+    info = {},
+    tab = {},
+    host = '',
+    targetUrl = '',
+    scopeAllowed = null
+} = {}) {
+    // Dynamic document-start registration is the preferred Chromium path,
+    // but it is not a sufficient lifecycle guarantee for an already tracked
+    // primary tab that is navigated by macro replay. Re-inject on every
+    // tracked, in-scope navigation boundary. The page agent has a loaded
+    // guard, so this is safe when dynamic registration already succeeded and
+    // also repairs the narrow registration/navigation race on Chromium.
+    if (!isScanRunning || !isTrackedTab) return false
+    const status = String(info?.status || '').trim().toLowerCase()
+    if (status !== 'loading' && status !== 'complete' && typeof info?.url !== 'string') {
+        return false
+    }
+    const navigationUrl = typeof info?.url === 'string' && info.url
+        ? info.url
+        : tab?.url
+    if (typeof scopeAllowed === 'boolean') return scopeAllowed
+    return isIastNavigationUrlInScope(navigationUrl, { host, targetUrl })
 }
 
 function clearIastModuleSendTracking(tabId = null) {
@@ -918,7 +1041,85 @@ function isHttpUrl(url) {
     return /^https?:\/\//i.test(String(url))
 }
 
-function buildIastAgentScriptTagLoaderSource(src, scanStrategy = 'SMART', options = {}) {
+function runIastAgentScriptTagLoader(sources, retryDelays, maxAttempts) {
+    var normalizedSources = Array.isArray(sources)
+        ? sources.filter(function (src) { return typeof src === 'string' && src.length > 0 })
+        : []
+    var normalizedRetryDelays = Array.isArray(retryDelays) && retryDelays.length
+        ? retryDelays
+        : [0]
+    var normalizedMaxAttempts = Number.isFinite(Number(maxAttempts))
+        ? Math.max(1, Math.floor(Number(maxAttempts)))
+        : 1
+    var sourceIndex = 0
+    var attempts = 0
+
+    function postFailed(error) {
+        try { window.postMessage({ channel: 'ptk_iast_agent_failed', error: error || 'script_load_failed' }, '*') } catch (_) { }
+    }
+
+    function loaderId(index) {
+        return index === normalizedSources.length - 1
+            ? '__ptk_iast_agent__'
+            : '__ptk_iast_agent_bootstrap_' + index + '__'
+    }
+
+    function removeLoader(index) {
+        try {
+            var existing = document.getElementById(loaderId(index))
+            if (existing) existing.remove()
+        } catch (_) { }
+    }
+
+    function scheduleRetry() {
+        var delay = normalizedRetryDelays[Math.min(attempts - 1, normalizedRetryDelays.length - 1)] || 0
+        try { setTimeout(loadCurrentSource, delay) } catch (_) { loadCurrentSource() }
+    }
+
+    function loadCurrentSource() {
+        if (sourceIndex >= normalizedSources.length) return
+        try {
+            var currentIndex = sourceIndex
+            var src = normalizedSources[currentIndex]
+            removeLoader(currentIndex)
+            attempts += 1
+            var script = document.createElement('script')
+            script.id = loaderId(currentIndex)
+            script.src = src
+            script.type = 'text/javascript'
+            script.async = false
+            script.onload = function () {
+                attempts = 0
+                sourceIndex = currentIndex + 1
+                loadCurrentSource()
+            }
+            script.onerror = function () {
+                removeLoader(currentIndex)
+                if (attempts < normalizedMaxAttempts) {
+                    scheduleRetry()
+                    return
+                }
+                postFailed('script_load_failed')
+            }
+            ;(document.head || document.documentElement).appendChild(script)
+        } catch (error) {
+            if (attempts < normalizedMaxAttempts) {
+                scheduleRetry()
+                return
+            }
+            postFailed(error?.message || 'script_inject_failed')
+        }
+    }
+
+    if (!normalizedSources.length) {
+        postFailed('script_source_missing')
+        return false
+    }
+    loadCurrentSource()
+    return true
+}
+
+function buildIastAgentScriptTagLoaderSource(sources, scanStrategy = 'SMART', options = {}) {
     const retryDelays = Array.isArray(options?.retryDelaysMs)
         ? options.retryDelaysMs
             .map(value => Number(value))
@@ -927,69 +1128,12 @@ function buildIastAgentScriptTagLoaderSource(src, scanStrategy = 'SMART', option
     const maxAttempts = Number.isFinite(Number(options?.maxAttempts))
         ? Math.max(1, Math.floor(Number(options.maxAttempts)))
         : IAST_AGENT_SCRIPT_TAG_MAX_ATTEMPTS
-    const strategy = String(scanStrategy || 'SMART').trim().toUpperCase() === 'COMPREHENSIVE'
-        ? 'COMPREHENSIVE'
-        : 'SMART'
+    const normalizedSources = (Array.isArray(sources) ? sources : [sources])
+        .map(value => typeof value === 'string' ? value.trim() : '')
+        .filter(Boolean)
+    void scanStrategy
 
-    return `
-        (function(src, strategy, retryDelays, maxAttempts) {
-            var attempts = 0;
-            function postReady() {
-                try { window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*'); } catch (e) {}
-            }
-            function postFailed(error) {
-                try { window.postMessage({ channel: 'ptk_iast_agent_failed', error: error || 'script_load_failed' }, '*'); } catch (e) {}
-            }
-            function removeLoader() {
-                try {
-                    var existing = document.getElementById('__ptk_iast_agent__');
-                    if (existing) existing.remove();
-                } catch (e) {}
-            }
-            function scheduleRetry() {
-                var delay = retryDelays[Math.min(attempts - 1, retryDelays.length - 1)] || 0;
-                try { setTimeout(loadAgent, delay); } catch (e) { loadAgent(); }
-            }
-            function loadAgent() {
-                try {
-                    window.__PTK_IAST_SCAN_STRATEGY__ = strategy || 'SMART';
-                    window.__PTK_IAST_AGENT_AUTHORIZED__ = true;
-                    window.__PTK_IAST_PROVISIONAL_HOOKS__ = true;
-                    if (window.__PTK_IAST_AGENT_LOADED__ === true) {
-                        postReady();
-                        return;
-                    }
-                    removeLoader();
-                    attempts += 1;
-                    var script = document.createElement('script');
-                    script.id = '__ptk_iast_agent__';
-                    script.src = src;
-                    script.type = 'text/javascript';
-                    script.async = true;
-                    script.onload = function() {
-                        postReady();
-                    };
-                    script.onerror = function() {
-                        removeLoader();
-                        if (attempts < maxAttempts) {
-                            scheduleRetry();
-                            return;
-                        }
-                        postFailed('script_load_failed');
-                    };
-                    (document.head || document.documentElement).appendChild(script);
-                } catch (e) {
-                    if (attempts < maxAttempts) {
-                        attempts += 1;
-                        scheduleRetry();
-                        return;
-                    }
-                    postFailed(e && e.message ? e.message : 'script_inject_failed');
-                }
-            }
-            loadAgent();
-        })(${JSON.stringify(src || '')}, ${JSON.stringify(strategy)}, ${JSON.stringify(retryDelays)}, ${maxAttempts});
-    `
+    return `(${runIastAgentScriptTagLoader.toString()})(${JSON.stringify(normalizedSources)}, ${JSON.stringify(retryDelays)}, ${maxAttempts});`
 }
 
 export class ptk_iast {
@@ -1002,6 +1146,7 @@ export class ptk_iast {
         this.onDevtoolsEvent = null
         this.agentReadyTabs = new Set()
         this.agentFailedTabs = new Map()
+        this.firefoxIastContentScriptRegistration = null
         this.maxHttpEvents = MAX_HTTP_EVENTS
         this.maxTrackedRequests = MAX_TRACKED_REQUESTS
         this.requestLookup = new Map()
@@ -1018,15 +1163,21 @@ export class ptk_iast {
         this.exportChunkStore = new ExportChunkStore({ prefix: "iast" })
         this.importTransfers = new Map()
         this._iastBufferAckedIds = new Set()
-        this.preparedAutomationArm = null
-        this._preparedAutomationArmRestorePromise = null
-        this._preparedAutomationPendingMessages = []
-        this.resetScanResult({ preservePreparedAutomationArm: true })
+        this._tokenOrigins = new Map()
+        this._pendingNavigationCorrelations = []
+        this._completedNavigationRequests = []
+        this.resetScanResult()
         this.modulesCatalog = null
         this.currentRulepackOverride = null
         this.currentRulepackLoadOptions = null
+        this.scopedTabCoordinator = null
 
         this.addMessageListeners()
+    }
+
+    setScopedTabCoordinator(coordinator) {
+        this.scopedTabCoordinator = coordinator || null
+        return this
     }
 
     _getZapTimingBridge() {
@@ -1147,11 +1298,8 @@ export class ptk_iast {
         }
     }
 
-    resetScanResult({ preservePreparedAutomationArm = false } = {}) {
-        if (!preservePreparedAutomationArm) {
-            this.unregisterScript()
-            this.preparedAutomationArm = null
-        }
+    resetScanResult() {
+        this.unregisterScript()
         this.detachDevtoolsDebugger()
         this.isScanRunning = false
         if (this.currentScanId) {
@@ -1164,6 +1312,7 @@ export class ptk_iast {
         this._requestLookupByUrl = new Map()
         this._iastFindingAggregateIndex = new Map()
         this.relatedScanTabs = new Map()
+        this._clearNavigationCorrelations()
         this._resetRuntimeEventIndex()
         this._resetPageIndexes()
         if (this._persistTimer) {
@@ -1180,167 +1329,6 @@ export class ptk_iast {
         } catch (err) {
             console.warn('[PTK IAST] Failed to load default modules', err)
             return []
-        }
-    }
-
-    async _readPreparedAutomationArmStorage() {
-        try {
-            if (!browser?.storage?.session?.get) return null
-            const stored = await browser.storage.session.get(IAST_PRE_NAVIGATION_ARM_STORAGE_KEY)
-            return stored?.[IAST_PRE_NAVIGATION_ARM_STORAGE_KEY] || null
-        } catch (_) {
-            return null
-        }
-    }
-
-    async _writePreparedAutomationArmStorage(value = null) {
-        try {
-            if (!browser?.storage?.session) return false
-            if (value && browser.storage.session.set) {
-                await browser.storage.session.set({
-                    [IAST_PRE_NAVIGATION_ARM_STORAGE_KEY]: value
-                })
-                return true
-            }
-            if (browser.storage.session.remove) {
-                await browser.storage.session.remove(IAST_PRE_NAVIGATION_ARM_STORAGE_KEY)
-                return true
-            }
-        } catch (_) { }
-        return false
-    }
-
-    _isPreparedAutomationArmUsable(arm = null, { tabId = null, candidateUrl = null } = {}) {
-        if (!arm || typeof arm !== 'object') return false
-        if (Number(arm.expiresAt || 0) <= Date.now()) return false
-        if (tabId !== null && tabId !== undefined) {
-            const normalizedTabId = this._normalizeTabId(tabId)
-            if (normalizedTabId === null || normalizedTabId !== this._normalizeTabId(arm.tabId)) return false
-        }
-        if (candidateUrl && !isIastPreNavigationUrlInScope(arm.target, candidateUrl)) return false
-        return Boolean(arm.target && arm.rulepackLoadOptions && arm.rulepackSignature)
-    }
-
-    async restorePreparedAutomationArm() {
-        if (this._isPreparedAutomationArmUsable(this.preparedAutomationArm)) {
-            return this.preparedAutomationArm
-        }
-        if (this._preparedAutomationArmRestorePromise) {
-            return this._preparedAutomationArmRestorePromise
-        }
-        this._preparedAutomationArmRestorePromise = (async () => {
-            const stored = await this._readPreparedAutomationArmStorage()
-            if (!this._isPreparedAutomationArmUsable(stored)) {
-                if (stored) await this._writePreparedAutomationArmStorage(null)
-                this.preparedAutomationArm = null
-                return null
-            }
-            this.preparedAutomationArm = stored
-            this.currentRulepackLoadOptions = cloneIastValue(stored.rulepackLoadOptions, {})
-            this.currentRulepackOverride = stored.rulepackLoadOptions?.rulepack || null
-            iastScanStrategy = normalizeIastBackgroundStrategy(stored.scanStrategy)
-            return stored
-        })().finally(() => {
-            this._preparedAutomationArmRestorePromise = null
-        })
-        return this._preparedAutomationArmRestorePromise
-    }
-
-    async getPreparedAutomationArm(tabId = null, candidateUrl = null) {
-        const arm = await this.restorePreparedAutomationArm()
-        if (!this._isPreparedAutomationArmUsable(arm, { tabId, candidateUrl })) {
-            if (arm && Number(arm.expiresAt || 0) <= Date.now()) {
-                await this.clearPreparedAutomationArm({ clearBuffer: true })
-            }
-            return null
-        }
-        return arm
-    }
-
-    async clearPreparedAutomationArm({ clearBuffer = false, preserveRegistration = false } = {}) {
-        const arm = this.preparedAutomationArm || await this._readPreparedAutomationArmStorage()
-        this.preparedAutomationArm = null
-        this._preparedAutomationPendingMessages = []
-        await this._writePreparedAutomationArmStorage(null)
-        if (arm?.tabId != null) {
-            clearIastModuleSendTracking(Number(arm.tabId))
-            if (clearBuffer) await this._clearIastBufferForTab(arm.tabId)
-        }
-        if (!preserveRegistration && !this.isScanRunning) {
-            await this.unregisterScript()
-        }
-        return arm || null
-    }
-
-    async prepareAutomationNavigation({ tabId, targetUrl, scanStrategy = 'SMART', opts = {} } = {}) {
-        if (this.isScanRunning) {
-            const err = new Error('iast_scan_already_running')
-            err.code = 'iast_scan_already_running'
-            throw err
-        }
-        const normalizedTabId = this._normalizeTabId(tabId)
-        const target = normalizeIastPreNavigationTarget(targetUrl)
-        if (normalizedTabId === null) {
-            const err = new Error('invalid_iast_pre_navigation_tab')
-            err.code = 'invalid_iast_pre_navigation_tab'
-            throw err
-        }
-        if (!target) {
-            const err = new Error('invalid_iast_pre_navigation_target')
-            err.code = 'invalid_iast_pre_navigation_target'
-            throw err
-        }
-
-        await this.clearPreparedAutomationArm({ clearBuffer: true })
-        const normalizedStrategy = normalizeIastBackgroundStrategy(scanStrategy)
-        const { customRulepack, rulepackLoadOptions } = resolveIastRulepackLoadOptions(opts || {})
-        const loadedRulepack = await loadIastModules(rulepackLoadOptions)
-        validateIastActivationRulepack(loadedRulepack, { label: 'IAST pre-navigation arm' })
-        const now = Date.now()
-        const requestedTtl = Number(opts?.armTtlMs || opts?.ttlMs || IAST_PRE_NAVIGATION_ARM_MAX_TTL_MS)
-        const ttlMs = Math.max(1000, Math.min(
-            Number.isFinite(requestedTtl) ? requestedTtl : IAST_PRE_NAVIGATION_ARM_MAX_TTL_MS,
-            IAST_PRE_NAVIGATION_ARM_MAX_TTL_MS
-        ))
-        const arm = {
-            version: 1,
-            tabId: normalizedTabId,
-            target,
-            scanStrategy: normalizedStrategy,
-            rulepackLoadOptions: cloneIastValue(rulepackLoadOptions, {}),
-            rulepackSignature: buildIastModulesSignature(loadedRulepack, normalizedStrategy),
-            createdAt: now,
-            expiresAt: now + ttlMs
-        }
-
-        this.preparedAutomationArm = arm
-        this.currentRulepackOverride = customRulepack
-        this.currentRulepackLoadOptions = cloneIastValue(rulepackLoadOptions, {})
-        iastScanStrategy = normalizedStrategy
-        clearIastModuleSendTracking(normalizedTabId)
-        await this._clearIastBufferForTab(normalizedTabId)
-        await this._writePreparedAutomationArmStorage(arm)
-
-        const registered = await this.registerScript(normalizedStrategy, { targetUrl: target.url })
-        if (!registered) {
-            await this.clearPreparedAutomationArm({ clearBuffer: true })
-            const err = new Error('iast_pre_navigation_registration_failed')
-            err.code = 'iast_pre_navigation_registration_failed'
-            throw err
-        }
-
-        return {
-            ok: true,
-            armed: true,
-            tabId: normalizedTabId,
-            targetUrl: target.url,
-            scope: {
-                origin: target.origin,
-                pathPrefix: target.pathPrefix
-            },
-            scanStrategy: normalizedStrategy,
-            rulepackSignature: arm.rulepackSignature,
-            expiresAt: arm.expiresAt
         }
     }
 
@@ -1556,11 +1544,9 @@ export class ptk_iast {
         }
     }
 
-    async reset({ preservePreparedAutomationArm = false } = {}) {
-        if (!preservePreparedAutomationArm) {
-            await this.clearPreparedAutomationArm({ clearBuffer: true })
-        }
-        this.resetScanResult({ preservePreparedAutomationArm })
+    async reset() {
+        this._clearAllTokenOrigins()
+        this.resetScanResult()
         await ptk_storage.setItem(this.storageKey, {})
     }
 
@@ -1642,10 +1628,7 @@ export class ptk_iast {
 
     async _appendIastBufferMessage(message = {}, sender = {}) {
         const tabId = this._normalizeTabId(sender?.tab?.id)
-        const preparedArm = !this.isTrackedScanTab(tabId)
-            ? await this.getPreparedAutomationArm(tabId, sender?.url || sender?.tab?.url || null)
-            : null
-        if (!this.isTrackedScanTab(tabId) && !preparedArm) {
+        if (!this.isTrackedScanTab(tabId)) {
             return {
                 ok: false,
                 reason: this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
@@ -1690,22 +1673,6 @@ export class ptk_iast {
         if (!key) return { ok: false, reason: 'missing_tab', messages: [] }
 
         const entries = await this._readIastBufferEntries(key)
-        const preparedArm = !this.isTrackedScanTab(sender?.tab?.id)
-            ? await this.getPreparedAutomationArm(
-                sender?.tab?.id,
-                sender?.url || sender?.tab?.url || null
-            )
-            : null
-        if (preparedArm) {
-            return {
-                ok: true,
-                pending: true,
-                reason: 'prepared_scan_pending',
-                count: entries.length,
-                messages: []
-            }
-        }
-
         await this._removeIastBufferKeys([key])
 
         if (!this.isTrackedScanTab(sender?.tab?.id)) {
@@ -1736,90 +1703,6 @@ export class ptk_iast {
         }
     }
 
-    _ingestPreparedIastBufferPayload(payload = {}, entry = {}) {
-        if (!payload || typeof payload !== 'object') return false
-        const tabId = this._normalizeTabId(entry?.tabId)
-        const bufferId = payload?.__ptkIastBufferId || payload?.bufferId || entry?.id || null
-        if (payload.ptk_iast === 'finding_report' && payload.finding) {
-            try {
-                const finding = createFindingFromIAST(payload.finding, {
-                    scanId: this.scanResult.scanId,
-                    host: this.scanResult.host,
-                    tabId
-                })
-                this._applyRelatedTabEvidence(finding, tabId)
-                this.addOrUpdateFinding(finding)
-                this._incrementIastAutomationTelemetry('findingReportsAccepted', {
-                    lastSenderTabId: tabId
-                })
-                this._rememberIastBufferAck(bufferId)
-                return true
-            } catch (error) {
-                console.warn('[PTK IAST] Failed to adopt prepared finding', error?.message || String(error))
-                return false
-            }
-        }
-        if (payload.ptk_iast === 'runtime_signal' && payload.signal) {
-            this.addOrUpdateRuntimeSignal(this._applyRelatedTabRuntimeSignal(payload.signal, tabId))
-            this._incrementIastAutomationTelemetry('runtimeSignalsAccepted', {
-                lastSenderTabId: tabId
-            })
-            this._rememberIastBufferAck(bufferId)
-            return true
-        }
-        return false
-    }
-
-    _rememberPreparedIastPayload(payload = {}, sender = {}) {
-        const cloned = this._cloneIastBufferPayload(payload)
-        if (!cloned || typeof cloned !== 'object') return false
-        this._preparedAutomationPendingMessages.push({
-            id: cloned?.__ptkIastBufferId || cloned?.bufferId || null,
-            message: cloned,
-            tabId: this._normalizeTabId(sender?.tab?.id),
-            frameId: Number.isInteger(Number(sender?.frameId)) ? Number(sender.frameId) : 0,
-            url: sender?.url || sender?.tab?.url || null,
-            createdAt: Date.now()
-        })
-        if (this._preparedAutomationPendingMessages.length > IAST_BUFFER_MAX_ENTRIES) {
-            this._preparedAutomationPendingMessages = this._preparedAutomationPendingMessages.slice(-IAST_BUFFER_MAX_ENTRIES)
-        }
-        return true
-    }
-
-    async _drainPreparedIastBufferForTab(tabId) {
-        const normalizedTabId = this._normalizeTabId(tabId)
-        if (normalizedTabId === null) return { accepted: 0, total: 0 }
-        const prefix = `ptk_iast_buffer:${normalizedTabId}:`
-        let allItems = {}
-        try {
-            allItems = await browser.storage.local.get(null)
-        } catch (_) {
-            const fallbackKey = this._iastBufferStorageKeyForParts(normalizedTabId, 0)
-            allItems = { [fallbackKey]: await this._readIastBufferEntries(fallbackKey) }
-        }
-        const keys = Object.keys(allItems || {}).filter(key => key.startsWith(prefix))
-        const storedEntries = keys.flatMap(key => Array.isArray(allItems[key]) ? allItems[key] : [])
-        const pendingEntries = this._preparedAutomationPendingMessages
-            .filter(entry => this._normalizeTabId(entry?.tabId) === normalizedTabId)
-        const entriesById = new Map()
-        const entriesWithoutId = []
-        for (const entry of [...storedEntries, ...pendingEntries]) {
-            const id = entry?.id || entry?.message?.__ptkIastBufferId || entry?.message?.bufferId || null
-            if (id) entriesById.set(String(id), entry)
-            else entriesWithoutId.push(entry)
-        }
-        const entries = [...entriesById.values(), ...entriesWithoutId]
-        let accepted = 0
-        for (const entry of entries) {
-            if (this._ingestPreparedIastBufferPayload(entry?.message, entry)) accepted += 1
-        }
-        await this._removeIastBufferKeys(keys)
-        this._preparedAutomationPendingMessages = this._preparedAutomationPendingMessages
-            .filter(entry => this._normalizeTabId(entry?.tabId) !== normalizedTabId)
-        return { accepted, total: entries.length }
-    }
-
     _normalizeTabId(tabId) {
         const numeric = Number(tabId)
         return Number.isInteger(numeric) && numeric >= 0 ? numeric : null
@@ -1833,7 +1716,9 @@ export class ptk_iast {
         const normalized = this._normalizeTabId(tabId)
         if (!this.isScanRunning || normalized === null) return false
         const primary = this._primaryScanTabId()
-        return normalized === primary || this.relatedScanTabs?.has?.(normalized) === true
+        return normalized === primary
+            || this.relatedScanTabs?.has?.(normalized) === true
+            || this.scopedTabCoordinator?.isTrackedTab?.('IAST', normalized) === true
     }
 
     _trackedScanTabIds() {
@@ -1859,14 +1744,15 @@ export class ptk_iast {
             return false
         }
         const parentTabId = this._normalizeTabId(meta?.parentTabId)
-        if (parentTabId !== null && parentTabId !== primary) {
+        if (parentTabId !== null && !this.isTrackedScanTab(parentTabId)) {
             return false
         }
         const now = Date.now()
         const existing = this.relatedScanTabs.get(normalized) || {}
         this.relatedScanTabs.set(normalized, Object.assign({}, existing, {
             tabId: normalized,
-            parentTabId: primary,
+            parentTabId: parentTabId !== null ? parentTabId : primary,
+            rootTabId: primary,
             role: String(meta?.role || existing.role || 'ptk_child_tab'),
             sourceEngine: String(meta?.sourceEngine || existing.sourceEngine || 'DAST'),
             url: typeof meta?.url === 'string' ? meta.url : (existing.url || null),
@@ -1904,6 +1790,7 @@ export class ptk_iast {
     releaseRelatedScanTab(tabId) {
         const normalized = this._normalizeTabId(tabId)
         if (normalized === null) return false
+        this._clearTokenOriginsForTab(normalized)
         this.relatedScanTabs.delete(normalized)
         activeIastTabs.delete(normalized)
         this.agentReadyTabs.delete(normalized)
@@ -1920,6 +1807,7 @@ export class ptk_iast {
         finding.evidence.iast.automationTab = {
             tabId: meta.tabId,
             parentTabId: meta.parentTabId,
+            rootTabId: meta.rootTabId ?? this._primaryScanTabId(),
             role: meta.role,
             sourceEngine: meta.sourceEngine,
             url: meta.url || null
@@ -1934,11 +1822,274 @@ export class ptk_iast {
             automationTab: {
                 tabId: meta.tabId,
                 parentTabId: meta.parentTabId,
+                rootTabId: meta.rootTabId ?? this._primaryScanTabId(),
                 role: meta.role,
                 sourceEngine: meta.sourceEngine,
                 url: meta.url || null
             }
         })
+    }
+
+    _tokenOriginKey(tabId, value, scanId = this.scanResult?.scanId || this.currentScanId) {
+        const normalizedTabId = this._normalizeTabId(tabId)
+        const normalizedScanId = scanId == null ? '' : String(scanId)
+        const normalizedValue = typeof value === 'string' ? value : ''
+        if (normalizedTabId === null || !normalizedScanId || !normalizedValue) return null
+        if (normalizedValue.length > IAST_TOKEN_ORIGIN_MAX_VALUE_CHARS) return null
+        return `${normalizedScanId}\u0000${normalizedTabId}\u0000${normalizedValue}`
+    }
+
+    _pruneTokenOrigins(now = Date.now()) {
+        if (!(this._tokenOrigins instanceof Map)) this._tokenOrigins = new Map()
+        const activeScanId = this.scanResult?.scanId || this.currentScanId || null
+        for (const [key, entry] of this._tokenOrigins.entries()) {
+            if (
+                !entry
+                || now - Number(entry.time || 0) > IAST_TOKEN_ORIGIN_TTL_MS
+                || !activeScanId
+                || entry.scanId !== activeScanId
+            ) {
+                this._tokenOrigins.delete(key)
+            }
+        }
+        while (this._tokenOrigins.size > IAST_TOKEN_ORIGIN_MAX_ENTRIES) {
+            const oldestKey = this._tokenOrigins.keys().next().value
+            if (oldestKey === undefined) break
+            this._tokenOrigins.delete(oldestKey)
+        }
+    }
+
+    _rememberTokenOrigin(tabId, value, origin, now = Date.now()) {
+        if (!this.isTrackedScanTab(tabId)) return false
+        const normalizedTabId = this._normalizeTabId(tabId)
+        const scanId = this.scanResult?.scanId || this.currentScanId || null
+        const key = this._tokenOriginKey(normalizedTabId, value, scanId)
+        if (!key) return false
+        this._pruneTokenOrigins(now)
+        if (this._tokenOrigins.has(key)) this._tokenOrigins.delete(key)
+        this._tokenOrigins.set(key, {
+            tabId: normalizedTabId,
+            scanId,
+            origin: origin && typeof origin === 'object' ? Object.assign({}, origin) : null,
+            time: now
+        })
+        this._pruneTokenOrigins(now)
+        return true
+    }
+
+    _resolveTokenOrigin(tabId, value, now = Date.now()) {
+        const key = this._tokenOriginKey(tabId, value)
+        if (!key) return null
+        this._pruneTokenOrigins(now)
+        const entry = this._tokenOrigins.get(key)
+        if (!entry) return null
+        if (!this.isTrackedScanTab(entry.tabId)) {
+            this._tokenOrigins.delete(key)
+            return null
+        }
+        return entry.origin && typeof entry.origin === 'object'
+            ? Object.assign({}, entry.origin)
+            : null
+    }
+
+    _clearTokenOriginsForTab(tabId) {
+        const normalizedTabId = this._normalizeTabId(tabId)
+        if (normalizedTabId === null || !(this._tokenOrigins instanceof Map)) return
+        for (const [key, entry] of this._tokenOrigins.entries()) {
+            if (entry?.tabId === normalizedTabId) this._tokenOrigins.delete(key)
+        }
+    }
+
+    _clearAllTokenOrigins() {
+        if (!(this._tokenOrigins instanceof Map)) this._tokenOrigins = new Map()
+        else this._tokenOrigins.clear()
+    }
+
+    _isTokenStorageObservation(details = {}) {
+        const context = details?.context && typeof details.context === 'object' ? details.context : {}
+        const observedAt = details?.observedAt && typeof details.observedAt === 'object'
+            ? details.observedAt
+            : (context?.observedAt && typeof context.observedAt === 'object' ? context.observedAt : {})
+        const detection = details?.detection && typeof details.detection === 'object'
+            ? details.detection
+            : (context?.detection && typeof context.detection === 'object' ? context.detection : {})
+        const sinkId = String(details?.sinkId || details?.sink || context?.operation?.sinkId || '')
+        const storageKind = String(observedAt?.kind || '')
+        const dataKind = String(detection?.dataKind || '').toLowerCase()
+        const reason = String(detection?.reason || '').toLowerCase()
+        const isStorage = storageKind.startsWith('storage.') || sinkId.startsWith('storage.')
+        const isToken = dataKind === 'token' || dataKind === 'jwt'
+            || reason === 'token_heuristic' || reason === 'jwt_heuristic'
+        return isStorage && isToken
+    }
+
+    _tokenCandidatesFromFinding(details = {}) {
+        const context = details?.context && typeof details.context === 'object' ? details.context : {}
+        const candidates = [
+            details?.matched,
+            context?.value,
+            details?.primarySource?.raw,
+            details?.primarySource?.value
+        ]
+        return [...new Set(candidates.filter(value => typeof value === 'string' && value.length > 0))]
+    }
+
+    _findOriginForFinding(details, tabId) {
+        for (const value of this._tokenCandidatesFromFinding(details)) {
+            const origin = this._resolveTokenOrigin(tabId, value)
+            if (origin) return origin
+        }
+        return null
+    }
+
+    async _enrichFindingWithTokenOrigin(details, tabId) {
+        if (!details || typeof details !== 'object' || !this._isTokenStorageObservation(details)) {
+            return details
+        }
+        let origin = this._findOriginForFinding(details, tabId)
+        if (!origin) {
+            await new Promise(resolve => setTimeout(resolve, IAST_TOKEN_ORIGIN_WAIT_MS))
+            origin = this._findOriginForFinding(details, tabId)
+        }
+        if (!origin) return details
+        const enriched = Object.assign({}, details, { origin })
+        enriched.context = Object.assign({}, details?.context || {}, { origin })
+        return enriched
+    }
+
+    _clearNavigationCorrelations(tabId = null) {
+        if (!Array.isArray(this._pendingNavigationCorrelations)) this._pendingNavigationCorrelations = []
+        if (!Array.isArray(this._completedNavigationRequests)) this._completedNavigationRequests = []
+        if (tabId === null || tabId === undefined) {
+            this._pendingNavigationCorrelations.length = 0
+            this._completedNavigationRequests.length = 0
+            return
+        }
+        const normalizedTabId = Number(tabId)
+        this._pendingNavigationCorrelations = this._pendingNavigationCorrelations
+            .filter((entry) => entry?.tabId !== normalizedTabId)
+        this._completedNavigationRequests = this._completedNavigationRequests
+            .filter((entry) => Number(entry?.tabId) !== normalizedTabId)
+    }
+
+    _pruneNavigationCorrelations(now = Date.now()) {
+        if (!Array.isArray(this._pendingNavigationCorrelations)) this._pendingNavigationCorrelations = []
+        if (!Array.isArray(this._completedNavigationRequests)) this._completedNavigationRequests = []
+        this._pendingNavigationCorrelations = this._pendingNavigationCorrelations
+            .filter((entry) => entry?.expiresAt > now)
+            .slice(-IAST_NAVIGATION_CORRELATION_MAX)
+        this._completedNavigationRequests = this._completedNavigationRequests
+            .filter((entry) => Number(entry?.completedAt || 0) + IAST_NAVIGATION_COMPLETED_TTL_MS > now)
+            .slice(-IAST_NAVIGATION_CORRELATION_MAX)
+    }
+
+    async _finalizeNavigationCorrelation(candidate, response) {
+        if (!candidate || !response) return false
+        if (!this.isScanRunning || String(this.scanResult?.scanId || '') !== candidate.scanId) return false
+        if (!this.isTrackedScanTab(candidate.tabId)) return false
+        const finding = Object.assign({}, candidate.finding)
+        const navigationCorrelation = Object.assign({}, candidate.finding?.context?.navigationCorrelation || {}, {
+                confirmed: true,
+                confirmedAt: Date.now(),
+                requestId: response.requestId || null,
+                statusCode: Number.isFinite(Number(response.statusCode)) ? Number(response.statusCode) : null,
+                observedUrl: response.url || null,
+                tabId: candidate.tabId,
+                frameId: candidate.frameId,
+                scanId: candidate.scanId
+            })
+        finding.navigationCorrelation = navigationCorrelation
+        finding.context = Object.assign({}, candidate.finding?.context || {}, {
+            navigationCorrelation
+        })
+        await this._handleFindingReport({ finding }, {
+            tab: { id: candidate.tabId },
+            frameId: candidate.frameId,
+            url: candidate.sourceUrl
+        })
+        return true
+    }
+
+    _matchNavigationCorrelations() {
+        this._pruneNavigationCorrelations()
+        for (let candidateIndex = this._pendingNavigationCorrelations.length - 1; candidateIndex >= 0; candidateIndex -= 1) {
+            const candidate = this._pendingNavigationCorrelations[candidateIndex]
+            const responseIndex = this._completedNavigationRequests.findIndex((response) => (
+                isIastNavigationResponseMatch(candidate, response)
+            ))
+            if (responseIndex === -1) continue
+            const [response] = this._completedNavigationRequests.splice(responseIndex, 1)
+            this._pendingNavigationCorrelations.splice(candidateIndex, 1)
+            this._finalizeNavigationCorrelation(candidate, response).catch(() => { })
+        }
+    }
+
+    _registerNavigationCandidate(message, sender) {
+        if (!this.isScanRunning || !this.isTrackedScanTab(sender?.tab?.id)) return false
+        const candidate = normalizeIastNavigationCandidate(
+            message,
+            sender,
+            this.scanResult?.scanId || null
+        )
+        if (!candidate) return false
+        this._pruneNavigationCorrelations()
+        const duplicate = this._pendingNavigationCorrelations.some((entry) => (
+            entry.scanId === candidate.scanId
+            && entry.tabId === candidate.tabId
+            && entry.frameId === candidate.frameId
+            && entry.sourceOrigin === candidate.sourceOrigin
+            && entry.requestUrl === candidate.requestUrl
+            && entry.navigationType === candidate.navigationType
+            && entry.finding?.ruleId === candidate.finding?.ruleId
+            && entry.finding?.sourceKey === candidate.finding?.sourceKey
+        ))
+        if (!duplicate) {
+            this._pendingNavigationCorrelations.push(candidate)
+        }
+        this._matchNavigationCorrelations()
+        return true
+    }
+
+    _observeCompletedNavigation(response) {
+        if (!this.isScanRunning || !this.isTrackedScanTab(response?.tabId)) return false
+        if (!['main_frame', 'sub_frame'].includes(String(response?.type || ''))) return false
+        if (!normalizeIastNavigationCorrelationUrl(response?.url || '')) return false
+        this._pruneNavigationCorrelations()
+        this._completedNavigationRequests.push(Object.assign({}, response, { completedAt: Date.now() }))
+        this._matchNavigationCorrelations()
+        return true
+    }
+
+    async _handleFindingReport(message, sender) {
+        const senderTabId = sender?.tab?.id
+        if (this.isTrackedScanTab(senderTabId)) {
+            this._incrementIastAutomationTelemetry('findingReportsAccepted', {
+                lastSenderTabId: senderTabId
+            })
+            try {
+                const findingDetails = await this._enrichFindingWithTokenOrigin(message.finding, senderTabId)
+                const finding = createFindingFromIAST(findingDetails, {
+                    scanId: this.scanResult.scanId,
+                    host: this.scanResult.host,
+                    tabId: senderTabId
+                })
+                this._applyRelatedTabEvidence(finding, senderTabId)
+                this.addOrUpdateFinding(finding)
+                await this._ackIastBufferMessage(sender, message?.bufferId).catch(() => { })
+            } catch (e) {
+                console.warn('[PTK IAST][background] createFindingFromIAST failed', e)
+            }
+            return
+        }
+        const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
+        this._incrementIastAutomationTelemetry(
+            reason === 'tab_mismatch' ? 'findingReportsDroppedTabMismatch' : 'findingReportsDroppedInactive',
+            {
+                lastSenderTabId: senderTabId,
+                lastDroppedReason: reason
+            }
+        )
+        this._rememberIastBufferAck(message?.bufferId)
     }
 
     addMessageListeners() {
@@ -1959,21 +2110,57 @@ export class ptk_iast {
             { urls: ["<all_urls>"], types: ptk_utils.requestFilters },
             ["responseHeaders"].concat(ptk_utils.extraInfoSpec)
         )
+
+        if (browser.webRequest?.onBeforeRedirect?.addListener) {
+            this.onBeforeRedirect = this.onBeforeRedirect.bind(this)
+            browser.webRequest.onBeforeRedirect.addListener(
+                this.onBeforeRedirect,
+                { urls: ["<all_urls>"], types: ['main_frame', 'sub_frame'] },
+                ["responseHeaders"].concat(ptk_utils.extraInfoSpec)
+            )
+        }
     }
 
     async onUpdated(tabId, info, tab) {
         if (info?.status === 'loading' || typeof info?.url === 'string') {
             clearIastModuleSendTracking(tabId)
         }
-        const arm = this.preparedAutomationArm
-        const nextUrl = typeof info?.url === 'string' ? info.url : (tab?.url || '')
-        if (
-            arm
-            && this._normalizeTabId(arm.tabId) === this._normalizeTabId(tabId)
-            && /^https?:/i.test(nextUrl)
-            && !isIastPreNavigationUrlInScope(arm.target, nextUrl)
-        ) {
-            await this.clearPreparedAutomationArm({ clearBuffer: true })
+        if (info?.status === 'loading') {
+            this._clearTokenOriginsForTab(tabId)
+        }
+        const normalizedTabId = this._normalizeTabId(tabId)
+        const primaryTabId = this._primaryScanTabId()
+        const isRelatedTab = normalizedTabId !== null && primaryTabId !== null && normalizedTabId !== primaryTabId
+        const navigationUrl = typeof info?.url === 'string' && info.url ? info.url : tab?.url
+        const hasScopedSession = this.scopedTabCoordinator?.hasSession?.('IAST') === true
+        const scopeAllowed = hasScopedSession
+            ? this.scopedTabCoordinator.isUrlInScope('IAST', navigationUrl)
+            : isIastNavigationUrlInScope(navigationUrl, {
+                host: this.scanResult?.host || '',
+                targetUrl: isRelatedTab ? '' : (this.scanResult?.targetUrl || '')
+            })
+        if (!shouldReinjectIastAgentForTabUpdate({
+            isFirefox: worker?.isFirefox === true,
+            isRelatedTab,
+            isScanRunning: this.isScanRunning === true,
+            isTrackedTab: this.isTrackedScanTab(tabId),
+            info,
+            tab,
+            host: this.scanResult?.host || '',
+            targetUrl: this.scanResult?.targetUrl || '',
+            scopeAllowed
+        })) {
+            return
+        }
+
+        // Re-run the page-world loader for tracked, in-scope documents at
+        // navigation boundaries. This covers Firefox's registration window,
+        // Chromium macro-driven primary-tab navigation, and related tabs. The
+        // page agent's loaded guard makes the fallback idempotent.
+        try {
+            await this.injectIastAgent(tabId, this.scanResult?.settings?.iastScanStrategy || 'SMART')
+        } catch (err) {
+            try { console.warn('[PTK IAST] Firefox navigation injection failed:', err?.message || err) } catch (_) { }
         }
     }
 
@@ -1981,18 +2168,21 @@ export class ptk_iast {
         browser.tabs.onRemoved.removeListener(this.onRemoved)
         browser.tabs.onUpdated.removeListener(this.onUpdated)
         browser.webRequest.onCompleted.removeListener(this.onCompleted)
+        if (this.onBeforeRedirect && browser.webRequest?.onBeforeRedirect?.removeListener) {
+            browser.webRequest.onBeforeRedirect.removeListener(this.onBeforeRedirect)
+        }
     }
 
     onRemoved(tabId, info) {
         clearIastModuleSendTracking(tabId)
-        if (this._normalizeTabId(this.preparedAutomationArm?.tabId) === this._normalizeTabId(tabId)) {
-            void this.clearPreparedAutomationArm({ clearBuffer: true })
-        }
+        this._clearTokenOriginsForTab(tabId)
+        this._clearNavigationCorrelations(tabId)
         if (this.relatedScanTabs?.has?.(Number(tabId))) {
             this.releaseRelatedScanTab(tabId)
             return
         }
         if (this.scanResult?.tabId == tabId) {
+            this._clearAllTokenOrigins()
             this.scanResult.tabId = null
             this.isScanRunning = false
             this.detachDevtoolsDebugger()
@@ -2002,6 +2192,8 @@ export class ptk_iast {
     onCompleted(response) {
         if (!this.isScanRunning) return
         if (!this.isTrackedScanTab(response.tabId)) return
+
+        this._observeCompletedNavigation(response)
 
         if (this.scanResult.host) {
             try {
@@ -2029,6 +2221,10 @@ export class ptk_iast {
         this.recordHttpEvent(evt)
     }
 
+    onBeforeRedirect(response) {
+        this._observeCompletedNavigation(response)
+    }
+
     onMessage(message, sender, sendResponse) {
 
         if (message.channel == "ptk_popup2background_iast") {
@@ -2048,13 +2244,7 @@ export class ptk_iast {
 
             if (message.type == 'check') {
                 //console.log('check iast')
-                if (
-                    this.isTrackedScanTab(sender?.tab?.id)
-                    || this._isPreparedAutomationArmUsable(this.preparedAutomationArm, {
-                        tabId: sender?.tab?.id,
-                        candidateUrl: sender?.url || sender?.tab?.url || null
-                    })
-                )
+                if (this.isTrackedScanTab(sender?.tab?.id))
                     return Promise.resolve({ loadAgent: true })
                 else
                     return Promise.resolve({ loadAgent: false })
@@ -2100,45 +2290,12 @@ export class ptk_iast {
                 return true
             }
 
+            if (message.type === 'navigation_candidate') {
+                return Promise.resolve({ ok: this._registerNavigationCandidate(message, sender) })
+            }
+
             if (message.type == 'finding_report') {
-                const senderTabId = sender?.tab?.id
-                if (this.isTrackedScanTab(senderTabId)) {
-                    this._incrementIastAutomationTelemetry('findingReportsAccepted', {
-                        lastSenderTabId: senderTabId
-                    })
-                    try {
-                        const finding = createFindingFromIAST(message.finding, {
-                            scanId: this.scanResult.scanId,
-                            host: this.scanResult.host,
-                            tabId: senderTabId
-                        })
-                        this._applyRelatedTabEvidence(finding, senderTabId)
-                        this.addOrUpdateFinding(finding)
-                        this._ackIastBufferMessage(sender, message?.bufferId).catch(() => { })
-                    } catch (e) {
-                        console.warn('[PTK IAST][background] createFindingFromIAST failed', e)
-                    }
-                } else if (this._isPreparedAutomationArmUsable(this.preparedAutomationArm, {
-                    tabId: senderTabId,
-                    candidateUrl: sender?.url || sender?.tab?.url || null
-                })) {
-                    // The paired iast_buffer_append message owns persistence until
-                    // startSession adopts this exact tab. Do not acknowledge or
-                    // classify the startup finding as dropped.
-                    this._rememberPreparedIastPayload(message, sender)
-                    return
-                } else {
-                    const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
-                    this._incrementIastAutomationTelemetry(
-                        reason === 'tab_mismatch' ? 'findingReportsDroppedTabMismatch' : 'findingReportsDroppedInactive',
-                        {
-                            lastSenderTabId: senderTabId,
-                            lastDroppedReason: reason
-                        }
-                    )
-                    this._rememberIastBufferAck(message?.bufferId)
-                }
-                return
+                return this._handleFindingReport(message, sender)
             }
 
             if (message.type === 'runtime_signal') {
@@ -2149,12 +2306,6 @@ export class ptk_iast {
                     })
                     this.addOrUpdateRuntimeSignal(this._applyRelatedTabRuntimeSignal(message.signal, senderTabId))
                     this._ackIastBufferMessage(sender, message?.bufferId).catch(() => { })
-                } else if (this._isPreparedAutomationArmUsable(this.preparedAutomationArm, {
-                    tabId: senderTabId,
-                    candidateUrl: sender?.url || sender?.tab?.url || null
-                })) {
-                    this._rememberPreparedIastPayload(message, sender)
-                    return
                 } else {
                     const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
                     this._incrementIastAutomationTelemetry(
@@ -2240,13 +2391,7 @@ export class ptk_iast {
             ;(async () => {
                 try {
                     const tabId = sender?.tab?.id
-                    const preparedArm = !this.isTrackedScanTab(tabId)
-                        ? await this.getPreparedAutomationArm(
-                            tabId,
-                            sender?.url || sender?.tab?.url || null
-                        )
-                        : null
-                    if (!this.isTrackedScanTab(tabId) && !preparedArm) {
+                    if (!this.isTrackedScanTab(tabId)) {
                         const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
                         sendResponse && sendResponse({
                             active: false,
@@ -2257,11 +2402,8 @@ export class ptk_iast {
                         })
                         return
                     }
-                    const moduleLoadOptions = preparedArm?.rulepackLoadOptions
-                        || this.currentRulepackLoadOptions
-                        || {}
-                    const effectiveStrategy = preparedArm?.scanStrategy
-                        || this.scanResult?.settings?.iastScanStrategy
+                    const moduleLoadOptions = this.currentRulepackLoadOptions || {}
+                    const effectiveStrategy = this.scanResult?.settings?.iastScanStrategy
                         || iastScanStrategy
                     const modules = await loadIastModules(moduleLoadOptions)
                     if (!modules) {
@@ -2287,7 +2429,7 @@ export class ptk_iast {
                         active: true,
                         iastModules: null,
                         iastModulesSignature: null,
-                        scanStrategy: preparedArm?.scanStrategy || iastScanStrategy,
+                        scanStrategy: iastScanStrategy,
                         error: err?.message || String(err)
                     })
                 }
@@ -2855,33 +2997,19 @@ export class ptk_iast {
                 tabUrl = (await browser.tabs.get(tabId))?.url || null
             } catch (_) { }
         }
-        const preparedArm = await this.getPreparedAutomationArm(tabId, tabUrl)
-        const requestedRulepackSignature = buildIastModulesSignature(
-            loadedRulepack,
-            normalizeIastBackgroundStrategy(scanStrategy)
-        )
-        if (preparedArm && preparedArm.rulepackSignature !== requestedRulepackSignature) {
-            await this.clearPreparedAutomationArm({ clearBuffer: true })
-            const err = new Error('iast_pre_navigation_policy_mismatch')
-            err.code = 'iast_pre_navigation_policy_mismatch'
-            throw err
-        }
-        const adoptsPreparedArm = Boolean(preparedArm)
-        await this.reset({ preservePreparedAutomationArm: adoptsPreparedArm })
+        await this.reset()
         this.currentRulepackOverride = customRulepack
         this.currentRulepackLoadOptions = Object.assign({}, rulepackLoadOptions, zapTiming ? { zapTiming } : {})
         clearIastModuleSendTracking(tabId)
-        if (!adoptsPreparedArm) this.agentReadyTabs.delete(tabId)
+        this.agentReadyTabs.delete(tabId)
         this.agentFailedTabs.delete(tabId)
         this.isScanRunning = true
         this.scanningRequest = false
-        if (!adoptsPreparedArm) {
-            await this._clearIastBufferForTab(tabId)
-            browser.tabs.sendMessage(tabId, {
-                channel: "ptk_background_iast2content",
-                type: "clean iast result"
-            }).catch(() => { })
-        }
+        await this._clearIastBufferForTab(tabId)
+        browser.tabs.sendMessage(tabId, {
+            channel: "ptk_background_iast2content",
+            type: "clean iast result"
+        }).catch(() => { })
         const scanId = ptk_utils.UUID()
         const started = new Date().toISOString()
         this.scanResult = this.getScanResultSchema({ scanId, host, startedAt: started })
@@ -2905,6 +3033,13 @@ export class ptk_iast {
         }
         iastScanStrategy = this.scanResult.settings.iastScanStrategy
         this.currentScanId = scanId
+        await this.scopedTabCoordinator?.registerSession?.('IAST', {
+            primaryTabId: tabId,
+            targetUrl: this.scanResult.targetUrl,
+            scopeMode: effectiveOpts?.zapManaged === true && this.scanResult.targetUrl ? 'path' : 'origin',
+            onEnroll: (meta) => this.enrollRelatedScanTab(meta.tabId, meta),
+            onRelease: (meta) => this.releaseRelatedScanTab(meta.tabId)
+        })
         activeIastTabs.add(tabId)
         this.scanResult.policyId = policyMeta?.id || (rulepackLoadOptions?.policyId != null ? String(rulepackLoadOptions.policyId) : null)
         this.scanResult.settings = Object.assign({}, this.scanResult.settings || {}, {
@@ -2924,24 +3059,11 @@ export class ptk_iast {
             }),
             noise: computeIastNoiseTelemetry(this.scanResult)
         }
-        if (adoptsPreparedArm) {
-            const adoptedBuffer = await this._drainPreparedIastBufferForTab(tabId)
-            this.scanResult.iastTelemetry.automation.preNavigationArm = {
-                adopted: true,
-                createdAt: preparedArm.createdAt,
-                expiresAt: preparedArm.expiresAt,
-                bufferedMessages: adoptedBuffer.total,
-                acceptedMessages: adoptedBuffer.accepted
-            }
-            await this.clearPreparedAutomationArm({ preserveRegistration: true })
-        }
         this.broadcastScanUpdate()
-        if (!adoptsPreparedArm) {
-            await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
-                host: this.scanResult.host,
-                targetUrl: this.scanResult.targetUrl || zapTiming?.targetUrl || null
-            })
-        }
+        await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
+            host: this.scanResult.host,
+            targetUrl: this.scanResult.targetUrl || zapTiming?.targetUrl || null
+        })
         this.addListeners()
         const devtoolsStartedAt = Date.now()
         await this.attachDevtoolsDebugger(tabId)
@@ -2978,6 +3100,7 @@ export class ptk_iast {
 
     async stopBackgroundScan(options = {}) {
         const trackedTabIds = this._trackedScanTabIds()
+        this.scopedTabCoordinator?.unregisterSession?.('IAST')
         await Promise.all(trackedTabIds.map(tabId => this._clearIastBufferForTab(tabId)))
         for (const tabId of trackedTabIds) {
             browser.tabs.sendMessage(tabId, {
@@ -2996,6 +3119,8 @@ export class ptk_iast {
         }
         this.scanResult.tabId = null
         this.relatedScanTabs = new Map()
+        this._clearAllTokenOrigins()
+        this._clearNavigationCorrelations()
         this.unregisterScript()
         this.removeListeners()
         this.detachDevtoolsDebugger()
@@ -4083,25 +4208,14 @@ export class ptk_iast {
             } catch (_) {
                 return
             }
-            const tokens = this.extractTokenCandidates(parsed).map(entry => ({
-                value: entry.value,
-                origin: {
+            const tokens = this.extractTokenCandidates(parsed)
+            for (const entry of tokens) {
+                this._rememberTokenOrigin(tabId, entry.value, {
                     kind: "http_response",
                     url,
                     requestId,
                     detail: entry.path
-                }
-            }))
-            if (!tokens.length) return
-            try {
-                browser.tabs.sendMessage(tabId, {
-                    channel: "ptk_background_iast2content_token_origin",
-                    tokens
-                }).catch((err) => {
-                    console.warn("[PTK IAST] token origin send failed", err)
                 })
-            } catch (err) {
-                console.warn("[PTK IAST] token origin send exception", err)
             }
         })
     }
@@ -4140,36 +4254,63 @@ export class ptk_iast {
     }
 
     async registerScript(scanStrategy = 'SMART', scope = {}) {
-        const files = buildIastAgentScriptFiles(scanStrategy, { isFirefox: worker.isFirefox === true })
+        const files = buildIastAgentScriptFiles(scanStrategy)
         try {
-            if (!browser?.scripting?.registerContentScripts) {
-                return false
-            }
             await this.unregisterScript()
             const registrationScope = buildIastAgentScriptRegistrationScope(scope)
             if (!registrationScope?.matches?.length) {
                 console.warn('[PTK IAST] Skipping dynamic IAST script registration without scan host scope')
                 return false
             }
-            const contentScript = {
-                id: 'iast-agent',
-                js: files,
-                matches: registrationScope.matches,
-                runAt: 'document_start',
-                world: 'MAIN',
-                persistAcrossSessions: false
+
+            if (browser?.scripting?.registerContentScripts) {
+                const contentScript = {
+                    id: 'iast-agent',
+                    js: files,
+                    matches: registrationScope.matches,
+                    runAt: 'document_start',
+                    world: 'MAIN',
+                    persistAcrossSessions: false
+                }
+                if (Array.isArray(registrationScope.includeGlobs) && registrationScope.includeGlobs.length) {
+                    contentScript.includeGlobs = registrationScope.includeGlobs
+                }
+                try {
+                    await browser.scripting.registerContentScripts([contentScript])
+                    return true
+                } catch (e) {
+                    // Current Firefox MV2 releases can expose `scripting`
+                    // while rejecting one or more MV3 registration options.
+                    // Preserve the exact host/path scope and fall through to
+                    // Firefox's MV2 registration API instead of broadening it.
+                    if (worker?.isFirefox !== true || !browser?.contentScripts?.register) throw e
+                }
             }
-            if (Array.isArray(registrationScope.includeGlobs) && registrationScope.includeGlobs.length) {
-                contentScript.includeGlobs = registrationScope.includeGlobs
+
+            // Firefox MV2 does not expose scripting.registerContentScripts.
+            // Register an isolated-world document-start loader which inserts
+            // the local bootstrap and agent files as page scripts. This keeps
+            // authorization and hooks in the page world while preserving the
+            // exact scan scope and avoiding a reload or fixed extension UUID.
+            if (browser?.contentScripts?.register && browser?.runtime?.getURL) {
+                const scriptUrls = files.map(file => browser.runtime.getURL(file))
+                const contentScript = {
+                    matches: registrationScope.matches,
+                    js: [{
+                        code: buildIastAgentScriptTagLoaderSource(scriptUrls, scanStrategy)
+                    }],
+                    runAt: 'document_start',
+                    allFrames: false,
+                    matchAboutBlank: false
+                }
+                if (Array.isArray(registrationScope.includeGlobs) && registrationScope.includeGlobs.length) {
+                    contentScript.includeGlobs = registrationScope.includeGlobs
+                }
+                this.firefoxIastContentScriptRegistration = await browser.contentScripts.register(contentScript)
+                return true
             }
-            try {
-                await browser.scripting.registerContentScripts([contentScript])
-            } catch (e) {
-                if (!contentScript.includeGlobs) throw e
-                delete contentScript.includeGlobs
-                await browser.scripting.registerContentScripts([contentScript])
-            }
-            return true
+
+            return false
         } catch (e) {
             console.warn('[PTK IAST] Failed to register IAST script:', e);
             return false
@@ -4178,80 +4319,20 @@ export class ptk_iast {
 
     async injectIastAgent(tabId, scanStrategy = 'SMART') {
         const file = 'ptk/content/iast.js'
-        const url = browser?.runtime?.getURL ? browser.runtime.getURL(file) : null
         const normalizedStrategy = String(scanStrategy || 'SMART').trim().toUpperCase() === 'COMPREHENSIVE'
             ? 'COMPREHENSIVE'
             : 'SMART'
+        const scriptUrls = browser?.runtime?.getURL
+            ? buildIastAgentScriptFiles(normalizedStrategy).map(scriptFile => browser.runtime.getURL(scriptFile))
+            : []
 
         const injectByScriptTag = async (execution) => {
-            if (!url) return false
+            if (!scriptUrls.length) return false
             const results = await execution({
                 target: { tabId },
                 world: 'MAIN',
-                func: (src, strategy, retryDelays, maxAttempts) => {
-                    try {
-                        let attempts = 0
-                        const postReady = () => {
-                            try { window.postMessage({ channel: 'ptk_iast_agent_ready' }, '*') } catch (_) { }
-                        }
-                        const postFailed = (error) => {
-                            try { window.postMessage({ channel: 'ptk_iast_agent_failed', error: error || 'script_load_failed' }, '*') } catch (_) { }
-                        }
-                        const removeLoader = () => {
-                            try {
-                                const existing = document.getElementById('__ptk_iast_agent__')
-                                if (existing) existing.remove()
-                            } catch (_) { }
-                        }
-                        const scheduleRetry = () => {
-                            const delay = retryDelays[Math.min(attempts - 1, retryDelays.length - 1)] || 0
-                            try { setTimeout(loadAgent, delay) } catch (_) { loadAgent() }
-                        }
-                        const loadAgent = () => {
-                            try {
-                                window.__PTK_IAST_SCAN_STRATEGY__ = strategy || 'SMART'
-                                window.__PTK_IAST_AGENT_AUTHORIZED__ = true
-                                window.__PTK_IAST_PROVISIONAL_HOOKS__ = true
-                                if (window.__PTK_IAST_AGENT_LOADED__ === true) {
-                                    postReady()
-                                    return
-                                }
-                                removeLoader()
-                                attempts += 1
-                                const script = document.createElement('script')
-                                script.id = '__ptk_iast_agent__'
-                                script.src = src
-                                script.type = 'text/javascript'
-                                script.async = true
-                                script.onload = postReady
-                                script.onerror = function () {
-                                    removeLoader()
-                                    if (attempts < maxAttempts) {
-                                        scheduleRetry()
-                                        return
-                                    }
-                                    postFailed('script_load_failed')
-                                }
-                                ;(document.head || document.documentElement).appendChild(script)
-                            } catch (error) {
-                                if (attempts < maxAttempts) {
-                                    attempts += 1
-                                    scheduleRetry()
-                                    return
-                                }
-                                postFailed(error?.message || 'script_inject_failed')
-                            }
-                        }
-                        loadAgent()
-                        return true
-                    } catch (error) {
-                        try {
-                            window.postMessage({ channel: 'ptk_iast_agent_failed', error: error?.message || 'script_inject_failed' }, '*')
-                        } catch (_) { }
-                        return false
-                    }
-                },
-                args: [url, normalizedStrategy, IAST_AGENT_SCRIPT_TAG_RETRY_DELAYS_MS, IAST_AGENT_SCRIPT_TAG_MAX_ATTEMPTS]
+                func: runIastAgentScriptTagLoader,
+                args: [scriptUrls, IAST_AGENT_SCRIPT_TAG_RETRY_DELAYS_MS, IAST_AGENT_SCRIPT_TAG_MAX_ATTEMPTS]
             })
             return Array.isArray(results) ? results.some(entry => entry?.result === true) : true
         }
@@ -4290,9 +4371,9 @@ export class ptk_iast {
         }
 
         // MV2-safe injection: use tabs.executeScript + script tag with absolute URL
-        if (browser?.tabs?.executeScript && url) {
+        if (browser?.tabs?.executeScript && scriptUrls.length) {
             try {
-                const code = buildIastAgentScriptTagLoaderSource(url, normalizedStrategy)
+                const code = buildIastAgentScriptTagLoaderSource(scriptUrls, normalizedStrategy)
                 // Use document_idle for already-loaded pages (document_start is for initial load)
                 await browser.tabs.executeScript(tabId, { code, runAt: 'document_idle' })
                 return true
@@ -4310,8 +4391,15 @@ export class ptk_iast {
     }
 
     async unregisterScript() {
+        const firefoxRegistration = this.firefoxIastContentScriptRegistration
+        this.firefoxIastContentScriptRegistration = null
+        if (firefoxRegistration?.unregister) {
+            try {
+                await firefoxRegistration.unregister()
+            } catch (_) { }
+        }
         try {
-            await browser.scripting.unregisterContentScripts({
+            await browser?.scripting?.unregisterContentScripts?.({
                 ids: ["iast-agent"],
             });
         } catch (err) {
@@ -4324,10 +4412,17 @@ export class ptk_iast {
 
 export const __iastTestHooks = {
     buildIastAgentScriptTagLoaderSource,
+    runIastAgentScriptTagLoader,
     buildDefaultIastRuntimeHealthTelemetry,
     buildIastAgentScriptFiles,
     buildIastAgentScriptRegistrationScope,
+    isIastNavigationUrlInScope,
+    shouldReinjectIastAgentForTabUpdate,
     buildIastModulesSignature,
+    normalizeIastNavigationCorrelationUrl,
+    normalizeIastNavigationCandidate,
+    isIastCorrelatedNavigationSink,
+    isIastNavigationResponseMatch,
     clearIastModuleSendTracking,
     getIastModuleDeliveryState,
     sendIastModulesToContent

@@ -1517,3 +1517,43 @@ body.ptk-card-fullscreen-active {
   background: #fff;
   z-index: 2;
 }
+
+.macro_export_diagnostics {
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.macro_export_diagnostics:focus {
+  outline: 2px solid rgba(33, 133, 208, 0.65);
+  outline-offset: 2px;
+}
+
+.macro_export_dialog_summary {
+  margin-bottom: 0.75rem;
+  font-weight: 600;
+}
+
+.macro_export_diagnostic_group {
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid rgba(34, 36, 38, 0.12);
+  overflow-wrap: anywhere;
+}
+
+.macro_export_diagnostic_title {
+  font-weight: 600;
+}
+
+.macro_export_diagnostic_steps,
+.macro_export_diagnostic_details {
+  margin-top: 0.25rem;
+  font-size: 0.9em;
+}
+
+.macro_export_diagnostic_details summary {
+  cursor: pointer;
+}
+
+.macro_element_path_controls.disabled {
+  opacity: 0.55;
+}

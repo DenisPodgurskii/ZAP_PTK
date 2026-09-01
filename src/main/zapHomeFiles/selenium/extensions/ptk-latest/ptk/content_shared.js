@@ -540,6 +540,17 @@ function handleIastPageBridgePayload(data) {
         return true;
     }
 
+    if (data?.channel === 'ptk_iast_navigation_candidate') {
+        sendRuntimeMessage({
+            channel: 'ptk_content_iast2background_iast',
+            type: 'navigation_candidate',
+            candidate: data?.candidate && typeof data.candidate === 'object' ? data.candidate : null,
+            finding: data?.finding && typeof data.finding === 'object' ? data.finding : null,
+            context: buildIastBridgeContext()
+        }).catch(() => { });
+        return true;
+    }
+
     if (data?.ptk_iast) {
         const type = data?.ptk_iast === 'runtime_signal' ? 'runtime_signal' : 'finding_report';
         sendRuntimeMessage({
@@ -634,14 +645,6 @@ function installIastBridge() {
                 return Promise.resolve({ ok: true });
             }
 
-            if (message?.channel === 'ptk_background_iast2content_token_origin') {
-                dispatchIastBridgeToPage({
-                    channel: 'ptk_background_iast2content_token_origin',
-                    tokens: Array.isArray(message.tokens) ? message.tokens : []
-                });
-                return Promise.resolve({ ok: true });
-            }
-
             return undefined;
         });
     }
@@ -653,6 +656,14 @@ function installIastBridge() {
     window.addEventListener('message', (event) => {
         handleIastPageBridgePayload(event.data || {});
     }, false);
+
+    // The page-world agent may initialize at document_start before this
+    // isolated content bridge is installed at document_idle. Ask an existing
+    // authorized agent to repeat its genuine readiness and module request so
+    // neither signal is lost to script-order timing.
+    dispatchIastBridgeToPage({
+        channel: 'ptk_content_iast_bridge_ready'
+    });
 
     return true;
 }

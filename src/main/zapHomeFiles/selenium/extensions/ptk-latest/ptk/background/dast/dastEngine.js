@@ -259,6 +259,19 @@ function cloneValue(value) {
     return JSON.parse(JSON.stringify(value))
 }
 
+export function deriveDastResponseIsHttps(explicitValue, ...urlCandidates) {
+    if (typeof explicitValue === 'boolean') return explicitValue
+    for (const candidate of urlCandidates) {
+        if (typeof candidate !== 'string' || !candidate.trim()) continue
+        try {
+            const protocol = new URL(candidate).protocol.toLowerCase()
+            if (protocol === 'https:') return true
+            if (protocol === 'http:') return false
+        } catch (_) { }
+    }
+    return undefined
+}
+
 export class dastEngine {
     /**
      * settings: { maxRequestsPerSecond, concurrency, modulesUrl, ... }
@@ -2027,10 +2040,52 @@ export class dastEngine {
             length,
             timeMs: typeof response.timeMs === 'number' ? response.timeMs : null
         }
+        const isHttps = deriveDastResponseIsHttps(
+            response.isHttps,
+            response.url,
+            response.ui_url,
+            response.uiUrl
+        )
+        if (typeof isHttps === 'boolean') {
+            normalized.isHttps = isHttps
+        }
         if (normalized.statusCode == null && !normalized.headers.length && !normalized.body) {
             return null
         }
         return normalized
+    }
+
+    _applyResponseProtocolIdentity(original, rawMeta = {}) {
+        if (!original || typeof original !== 'object') return original
+        const request = original.request && typeof original.request === 'object'
+            ? original.request
+            : null
+        const response = original.response && typeof original.response === 'object'
+            ? original.response
+            : null
+        if (!response) return original
+        const capturedResponse = rawMeta?.capturedResponse && typeof rawMeta.capturedResponse === 'object'
+            ? rawMeta.capturedResponse
+            : null
+        const isHttps = deriveDastResponseIsHttps(
+            response.isHttps,
+            response.url,
+            response.ui_url,
+            response.uiUrl,
+            capturedResponse?.url,
+            capturedResponse?.ui_url,
+            capturedResponse?.uiUrl,
+            request?.url,
+            request?.ui_url,
+            request?.uiUrl,
+            rawMeta?.url,
+            rawMeta?.ui_url,
+            rawMeta?.uiUrl
+        )
+        if (typeof isHttps === 'boolean') {
+            response.isHttps = isHttps
+        }
+        return original
     }
 
     _normalizeQueuedRequestPayload(rawRequest, dedupeKey, response = null) {
@@ -2333,10 +2388,10 @@ export class dastEngine {
         } else {
             response.baselineSource = 'captured'
         }
-        return {
+        return this._applyResponseProtocolIdentity({
             request,
             response
-        }
+        }, rawMeta)
     }
 
     _baselineResponseText(original = null) {
@@ -2401,6 +2456,7 @@ export class dastEngine {
         if (cachedOriginal) {
             this._recordBaselineResolution("captured")
             const nextOriginal = cloneValue(cachedOriginal)
+            this._applyResponseProtocolIdentity(nextOriginal, rawMeta)
             this._applyRequestDiscoveryMetadata(nextOriginal, rawMeta)
             return nextOriginal
         }
@@ -2416,12 +2472,13 @@ export class dastEngine {
             return capturedOriginal
         }
         this._recordBaselineResolution("replay")
-        let original = await this.executeOriginal(schema)
+        let original = this._applyResponseProtocolIdentity(await this.executeOriginal(schema), rawMeta)
         const capturedFallbackOriginal = this._buildCapturedOriginalFallbackAfterReplay(schema, rawMeta, modules, original)
         if (capturedFallbackOriginal) {
             original = capturedFallbackOriginal
             this._recordBaselineResolution("captured")
         }
+        this._applyResponseProtocolIdentity(original, rawMeta)
         this._applyRequestDiscoveryMetadata(original, rawMeta)
         if (originalCacheKey && original) {
             const cacheOriginal = cloneValue(original)
@@ -2487,6 +2544,29 @@ export class dastEngine {
             if (!String(bodyText || '').trim()) return true
         }
         return false
+    }
+
+    isRecordedStrongTopFrameResponseDuplicate(response = {}) {
+        const method = String(response?.method || 'GET').toUpperCase()
+        if (method !== 'GET' && method !== 'HEAD') return false
+        if (String(response?.type || '').toLowerCase() !== 'main_frame') return false
+        if (Number(response?.frameId) !== 0) return false
+        if (!this.isAllowed(response)) return false
+
+        const url = String(response?.url || response?.ui_url || '').trim()
+        if (!url) return false
+        const dedupeKey = this._simpleFingerprint({
+            raw: `${method} ${url} HTTP/1.1\r\n\r\n`,
+            url,
+            method,
+            ui_url: response?.ui_url || url
+        }, response)
+        if (!dedupeKey || !this._isRecordedRequestDedupeKey(dedupeKey)) return false
+
+        const record = this._requestRecordByDedupeKey instanceof Map
+            ? this._requestRecordByDedupeKey.get(dedupeKey)
+            : null
+        return !!record && !this._recordedRequestLooksWeak(record)
     }
 
     _shouldUpgradeRecordedRequest(dedupeKey, record = null, existing = null, quality = 0) {
@@ -2797,6 +2877,7 @@ export class dastEngine {
         if (response.errorMessage) compact.errorMessage = response.errorMessage
         if (response.errorCause) compact.errorCause = response.errorCause
         if (response.mimeType) compact.mimeType = response.mimeType
+        if (typeof response.isHttps === 'boolean') compact.isHttps = response.isHttps
         if (includeHeaders) {
             const headers = this._normalizeHttpHeaders(response.headers)
             if (headers) compact.headers = headers
@@ -3438,6 +3519,15 @@ export class dastEngine {
         }
     }
 
+    _moduleExecutedHistoryLimit(task) {
+        const attacks = Array.isArray(task?.module?.attacks) ? task.module.attacks : []
+        const usesCarrierBaseline = attacks.some((attack) => {
+            const constants = attack?.metadata?.constants
+            return Boolean(constants?.jwtCarrierProof && constants?.jwtCarrierBaseline)
+        })
+        return usesCarrierBaseline ? 24 : 5
+    }
+
     _confirmConfig() {
         return this.scanControls?.confirm || {}
     }
@@ -3552,6 +3642,17 @@ export class dastEngine {
             })
             return null
         }
+        const advancedJwtContract = this._jwtAdvancedCarrierContract(task, executed)
+        if (advancedJwtContract && validationResult?.success) {
+            const carrierProof = this._validateJwtAdvancedCarrierProof(task, executed, advancedJwtContract)
+            if (carrierProof?.ok) return validationResult
+            this._appendTaskRuntimeEvent(task, context, {
+                type: 'dast_validation_suppressed',
+                phase: 'validation',
+                reason: carrierProof?.reason || 'jwt_advanced_carrier_proof_missing'
+            })
+            return null
+        }
         if (!validationResult?.success) {
             return validationResult
         }
@@ -3612,11 +3713,29 @@ export class dastEngine {
     }
 
     _requestEvidenceContainsJwtNone(request = null, surface = 'any') {
-        const text = JSON.stringify(request || '')
-        if (!/eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0\./.test(text)) return false
-        if (surface === 'cookie') return /cookie/i.test(text)
-        if (surface === 'authorization') return /authorization/i.test(text)
-        return true
+        const jwtNonePattern = /eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0\./
+        if (surface === 'cookie') {
+            const cookies = Array.isArray(request?.cookies) ? request.cookies : []
+            const cookieHeader = Array.isArray(request?.headers)
+                ? request.headers.find((header) => String(header?.name || '').toLowerCase() === 'cookie')
+                : null
+            return jwtNonePattern.test(JSON.stringify(cookies))
+                || jwtNonePattern.test(String(cookieHeader?.value || ''))
+        }
+        if (surface === 'authorization') {
+            const authorization = Array.isArray(request?.headers)
+                ? request.headers.find((header) => String(header?.name || '').toLowerCase() === 'authorization')
+                : null
+            return jwtNonePattern.test(String(authorization?.value || ''))
+        }
+        if (surface === 'form') {
+            return jwtNonePattern.test(JSON.stringify(request?.body?.params || []))
+        }
+        if (surface === 'json') {
+            return jwtNonePattern.test(String(request?.body?.text || ''))
+                || jwtNonePattern.test(JSON.stringify(request?.body?.json || null))
+        }
+        return jwtNonePattern.test(JSON.stringify(request || ''))
     }
 
     _jwtResponseBodyMatchesRegex(response = null, regexSource = '') {
@@ -3640,6 +3759,165 @@ export class dastEngine {
                 ? executed.metadata.constants
                 : {}
         )
+    }
+
+    _jwtAdvancedCarrierContract(task = null, executed = null) {
+        const constants = this._jwtAttackConstants(task, executed)
+        const proof = String(constants.jwtCarrierProof || '').trim().toLowerCase()
+        const baselineId = String(constants.jwtCarrierBaseline || '').trim()
+        if (!proof || !baselineId) return null
+        return { proof, baselineId }
+    }
+
+    _jwtCarrierTargetIdentity(attacked = null) {
+        let location = String(attacked?.location || '').trim().toLowerCase()
+        const name = String(attacked?.name || '').trim()
+        if (location === 'body') location = 'form'
+        if (location === 'header' && name.toLowerCase() === 'authorization') {
+            location = 'authorization'
+        }
+        const normalizedName = location === 'json' || location === 'form'
+            ? name
+            : name.toLowerCase()
+        return { location, name: normalizedName }
+    }
+
+    _jwtCarrierTargetsMatch(left = null, right = null) {
+        const a = this._jwtCarrierTargetIdentity(left)
+        const b = this._jwtCarrierTargetIdentity(right)
+        return Boolean(a.location && a.name && a.location === b.location && a.name === b.name)
+    }
+
+    _jwtJsonPathValue(value, path = '') {
+        const parts = String(path || '')
+            .replace(/\[(\d+)\]/g, '.$1')
+            .split('.')
+            .filter(Boolean)
+        let current = value
+        for (const part of parts) {
+            if (current === null || current === undefined || typeof current !== 'object') return undefined
+            current = current[part]
+        }
+        return current
+    }
+
+    _jwtValueOnAttackedCarrier(request = null, attacked = null) {
+        const target = this._jwtCarrierTargetIdentity(attacked)
+        if (!target.location || !target.name) return ''
+        if (target.location === 'authorization') {
+            const header = (Array.isArray(request?.headers) ? request.headers : []).find((entry) => {
+                return String(entry?.name || '').toLowerCase() === 'authorization'
+            })
+            return String(header?.value || '')
+        }
+        if (target.location === 'cookie') {
+            const cookie = (Array.isArray(request?.cookies) ? request.cookies : []).find((entry) => {
+                return String(entry?.name || '').toLowerCase() === target.name
+            })
+            if (cookie) return String(cookie?.value || '')
+            const cookieHeader = (Array.isArray(request?.headers) ? request.headers : []).find((entry) => {
+                return String(entry?.name || '').toLowerCase() === 'cookie'
+            })
+            const pair = String(cookieHeader?.value || '').split(';').map((value) => value.trim()).find((value) => {
+                return value.slice(0, value.indexOf('=')).trim().toLowerCase() === target.name
+            })
+            return pair ? pair.slice(pair.indexOf('=') + 1) : ''
+        }
+        if (target.location === 'form') {
+            const param = (Array.isArray(request?.body?.params) ? request.body.params : []).find((entry) => {
+                return String(entry?.name || '') === target.name
+            })
+            return String(param?.value || '')
+        }
+        if (target.location === 'json') {
+            let json = request?.body?.json
+            if (!json && typeof request?.body?.text === 'string') {
+                try {
+                    json = JSON.parse(request.body.text)
+                } catch (_) {
+                    return ''
+                }
+            }
+            const value = this._jwtJsonPathValue(json, target.name)
+            return typeof value === 'string' ? value : ''
+        }
+        return ''
+    }
+
+    _jwtTokenParts(value = '') {
+        const match = String(value || '').match(/([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/)
+        if (!match) return null
+        return { token: match[0], header: match[1], payload: match[2], signature: match[3] }
+    }
+
+    _decodeJwtHeader(segment = '') {
+        try {
+            const normalized = String(segment).replace(/-/g, '+').replace(/_/g, '/')
+            const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4)
+            return JSON.parse(atob(padded))
+        } catch (_) {
+            return null
+        }
+    }
+
+    _jwtCarrierMutationMatches(value = '', proof = '') {
+        const parts = this._jwtTokenParts(value)
+        if (!parts) return false
+        const header = this._decodeJwtHeader(parts.header)
+        if (!header || typeof header !== 'object') return false
+        if (proof === 'alg_none') {
+            return String(header.alg || '').toLowerCase() === 'none' && parts.signature === ''
+        }
+        if (proof === 'empty_signature') {
+            return parts.signature === ''
+        }
+        if (proof === 'kid_path') {
+            const kid = String(header.kid || '')
+            return /(?:\.\.[/\\]|^[/\\]|[/\\]dev[/\\]null)/i.test(kid)
+        }
+        if (proof === 'jku_remote') {
+            try {
+                const url = new URL(String(header.jku || ''))
+                return url.protocol === 'http:' || url.protocol === 'https:'
+            } catch (_) {
+                return false
+            }
+        }
+        return false
+    }
+
+    _jwtAdvancedBaselineDiffers(attackResponse = null, baselineResponse = null) {
+        const attackStatus = Number(attackResponse?.statusCode ?? attackResponse?.status)
+        const baselineStatus = Number(baselineResponse?.statusCode ?? baselineResponse?.status)
+        if (Number.isFinite(attackStatus) && Number.isFinite(baselineStatus) && attackStatus !== baselineStatus) {
+            return true
+        }
+        const attackLength = Number(attackResponse?.length ?? (typeof attackResponse?.body === 'string' ? attackResponse.body.length : NaN))
+        const baselineLength = Number(baselineResponse?.length ?? (typeof baselineResponse?.body === 'string' ? baselineResponse.body.length : NaN))
+        return Number.isFinite(attackLength)
+            && Number.isFinite(baselineLength)
+            && Math.abs(attackLength - baselineLength) > 20
+    }
+
+    _validateJwtAdvancedCarrierProof(task, executed, contract) {
+        const attacked = executed?.metadata?.attacked || task?.payload?.metadata?.attacked || null
+        const carrierValue = this._jwtValueOnAttackedCarrier(executed?.request, attacked)
+        if (!this._jwtCarrierMutationMatches(carrierValue, contract.proof)) {
+            return { ok: false, reason: 'jwt_advanced_mutation_not_on_expected_carrier' }
+        }
+        const history = Array.isArray(task?.module?.executed) ? task.module.executed : []
+        const baseline = history.find((entry) => {
+            const entryId = String(entry?.metadata?.id || '').trim()
+            const status = Number(entry?.response?.statusCode ?? entry?.response?.status)
+            return entryId === contract.baselineId
+                && [400, 401, 403].includes(status)
+                && this._jwtCarrierTargetsMatch(attacked, entry?.metadata?.attacked)
+        })
+        if (!baseline) return { ok: false, reason: 'jwt_advanced_matching_baseline_missing' }
+        if (!this._jwtAdvancedBaselineDiffers(executed?.response, baseline?.response)) {
+            return { ok: false, reason: 'jwt_advanced_response_did_not_differ_from_baseline' }
+        }
+        return { ok: true, baseline }
     }
 
     _jwtAuthorizationNonBaselineProofAllowed(task, executed, context, validationResult, contrastingProbe) {
@@ -3677,8 +3955,14 @@ export class dastEngine {
         if (attackId === 'jwt_1') {
             return { surface: 'cookie', probeIds: new Set(['jwt_probe_no_cookie']) }
         }
+        if (attackId === 'jwt_2') {
+            return { surface: 'form', probeIds: new Set(['jwt_probe_no_form']) }
+        }
         if (attackId === 'jwt_3') {
             return { surface: 'authorization', probeIds: new Set(['jwt_probe_no_authz']) }
+        }
+        if (attackId === 'jwt_4') {
+            return { surface: 'json', probeIds: new Set(['jwt_probe_no_json']) }
         }
         return null
     }
@@ -3798,6 +4082,7 @@ export class dastEngine {
             const executedPathHistory = !task.moduleAsync && moduleId && executedByModule
                 ? (executedByModule[pathKey] ||= [])
                 : null
+            const executedHistoryLimit = this._moduleExecutedHistoryLimit(task)
             const mergedExecutedHistory = () => {
                 const seen = new Set()
                 const merged = []
@@ -3806,17 +4091,19 @@ export class dastEngine {
                         if (!entry || typeof entry !== 'object') continue
                         const key = [
                             String(entry?.metadata?.id || ''),
+                            String(entry?.metadata?.attacked?.location || ''),
+                            String(entry?.metadata?.attacked?.name || ''),
                             String(entry?.response?.statusCode ?? entry?.statusCode ?? ''),
                             String(entry?.response?.body ?? '')
                         ].join('|')
                         if (seen.has(key)) continue
                         seen.add(key)
                         merged.push(entry)
-                        if (merged.length >= 5) break
+                        if (merged.length >= executedHistoryLimit) break
                     }
                 }
                 append(executedHistory)
-                if (merged.length < 5) append(executedPathHistory)
+                if (merged.length < executedHistoryLimit) append(executedPathHistory)
                 return merged
             }
             const recordExecuted = (entry) => {
@@ -3828,11 +4115,15 @@ export class dastEngine {
                     if (!Array.isArray(bucket)) return
                     const key = [
                         String(entry?.metadata?.id || ''),
+                        String(entry?.metadata?.attacked?.location || ''),
+                        String(entry?.metadata?.attacked?.name || ''),
                         String(entry?.response?.statusCode ?? entry?.statusCode ?? ''),
                         String(entry?.response?.body ?? '')
                     ].join('|')
                     const duplicateIndex = bucket.findIndex((candidate) => [
                         String(candidate?.metadata?.id || ''),
+                        String(candidate?.metadata?.attacked?.location || ''),
+                        String(candidate?.metadata?.attacked?.name || ''),
                         String(candidate?.response?.statusCode ?? candidate?.statusCode ?? ''),
                         String(candidate?.response?.body ?? '')
                     ].join('|') === key)
@@ -3840,7 +4131,7 @@ export class dastEngine {
                         bucket.splice(duplicateIndex, 1)
                     }
                     bucket.unshift(entry)
-                    if (bucket.length > 5) bucket.pop()
+                    if (bucket.length > executedHistoryLimit) bucket.pop()
                 }
                 pushUnique(executedHistory)
                 if (executedPathHistory !== executedHistory) {
@@ -6253,6 +6544,30 @@ export class dastEngine {
         }
     }
 
+    async _probeBrowserNavMainWorldDomMarker(tabId, markerToken) {
+        const markerId = String(markerToken || '').trim()
+        if (!tabId || !markerId || !browser?.scripting?.executeScript) return false
+        try {
+            const results = await browser.scripting.executeScript({
+                target: { tabId },
+                world: 'MAIN',
+                func: (marker, attributeName) => {
+                    try {
+                        const root = document.documentElement || document.body
+                        const value = String(root?.getAttribute?.(attributeName) || '')
+                        return value === marker || value.split(/\s+/).includes(marker)
+                    } catch (_) {
+                        return false
+                    }
+                },
+                args: [markerId, 'data-ptk-xss']
+            })
+            return Array.isArray(results) && results.some((entry) => entry?.result === true)
+        } catch (_) {
+            return false
+        }
+    }
+
     async _runBrowserNavChecksInTab(tabId, task, taskContext, markerToken, checks, settleMs) {
         const result = await this._sendBrowserNavHarnessMessage(tabId, {
             type: 'browserNavRun',
@@ -6260,11 +6575,13 @@ export class dastEngine {
             checks,
             settleMs
         }, task, taskContext)
-        if (
-            this._normalizeBrowserNavChecks(checks).includes('dom_xss')
+        const needsDomXssFallback = this._normalizeBrowserNavChecks(checks).includes('dom_xss')
             && !result?.dom_xss?.vulnerable
-            && await this._probeBrowserNavMainWorldWindowName(tabId, markerToken)
-        ) {
+        const mainWorldExecuted = needsDomXssFallback && (
+            await this._probeBrowserNavMainWorldDomMarker(tabId, markerToken)
+            || await this._probeBrowserNavMainWorldWindowName(tabId, markerToken)
+        )
+        if (mainWorldExecuted) {
             return Object.assign({}, result, {
                 dom_xss: {
                     vulnerable: true,
@@ -6272,14 +6589,14 @@ export class dastEngine {
                     reflected: false,
                     sinkKey: null,
                     context: {
-                        type: 'window_name_marker',
+                        type: 'main_world_execution_marker',
                         sourceDriver: null,
                         sourceKey: null,
                         tag: null,
-                        attr: 'window.name',
+                        attr: null,
                         cssPath: null,
                         outerHTML: null,
-                        snippet: `ptk-xss:${String(markerToken || '').trim()}`
+                        snippet: String(markerToken || '').trim()
                     }
                 }
             })
@@ -6308,8 +6625,13 @@ export class dastEngine {
         await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
     }
 
-    async _waitForBrowserNavAttackTabNavigation(tabId, task, taskContext, timeoutMs = 4500) {
-        await this._waitForTabReady(tabId, timeoutMs)
+    async _waitForBrowserNavAttackTabNavigation(tabId, task, taskContext, navigationPromise = null, timeoutMs = 4500) {
+        const navigation = navigationPromise
+            ? await navigationPromise
+            : await this._waitForTabNavigation(tabId, timeoutMs)
+        if (!navigation?.ready) {
+            await this._waitForTabReady(tabId, timeoutMs)
+        }
         await this._markSpaAttackTab(tabId, {
             marker: DAST_BROWSER_NAV_TAB_MARKER,
             domOnly: true
@@ -6399,14 +6721,22 @@ export class dastEngine {
                     }
                 }
                 if (driver === 'form') {
-                    const submitted = await this._sendBrowserNavHarnessMessage(tabId, {
-                        type: 'browserNavSourceForm',
-                        markerToken: options.markerToken,
-                        checks: options.checks,
-                        settleMs: options.settleMs,
-                        payload: payloadValue
-                    }, task, taskContext)
+                    const navigationWaiter = this._watchForTabNavigation(tabId, 4500)
+                    let submitted = null
+                    try {
+                        submitted = await this._sendBrowserNavHarnessMessage(tabId, {
+                            type: 'browserNavSourceForm',
+                            markerToken: options.markerToken,
+                            checks: options.checks,
+                            settleMs: options.settleMs,
+                            payload: payloadValue
+                        }, task, taskContext)
+                    } catch (error) {
+                        navigationWaiter.cancel('form_probe_failed')
+                        throw error
+                    }
                     if (this._browserNavVulnerableCheck(submitted, options.checks)) {
+                        navigationWaiter.cancel('form_probe_confirmed_without_navigation')
                         return {
                             res: submitted,
                             sourceInfo: submitted.sourceContext || {
@@ -6416,7 +6746,12 @@ export class dastEngine {
                         }
                     }
                     if (submitted?.mayNavigate) {
-                        await this._waitForBrowserNavAttackTabNavigation(tabId, task, taskContext)
+                        await this._waitForBrowserNavAttackTabNavigation(
+                            tabId,
+                            task,
+                            taskContext,
+                            navigationWaiter.promise
+                        )
                         const res = await this._runBrowserNavChecksInTab(
                             tabId,
                             task,
@@ -6433,6 +6768,7 @@ export class dastEngine {
                             }
                         }
                     }
+                    navigationWaiter.cancel('form_probe_did_not_navigate')
                     return {
                         res: submitted,
                         reason: submitted?.reason || submitted?.error || 'no_source_candidates',
@@ -7556,8 +7892,17 @@ export class dastEngine {
                 marker: DAST_BROWSER_NAV_TAB_MARKER,
                 runAt: 'document_start'
             })
-            await browser.tabs.update(tabId, { url })
-            await this._waitForTabReady(tabId)
+            const navigationWaiter = this._watchForTabNavigation(tabId)
+            try {
+                await browser.tabs.update(tabId, { url })
+                const navigation = await navigationWaiter.promise
+                if (!navigation?.ready) {
+                    await this._waitForTabReady(tabId)
+                }
+            } catch (error) {
+                navigationWaiter.cancel('attack_tab_navigation_failed')
+                throw error
+            }
             // Chromium can lose the pre-navigation marker that was set on about:blank.
             // Re-apply it on the real target page before the harness ping so the content
             // script can identify the page as a browser-nav attack tab.
@@ -7892,6 +8237,70 @@ export class dastEngine {
                     finish(false, error?.message || 'tab_lookup_failed')
                 })
         })
+    }
+
+    _watchForTabNavigation(tabId, timeoutMs = 8000) {
+        const normalizedTabId = Number(tabId)
+        let settled = false
+        let started = false
+        let timer = null
+        let resolvePromise = null
+
+        const cleanup = () => {
+            if (timer) clearTimeout(timer)
+            timer = null
+            try { browser.tabs.onUpdated.removeListener(listener) } catch (_) { }
+        }
+        const finish = (ready, reason, tab = null) => {
+            if (settled) return
+            settled = true
+            cleanup()
+            resolvePromise?.({
+                ready,
+                reason,
+                status: tab?.status || null,
+                url: tab?.url || tab?.pendingUrl || null
+            })
+        }
+        const listener = (updatedTabId, info, tab) => {
+            if (Number(updatedTabId) !== normalizedTabId) return
+            if (info?.status === 'loading' || typeof info?.url === 'string') {
+                started = true
+            }
+            if (
+                started
+                && (info?.status === 'complete' || tab?.status === 'complete')
+            ) {
+                finish(true, 'navigation_complete', tab)
+            }
+        }
+        const promise = new Promise((resolve) => {
+            resolvePromise = resolve
+            if (!Number.isInteger(normalizedTabId) || normalizedTabId < 0) {
+                finish(false, 'invalid_tab')
+                return
+            }
+            try {
+                browser.tabs.onUpdated.addListener(listener)
+            } catch (error) {
+                finish(false, error?.message || 'listener_failed')
+                return
+            }
+            timer = setTimeout(() => {
+                finish(false, started ? 'navigation_incomplete' : 'navigation_not_observed')
+            }, Math.max(250, Number(timeoutMs) || 8000))
+        })
+
+        return {
+            promise,
+            cancel(reason = 'cancelled') {
+                finish(false, reason)
+            }
+        }
+    }
+
+    async _waitForTabNavigation(tabId, timeoutMs = 8000) {
+        return this._watchForTabNavigation(tabId, timeoutMs).promise
     }
 
     async _drainRequestQueue() {
@@ -8797,6 +9206,17 @@ export class dastEngine {
     }
 
 
+    _shouldUseIsolatedHttpReplay(schema) {
+        if (schema?.opts?.follow_redirect === false) return false
+        if (String(schema?.opts?.transport_mode || '').trim()) return false
+        try {
+            const protocol = new URL(schema?.request?.url || '').protocol
+            return protocol === 'http:' || protocol === 'https:'
+        } catch (_) {
+            return false
+        }
+    }
+
     async activeAttack(schema) {
         try {
             let request = new ptk_request()
@@ -8848,6 +9268,7 @@ export class dastEngine {
             if (requestTimeoutMs) {
                 schema.opts.requestTimeoutMs = requestTimeoutMs
             }
+            request.isolatedRedirectSession = this._shouldUseIsolatedHttpReplay(schema)
             return request.sendRequest(schema)
         } catch (e) {
             // optionally: log or handle
@@ -8868,6 +9289,21 @@ export class dastEngine {
         }
         _schema.opts.override_headers = true
         _schema.opts.follow_redirect = true
+        if (typeof _schema.opts.preserve_browser_headers === 'undefined') {
+            _schema.opts.preserve_browser_headers = false
+        }
+        if (typeof _schema.opts.keepalive === 'undefined') {
+            _schema.opts.keepalive = false
+        }
+        if (typeof _schema.opts.retry_on_transport_failure === 'undefined') {
+            _schema.opts.retry_on_transport_failure = true
+        }
+        if (typeof _schema.opts.transport_retry_count === 'undefined') {
+            _schema.opts.transport_retry_count = 1
+        }
+        if (typeof _schema.opts.transport_retry_delay_ms === 'undefined') {
+            _schema.opts.transport_retry_delay_ms = 75
+        }
         const requestTimeoutMs = this._resolveRequestTimeoutMs(
             _schema?.opts?.requestTimeoutMs,
             this.originalRequestTimeoutMs || this.requestTimeoutMs
@@ -8875,6 +9311,7 @@ export class dastEngine {
         if (requestTimeoutMs) {
             _schema.opts.requestTimeoutMs = requestTimeoutMs
         }
+        request.isolatedRedirectSession = this._shouldUseIsolatedHttpReplay(_schema)
         return Promise.resolve(request.sendRequest(_schema))
     }
 
@@ -9176,6 +9613,220 @@ export class dastEngine {
         return this._moduleRuntimeMode(task?.module) !== 'browser_nav'
     }
 
+    _isStoredXssTrackingTask(task) {
+        const moduleId = String(task?.moduleId || task?.module?.id || '').trim().toLowerCase()
+        if (moduleId !== 'stored_xss_blind') return false
+        return !(Array.isArray(task?.attack?.action?.files) && task.attack.action.files.length)
+    }
+
+    _storedXssTrackingMarker(task, tracking) {
+        let marker = String(tracking?.marker || '').trim()
+        const random = String(task?.attack?.action?.random || '').trim()
+        if (marker && random) {
+            marker = marker.replaceAll('%%random%%', random)
+        }
+        return marker
+    }
+
+    _storedXssRenderCandidates(task, executed, context = null) {
+        const executedRequest = executed?.request || {}
+        const originalRequest = context?.original?.request || {}
+        const baseUrl = String(
+            executedRequest.ui_url
+            || executedRequest.uiUrl
+            || executedRequest.url
+            || originalRequest.ui_url
+            || originalRequest.uiUrl
+            || originalRequest.url
+            || ''
+        ).trim()
+        if (!baseUrl) return []
+
+        const candidates = []
+        const seen = new Set()
+        const add = (candidate) => {
+            const resolved = this._resolveSameOriginUrl(candidate, baseUrl)
+            if (!resolved || seen.has(resolved)) return
+            if (!this._isDastAttackTargetInScope(resolved)) return
+            seen.add(resolved)
+            candidates.push(resolved)
+        }
+
+        // The state-changing request is never replayed in the browser. Its endpoint
+        // is used only as a bounded GET render candidate after the submission.
+        add(executedRequest.ui_url || executedRequest.uiUrl || executedRequest.url)
+        add(this._getHeaderValue(executed?.response?.headers, 'location'))
+        add(
+            executed?.response?.ui_url
+            || executed?.response?.uiUrl
+            || executed?.response?.finalUrl
+            || executed?.response?.url
+        )
+        add(originalRequest.ui_url || originalRequest.uiUrl || originalRequest.url)
+
+        return candidates.slice(0, 2)
+    }
+
+    _buildStoredXssExecutionResult(task, tracking, executed, retrieval, renderUrl, browserResult) {
+        const marker = this._storedXssTrackingMarker(task, tracking)
+        const check = browserResult?.dom_xss || {}
+        const attacked = executed?.metadata?.attacked
+            || task?.payload?.metadata?.attacked
+            || null
+        const submission = {
+            url: executed?.request?.ui_url || executed?.request?.uiUrl || executed?.request?.url || null,
+            method: String(executed?.request?.method || '').toUpperCase() || null,
+            attacked
+        }
+        const proof = {
+            check: 'stored_xss_browser_execution',
+            executed: true,
+            marker,
+            submission,
+            retrieval: {
+                source: retrieval?.source || null,
+                url: retrieval?.url || null
+            },
+            render: {
+                url: renderUrl,
+                reflected: check.reflected === true,
+                sinkKey: check.sinkKey || null,
+                context: check.context || null
+            }
+        }
+
+        return {
+            success: true,
+            proof: JSON.stringify(proof),
+            confidence: typeof tracking?.confidence === 'number' ? tracking.confidence : 95,
+            trackingConfirmed: true,
+            trackingTier: 'executed',
+            tracking: {
+                url: renderUrl,
+                tier: 'executed',
+                source: 'browser',
+                marker,
+                request: retrieval?.request || null,
+                response: retrieval?.response || null
+            },
+            executed: true,
+            metadata: {
+                confirmation: {
+                    channel: 'browser_nav',
+                    tier: 'executed',
+                    source: 'stored_xss_retrieval',
+                    marker,
+                    url: renderUrl
+                },
+                executed: true,
+                reflected: check.reflected === true,
+                context: check.context || null,
+                sinkKey: check.sinkKey || null,
+                storedXss: {
+                    submission,
+                    retrievalUrl: retrieval?.url || null,
+                    renderUrl
+                }
+            }
+        }
+    }
+
+    async _runStoredXssTracking(task, executed, context, tracking) {
+        const marker = this._storedXssTrackingMarker(task, tracking)
+        if (!marker) {
+            this._appendTaskRuntimeEvent(task, context, {
+                type: 'dast_stored_xss_tracking_skipped',
+                phase: 'tracking',
+                reason: 'missing_marker'
+            })
+            return null
+        }
+
+        const candidates = this._storedXssRenderCandidates(task, executed, context)
+        const retrievals = []
+        const responseBody = String(executed?.response?.body || '')
+        if (responseBody.includes(marker)) {
+            retrievals.push({
+                source: 'submission_response',
+                url: candidates[0] || null,
+                request: executed?.request || null,
+                response: executed?.response || null
+            })
+        }
+
+        for (const url of candidates) {
+            const followup = this._buildFollowupRequest(executed, url)
+            if (!followup) continue
+            const followupExecuted = await this.activeAttack(followup)
+            const body = String(followupExecuted?.response?.body || '')
+            if (!body.includes(marker)) continue
+            retrievals.push({
+                source: 'followup',
+                url,
+                request: followupExecuted?.request || null,
+                response: followupExecuted?.response || null
+            })
+        }
+
+        if (!retrievals.length) return null
+
+        const renderUrls = []
+        const seenRenderUrls = new Set()
+        const addRenderUrl = (candidate) => {
+            const resolved = this._resolveSameOriginUrl(candidate, candidates[0] || candidate)
+            if (!resolved || seenRenderUrls.has(resolved)) return
+            if (!this._isDastAttackTargetInScope(resolved)) return
+            seenRenderUrls.add(resolved)
+            renderUrls.push(resolved)
+        }
+        retrievals.forEach((retrieval) => addRenderUrl(retrieval.url))
+        candidates.forEach(addRenderUrl)
+
+        for (const renderUrl of renderUrls.slice(0, 2)) {
+            try {
+                const browserResult = await this._withBrowserNavAttackTab(renderUrl, (tabId) => (
+                    this._runBrowserNavChecksInTab(
+                        tabId,
+                        task,
+                        context,
+                        marker,
+                        ['dom_xss'],
+                        DAST_BROWSER_NAV_DEFAULT_SETTLE_MS
+                    )
+                ))
+                const check = browserResult?.dom_xss
+                if (check?.vulnerable === true && check?.executed === true) {
+                    const retrieval = retrievals.find((entry) => entry.url === renderUrl) || retrievals[0]
+                    return this._buildStoredXssExecutionResult(
+                        task,
+                        tracking,
+                        executed,
+                        retrieval,
+                        renderUrl,
+                        browserResult
+                    )
+                }
+            } catch (err) {
+                this._appendTaskRuntimeEvent(task, context, {
+                    type: 'dast_stored_xss_browser_confirmation_failed',
+                    phase: 'tracking',
+                    reason: 'browser_probe_failed',
+                    url: renderUrl,
+                    error: err?.message || String(err)
+                })
+            }
+        }
+
+        this._appendTaskRuntimeEvent(task, context, {
+            type: 'dast_stored_xss_retrieved_unconfirmed',
+            phase: 'tracking',
+            retrievalCount: retrievals.length,
+            retrievalSources: Array.from(new Set(retrievals.map((entry) => entry.source))).slice(0, 3),
+            renderCandidates: renderUrls.slice(0, 2)
+        })
+        return null
+    }
+
     async _runTracking(task, executed, context = null) {
         const tracking = this._attackRuntimeConfirmation(task?.attack, 'tracking')
         if (!tracking || tracking.enabled !== true) return null
@@ -9202,6 +9853,9 @@ export class dastEngine {
                 sameResponseMarker: !!(marker && responseBody.includes(marker))
             })
             return null
+        }
+        if (this._isStoredXssTrackingTask(task)) {
+            return this._runStoredXssTracking(task, executed, context, tracking)
         }
         if (marker && responseBody.includes(marker)) {
             return this._buildTrackingSuccessResult(task, tracking, {

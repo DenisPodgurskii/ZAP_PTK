@@ -118,6 +118,8 @@ export class ptk_request_manager {
     async msg_send_request(message) {
         let self = this
         let request = new ptk_request()
+        request.isolatedRedirectSession = true
+        request.isolatedPreserveRawHeaders = true
         if (message.useListeners) request.useListeners = true
         return request.sendRequest(message.schema).then(function (response) {
             if (message.formId) {

@@ -816,7 +816,8 @@
             "objectPath": "window.Function"
           },
           "conditions": {
-            "requiresTaint": true
+            "requiresTaint": true,
+            "excludesFramework": "AngularJS"
           }
         },
         {
@@ -976,7 +977,13 @@
             "objectPath": "Function"
           },
           "conditions": {
-            "requiresTaint": true
+            "requiresTaint": true,
+            "requiresFramework": "AngularJS",
+            "requiresAngularServices": [
+              "$parse",
+              "$compile",
+              "$interpolate"
+            ]
           },
           "limits": {
             "maxReports": 50

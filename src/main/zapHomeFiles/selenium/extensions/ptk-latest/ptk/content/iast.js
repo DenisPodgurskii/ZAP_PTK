@@ -227,6 +227,35 @@ const IAST_FORM_HIJACK_SOURCE_KINDS = new Set([
 const IAST_CHANNEL_SOURCE_KINDS = new Set(['broadcastMessage', 'messagePort', 'workerMessage']);
 const IAST_OBJECT_URL_SOURCE_KINDS = new Set(['objectUrl']);
 const IAST_PERSISTENT_STORAGE_SOURCE_KINDS = new Set(['indexedDb', 'cacheStorage']);
+const IAST_ANGULAR_EXECUTION_SERVICES = new Set(['$parse', '$compile', '$interpolate']);
+const IAST_EXECUTION_CONTEXT_STACK = [];
+
+function withIastExecutionContext(context, callback) {
+    if (typeof callback !== 'function') return undefined;
+    const normalized = context && typeof context === 'object'
+        ? Object.assign({}, context)
+        : null;
+    if (!normalized) return callback();
+    IAST_EXECUTION_CONTEXT_STACK.push(normalized);
+    try {
+        return callback();
+    } finally {
+        IAST_EXECUTION_CONTEXT_STACK.pop();
+    }
+}
+
+function getActiveIastExecutionContext() {
+    if (!IAST_EXECUTION_CONTEXT_STACK.length) return null;
+    const context = IAST_EXECUTION_CONTEXT_STACK[IAST_EXECUTION_CONTEXT_STACK.length - 1];
+    return context && typeof context === 'object' ? Object.assign({}, context) : null;
+}
+
+function getActiveAngularExecutionContext() {
+    const context = getActiveIastExecutionContext();
+    if (context?.framework !== 'AngularJS') return null;
+    if (!IAST_ANGULAR_EXECUTION_SERVICES.has(context.angularService)) return null;
+    return context;
+}
 
 function hasAnyIastSourceKind(sourceKinds, expected) {
     return Array.isArray(sourceKinds) && sourceKinds.some((kind) => expected.has(kind));
@@ -241,7 +270,7 @@ function getIastRuleVariantByPrefix(sinkPlan, prefixes = []) {
     return null;
 }
 
-function selectIastRuleVariant({ runtimePlan = null, sinkId = null, sourceKinds = [], isCrossOrigin = false } = {}) {
+function selectIastRuleVariant({ runtimePlan = null, sinkId = null, sourceKinds = [], isCrossOrigin = false, context = {} } = {}) {
     const sinkPlan = sinkId && runtimePlan?.bySinkId ? runtimePlan.bySinkId[sinkId] || null : null;
     if (!sinkPlan?.variants?.length) return null;
     if (sinkPlan.uniqueRuleId) return sinkPlan.variants[0] || null;
@@ -277,6 +306,10 @@ function selectIastRuleVariant({ runtimePlan = null, sinkId = null, sourceKinds 
     }
 
     if (['code.eval', 'code.function.constructor', 'code.function.apply', 'code.setTimeout', 'code.setInterval'].includes(sinkId)) {
+        if (sinkId === 'code.function.constructor' && context?.framework === 'AngularJS'
+            && IAST_ANGULAR_EXECUTION_SERVICES.has(context?.angularService)) {
+            return getIastRuleVariantByPrefix(sinkPlan, ['angularjs_expression_']);
+        }
         if (hasAnyIastSourceKind(sourceKinds, IAST_CHANNEL_SOURCE_KINDS)) {
             return getIastRuleVariantByPrefix(sinkPlan, ['channel_']);
         }
@@ -286,7 +319,7 @@ function selectIastRuleVariant({ runtimePlan = null, sinkId = null, sourceKinds 
         if (hasAnyIastSourceKind(sourceKinds, IAST_STORAGE_EXEC_SOURCE_KINDS)) {
             return getIastRuleVariantByPrefix(sinkPlan, ['storage_']);
         }
-        return sinkPlan.variants.find((entry) => !entry.ruleId.includes('storage_')) || sinkPlan.variants[0];
+        return sinkPlan.variants.find((entry) => !entry.ruleId.includes('storage_') && !entry.ruleId.includes('angularjs_expression_')) || sinkPlan.variants[0];
     }
 
     if (sinkId === 'http.fetch.url' || sinkId === 'http.xhr.open') {
@@ -842,6 +875,7 @@ const IAST_OBJECT_URL_TAINT_KEYS = new Map();
 const IAST_BLOB_TAINT = typeof WeakMap === 'function' ? new WeakMap() : null;
 const IAST_CACHE_INSTANCES = typeof WeakMap === 'function' ? new WeakMap() : null;
 const IAST_CACHE_RESPONSE_META = typeof WeakMap === 'function' ? new WeakMap() : null;
+const IAST_FETCH_RESPONSE_META = typeof WeakMap === 'function' ? new WeakMap() : null;
 const IAST_MESSAGE_HANDLER_WRAPS = typeof WeakMap === 'function' ? new WeakMap() : null;
 const IAST_MESSAGE_TARGET_LABELS = typeof WeakMap === 'function' ? new WeakMap() : null;
 let IAST_MESSAGE_TARGET_SEQ = 0;
@@ -1084,6 +1118,11 @@ function getIastRuleByRuleId(ruleId) {
 
 function handleBackgroundIastBridgeMessage(data) {
     data = data || {}
+    if (data.channel === 'ptk_content_iast_bridge_ready') {
+        emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready' });
+        requestModulesFromBackground(true);
+        return;
+    }
     if (data.channel === 'ptk_background_iast2content_modules') {
         if (data.active === false) {
             disableIastRuntimeHooks(data.reason || 'inactive_scan_tab');
@@ -1096,14 +1135,6 @@ function handleBackgroundIastBridgeMessage(data) {
             scanStrategy: data.scanStrategy || null
         })
         //__PTK_IAST_DBG__ && __PTK_IAST_DBG__('IAST: modules received from bridge')
-    }
-    if (data.channel === 'ptk_background_iast2content_token_origin') {
-        if (Array.isArray(data.tokens)) {
-            data.tokens.forEach(entry => {
-                if (!entry || !entry.value) return;
-                addTokenOrigin(entry.value, entry.origin || null);
-            });
-        }
     }
 }
 
@@ -1747,11 +1778,6 @@ window.__PTK_IAST_PROPAGATION_OVERRIDE__ = typeof window.__PTK_IAST_PROPAGATION_
     : null;
 window.__PTK_IAST_PROPAGATION_ENABLED__ = false;
 refreshIastPropagationSettings();
-const IAST_TOKEN_ORIGINS = new Map();
-const IAST_TOKEN_ORIGIN_TTL_MS = 2 * 60 * 1000;
-const IAST_TOKEN_ORIGIN_MAX = 200;
-const IAST_ORIGIN_WAIT_MS = 200;
-
 function getTaintMetaEntry(key) {
     if (!key) return null;
     return window.__IAST_TAINT_META__?.[key] || null;
@@ -1798,33 +1824,6 @@ function pruneTaintStore() {
         }
         if (IAST_TAINT_STORE.stringMap.size <= IAST_TAINT_MAX) break;
     }
-}
-
-function addTokenOrigin(value, origin) {
-    if (!value) return;
-    const str = String(value);
-    const now = Date.now();
-    IAST_TOKEN_ORIGINS.set(str, { origin: origin || null, time: now });
-    if (IAST_TOKEN_ORIGINS.size > IAST_TOKEN_ORIGIN_MAX) {
-        for (const [key, entry] of IAST_TOKEN_ORIGINS.entries()) {
-            if (!entry || now - entry.time > IAST_TOKEN_ORIGIN_TTL_MS) {
-                IAST_TOKEN_ORIGINS.delete(key);
-            }
-            if (IAST_TOKEN_ORIGINS.size <= IAST_TOKEN_ORIGIN_MAX) break;
-        }
-    }
-}
-
-function getTokenOrigin(value) {
-    if (!value) return null;
-    const str = String(value);
-    const entry = IAST_TOKEN_ORIGINS.get(str);
-    if (!entry) return null;
-    if (Date.now() - entry.time > IAST_TOKEN_ORIGIN_TTL_MS) {
-        IAST_TOKEN_ORIGINS.delete(str);
-        return null;
-    }
-    return entry.origin || null;
 }
 
 function classifyTaintKind(sourceKind, value, meta = {}) {
@@ -2792,16 +2791,57 @@ function looksLikeInternalRoute(url) {
     return false;
 }
 
+function buildUrlValidationEvidence(rawUrl) {
+    const raw = safeSerializeValue(rawUrl).trim();
+    const internalRoute = looksLikeInternalRoute(raw);
+    const scheme = getUrlScheme(raw);
+    const dangerousScheme = scheme && DANGEROUS_URL_SCHEMES.has(scheme) ? scheme : null;
+    const evidence = {
+        parsed: false,
+        rawKind: internalRoute ? 'internal_route' : 'url',
+        resolvedUrl: null,
+        scheme: scheme || null,
+        dangerousScheme,
+        sameOrigin: null,
+        crossOrigin: null,
+        validationState: dangerousScheme ? 'dangerous_scheme' : 'unresolved'
+    };
+    if (!raw) {
+        evidence.rawKind = 'empty';
+        evidence.validationState = 'empty';
+        return evidence;
+    }
+    try {
+        const parsed = new URL(raw, window.location.href);
+        evidence.parsed = true;
+        evidence.resolvedUrl = parsed.href;
+        evidence.scheme = parsed.protocol ? parsed.protocol.replace(':', '').toLowerCase() : evidence.scheme;
+        evidence.sameOrigin = parsed.origin === window.location.origin;
+        evidence.crossOrigin = parsed.origin !== window.location.origin;
+        if (dangerousScheme) {
+            evidence.validationState = 'dangerous_scheme';
+        } else if (internalRoute || evidence.sameOrigin) {
+            evidence.validationState = 'same_origin';
+        } else {
+            evidence.validationState = 'cross_origin';
+        }
+    } catch (_) {
+        evidence.validationState = dangerousScheme ? 'dangerous_scheme' : 'invalid_url';
+    }
+    return evidence;
+}
+
 function shouldReportNavigationSink(targetUrl) {
     if (!targetUrl) return false;
-    if (getDangerousUrlScheme(targetUrl)) {
+    const validation = buildUrlValidationEvidence(targetUrl);
+    if (validation.dangerousScheme) {
         return true;
     }
-    if (looksLikeInternalRoute(targetUrl)) {
+    if (validation.rawKind === 'internal_route' || validation.sameOrigin === true) {
         // Ignore internal SPA routes like /login or #/search to reduce noise.
         return false;
     }
-    return isCrossOriginUrl(targetUrl);
+    return validation.crossOrigin === true;
 }
 
 function shouldReportRouteControlledNavigationSink(targetUrl) {
@@ -3083,7 +3123,8 @@ function buildObservedRuleBinding({ sinkId, value, match = null, context = {}, f
         runtimePlan: IAST_RUNTIME_PLAN,
         sinkId,
         sourceKinds,
-        isCrossOrigin
+        isCrossOrigin,
+        context
     });
     return buildRuleBinding({
         sinkId,
@@ -3309,7 +3350,6 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                 const ruleId = area === 'localStorage' ? 'localstorage_token_persist' : 'sessionstorage_token_persist';
                 const binding = buildRuleBinding({ sinkId, ruleId, fallbackType: 'storage-token-leak' });
                 const dataKind = getTokenDataKind(value);
-                const origin = getTokenOrigin(value);
                 if (!storageHooksEnabled) {
                     emitStorageObservationSignal({ area, key: k, value, elMeta });
                     return orig.apply(this, arguments);
@@ -3336,13 +3376,7 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                         operation: { sinkId, sinkArgs: { key: k, area } }
                     }, elMeta), match);
                 };
-                if (origin) {
-                    reportObservation(origin);
-                } else {
-                    setTimeout(() => {
-                        reportObservation(getTokenOrigin(value));
-                    }, IAST_ORIGIN_WAIT_MS);
-                }
+                reportObservation(null);
             }
             if (fn === 'removeItem') delete taints[`${storageAreaName(this)}:${k}`];
             if (fn === 'clear') Object.keys(taints)
@@ -3398,7 +3432,6 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                     fallbackType: 'storage-token-leak'
                 });
                 const dataKind = getTokenDataKind(decoded);
-                const origin = getTokenOrigin(decoded);
                 if (!storageHooksEnabled) {
                     emitStorageObservationSignal({ area: 'cookie', key: k, value: decoded, rawCookie: v, elMeta });
                     return res;
@@ -3425,13 +3458,7 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                         operation: { sinkId: 'storage.document.cookie', sinkArgs: { cookieName: k } }
                     }, elMeta), match);
                 };
-                if (origin) {
-                    reportObservation(origin);
-                } else {
-                    setTimeout(() => {
-                        reportObservation(getTokenOrigin(decoded));
-                    }, IAST_ORIGIN_WAIT_MS);
-                }
+                reportObservation(null);
                 return res;
             },
             configurable: true
@@ -3641,12 +3668,13 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
         }
     }
 
-    if (typeof Response !== 'undefined' && Response.prototype && IAST_CACHE_RESPONSE_META) {
+    if (typeof Response !== 'undefined' && Response.prototype && (IAST_CACHE_RESPONSE_META || IAST_FETCH_RESPONSE_META)) {
         ['text', 'json'].forEach((method) => {
             const original = Response.prototype[method];
             if (typeof original !== 'function' || original.__ptk_iast_wrapped__) return;
             const wrapped = function () {
-                const cacheMeta = IAST_CACHE_RESPONSE_META.get(this) || null;
+                const cacheMeta = IAST_CACHE_RESPONSE_META?.get(this) || null;
+                const fetchMeta = IAST_FETCH_RESPONSE_META?.get(this) || null;
                 return Promise.resolve(original.apply(this, arguments)).then((result) => {
                     if (cacheMeta) {
                         try {
@@ -3654,6 +3682,18 @@ function applySourceSpecificSignals(context = {}, primarySource = null, sinkId =
                             registerPersistentSource('cacheStorage', `${cacheMeta.cacheName || 'cache'}:${cacheMeta.requestUrl || 'entry'}`, value);
                         } catch (_) {
                             // ignore cache response source registration failures
+                        }
+                    }
+                    if (fetchMeta && isHookGroupEnabled('hook.net.responses')) {
+                        try {
+                            const parsed = method === 'json' && result && typeof result === 'object'
+                                ? result
+                                : parseJsonTextSafely(trimResponsePayloadText(result));
+                            if (parsed && typeof parsed === 'object') {
+                                registerResponseFieldSources(parsed, fetchMeta);
+                            }
+                        } catch (_) {
+                            // Response observation must preserve native response consumption.
                         }
                     }
                     return result;
@@ -4301,6 +4341,22 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
     // 2) PostMessage to background (sanitize non-cloneable payloads)
     const sanitized = sanitizeIastPayloadObject(details);
     try {
+        const navigationCorrelation = sanitized?.context?.navigationCorrelation;
+        if (navigationCorrelation?.deferUntilObserved === true) {
+            postDirectIastMessage({
+                channel: 'ptk_iast_navigation_candidate',
+                candidate: {
+                    destination: navigationCorrelation.destination || sanitized?.context?.destUrl || null,
+                    requestUrl: navigationCorrelation.requestUrl || sanitized?.context?.destUrl || null,
+                    sourceOrigin: navigationCorrelation.sourceOrigin || window.location.origin,
+                    sourceUrl: navigationCorrelation.sourceUrl || loc,
+                    navigationType: navigationCorrelation.navigationType || null,
+                    methodEvidence: navigationCorrelation.methodEvidence || null
+                },
+                finding: sanitized
+            });
+            return;
+        }
         postBufferedIastMessage({
             ptk_iast: 'finding_report',
             channel: 'ptk_content_iast2background_iast',
@@ -5093,7 +5149,8 @@ function buildNetworkContext(rawUrl) {
         destHost: target.host,
         destOrigin: target.origin,
         isCrossOrigin: target.isCrossOrigin,
-        scheme: target.scheme
+        scheme: target.scheme,
+        urlValidation: buildUrlValidationEvidence(rawUrl)
     };
 }
 
@@ -5517,7 +5574,14 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
     const sinkId = info.sinkId || info.sink || null;
     const explicitRule = info.ruleId ? getIastRuleByRuleId(info.ruleId) : null;
     const sinkCandidates = sinkId ? getIastRulesBySinkId(sinkId) : [];
-    const candidates = explicitRule
+    // A browser-observed navigation has already been classified to one concrete
+    // sink identity. Keep that identity exclusive so one completed navigation
+    // cannot create competing assign/replace findings in comprehensive mode.
+    const exclusiveObservedNavigation = explicitRule
+        && context?.navigationCorrelation?.deferUntilObserved === true;
+    const candidates = exclusiveObservedNavigation
+        ? [explicitRule]
+        : explicitRule
         ? [explicitRule, ...sinkCandidates.filter((entry) => entry && entry.ruleId !== explicitRule.ruleId)]
         : sinkCandidates;
     window.__PTK_IAST_LAST_REPORT_DEBUG__ = {
@@ -5580,6 +5644,16 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
     let reported = false;
     for (const ruleEntry of candidates) {
         const conditions = ruleEntry.conditions || {};
+        if (conditions.requiresFramework && context.framework !== conditions.requiresFramework) {
+            continue;
+        }
+        if (conditions.excludesFramework && context.framework === conditions.excludesFramework) {
+            continue;
+        }
+        if (Array.isArray(conditions.requiresAngularServices)
+            && !conditions.requiresAngularServices.includes(context.angularService)) {
+            continue;
+        }
         if (conditions.requiresCrossOrigin) {
             const reqUrl = context.requestUrl || context.url || context.destUrl || null;
             if (!isCrossOriginRequest(reqUrl)) {
@@ -5775,7 +5849,7 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
             filteredSourceKinds: filteredSources.map((src) => src?.sourceKind || src?.kind || null)
         });
         reported = true;
-        if (isSmart) {
+        if (isSmart && nextContext?.navigationCorrelation?.deferUntilObserved !== true) {
             if (sinkPageKey) {
                 markCache(IAST_SINK_SEEN, sinkPageKey);
             }
@@ -5867,14 +5941,15 @@ function scanInlineEvents(htmlFragment) {
                 const body = args.slice(-1)[0] + '';
                 const m = matchesTaint(body);
                 if (m) {
+                    const angularContext = getActiveAngularExecutionContext();
                     maybeReportTaintedValue(body, {
                         type: 'xss-via-Function',
                         sink: 'Function.constructor',
                         sinkId: 'code.function.constructor'
-                    }, {
+                    }, Object.assign({
                         element: document?.activeElement || null,
                         code: body
-                    }, m);
+                    }, angularContext || {}), m);
                 }
             });
             return Reflect.construct(target, args, newTarget);
@@ -5887,11 +5962,12 @@ function scanInlineEvents(htmlFragment) {
                 const body = args.slice(-1)[0] + '';
                 const m = matchesTaint(body);
                 if (m) {
+                    const angularContext = getActiveAngularExecutionContext();
                     maybeReportTaintedValue(body, {
                         type: 'xss-via-Function',
                         sink: 'Function.apply',
                         sinkId: 'code.function.apply'
-                    }, { element: document?.activeElement || null, code: body }, m);
+                    }, Object.assign({ element: document?.activeElement || null, code: body }, angularContext || {}), m);
                 }
             });
             return Reflect.apply(target, thisArg, args);
@@ -6455,7 +6531,14 @@ if (!isTrustedTypesHtmlRestricted()) {
             };
             return;
         }
-        const binding = buildRuleBinding({ sinkId, fallbackType: 'dom-attr' });
+        const networkContext = buildNetworkContext(value) || {};
+        const binding = buildObservedRuleBinding({
+            sinkId,
+            value,
+            match: m,
+            context: Object.assign({ value }, networkContext),
+            fallbackType: 'dom-attr'
+        });
         window.__PTK_IAST_LAST_ATTR_DEBUG__ = {
             attrName,
             sinkId,
@@ -6466,12 +6549,12 @@ if (!isTrustedTypesHtmlRestricted()) {
             matchedRaw: safeSerializeValue(m?.raw ?? value),
             value: safeSerializeValue(value)
         };
-        maybeReportTaintedValue(value, binding, {
+        maybeReportTaintedValue(value, binding, Object.assign({
             value,
             attribute: attrName,
             element: el,
             domPath: getDomPath(el)
-        }, m);
+        }, networkContext), m);
     };
 
     const wrapPropertySetter = (proto, prop) => {
@@ -6922,7 +7005,9 @@ if (!isTrustedTypesHtmlRestricted()) {
 // DOM URL navigation sinks
 ; (function () {
     const NAV_SUPPRESS = { meta: null, time: 0 };
-    const NAV_REPLAY_STATE = { active: false };
+    const HAS_NAVIGATION_OBSERVER = Boolean(
+        'navigation' in window && typeof window.navigation?.addEventListener === 'function'
+    );
     function markLocationNavTrigger(meta) {
         NAV_SUPPRESS.meta = meta || null;
         NAV_SUPPRESS.time = Date.now();
@@ -6938,21 +7023,41 @@ if (!isTrustedTypesHtmlRestricted()) {
         return meta;
     }
     window.__IAST_CONSUME_NAV_TRIGGER__ = consumeLocationNavTrigger;
-    function scheduleNavigationReplay(fn) {
-        if (typeof fn !== 'function') return;
-        setTimeout(() => {
-            NAV_REPLAY_STATE.active = true;
-            try {
-                fn();
-            } catch (e) {
-                __PTK_IAST_DBG__ && __PTK_IAST_DBG__('IAST: navigation replay failed', e);
-            } finally {
-                NAV_REPLAY_STATE.active = false;
-            }
-        }, 0);
-    }
+    window.__IAST_MARK_NAV_TRIGGER__ = markLocationNavTrigger;
 
     const LocationProto = typeof Location !== 'undefined' ? Location.prototype : null;
+
+    function observeDirectLocationIntent(value, sinkId, label) {
+        if (!isHookGroupEnabled('hook.nav.redirects')) return false;
+        const url = safeSerializeValue(value);
+        if (!url || !shouldReportNavigationSink(url)) return false;
+        const match = matchesTaint(url);
+        if (!match) return false;
+        const resolvedSinkId = resolveDangerousUrlSinkId(sinkId, url) || sinkId;
+        markLocationNavTrigger({
+            sinkId: resolvedSinkId,
+            sinkLabel: label,
+            methodEvidence: 'direct_wrapper'
+        });
+        if (!HAS_NAVIGATION_OBSERVER) {
+            const networkContext = buildNetworkContext(url) || {};
+            const observedBinding = buildObservedRuleBinding({
+                sinkId: resolvedSinkId,
+                value: url,
+                match,
+                context: Object.assign({ value: url }, networkContext),
+                fallbackType: 'dom-url-navigation'
+            });
+            maybeReportTaintedValue(url, Object.assign({
+                type: 'dom-url-navigation',
+                sink: label
+            }, observedBinding), Object.assign({
+                value: url,
+                methodEvidence: 'direct_wrapper_without_navigation_api'
+            }, captureElementMeta(document?.activeElement || null), networkContext), match);
+        }
+        return true;
+    }
 
     function wrapLocationSetter(prop, sinkId, label) {
         const targets = [];
@@ -6969,37 +7074,8 @@ if (!isTrustedTypesHtmlRestricted()) {
                     enumerable: desc.enumerable,
                     get: desc.get ? function () { return desc.get.call(this); } : undefined,
                     set(value) {
-                        const ctx = this;
-                        const runNative = () => desc.set.call(ctx, value);
-                        if (NAV_REPLAY_STATE.active) {
-                            return runNative();
-                        }
-                        if (!isHookGroupEnabled('hook.nav.redirects')) {
-                            return runNative();
-                        }
-                        if (!shouldReportNavigationSink(value)) {
-                            return runNative();
-                        }
-                        const resolvedSinkId = resolveDangerousUrlSinkId(sinkId, value) || sinkId;
-                        const elMeta = captureElementMeta(document?.activeElement || null);
-                        const observedBinding = buildObservedRuleBinding({
-                            sinkId: resolvedSinkId,
-                            value,
-                            context: Object.assign({ value }, buildNetworkContext(value) || {}),
-                            fallbackType: 'dom-url-navigation'
-                        });
-                        const reported = maybeReportTaintedValue(value, Object.assign({
-                            type: 'dom-url-navigation',
-                            sink: label
-                        }, observedBinding), Object.assign({ property: prop, value }, elMeta, buildNetworkContext(value) || {}, {
-                            scheme: getUrlScheme(value)
-                        }));
-                        if (reported) markLocationNavTrigger({ sinkId: resolvedSinkId, ruleId: observedBinding.ruleId || null, sinkLabel: label });
-                        if (reported) {
-                            scheduleNavigationReplay(runNative);
-                            return;
-                        }
-                        return runNative();
+                        observeDirectLocationIntent(value, sinkId, label);
+                        return desc.set.call(this, value);
                     }
                 });
             } catch (e) {
@@ -7025,74 +7101,19 @@ if (!isTrustedTypesHtmlRestricted()) {
                 if (typeof orig !== 'function') return;
                 if (useBound) {
                     const bound = orig.bind(window.location);
-                    target[method] = function (...args) {
-                        const callArgs = args.slice(0);
-                        const invokeNative = () => bound(...callArgs);
-                        if (NAV_REPLAY_STATE.active) {
-                            return invokeNative();
-                        }
-                        if (!isHookGroupEnabled('hook.nav.redirects')) {
-                            return invokeNative();
-                        }
-                        const url = safeSerializeValue(args[0]);
-                        if (url && shouldReportNavigationSink(url)) {
-                            const resolvedSinkId = resolveDangerousUrlSinkId(sinkId, url) || sinkId;
-                            const elMeta = captureElementMeta(document?.activeElement || null);
-                            const observedBinding = buildObservedRuleBinding({
-                                sinkId: resolvedSinkId,
-                                value: url,
-                                context: Object.assign({ value: url }, buildNetworkContext(url) || {}),
-                                fallbackType: 'dom-url-navigation'
-                            });
-                            const reported = maybeReportTaintedValue(url, Object.assign({
-                                type: 'dom-url-navigation',
-                                sink: label
-                            }, observedBinding), Object.assign({ method: label, value: url }, elMeta, buildNetworkContext(url) || {}, {
-                                scheme: getUrlScheme(url)
-                            }));
-                            if (reported) {
-                                markLocationNavTrigger({ sinkId: resolvedSinkId, ruleId: observedBinding.ruleId || null, sinkLabel: label });
-                                scheduleNavigationReplay(invokeNative);
-                                return;
-                            }
-                        }
-                        return invokeNative();
+                    const wrapper = function (...args) {
+                        observeDirectLocationIntent(args[0], sinkId, label);
+                        return bound(...args);
                     };
+                    target[method] = wrapper;
+                    if (target[method] !== wrapper) return;
                 } else {
-                    target[method] = function (...args) {
-                        const ctx = this;
-                        const callArgs = args.slice(0);
-                        const invokeNative = () => orig.apply(ctx, callArgs);
-                        if (NAV_REPLAY_STATE.active) {
-                            return invokeNative();
-                        }
-                        if (!isHookGroupEnabled('hook.nav.redirects')) {
-                            return invokeNative();
-                        }
-                        const url = safeSerializeValue(args[0]);
-                        if (url && shouldReportNavigationSink(url)) {
-                            const resolvedSinkId = resolveDangerousUrlSinkId(sinkId, url) || sinkId;
-                            const elMeta = captureElementMeta(document?.activeElement || null);
-                            const observedBinding = buildObservedRuleBinding({
-                                sinkId: resolvedSinkId,
-                                value: url,
-                                context: Object.assign({ value: url }, buildNetworkContext(url) || {}),
-                                fallbackType: 'dom-url-navigation'
-                            });
-                            const reported = maybeReportTaintedValue(url, Object.assign({
-                                type: 'dom-url-navigation',
-                                sink: label
-                            }, observedBinding), Object.assign({ method: label, value: url }, elMeta, buildNetworkContext(url) || {}, {
-                                scheme: getUrlScheme(url)
-                            }));
-                            if (reported) {
-                                markLocationNavTrigger({ sinkId: resolvedSinkId, ruleId: observedBinding.ruleId || null, sinkLabel: label });
-                                scheduleNavigationReplay(invokeNative);
-                                return;
-                            }
-                        }
-                        return invokeNative();
+                    const wrapper = function (...args) {
+                        observeDirectLocationIntent(args[0], sinkId, label);
+                        return orig.apply(this, args);
                     };
+                    target[method] = wrapper;
+                    if (target[method] !== wrapper) return;
                 }
                 wrapped = true;
             } catch (e) {
@@ -7174,23 +7195,7 @@ if (!isTrustedTypesHtmlRestricted()) {
         // 1) skip anything that isn’t an external http(s) redirect
         if (!isExternalRedirect(url)) return;
 
-        let resolvedSinkId = method === 'navigation.navigate' ? 'nav.navigation.navigate' : 'nav.window.open';
-        let resolvedSinkLabel = method === 'navigation.navigate' ? 'navigation.navigate' : method;
-        if (method === 'navigation.navigate') {
-            if (typeof window.__IAST_CONSUME_NAV_TRIGGER__ === 'function') {
-                const recent = window.__IAST_CONSUME_NAV_TRIGGER__();
-                if (recent && recent.sinkId) {
-                    resolvedSinkId = recent.sinkId;
-                    resolvedSinkLabel = recent.sinkLabel || resolvedSinkLabel;
-                } else {
-                    resolvedSinkId = 'nav.location.href';
-                    resolvedSinkLabel = 'location.href';
-                }
-            } else {
-                resolvedSinkId = 'nav.location.href';
-                resolvedSinkLabel = 'location.href';
-            }
-        }
+        let resolvedSinkId = 'nav.window.open';
         resolvedSinkId = resolveDangerousUrlSinkId(resolvedSinkId, url) || resolvedSinkId;
 
         const m = matchesTaint(url);
@@ -7219,35 +7224,89 @@ if (!isTrustedTypesHtmlRestricted()) {
     };
 
     if ('navigation' in window && typeof navigation.addEventListener === 'function') {
+        if (typeof navigation.navigate === 'function') {
+            try {
+                const originalNavigate = navigation.navigate.bind(navigation);
+                const wrappedNavigate = function (url, options) {
+                    const payload = safeSerializeValue(url);
+                    if (payload && shouldReportRouteControlledNavigationSink(payload) && matchesTaint(payload)
+                        && typeof window.__IAST_MARK_NAV_TRIGGER__ === 'function') {
+                        window.__IAST_MARK_NAV_TRIGGER__({
+                            sinkId: resolveDangerousUrlSinkId('nav.navigation.navigate', payload) || 'nav.navigation.navigate',
+                            sinkLabel: 'navigation.navigate',
+                            methodEvidence: 'direct_wrapper'
+                        });
+                    }
+                    return originalNavigate(url, options);
+                };
+                navigation.navigate = wrappedNavigate;
+            } catch (_) {
+                // The navigate event remains the authoritative fallback.
+            }
+        }
         navigation.addEventListener('navigate', event => {
             if (!isHookGroupEnabled('hook.nav.redirects')) return;
-            // event.destination.url is the URL we’re about to go to
-            const url = event.destination.url;
-            if (typeof url === 'string' && shouldReportRouteControlledNavigationSink(url)) {
-                let resolvedSinkId = 'nav.navigation.navigate';
-                let resolvedSinkLabel = 'navigation.navigate';
-                if (typeof window.__IAST_CONSUME_NAV_TRIGGER__ === 'function') {
-                    const recent = window.__IAST_CONSUME_NAV_TRIGGER__();
-                    if (recent && recent.sinkId) {
-                        resolvedSinkId = recent.sinkId;
-                        resolvedSinkLabel = recent.sinkLabel || resolvedSinkLabel;
-                    }
-                }
-                resolvedSinkId = resolveDangerousUrlSinkId(resolvedSinkId, url) || resolvedSinkId;
-                const binding = buildObservedRuleBinding({
-                    sinkId: resolvedSinkId,
-                    value: url,
-                    context: Object.assign({ value: url }, buildNetworkContext(url) || {}),
-                    fallbackType: 'open-redirect'
-                });
-                const match = matchesTaint(url);
-                if (match) {
-                    const meta = captureElementMeta(document?.activeElement || null);
-                    maybeReportTaintedValue(url, binding, Object.assign({ value: url }, meta, buildNetworkContext(url) || {}), match);
-                }
+            const url = safeSerializeValue(event?.destination?.url);
+            const navigationType = String(event?.navigationType || '');
+            if (!url || event?.downloadRequest != null || event?.formData != null
+                || event?.sourceElement || event?.userInitiated === true
+                || event?.hashChange === true || !['push', 'replace'].includes(navigationType)) {
+                return;
             }
-            // keep open-redirect classification for external redirects
-            recordRedirect(url, 'navigation.navigate');
+            const recent = typeof window.__IAST_CONSUME_NAV_TRIGGER__ === 'function'
+                ? window.__IAST_CONSUME_NAV_TRIGGER__()
+                : null;
+            const explicitNavigationApi = recent?.sinkId === 'nav.navigation.navigate'
+                || String(recent?.sinkId || '').startsWith('nav.navigation.navigate.');
+            const reportable = explicitNavigationApi
+                ? shouldReportRouteControlledNavigationSink(url)
+                : shouldReportNavigationSink(url);
+            if (!reportable) return;
+            const match = matchesTaint(url);
+            if (!match) return;
+
+            const baseSinkId = recent?.sinkId
+                || (navigationType === 'replace' ? 'nav.location.replace' : 'nav.location.assign');
+            const resolvedSinkId = resolveDangerousUrlSinkId(baseSinkId, url) || baseSinkId;
+            const sinkLabel = recent?.sinkLabel
+                || (navigationType === 'replace' ? 'location.replace' : 'location.assign-equivalent');
+            const networkContext = buildNetworkContext(url) || {};
+            const requestUrl = (() => {
+                try {
+                    const parsed = new URL(url, window.location.href);
+                    parsed.hash = '';
+                    return parsed.href;
+                } catch (_) {
+                    return url;
+                }
+            })();
+            const isHttpNavigation = /^https?:/i.test(requestUrl);
+            const correlation = {
+                deferUntilObserved: isHttpNavigation,
+                destination: url,
+                requestUrl,
+                sourceOrigin: window.location.origin,
+                sourceUrl: window.location.href,
+                navigationType,
+                methodEvidence: recent?.methodEvidence || (navigationType === 'replace'
+                    ? 'navigation_api_replace'
+                    : 'navigation_api_push_equivalent')
+            };
+            const binding = buildObservedRuleBinding({
+                sinkId: resolvedSinkId,
+                value: url,
+                match,
+                context: Object.assign({ value: url, navigationCorrelation: correlation }, networkContext),
+                fallbackType: 'open-redirect'
+            });
+            const meta = captureElementMeta(document?.activeElement || null);
+            maybeReportTaintedValue(url, Object.assign({
+                type: 'open-redirect',
+                sink: sinkLabel
+            }, binding), Object.assign({
+                value: url,
+                navigationCorrelation: correlation
+            }, meta, networkContext), match);
         });
     }
 
@@ -7833,10 +7892,16 @@ if (!isTrustedTypesHtmlRestricted()) {
             return Promise.resolve(fetchPromise).then((response) => {
                 runIastHookGuard('hook.net.responses', 'window.fetch.responseCapture', () => {
                     if (isHookGroupEnabled('hook.net.responses')) {
-                        captureFetchResponseSources(response, {
+                        const responseMeta = {
                             requestUrl: coerceRequestUrl(args[0]),
+                            responseUrl: response?.url || coerceRequestUrl(args[0]),
+                            responseStatus: response?.status,
                             isGraphql: isGraphqlRequest
-                        });
+                        };
+                        if (response && IAST_FETCH_RESPONSE_META) {
+                            IAST_FETCH_RESPONSE_META.set(response, responseMeta);
+                        }
+                        captureFetchResponseSources(response, responseMeta);
                     }
                 });
                 return response;
@@ -8607,27 +8672,9 @@ if (!isTrustedTypesHtmlRestricted()) {
             }
         });
     }
-    const srcdocDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc');
-    if (srcdocDesc && srcdocDesc.set) {
-        Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
-            configurable: true,
-            enumerable: srcdocDesc.enumerable,
-            get: srcdocDesc.get,
-            set(value) {
-                if (!isHookGroupEnabled('hook.dom.htmlAssignments')) {
-                    return srcdocDesc.set.call(this, value);
-                }
-                runIastHookGuard('hook.dom.htmlAssignments', 'HTMLIFrameElement.srcdoc.setter', () => {
-                    maybeReportTaintedValue(value, {
-                        type: 'iframe-srcdoc',
-                        sink: 'iframe.srcdoc',
-                        sinkId: 'nav.iframe.srcdoc'
-                    }, { value, element: this });
-                });
-                return srcdocDesc.set.call(this, value);
-            }
-        });
-    }
+    // srcdoc is intentionally handled only by the generic attribute/property
+    // wrapper above. That path binds the rule from the observed source kind,
+    // which is required to distinguish direct input from secondary sources.
 })();
 
 // AngularJS expression/template sinks
@@ -8653,7 +8700,36 @@ if (!isTrustedTypesHtmlRestricted()) {
         }
     };
     const wrappedServices = new WeakMap();
+    const wrappedServiceResults = new WeakMap();
     const patchedInjectors = new WeakSet();
+
+    function buildAngularExecutionContext(serviceName, phase) {
+        return {
+            framework: 'AngularJS',
+            angularService: serviceName,
+            angularPhase: phase
+        };
+    }
+
+    function wrapAngularServiceResult(serviceName, result) {
+        if (typeof result !== 'function') return result;
+        let byService = wrappedServiceResults.get(result);
+        if (byService?.[serviceName]) return byService[serviceName];
+        const wrappedResult = new Proxy(result, {
+            apply(target, thisArg, args) {
+                return withIastExecutionContext(
+                    buildAngularExecutionContext(serviceName, 'evaluator'),
+                    () => Reflect.apply(target, thisArg, args)
+                );
+            }
+        });
+        if (!byService) {
+            byService = Object.create(null);
+            wrappedServiceResults.set(result, byService);
+        }
+        byService[serviceName] = wrappedResult;
+        return wrappedResult;
+    }
 
     function reportAngularSink(value, serviceName, serviceMeta) {
         if (!isHookGroupEnabled(GROUP_ID)) return;
@@ -8682,10 +8758,16 @@ if (!isTrustedTypesHtmlRestricted()) {
         let byService = wrappedServices.get(service);
         if (byService?.[serviceName]) return byService[serviceName];
         const wrapped = function (...args) {
-            runIastHookGuard(GROUP_ID, `AngularJS.${serviceName}.pre`, () => {
-                reportAngularSink(args[0], serviceName, serviceMeta);
-            });
-            return service.apply(this, args);
+            const thisArg = this;
+            return withIastExecutionContext(
+                buildAngularExecutionContext(serviceName, 'service'),
+                () => {
+                    runIastHookGuard(GROUP_ID, `AngularJS.${serviceName}.pre`, () => {
+                        reportAngularSink(args[0], serviceName, serviceMeta);
+                    });
+                    return wrapAngularServiceResult(serviceName, service.apply(thisArg, args));
+                }
+            );
         };
         try {
             Object.defineProperty(wrapped, WRAPPED_MARK, {

@@ -380,17 +380,33 @@
          * Get current session statistics
          * @returns {Promise<{findingsCount: number, bySeverity: Object}>}
          */
-        async getStats() {
+        async getStats(options = {}) {
             if (this._automationEnabled === false) {
                 return { findingsCount: 0, bySeverity: {} }
             }
-            // Background looks up session by tabId
+            const lookupOptions = options && typeof options === 'object'
+                ? {
+                    sessionId: options.sessionId,
+                    sessionScope: options.sessionScope
+                }
+                : {}
+            const strict = lookupOptions.sessionScope === PTK_AGENT_SESSION_SCOPE
             try {
-                const response = await sendMessage('get-stats', { sessionId: currentSessionId })
+                const response = await sendMessage('get-stats', {
+                    sessionId: sessionIdForBridgeLookup(lookupOptions),
+                    options: lookupOptions
+                })
                 if (response.error) throw new Error(response.error)
-                return { findingsCount: response.findingsCount || 0, bySeverity: response.bySeverity || {} }
-            } catch {
-                return { findingsCount: 0, bySeverity: {} }
+                return {
+                    ...(strict ? { ok: true } : {}),
+                    findingsCount: response.findingsCount || 0,
+                    bySeverity: response.bySeverity || {},
+                    ...(response.sessionLookup ? { sessionLookup: response.sessionLookup } : {})
+                }
+            } catch (err) {
+                return strict
+                    ? { ok: false, error: err.message, ...diagnosticExtras(err) }
+                    : { findingsCount: 0, bySeverity: {} }
             }
         },
 

@@ -22,6 +22,7 @@
     <link rel="stylesheet" href="../packages/codemirror/addon/fold/foldgutter.css" type="text/css" />
     <script src="../packages/codemirror/codemirror.js"></script>
     <script src="../packages/codemirror/mode/xml/xml.js"></script>
+    <script src="../packages/codemirror/mode/javascript/javascript.js"></script>
     <script src="../packages/codemirror/addon/fold/foldcode.js"></script>
     <script src="../packages/codemirror/addon/fold/foldgutter.js"></script>
     <script src="../packages/codemirror/addon/fold/brace-fold.js"></script>
@@ -51,10 +52,9 @@
                 <div class="fifteen wide field leftside" style="max-width: 70%vw; overflow: scroll;scrollbar-width: none;">
                     <div class="ui labels infoSigns">
                         <a class="ui red label iframeSign question"
-                            data-content="iFrames identified for the macro. It's recommended to use IE and OnClick event type">iFrames</a>
+                            data-content="Frames were identified in this macro and will be replayed through their recorded frame routes.">Frames</a>
                         <a class="ui grey label savedMacro question"
                             data-content="You are working with stored macro">Stored</a>
-                        <a class="ui grey label exportType question" data-content="Selected event type"></a>
                     </div>
                     <textarea name="recording_output" id="recording_output" class="ui small input CodeMirror" rows="30"
                         placeholder="Macro" style="height: 100%; overflow: scroll;max-width: 80%;"></textarea>
@@ -84,11 +84,19 @@
                                     <i class="dropdown icon"></i>Export settings
                                 </div>
                                 <div class="active content" style="padding: 0px;">
-                                    <div class="ui attached segment form">
+                                        <div class="ui attached segment form">
                                         <div class="ui top aligned inverted dimmer">
                                         
                                         </div>
 
+                                        <div class="field" style="margin-bottom: 3px;">
+                                            <label for="macro_export_format">Export format</label>
+                                            <select class="ui fluid dropwdown" id="macro_export_format"
+                                                name="export_format"></select>
+                                        </div>
+                                        <div class="ui tiny negative message macro_export_diagnostics"
+                                            role="button" tabindex="0" aria-label="Show export errors"
+                                            style="display:none"></div>
 
                                         <div class="xml_settings ui small form">
                                             <div class="inline fields" style="z-index: 1">
@@ -118,50 +126,17 @@
                                                 </div>
                                             </div>
 
-                                            <div class="field"><label style="min-width: 100px">Event type<i
-                                                        class="question circle icon event_type"
-                                                        style='cursor:pointer; float:right'
-                                                        data-content="Export a macro using OnClick for iframes, DriverClick in general and Javascript in complex cases like SPA or SSO"></i></label>
-                                            </div>
-
-                                            <div class="inline fields">
-                                                <div class="five wide field">
-                                                </div>
-                                                <div class="eleven wide field">
-                                                    <div class="grouped fields ui ">
-                                                        <div class="field" style="padding: 2px">
-                                                            <div class="ui slider small form checkbox">
-                                                                <input type="radio" name="event_type" checked="checked"
-                                                                    value="driverclick">
-                                                                <label>DriverClick</label>
-                                                            </div>
-                                                        </div>
-                                                        <div class="field" style="padding: 2px">
-                                                            <div class="ui slider small form checkbox">
-                                                                <input type="radio" name="event_type" value="onclick">
-                                                                <label>OnClick</label>
-                                                            </div>
-                                                        </div>
-                                                        <div class="field" style="padding: 2px;">
-                                                            <div class="ui slider small form checkbox">
-                                                                <input type="radio" name="event_type"
-                                                                    value="javascript">
-                                                                <label>Javascript</label>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-
-                                            <div class="field"><label style="min-width: 100px">Element path<i
+                                            <div class="field macro_element_path_settings"><label style="min-width: 100px">Element path<i
                                                         class="question circle icon element_path"
                                                         style='cursor:pointer; float:right'
                                                         data-content="Export a macro using full
                                                                                     xpath or xpath with element ID"></i></label>
+                                                <div class="ui tiny info message macro_element_path_lock" style="display:none">
+                                                    Imported macros use the locators supplied by their source file.
+                                                </div>
                                             </div>
 
-                                            <div class="inline fields">
+                                            <div class="inline fields macro_element_path_controls">
                                                 <div class="five wide field">
                                                 </div>
                                                 <div class="eleven wide field">
@@ -170,7 +145,7 @@
                                                             <div class="ui slider small form checkbox">
                                                                 <input type="radio" name="element_path"
                                                                     checked="checked" value="id">
-                                                                <label>ElementID</label>
+                                                                <label>Element ID</label>
                                                             </div>
                                                         </div>
                                                         <div class="field" style="padding: 2px">
@@ -221,6 +196,7 @@
                                                 placeholder="(sign|log)[ -]?(out|off)" disabled>
                                         </div>
                                     </div>
+                                    <div class="macro_runtime_secrets"></div>
                                     <div class="inline fields">
                                         <div class="sixteen wide field" style="padding: 0px;">
                                             <button type="button"
@@ -241,12 +217,10 @@
                     </div>
 
                     <div class="bottommenu" >
-                        <!--div class="inline fields">
+                        <div class="inline fields">
                             <button type="button" class="ui small fluid button import_recording"
-                                style="margin:0px">Import
-                                recording</button>
-
-                        </div-->
+                                style="margin:0 0 8px 0">Import</button>
+                        </div>
                         <div class="two fields">
                             <div class="field">
                                 <button type="button"
@@ -274,43 +248,52 @@
             <div class="ui approve button">Close</div>
         </div>
     </div>
-    <div id="dialogImportRecording" class="ui mini modal" style="display: none">
+    <div id="macroExportDiagnosticsDialog" class="ui small modal">
         <i class="close icon"></i>
-        <div class="header">Import recording</div>
+        <div class="header">Why export is blocked</div>
+        <div class="scrolling content">
+            <div class="macro_export_dialog_summary"></div>
+            <div class="macro_export_dialog_groups"></div>
+        </div>
+        <div class="actions">
+            <div class="ui approve button">Close</div>
+        </div>
+    </div>
+    <div id="dialogImportRecording" class="ui small modal" style="display: none">
+        <i class="close icon"></i>
+        <div class="header">Import macro</div>
         <div class="ui message" id="importerrordlg" style="display: none">
             <div class="header">
                 Error
             </div>
             <p id="importerrormsg"></p>
         </div>
-        <div class="ui small form segment" style="margin-top: 0px;border: 0px;">
-            <div class="inline fields">
-                <div class="two wide field"></div>
-                <div class="fourteen wide field">
-                    <label for="sidefileimport" class="ui button" style="width: 100%">
-                        <i class="ui upload icon" style="float: right"></i>Import PTK xml (.rec)
-                    </label>
-                    <input type="file" class="inputfile" id="xmlfileimport" />
-                </div>
+        <div class="ui small form segment" style="margin-top:0;border:0">
+            <div class="field">
+                <label for="macrofileimport" class="ui fluid button macro_import_drop_zone">
+                    <i class="ui upload icon"></i>Select or drop macro file
+                </label>
+                <input type="file" class="inputfile" id="macrofileimport"
+                    accept=".rec,.xml,.json,.zst,.side,application/json,application/xml,text/xml" />
             </div>
-            <div class="inline fields">
-                <div class="two wide field"></div>
-                <div class="fourteen wide field">
-                    <label for="sidefileimport" class="ui button" style="width: 100%">
-                        <i class="ui upload icon" style="float: right"></i>Import Selenium (.side)
-                    </label>
-                    <input type="file" class="inputfile" id="sidefileimport" />
-                </div>
+            <div class="field">
+                <label for="macro_import_format">Detected format</label>
+                <select class="ui fluid dropdown" id="macro_import_format"></select>
             </div>
-            <div class="inline fields">
-                <div class="two wide field"></div>
-                <div class="fourteen wide field">
-                    <label for="htmlfileimport" class="ui button" style="width: 100%">
-                        <i class="ui upload icon" style="float: right"></i>Import Selenium (.html)
-                    </label>
-                    <input type="file" class="inputfile" id="htmlfileimport" />
+            <div class="ui tiny message macro_import_summary" style="display:none; white-space:pre-wrap"></div>
+            <div class="ui tiny warning message macro_import_diagnostics" style="display:none; white-space:pre-wrap"></div>
+            <div class="macro_import_secrets"></div>
+            <div class="field macro_import_scope" style="display:none">
+                <div class="ui checkbox">
+                    <input type="checkbox" id="macro_import_scope_confirm" />
+                    <label for="macro_import_scope_confirm">I am authorised to replay this macro against the displayed target scope.</label>
                 </div>
+                <div class="ui tiny basic label macro_import_origin" style="margin-top:8px"></div>
             </div>
+        </div>
+        <div class="actions">
+            <button type="button" class="ui button macro_import_cancel">Cancel</button>
+            <button type="button" class="ui primary disabled button macro_import_accept">Import</button>
         </div>
     </div>
 </body>

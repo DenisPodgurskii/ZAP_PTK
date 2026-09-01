@@ -63,6 +63,7 @@ const defaultSettings = {
     },
     macro: {
         format: "xml",
+        export_format: "xml",
         min_duration: 3000,
         enable_extra_delay: false,
         element_path: "css",
