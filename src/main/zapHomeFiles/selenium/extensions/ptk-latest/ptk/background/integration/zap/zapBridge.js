@@ -2146,12 +2146,12 @@ class ZapBridge {
             return true
         }
 
-        const observedAt = Number(observed.ts || 0)
+        const observedAt = Number(observed.activityAt ?? observed.ts ?? 0)
         if (!Number.isFinite(observedAt) || observedAt <= 0) {
             return true
         }
 
-        const source = String(observed.source || '')
+        const source = String(observed.activitySource || observed.source || '')
         if (!TERMINAL_BLOCKING_TARGET_SOURCES.has(source)) {
             return true
         }
@@ -3728,11 +3728,33 @@ class ZapBridge {
             return null
         }
 
+        const now = Date.now()
+        const source = String(payload?.source || '')
+        const previous = this._lastTopLevelTargetObservation
+        const sameIdentity = previous?.tabId === tabId
+            && previous?.targetUrl === targetUrl
+        const previousActivitySource = String(previous?.activitySource || previous?.source || '')
+        const promotesBlockingActivity = sameIdentity
+            && TERMINAL_BLOCKING_TARGET_SOURCES.has(source)
+            && !TERMINAL_BLOCKING_TARGET_SOURCES.has(previousActivitySource)
+        const refreshesActivity = !sameIdentity || promotesBlockingActivity
+        const previousActivityAt = Number(previous?.activityAt ?? previous?.ts ?? 0)
+
         this._lastTopLevelTargetObservation = {
             tabId,
             targetUrl,
-            source: String(payload?.source || ''),
-            ts: Date.now()
+            source,
+            ts: now,
+            lastSeenAt: now,
+            activityAt: refreshesActivity || !Number.isFinite(previousActivityAt) || previousActivityAt <= 0
+                ? now
+                : previousActivityAt,
+            activitySource: refreshesActivity
+                ? source
+                : (previousActivitySource || source),
+            repeatCount: sameIdentity
+                ? Math.max(0, Number(previous?.repeatCount || 0)) + 1
+                : 0
         }
         return this._lastTopLevelTargetObservation
     }
@@ -3741,7 +3763,7 @@ class ZapBridge {
         const observed = this._lastTopLevelTargetObservation
         if (!observed) return null
 
-        const ageMs = Date.now() - Number(observed.ts || 0)
+        const ageMs = Date.now() - Number(observed.lastSeenAt ?? observed.ts ?? observed.activityAt ?? 0)
         if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > AUTO_START_OBSERVED_MAX_AGE_MS) {
             return null
         }

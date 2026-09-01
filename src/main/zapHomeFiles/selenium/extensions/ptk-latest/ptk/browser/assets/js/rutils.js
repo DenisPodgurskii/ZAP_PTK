@@ -3,6 +3,7 @@ import { ptk_decoder } from "../../../background/decoder.js";
 import { default as dompurify } from "../../../packages/dompurify/purify.es.mjs";
 import { buildSastItemFromFinding } from "./sastFindingItem.js";
 import { buildIastItemFromFinding } from "./iastFindingItem.js";
+import { prepareHtmlPreview } from "./htmlPreview.js";
 const decoder = new ptk_decoder();
 const INLINE_FILE_SPLIT_RE = /\s+::\s+/;
 const INLINE_FILE_PREFIX_RE = /^inline/i;
@@ -373,7 +374,7 @@ $("#attack_details_dialog_wrapper").prepend(
         <div class="content" id="dialogResponseHtmlContent" style="min-height: 400px;height: 90%;padding:0px">
             <object id="dialogResponseHtmlContentObj" type="text/html" data="" style="overflow:hidden;height:100%;width:100%; min-height: 400px;" height="100%">
             </object>
-            <iframe id="dialogResponseHtmlContentFrame" title="Rendered HTTP response" src="" sandbox="" referrerpolicy="no-referrer" style="overflow:hidden;height:100%;width:100%; min-height: 400px;" height="100%"></iframe>
+            <iframe id="dialogResponseHtmlContentFrame" title="PTK HTML response viewer" src="" referrerpolicy="no-referrer" style="overflow:hidden;height:100%;width:100%; min-height: 400px;" height="100%"></iframe>
         </div>
     </div>
     `
@@ -2778,26 +2779,28 @@ function scrollSelectionIntoView(textarea, start, end) {
     textarea.scrollTop = targetTop;
 }
 
-export function showHtml(obj, newWin = false) {
+export async function showHtml(obj, newWin = false) {
     let formId = obj.closest(".ui.tab.active").attr("id"),
-        target = "";
+        requestUrl = "";
     if (formId) {
         let $form = $("#" + formId + " #request_form"),
             values = $form.form("get values");
-        target = new URL(values["request_url"]).origin;
+        requestUrl = values["request_url"];
     } else {
         let $form = $("#attack_details_form"),
             values = $form.form("get values");
-        target = new URL(values["request_url"]).origin;
+        requestUrl = values["request_url"];
     }
     let htmlString = obj
         .closest(".response_view")
         .find('[name="response_body"]')
         .val();
-    htmlString = htmlString.replace(
-        /<([^<])*(head)([^>])*>/,
-        "<$1$2><base href='" + target + "' />"
-    );
+    try {
+        const prepared = await prepareHtmlPreview({ html: htmlString, requestUrl });
+        htmlString = prepared.html;
+    } catch (_) {
+        htmlString = String(htmlString || "");
+    }
     //let dataBase64 = 'data:text/html;base64,' + decoder.base64_encode(htmlString)
     //let blob = new Blob([unescape(encodeURIComponent(htmlString))], { type: 'text/html' })
     let url = "showhtml.html?s=" + decoder.base64_encode(encodeURI(htmlString));

@@ -116,6 +116,11 @@ tasks.withType<JavaCompile>().configureEach {
 
 tasks.named<Test>("test") {
     useJUnitPlatform()
+    // This test asserts that diagnostic providers are absent from production.
+    // Diagnostic builds intentionally include them.
+    if (diagnosticBuild) {
+        exclude("**/PtkDiagnosticExtensionProductionTest.class")
+    }
 }
 
 if (!diagnosticBuild) {
@@ -176,6 +181,26 @@ val verifyProductionArtifactClean =
         }
     }
 
+val verifyPtkDastCatalogSync =
+    tasks.register("verifyPtkDastCatalogSync") {
+        group = "verification"
+        description = "Verifies that the ZAP DAST catalog matches the bundled signed PTK catalog."
+        val zapCatalog =
+            layout.projectDirectory.file("src/main/resources/org/zaproxy/addon/ptk/dast-modules.json")
+        val bundledCatalog =
+            layout.projectDirectory.file(
+                "src/main/zapHomeFiles/selenium/extensions/ptk-latest/ptk/background/dast/modules/modules.json",
+            )
+        inputs.files(zapCatalog, bundledCatalog)
+        doLast {
+            if (!zapCatalog.asFile.readBytes().contentEquals(bundledCatalog.asFile.readBytes())) {
+                throw GradleException(
+                    "ZAP DAST catalog differs from the catalog bundled in the signed PTK extension.",
+                )
+            }
+        }
+    }
+
 if (!diagnosticBuild) {
     verifyProductionArtifactClean.configure {
         dependsOn(tasks.named("jarZapAddOn"))
@@ -183,6 +208,7 @@ if (!diagnosticBuild) {
 }
 
 tasks.named("check") {
+    dependsOn(verifyPtkDastCatalogSync)
     if (!diagnosticBuild) {
         dependsOn(verifyProductionArtifactClean)
     }

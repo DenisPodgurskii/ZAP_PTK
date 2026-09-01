@@ -37,9 +37,22 @@ export class ptk_sca {
         this._persistTimer = null
         this._persistDebounceMs = 1000
         this.exportChunkStore = new ExportChunkStore({ prefix: "sca" })
+        this.scopedTabCoordinator = null
         this.resetScanResult()
 
         this.addMessageListeners()
+    }
+
+    setScopedTabCoordinator(coordinator) {
+        this.scopedTabCoordinator = coordinator || null
+        return this
+    }
+
+    isTrackedScanTab(tabId) {
+        const normalized = Number(tabId)
+        if (!this.isScanRunning || !Number.isInteger(normalized) || normalized < 0) return false
+        if (normalized === this.activeTabId) return true
+        return this.scopedTabCoordinator?.isTrackedTab?.('SCA', normalized) === true
     }
 
     async init() {
@@ -248,7 +261,13 @@ export class ptk_sca {
     }
 
     async onUpdated(tabId, info, tab) {
-
+        if (!this.isTrackedScanTab(tabId)) return
+        if (String(info?.status || '').toLowerCase() !== 'complete') return
+        const url = String(tab?.url || info?.url || '').trim()
+        if (!this.scopedTabCoordinator?.isUrlInScope?.('SCA', url)) return
+        this.collectCurrentTabResources(tabId)
+            .then((resources) => this.scanResourceList(resources))
+            .catch(() => { })
     }
 
     removeListeners() {
@@ -265,7 +284,7 @@ export class ptk_sca {
     }
 
     onCompleted(response) {
-        if (this.isScanRunning && this.activeTabId === response.tabId && ptk_utils.isURL(response?.url)) {
+        if (this.isTrackedScanTab(response.tabId) && ptk_utils.isURL(response?.url)) {
             if (!this.urls.includes(response.url)) {
                 this.urls.push(response.url)
                 this.scan(response.url)
@@ -773,15 +792,24 @@ export class ptk_sca {
         this.activeTabId = tabId
         this.scanResult.scanId = ptk_utils.UUID()
         this.scanResult.host = host
+        this.scanResult.tabId = tabId
         this.scanResult.startedAt = new Date().toISOString()
         this.scanResult.finishedAt = null
         this.addListeners()
+        await this.scopedTabCoordinator?.registerSession?.('SCA', {
+            primaryTabId: tabId,
+            scopeMode: 'origin',
+            onEnroll: (meta) => this.collectCurrentTabResources(meta.tabId)
+                .then((resources) => this.scanResourceList(resources))
+                .catch(() => { })
+        })
         this.collectCurrentTabResources(tabId)
             .then((resources) => this.scanResourceList(resources))
             .catch(() => { })
     }
 
     async stopBackgroundScan(options = {}) {
+        this.scopedTabCoordinator?.unregisterSession?.('SCA')
         this.isScanRunning = false
         this.activeTabId = null
         if (this.scanResult) {

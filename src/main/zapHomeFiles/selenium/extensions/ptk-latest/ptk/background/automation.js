@@ -2477,15 +2477,16 @@ export class ptk_automation {
     }
 
     async msg_get_stats(message, sender) {
-        const { requestId } = message
+        const { requestId, options = {} } = message
         const tabId = sender?.tab?.id
 
+        const strictCurrentTab = this._isStrictCurrentTabScope(options)
         const resolution = this._resolveSessionForRequest({
-            sessionId: message.sessionId,
+            sessionId: options?.sessionId || message.sessionId,
             tabId,
-            strictCurrentTab: false,
+            strictCurrentTab,
             allowActive: true,
-            allowCompleted: false,
+            allowCompleted: strictCurrentTab,
             allowGlobalCompleted: false
         })
         if (!resolution.ok) {
@@ -4342,6 +4343,37 @@ export class ptk_automation {
 
     // === Utility Methods ===
 
+    getPopupRuntimeStatus() {
+        const sessions = Array.from(this.sessions.values())
+        const activeStatuses = sessions
+            .filter((session) => this._isActiveSessionStatus(session?.status))
+            .map((session) => this._deriveSessionStatus(session))
+
+        if (activeStatuses.includes(ENGINE_STATUS_ERROR)) {
+            return { status: 'error' }
+        }
+        if (activeStatuses.includes(ENGINE_STATUS_RUNNING)) {
+            return { status: 'scanning' }
+        }
+        if (activeStatuses.includes(ENGINE_STATUS_STARTING)) {
+            return { status: 'starting' }
+        }
+        if (activeStatuses.includes(ENGINE_STATUS_STOPPING)) {
+            return { status: 'finishing' }
+        }
+
+        const latestSession = sessions.reduce((latest, session) => {
+            const timestamp = Date.parse(session?.finishedAt || session?.startedAt || '') || 0
+            const latestTimestamp = Date.parse(latest?.finishedAt || latest?.startedAt || '') || 0
+            return !latest || timestamp >= latestTimestamp ? session : latest
+        }, null)
+        if (latestSession && this._deriveSessionStatus(latestSession) === ENGINE_STATUS_ERROR) {
+            return { status: 'error' }
+        }
+
+        return { status: 'ready' }
+    }
+
     _generateSessionId() {
         return makeRandomToken('ptk-session')
     }
@@ -4662,15 +4694,73 @@ export class ptk_automation {
     // Returns { findings, truncated }
     _collectFindings(session, limit = 100) {
         const allFindings = []
+        const normalizedLimit = Math.max(0, Math.min(Number(limit) || 100, MAX_FINDINGS_LIMIT))
+        const startedAtMs = Date.parse(session.startedAt || '')
+        const registryHints = {
+            tabId: session.tabId,
+            host: session.host,
+            startedAfterMs: Number.isFinite(startedAtMs) ? Math.max(0, startedAtMs - 1000) : undefined,
+            latestFirst: true
+        }
+
         for (const engineName of session.engines) {
             const adapter = this.engines.getAdapter(engineName)
-            if (adapter) {
-                allFindings.push(...adapter.getFindings(limit + 1))  // Get more to check truncation
+            if (!adapter) continue
+
+            let bestFindings = []
+            try {
+                const adapterFindings = adapter.getFindings(normalizedLimit + 1)
+                if (Array.isArray(adapterFindings)) bestFindings = adapterFindings
+            } catch (err) {
+                debugAutomationLog('[PTK Automation] Adapter findings unavailable', {
+                    engine: engineName,
+                    error: err?.message || String(err)
+                })
             }
+
+            const candidateScanIds = []
+            const addCandidate = (scanId) => {
+                if (scanId && !candidateScanIds.includes(scanId)) candidateScanIds.push(scanId)
+            }
+            addCandidate(session.scanIds?.[engineName])
+            try {
+                addCandidate(adapter.getScanId?.())
+            } catch (_) {
+                // Continue with session and registry candidates.
+            }
+            for (const scanId of resultsRegistry.findScanIdsForEngine(engineName, registryHints)) {
+                addCandidate(scanId)
+            }
+
+            let bestScanId = null
+            for (const scanId of candidateScanIds) {
+                try {
+                    const registeredResult = resultsRegistry.get(engineName, scanId)
+                    if (!registeredResult) continue
+                    const registeredFindings = this.engines._extractFindings(
+                        registeredResult,
+                        normalizedLimit + 1,
+                        engineName
+                    )
+                    if (registeredFindings.length > bestFindings.length) {
+                        bestFindings = registeredFindings
+                        bestScanId = scanId
+                    }
+                } catch (err) {
+                    debugAutomationLog('[PTK Automation] Registered findings unavailable', {
+                        engine: engineName,
+                        scanId,
+                        error: err?.message || String(err)
+                    })
+                }
+            }
+
+            if (bestScanId) session.scanIds[engineName] = bestScanId
+            allFindings.push(...bestFindings)
         }
-        const truncated = allFindings.length > limit
+        const truncated = allFindings.length > normalizedLimit
         return {
-            findings: allFindings.slice(0, limit),
+            findings: allFindings.slice(0, normalizedLimit),
             truncated
         }
     }

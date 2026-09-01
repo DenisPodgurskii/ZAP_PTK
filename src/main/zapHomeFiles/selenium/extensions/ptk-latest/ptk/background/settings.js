@@ -131,6 +131,15 @@ export class ptk_settings {
 
     mergeSettings(source) {
         if (!source) return this
+        const legacyMacroFormat = source?.macro?.format
+        const hasExportFormat = Object.prototype.hasOwnProperty.call(source?.macro || {}, 'export_format')
+        const supportedMacroFormats = new Set([
+            'ptk-flow', 'xml', 'zest', 'side', 'chrome-recorder',
+            'playwright', 'puppeteer', 'selenium-webdriver', 'cypress'
+        ])
+        if (!hasExportFormat && supportedMacroFormats.has(legacyMacroFormat) && this.macro) {
+            this.macro.export_format = legacyMacroFormat
+        }
         const result = this.deepMerge(this, source)
         this._attachSecretAccessor()
         return result

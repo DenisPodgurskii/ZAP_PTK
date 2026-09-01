@@ -6,6 +6,11 @@ import * as rutils from "../js/rutils.js"
 import { PRO_UI_VISIBLE } from "./releaseFeatureFlags.js"
 import { escapeUiText, renderDataTableText, renderPreformattedJson } from "./safeUiText.js"
 import { captureReportEngineSnapshots } from "./report/reportingContract.js"
+import {
+    assertDashboardMacroScope,
+    compileDashboardScanMacro,
+    prepareDashboardScanMacro
+} from "./dashboardScanMacro.js"
 const controller = new ptk_controller_index()
 const macro_controller = new ptk_controller_macro()
 const jwtHelper = new ptk_jwtHelper()
@@ -52,6 +57,15 @@ let dashboardActionInProgress = false
 const DASHBOARD_DAST_MACRO_STATE = {
     requested: false,
     started: false
+}
+const DASHBOARD_SCAN_MACRO_IMPORT_STATE = {
+    prepared: null,
+    fileName: '',
+    text: ''
+}
+const DASHBOARD_SCAN_MACRO_REPLAY_STATE = {
+    active: false,
+    sessionId: null
 }
 const DASHBOARD_POLICY_ENGINES = Object.freeze(['dast', 'iast', 'sast'])
 const DASHBOARD_POLICY_SELECTORS = Object.freeze({
@@ -193,6 +207,134 @@ async function stopDashboardDastMacroRecording(reason = 'dashboard_manage_scans_
     }
 }
 
+function setDashboardScanMacroStatus(message = '', type = 'info') {
+    const $status = $('#dashboard_scan_macro_status')
+    $status.removeClass('error success info warning positive negative')
+    if (!message) {
+        $status.text('').hide()
+        return
+    }
+    const normalized = ['error', 'success', 'warning'].includes(type) ? type : 'info'
+    $status.addClass(normalized).text(message).show()
+}
+
+function populateDashboardScanMacroFormats() {
+    const $select = $('#dashboard_scan_macro_format')
+    if (!$select.length || $select.data('ptk-formats-ready')) return
+    macro_controller.formats()
+        .filter((entry) => entry.canImport)
+        .forEach((entry) => {
+            $('<option>').val(entry.id).text(entry.label).appendTo($select)
+        })
+    $select.data('ptk-formats-ready', true)
+}
+
+function renderDashboardScanMacroRuntimeFields(prepared) {
+    const $container = $('#dashboard_scan_macro_runtime_fields')
+    $container.empty().hide()
+    const fields = Array.isArray(prepared?.runtimeFields)
+        ? prepared.runtimeFields.filter((entry) => !entry.suppliedByImport)
+        : []
+    if (!fields.length) return
+    for (const entry of fields) {
+        const safeName = String(entry.name || '')
+        const $field = $('<div>').addClass('eight wide field')
+        $('<label>').attr('for', `dashboard_scan_macro_value_${safeName}`).text(
+            entry.secret ? `${safeName} (secret)` : safeName
+        ).appendTo($field)
+        $('<input>')
+            .attr({
+                id: `dashboard_scan_macro_value_${safeName}`,
+                type: entry.secret ? 'password' : 'text',
+                autocomplete: 'off',
+                'data-ptk-macro-name': safeName,
+                'data-ptk-macro-secret': entry.secret ? 'true' : 'false'
+            })
+            .appendTo($field)
+        $field.appendTo($container)
+    }
+    $container.css('display', 'flex')
+}
+
+function updateDashboardScanMacroFileUi(fileName = '') {
+    const normalized = String(fileName || '').trim()
+    $('#dashboard_scan_macro_filename')
+        .text(normalized || 'No macro selected')
+        .attr('title', normalized)
+    $('#dashboard_scan_macro_clear')
+        .prop('disabled', !normalized)
+        .toggleClass('disabled', !normalized)
+}
+
+function clearDashboardScanMacroSelection() {
+    DASHBOARD_SCAN_MACRO_IMPORT_STATE.prepared = null
+    DASHBOARD_SCAN_MACRO_IMPORT_STATE.fileName = ''
+    DASHBOARD_SCAN_MACRO_IMPORT_STATE.text = ''
+    $('#dashboard_scan_macro_file').val('')
+    $('#dashboard_scan_macro_format').val('auto')
+    $('#dashboard_scan_macro_runtime_fields').empty().hide()
+    updateDashboardScanMacroFileUi()
+    setDashboardScanMacroStatus()
+}
+
+function dashboardScanMacroRuntimeValues() {
+    const secrets = Object.create(null)
+    const variables = Object.create(null)
+    $('#dashboard_scan_macro_runtime_fields [data-ptk-macro-name]').each(function () {
+        const name = String($(this).attr('data-ptk-macro-name') || '')
+        if (!name) return
+        const value = String($(this).val() || '')
+        if ($(this).attr('data-ptk-macro-secret') === 'true') secrets[name] = value
+        else variables[name] = value
+    })
+    return { secrets, variables }
+}
+
+function compileSelectedDashboardScanMacro(activeTab) {
+    const prepared = DASHBOARD_SCAN_MACRO_IMPORT_STATE.prepared
+    if (!prepared) return null
+    assertDashboardMacroScope(prepared.flow, activeTab?.url)
+    const runtime = dashboardScanMacroRuntimeValues()
+    const compiled = compileDashboardScanMacro(prepared, runtime)
+    return { compiled, scopeOrigin: new URL(activeTab.url).origin }
+}
+
+async function startDashboardScanMacroReplay(activeTab, selection) {
+    if (!selection) return { success: true, skipped: true }
+    const result = await macro_controller.replay(
+        false,
+        selection.compiled.startUrl,
+        selection.compiled.events,
+        '',
+        {
+            targetTabId: activeTab.tabId,
+            scopeOrigin: selection.scopeOrigin,
+            suppressConfirmation: true,
+            scanOwned: true,
+            source: 'dashboard_manage_scans'
+        }
+    )
+    if (result?.success === false) throw new Error(result?.error || 'macro_replay_start_failed')
+    DASHBOARD_SCAN_MACRO_REPLAY_STATE.active = true
+    DASHBOARD_SCAN_MACRO_REPLAY_STATE.sessionId = result?.sessionId || null
+    return result
+}
+
+async function stopDashboardScanMacroReplay(reason = 'dashboard_manage_scans_stopped') {
+    if (!DASHBOARD_SCAN_MACRO_REPLAY_STATE.active) return null
+    try {
+        return await macro_controller.stopReplay({
+            reason,
+            sessionId: DASHBOARD_SCAN_MACRO_REPLAY_STATE.sessionId
+        })
+    } catch (_) {
+        return null
+    } finally {
+        DASHBOARD_SCAN_MACRO_REPLAY_STATE.active = false
+        DASHBOARD_SCAN_MACRO_REPLAY_STATE.sessionId = null
+    }
+}
+
 let dashboardExportInProgress = false
 
 async function downloadScanExport(scanController, exportResult, filename, options = {}) {
@@ -314,8 +456,23 @@ function resetDashboardModalVisualState($modal) {
     $modal.find('.ui.dimmer').removeClass('active visible transition fade in').hide()
 }
 
+function setDashboardDastAdvancedSettingsExpanded(expanded) {
+    const isExpanded = expanded === true
+    $('#index_scans_form .ptk-dast-advanced-row, #index_scans_form .ptk-dast-advanced-column')
+        .toggleClass('ptk-dast-advanced-visible', isExpanded)
+    const $toggle = $('#dashboard_dast_advanced_toggle')
+    $toggle.attr('aria-expanded', String(isExpanded))
+    $toggle.find('.ptk-dast-advanced-chevron')
+        .toggleClass('down', !isExpanded)
+        .toggleClass('up', isExpanded)
+}
+
 function resetDashboardManageScansModalState() {
     resetDashboardModalVisualState($dashboardRunScansModal)
+    setDashboardDastAdvancedSettingsExpanded(false)
+    $('#run_scan_dlg > .scrolling.content').scrollTop(0)
+    populateDashboardScanMacroFormats()
+    clearDashboardScanMacroSelection()
 }
 
 function setDashboardUploadModalBusy(busy) {
@@ -877,11 +1034,24 @@ async function runDashboardProgressAction({ title, initialMessage, jobs, success
         const errors = []
         const completed = []
         const skipped = []
+        let priorJobFailed = false
         const total = queue.length
         for (let i = 0; i < total; i += 1) {
             const job = queue[i]
             const base = Math.floor((i / total) * 100)
             const done = Math.floor(((i + 1) / total) * 100)
+            if (job.requiresAnyPreviousSuccess === true && completed.length === 0) {
+                const skipMessage = `${job.label} (no required earlier action succeeded)`
+                skipped.push(skipMessage)
+                setDashboardExportProgress(done, `${job.label}: skipped`, { title })
+                continue
+            }
+            if (job.requiresPreviousSuccess === true && priorJobFailed) {
+                const skipMessage = `${job.label} (a required earlier action failed)`
+                skipped.push(skipMessage)
+                setDashboardExportProgress(done, `${job.label}: skipped`, { title })
+                continue
+            }
             setDashboardExportProgress(base, `${job.label}: in progress...`, { title })
             try {
                 const result = await Promise.resolve(job.run())
@@ -899,6 +1069,7 @@ async function runDashboardProgressAction({ title, initialMessage, jobs, success
                 completed.push(job.label)
                 setDashboardExportProgress(done, `${job.label}: complete`, { title })
             } catch (err) {
+                priorJobFailed = true
                 errors.push(`${job.label}: ${err?.message || 'action_failed'}`)
                 setDashboardExportProgress(done, `${job.label}: failed`, { title })
             }
@@ -1918,6 +2089,12 @@ $(document).on("click", "#stop_all_scans", function () {
     const activeTab = controller.activeTab || (controller.tabId ? { tabId: controller.tabId, url: controller.url } : null)
     const scans = controller.scans || {}
     const jobs = []
+    if (DASHBOARD_SCAN_MACRO_REPLAY_STATE.active) {
+        jobs.push({
+            label: 'Macro replay',
+            run: async () => stopDashboardScanMacroReplay()
+        })
+    }
     const siblingSelection = {
         dast: false,
         iast: !!scans.iast,
@@ -2135,6 +2312,71 @@ $(document).on("click", "#upload_all_scans", function () {
     return false
 })
 
+async function prepareSelectedDashboardScanMacro() {
+    if (!DASHBOARD_SCAN_MACRO_IMPORT_STATE.text) {
+        clearDashboardScanMacroSelection()
+        return null
+    }
+    const activeTab = controller.activeTab || getDashboardCachedActiveTab()
+    if (!activeTab?.url) throw new Error('The active scan tab is unavailable.')
+    const prepared = prepareDashboardScanMacro(DASHBOARD_SCAN_MACRO_IMPORT_STATE.text, {
+        fileName: DASHBOARD_SCAN_MACRO_IMPORT_STATE.fileName,
+        format: $('#dashboard_scan_macro_format').val() || 'auto',
+        targetUrl: activeTab.url
+    })
+    DASHBOARD_SCAN_MACRO_IMPORT_STATE.prepared = prepared
+    renderDashboardScanMacroRuntimeFields(prepared)
+    const warnings = prepared.diagnostics.filter((entry) => entry.level === 'warning').length
+    const suffix = warnings ? ` ${warnings} conversion warning(s) will be preserved for review.` : ''
+    setDashboardScanMacroStatus(
+        `${prepared.formatLabel}: ${prepared.flow.steps.length} step(s) ready for exact-origin replay.${suffix}`,
+        warnings ? 'warning' : 'success'
+    )
+    return prepared
+}
+
+$(document).on('change', '#dashboard_scan_macro_file', async function () {
+    const file = this.files?.[0]
+    if (!file) {
+        clearDashboardScanMacroSelection()
+        return
+    }
+    DASHBOARD_SCAN_MACRO_IMPORT_STATE.prepared = null
+    DASHBOARD_SCAN_MACRO_IMPORT_STATE.fileName = String(file.name || '')
+    updateDashboardScanMacroFileUi(DASHBOARD_SCAN_MACRO_IMPORT_STATE.fileName)
+    setDashboardScanMacroStatus('Validating macro...', 'info')
+    try {
+        DASHBOARD_SCAN_MACRO_IMPORT_STATE.text = await file.text()
+        await prepareSelectedDashboardScanMacro()
+    } catch (error) {
+        DASHBOARD_SCAN_MACRO_IMPORT_STATE.prepared = null
+        renderDashboardScanMacroRuntimeFields(null)
+        setDashboardScanMacroStatus(error?.message || 'Unable to import this macro.', 'error')
+    }
+})
+
+$(document).on('change', '#dashboard_scan_macro_format', function () {
+    if (!DASHBOARD_SCAN_MACRO_IMPORT_STATE.text) return
+    setDashboardScanMacroStatus('Validating macro...', 'info')
+    prepareSelectedDashboardScanMacro().catch((error) => {
+        DASHBOARD_SCAN_MACRO_IMPORT_STATE.prepared = null
+        renderDashboardScanMacroRuntimeFields(null)
+        setDashboardScanMacroStatus(error?.message || 'Unable to import this macro.', 'error')
+    })
+})
+
+$(document).on('click', '#dashboard_scan_macro_clear', function () {
+    clearDashboardScanMacroSelection()
+    return false
+})
+
+$(document).on('click', '#dashboard_dast_advanced_toggle', function () {
+    const expanded = $(this).attr('aria-expanded') === 'true'
+    setDashboardDastAdvancedSettingsExpanded(!expanded)
+    $dashboardRunScansModal.modal('refresh')
+    return false
+})
+
 $(document).on("click", "#manage_scans", function () {
     window._ptkReloadWarningClosed = false
     ; (async () => {
@@ -2208,6 +2450,25 @@ $(document).on("click", "#manage_scans", function () {
                         setReloadWarning($('#ptk_reload_warning'), true)
                         return false
                     }
+                    if (DASHBOARD_SCAN_MACRO_IMPORT_STATE.text && !DASHBOARD_SCAN_MACRO_IMPORT_STATE.prepared) {
+                        setDashboardScanMacroStatus('Resolve the macro import error before starting scans.', 'error')
+                        return false
+                    }
+                    if (DASHBOARD_SCAN_MACRO_IMPORT_STATE.prepared && !Object.values(s).some(Boolean)) {
+                        setDashboardScanMacroStatus('Select at least one scan engine to replay this macro.', 'error')
+                        return false
+                    }
+                    let scanMacroSelection = null
+                    try {
+                        scanMacroSelection = compileSelectedDashboardScanMacro(currentActiveTab)
+                    } catch (error) {
+                        setDashboardScanMacroStatus(error?.message || 'The macro cannot be replayed.', 'error')
+                        return false
+                    }
+                    if (scanMacroSelection && settings.dastRecordMacro) {
+                        setDashboardScanMacroStatus('Macro replay and macro recording cannot run at the same time.', 'error')
+                        return false
+                    }
                     const jobs = []
                     if (s.dast) {
                         DASHBOARD_DAST_MACRO_STATE.requested = !!settings.dastRecordMacro
@@ -2268,6 +2529,13 @@ $(document).on("click", "#manage_scans", function () {
                                 }
                                 return response
                             }
+                        })
+                    }
+                    if (scanMacroSelection) {
+                        jobs.push({
+                            label: 'Macro replay',
+                            requiresAnyPreviousSuccess: true,
+                            run: async () => startDashboardScanMacroReplay(currentActiveTab, scanMacroSelection)
                         })
                     }
                     runDashboardProgressAction({

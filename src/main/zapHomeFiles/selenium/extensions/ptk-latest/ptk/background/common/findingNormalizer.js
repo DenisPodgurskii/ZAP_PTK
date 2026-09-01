@@ -332,6 +332,61 @@ function sanitizeIastContext(context) {
     return Object.keys(sanitized).length ? sanitized : null
 }
 
+function sanitizeIastNavigationCorrelation(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value) || value.confirmed !== true) return null
+    const normalized = {
+        confirmed: true,
+        confirmedAt: Number.isFinite(Number(value.confirmedAt)) ? Number(value.confirmedAt) : null,
+        requestId: truncateString(value.requestId, 160),
+        statusCode: Number.isFinite(Number(value.statusCode)) ? Number(value.statusCode) : null,
+        observedUrl: truncateString(value.observedUrl, 2048),
+        tabId: Number.isInteger(Number(value.tabId)) ? Number(value.tabId) : null,
+        frameId: Number.isInteger(Number(value.frameId)) ? Number(value.frameId) : null,
+        scanId: truncateString(value.scanId, 160),
+        navigationType: ["push", "replace"].includes(String(value.navigationType || ""))
+            ? String(value.navigationType)
+            : null,
+        methodEvidence: truncateString(value.methodEvidence, 160)
+    }
+    return compactEvidenceObject(normalized, [
+        "confirmed",
+        "confirmedAt",
+        "requestId",
+        "statusCode",
+        "observedUrl",
+        "tabId",
+        "frameId",
+        "scanId",
+        "navigationType",
+        "methodEvidence"
+    ])
+}
+
+function sanitizeIastUrlValidation(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null
+    const booleanOrNull = (candidate) => typeof candidate === "boolean" ? candidate : null
+    const normalized = {
+        parsed: booleanOrNull(value.parsed),
+        rawKind: truncateString(value.rawKind, 80),
+        resolvedUrl: truncateString(value.resolvedUrl, 2048),
+        scheme: truncateString(value.scheme, 40),
+        dangerousScheme: truncateString(value.dangerousScheme, 40),
+        sameOrigin: booleanOrNull(value.sameOrigin),
+        crossOrigin: booleanOrNull(value.crossOrigin),
+        validationState: truncateString(value.validationState, 80)
+    }
+    return compactEvidenceObject(normalized, [
+        "parsed",
+        "rawKind",
+        "resolvedUrl",
+        "scheme",
+        "dangerousScheme",
+        "sameOrigin",
+        "crossOrigin",
+        "validationState"
+    ])
+}
+
 function normalizeIastEvidence(evidence = {}, finding = {}) {
     let payload = {}
     if (evidence && typeof evidence === "object" && !Array.isArray(evidence)) {
@@ -385,6 +440,8 @@ function normalizeIastEvidence(evidence = {}, finding = {}) {
         origin: payload.origin || null,
         observedAt: payload.observedAt || null,
         operation: payload.operation || null,
+        navigationCorrelation: sanitizeIastNavigationCorrelation(payload.navigationCorrelation || context?.navigationCorrelation),
+        urlValidation: sanitizeIastUrlValidation(payload.urlValidation || context?.urlValidation),
         detection: payload.detection || null,
         trust: payload.trust || null,
         suppression: payload.suppression || null,
@@ -396,7 +453,7 @@ function normalizeIastEvidence(evidence = {}, finding = {}) {
         truncated,
         samples,
         message: truncateString(payload.message || finding.message || null, 400)
-    }, ["requestId", "sinkId", "sourceId", "sourceKey", "sourceKind", "sourceValuePreview", "taintSource", "source", "primarySource", "secondarySources", "sources", "sink", "sinkContext", "matched", "trace", "traceSummary", "context", "sinkSummary", "taintSummary", "allowedSources", "schemaVersion", "primaryClass", "sourceRole", "origin", "observedAt", "operation", "detection", "trust", "suppression", "networkTarget", "routing", "aggregate", "occurrenceCount", "sampleLimit", "truncated", "samples", "message"])
+    }, ["requestId", "sinkId", "sourceId", "sourceKey", "sourceKind", "sourceValuePreview", "taintSource", "source", "primarySource", "secondarySources", "sources", "sink", "sinkContext", "matched", "trace", "traceSummary", "context", "sinkSummary", "taintSummary", "allowedSources", "schemaVersion", "primaryClass", "sourceRole", "origin", "observedAt", "operation", "navigationCorrelation", "urlValidation", "detection", "trust", "suppression", "networkTarget", "routing", "aggregate", "occurrenceCount", "sampleLimit", "truncated", "samples", "message"])
     const extras = {}
     if (Array.isArray(finding.affectedUrls)) {
         const filtered = finding.affectedUrls.map(ensureString).filter(Boolean)

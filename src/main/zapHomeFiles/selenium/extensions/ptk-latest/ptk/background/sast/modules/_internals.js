@@ -104,6 +104,7 @@ function _cacheFlagsFromSpec(spec = {}) {
 function _nodeToStaticString(node) {
   if (!node) return null;
   if (node.type === "Literal") return node.value != null ? String(node.value) : null;
+  if (node.type === "StringLiteral") return node.value != null ? String(node.value) : null;
   if (node.type === "TemplateLiteral" && (node.expressions || []).length === 0) {
     return node.quasis.map((q) => q?.value?.cooked || "").join("");
   }
@@ -568,6 +569,27 @@ function _matchImportSource(node, spec) {
 export function compilePattern(pattern) {
   try {
     const testers = [];
+
+    if (pattern.literalRegex) {
+      const re = _getCachedRegex(
+        pattern,
+        "pattern.literalRegex",
+        pattern.literalRegex,
+        _cacheFlagsFromSpec(pattern)
+      );
+      testers.push((node) => {
+        if (
+          (node?.type === "Literal" || node?.type === "StringLiteral") &&
+          typeof node.value !== "string"
+        ) {
+          return false;
+        }
+        const value = _nodeToStaticString(node);
+        if (value == null || !re) return false;
+        re.lastIndex = 0;
+        return re.test(value);
+      });
+    }
 
     if (pattern.custom) {
       const name = pattern.custom;

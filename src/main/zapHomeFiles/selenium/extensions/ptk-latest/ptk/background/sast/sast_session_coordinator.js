@@ -34,6 +34,7 @@ export class SastSessionCoordinator {
     this.collectionState = "idle";
     this.analysisState = "idle";
     this.activeTabId = null;
+    this.relatedScanTabs = new Map();
     this.multiPageScanActive = false;
     this.spaPageSet = new Set();
     this.spaScanInFlight = new Set();
@@ -73,6 +74,7 @@ export class SastSessionCoordinator {
     this.collectionState = "collection_pending";
     this.analysisState = "waiting";
     this.activeTabId = tabId;
+    this.relatedScanTabs = new Map();
     this.scanningRequest = false;
     this.firstCollectionStarted = false;
     this.firstCollectionSettled = false;
@@ -154,8 +156,13 @@ export class SastSessionCoordinator {
   }
 
   handleRemoved(tabId) {
+    if (this.relatedScanTabs.has(Number(tabId))) {
+      this.relatedScanTabs.delete(Number(tabId));
+      return;
+    }
     if (this.activeTabId !== tabId) return;
     this.activeTabId = null;
+    this.relatedScanTabs = new Map();
     this.isScanRunning = false;
     this.sessionState = "stopped";
     this.collectionState = "stopped";
@@ -169,6 +176,7 @@ export class SastSessionCoordinator {
     this.collectionState = "stopped";
     this.analysisState = "idle";
     this.activeTabId = null;
+    this.relatedScanTabs = new Map();
     this.multiPageScanActive = false;
     this.spaScanInFlight.clear();
     this.activeCollectionCount = 0;
@@ -293,7 +301,7 @@ export class SastSessionCoordinator {
 
   async handleUpdated(tabId, info, tab) {
     if (!this.isScanRunning) return;
-    if (this.activeTabId !== tabId) return;
+    if (!this.isTrackedScanTab(tabId)) return;
     if (this.multiPageScanActive) return;
     if (String(info?.status || "").toLowerCase() !== "complete") return;
     const url = String(tab?.url || info?.url || "").trim();
@@ -336,7 +344,7 @@ export class SastSessionCoordinator {
 
   async onSpaUrlChanged(rawUrl, tabId, scanResult, payload = null) {
     if (!rawUrl || !tabId) return;
-    if (!this.isScanRunning || this.activeTabId !== tabId) return;
+    if (!this.isScanRunning || !this.isTrackedScanTab(tabId)) return;
     const normalized = this.normalizeSpaPages([rawUrl], null)[0];
     if (!normalized) return;
     const isNew = this.registerSpaPage(scanResult, normalized);
@@ -499,7 +507,7 @@ export class SastSessionCoordinator {
 
   async _scanCollectedPayloadNow(tabId, payload, opts = {}) {
     if (!this.isScanRunning) return [];
-    if (this.activeTabId !== tabId) return [];
+    if (!this.isTrackedScanTab(tabId)) return [];
     if (!this.isCollectedPayloadUsable(payload)) return [];
     if (opts?.expectedUrl && payload?.file && !sameDocumentUrl(payload.file, opts.expectedUrl)) {
       this.recordTiming("sast.payload.stale", {
@@ -584,6 +592,33 @@ export class SastSessionCoordinator {
       }
     }
     return normalized;
+  }
+
+  isTrackedScanTab(tabId) {
+    const normalized = Number(tabId);
+    if (!this.isScanRunning || !Number.isInteger(normalized) || normalized < 0) return false;
+    return normalized === this.activeTabId || this.relatedScanTabs.has(normalized);
+  }
+
+  registerRelatedScanTab(tabId, meta = {}) {
+    const normalized = Number(tabId);
+    if (!this.isScanRunning || !Number.isInteger(normalized) || normalized < 0 || normalized === this.activeTabId) {
+      return false;
+    }
+    const parentTabId = Number(meta?.parentTabId);
+    if (Number.isInteger(parentTabId) && !this.isTrackedScanTab(parentTabId)) return false;
+    this.relatedScanTabs.set(normalized, Object.assign({}, this.relatedScanTabs.get(normalized) || {}, meta, {
+      tabId: normalized,
+      parentTabId: Number.isInteger(parentTabId) ? parentTabId : this.activeTabId,
+      rootTabId: Number.isInteger(Number(meta?.rootTabId)) ? Number(meta.rootTabId) : this.activeTabId
+    }));
+    return true;
+  }
+
+  releaseRelatedScanTab(tabId) {
+    const normalized = Number(tabId);
+    if (!Number.isInteger(normalized) || normalized < 0) return false;
+    return this.relatedScanTabs.delete(normalized);
   }
 
   async scanSpaPages(tabId, pages, opts = {}) {

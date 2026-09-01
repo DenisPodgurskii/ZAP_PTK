@@ -91,6 +91,7 @@ export class DastSessionCoordinator {
         this.getScanResult = getScanResult
         this.notifyScanCompleted = notifyScanCompleted
         this.collectSeverityStats = collectSeverityStats
+        this.relatedTabs = new Map()
     }
 
     _collectDrainSnapshot() {
@@ -176,7 +177,29 @@ export class DastSessionCoordinator {
     }
 
     isRunningForTab(tabId) {
-        return !!(this.engine?.isRunning && this.engine.tabId === tabId)
+        const normalized = Number(tabId)
+        return !!(
+            this.engine?.isRunning
+            && Number.isInteger(normalized)
+            && (this.engine.tabId === normalized || this.relatedTabs.has(normalized))
+        )
+    }
+
+    registerRelatedTab(tabId, meta = {}) {
+        const normalized = Number(tabId)
+        if (!this.engine?.isRunning || !Number.isInteger(normalized) || normalized < 0 || normalized === this.engine.tabId) {
+            return false
+        }
+        this.relatedTabs.set(normalized, Object.assign({}, this.relatedTabs.get(normalized) || {}, meta, {
+            tabId: normalized
+        }))
+        return true
+    }
+
+    releaseRelatedTab(tabId) {
+        const normalized = Number(tabId)
+        if (!Number.isInteger(normalized) || normalized < 0) return false
+        return this.relatedTabs.delete(normalized)
     }
 
     isCaptureBlockedByInteraction() {
@@ -199,6 +222,7 @@ export class DastSessionCoordinator {
         const targetDomains = normalizedDomains && normalizedDomains.length ? normalizedDomains : host
 
         this.reset?.()
+        this.relatedTabs.clear()
         this.state.sentAllAttacksCompleted = false
         this.captureAdapter?.addListeners?.()
         this.state.acceptIncomingRequests = true
@@ -230,6 +254,7 @@ export class DastSessionCoordinator {
         this.state.enableSyntheticRedirectRequests = false
         this.state.zapManaged = false
         this.state.pendingAutomationSeeds = 0
+        this.relatedTabs.clear()
 
         if (waitForIdleBeforeStop) {
             try {

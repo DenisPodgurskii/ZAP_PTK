@@ -23,6 +23,7 @@
         WaitForUrl: 10,
         SendKeys: 11,
         Hover: 12,
+        Scroll: 13,
         Delay: 25
     }
 
@@ -89,7 +90,7 @@
     class ptk_event {
         constructor(e) {
             this.event = (e) ? e : window.event 
-            let t = this.target()
+            let t = this.eventTarget()
             let path = e.path ? e.path : e.composedPath()
 
             if (e && (e.type === "click" || e.type === "dblclick" || e.type === "mousedown" || e.type === "mouseup")) {
@@ -155,13 +156,26 @@
         }
 
         getLocatorCandidates(element) {
-            const candidates = []
-            const pushUnique = (value) => {
-                if (value && !candidates.includes(value)) {
-                    candidates.push(value)
+            const preferred = []
+            const fallback = []
+            const pushUnique = (value, isUnique = false) => {
+                const target = isUnique ? preferred : fallback
+                if (value && !preferred.includes(value) && !fallback.includes(value)) {
+                    target.push(value)
                 }
             }
-            if (!element || !element.getAttribute) return candidates
+            if (!element || !element.getAttribute) return []
+
+            const isUniqueCss = (selector) => {
+                try { return document.querySelectorAll(selector).length === 1 } catch (e) { return false }
+            }
+            const isUniqueXpath = (selector) => {
+                try {
+                    return document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength === 1
+                } catch (e) {
+                    return false
+                }
+            }
 
             const text = (element.innerText || element.textContent || '').trim()
             const tag = (element.tagName || '').toLowerCase()
@@ -184,30 +198,32 @@
                 if (!value || value.includes('"')) return
                 if (attr === 'id' && !this.isStableId(value)) return
                 if (attr === 'id') {
-                    pushUnique(`id=${value}`)
+                    pushUnique(`id=${value}`, isUniqueCss(`[id="${value}"]`))
                     return
                 }
                 if (attr === 'name') {
-                    pushUnique(`name=${value}`)
+                    pushUnique(`name=${value}`, isUniqueCss(`[name="${value}"]`))
                     return
                 }
-                pushUnique(`css=[${attr}="${value}"]`)
+                const selector = `[${attr}="${value}"]`
+                pushUnique(`css=${selector}`, isUniqueCss(selector))
             })
 
             if (this.csspath) {
-                pushUnique(`css=${this.csspath}`)
+                pushUnique(`css=${this.csspath}`, isUniqueCss(this.csspath))
             } else if (this.fullcsspath) {
-                pushUnique(`css=${this.fullcsspath}`)
+                pushUnique(`css=${this.fullcsspath}`, isUniqueCss(this.fullcsspath))
             }
+            if (this.fullcsspath) pushUnique(`css=${this.fullcsspath}`, isUniqueCss(this.fullcsspath))
 
             if (this.xpath) {
-                pushUnique(`xpath=${this.xpath}`)
+                pushUnique(`xpath=${this.xpath}`, isUniqueXpath(this.xpath))
             }
             if (this.fullxpath) {
-                pushUnique(`xpath=${this.fullxpath}`)
+                pushUnique(`xpath=${this.fullxpath}`, isUniqueXpath(this.fullxpath))
             }
 
-            return candidates
+            return [...preferred, ...fallback]
         }
 
         stopPropagation() {
@@ -235,7 +251,7 @@
             return UnknownButton
         }
 
-        target() {
+        eventTarget() {
             let t = (this.event.target) ? this.event.target : this.event.srcElement
             if (t && t.nodeType == 3)
                 return t.parentNode
@@ -382,7 +398,7 @@
             super(e)
             this.eventType = EventTypes.KeyPress
             this.eventTypeName = "SetValue"
-            this.data = protectRecordedValue(this.target(), this.keychar())
+            this.data = protectRecordedValue(this.eventTarget(), this.keychar())
         }
     }
 
@@ -449,6 +465,34 @@
         }
     }
 
+    class ptk_event_scroll extends ptk_event {
+        constructor(e, target, x, y, isWindowTarget) {
+            const sourceEvent = isWindowTarget
+                ? {
+                    target: document.documentElement,
+                    composedPath: () => [document.documentElement]
+                }
+                : e
+            super(sourceEvent)
+            this.eventType = EventTypes.Scroll
+            this.eventTypeName = "Scroll"
+            this.scrollMode = "to"
+            this.scrollTarget = isWindowTarget ? "window" : "element"
+            this.x = x
+            this.y = y
+            this.data = `${x},${y}`
+            this.optional = false
+            if (isWindowTarget) {
+                this.xpath = ''
+                this.fullxpath = ''
+                this.csspath = ''
+                this.fullcsspath = ''
+                this.target = null
+                this.targetOptions = []
+            }
+        }
+    }
+
     class ptk_testcase {
         constructor(items, log) {
             this.items = items ? items : []
@@ -482,7 +526,12 @@
                     csspath: item.csspath,
                     fullcsspath: item.fullcsspath,
                     target: item.target,
-                    targetOptions: item.targetOptions || []
+                    targetOptions: item.targetOptions || [],
+                    scrollMode: item.scrollMode,
+                    scrollTarget: item.scrollTarget,
+                    x: item.x,
+                    y: item.y,
+                    Optional: item.optional === true ? 1 : 0
                 }
 
                 try {
@@ -524,13 +573,20 @@
             this.clickDelay = 180
             this.waitClick = false
             this.testcase = new ptk_testcase()
+            this.frameRoutes = new Map()
+            this.frameLoadListeners = new WeakSet()
+            this.frameReadyAttempts = 0
+            this.frameReadyTimer = null
+            this.frameRouteReady = false
             this._routeDebounceMs = 150
             this._routeTimer = null
             this._lastRecordedUrl = null
             this._historyWrapped = false
             this._originalHistory = {}
+            this._scrollDebounceMs = 180
+            this._pendingScrolls = new Map()
 
-            browser.storage.local.get(['ptk_recording', 'ptk_recording_items', 'ptk_recording_timing', 'ptk_recording_log', 'ptk_double_click']).then(function (result) {
+            browser.storage.local.get(['ptk_recording', 'ptk_recording_items', 'ptk_recording_timing', 'ptk_recording_log', 'ptk_double_click']).then(async function (result) {
 
                 this.doubleClick = result.ptk_double_click
                 captureSensitiveInputs = result.ptk_recording?.captureSensitiveInputs === true
@@ -539,6 +595,7 @@
                     : null
                 this.testcase = new ptk_testcase(result.ptk_recording_items, result.ptk_recording_log)
                 if (!isIframe) {
+                    await this.resolveRecordingContext()
                     if (this.testcase.items.length == 0) {
                         let evtNavigate = new ptk_event_navigate(result.ptk_recording?.startUrl)
                         evtNavigate.eventDuration = evtNavigate.eventStart - gstartTime
@@ -561,29 +618,124 @@
         init() {
 
             if (isIframe) {
-                windowIndex = window.top.opener ? 1 : 0
+                this.announceFrameReady()
             } else {
                 this.broadcastFrameInfo([])
             }
+        }
+
+        async resolveRecordingContext() {
+            if (!this.sessionId) return
+            try {
+                const context = await browser.runtime.sendMessage({
+                    channel: 'ptk_content2background_recorder',
+                    type: 'get_recording_context',
+                    sessionId: this.sessionId
+                })
+                if (!context?.success) return
+                windowIndex = Number(context.windowIndex) === 1 ? 1 : 0
+            } catch (_) { }
         }
 
         broadcastFrameInfo(parentStack = []) {
             let frames = document.getElementsByTagName('iframe')
             if (!frames || !frames.length) return
             for (let i = 0; i < frames.length; i++) {
-                let item = {
-                    index: i, name: frames[i].name ? frames[i].name : "",
-                    id: frames[i].id ? frames[i].id : "",
-                    title: frames[i].title ? frames[i].title : "",
-                    src: frames[i].src ? frames[i].src : ""
-                }
-                item.stack = parentStack.concat([item])
-                frames[item.index].contentWindow.postMessage({
-                    channel: "frameInfo",
-                    sessionId: this.sessionId,
-                    item: item
-                }, '*')
+                const frame = frames[i]
+                const route = this.frameRoutes.get(frame.contentWindow)
+                if (!route) continue
+                const item = this.buildFrameInfo(frame, i, parentStack)
+                this.sendFrameInfo(frame, route, item)
             }
+        }
+
+        buildFrameInfo(frame, index, parentStack = []) {
+            const item = {
+                index,
+                name: frame.name || '',
+                id: frame.id || '',
+                title: frame.title || '',
+                src: frame.src || ''
+            }
+            item.stack = parentStack.concat([item])
+            return normalizeFrameInfo(item)
+        }
+
+        findDirectFrame(source) {
+            const frames = Array.from(document.getElementsByTagName('iframe'))
+            const index = frames.findIndex((frame) => frame.contentWindow === source)
+            if (index < 0) return null
+            return { frame: frames[index], index }
+        }
+
+        async announceFrameReady() {
+            if (!isIframe || !this.sessionId || this.frameRouteReady || this.frameReadyAttempts >= 20) return
+            try {
+                const identity = await browser.runtime.sendMessage({
+                    channel: 'ptk_content2background_recorder',
+                    type: 'get_frame_identity',
+                    sessionId: this.sessionId
+                })
+                if (!identity?.success || !Number.isInteger(identity.frameId) || identity.frameId < 1) return
+                windowIndex = Number(identity.windowIndex) === 1 ? 1 : 0
+                // This wildcard readiness packet contains no PTK session, URL,
+                // recorded value, testcase, or executable replay state.
+                window.parent.postMessage({
+                    channel: 'ptk_recorder_ready',
+                    message: 'frame_ready',
+                    frameId: identity.frameId
+                }, '*')
+            } catch (_) { }
+            this.frameReadyAttempts += 1
+            if (!this.frameRouteReady && this.frameReadyAttempts < 20) {
+                clearTimeout(this.frameReadyTimer)
+                this.frameReadyTimer = setTimeout(() => this.announceFrameReady(), 250)
+            }
+        }
+
+        confirmFrameRoute() {
+            this.frameRouteReady = true
+            clearTimeout(this.frameReadyTimer)
+            this.frameReadyTimer = null
+        }
+
+        registerFrameRoute(event) {
+            const direct = this.findDirectFrame(event?.source)
+            const frameId = Number(event?.data?.frameId)
+            if (!direct || !Number.isInteger(frameId) || frameId < 1) return
+            const origin = typeof event.origin === 'string' && event.origin !== 'null'
+                ? event.origin
+                : null
+            this.frameRoutes.set(event.source, { frameId, origin })
+            if (!this.frameLoadListeners.has(direct.frame)) {
+                this.frameLoadListeners.add(direct.frame)
+                const source = event.source
+                direct.frame.addEventListener('load', () => {
+                    this.frameRoutes.delete(source)
+                })
+            }
+            const item = this.buildFrameInfo(direct.frame, direct.index, frameInfo?.stack || [])
+            this.sendFrameInfo(direct.frame, { frameId, origin }, item)
+        }
+
+        sendFrameInfo(frame, route, item) {
+            if (!frame?.contentWindow || !route || !item || !this.sessionId) return
+            const payload = {
+                channel: 'frameInfo',
+                sessionId: this.sessionId,
+                item
+            }
+            if (route.origin) {
+                frame.contentWindow.postMessage(payload, route.origin)
+                return
+            }
+            browser.runtime.sendMessage({
+                channel: 'ptk_content2background_recorder',
+                type: 'relay_frame_info',
+                sessionId: this.sessionId,
+                targetFrameId: route.frameId,
+                frameInfo: item
+            }).catch(() => {})
         }
 
         start() {
@@ -638,6 +790,9 @@
 
             this.oncustomevent = this.oncustomevent.bind(this)
             document.addEventListener("customRecorderEvent", this.oncustomevent)
+
+            this.onscroll = this.onscroll.bind(this)
+            window.addEventListener("scroll", this.onscroll, true)
             this._initRouteTracking()
 
             this.mutationObserver = new MutationObserver(function (mutations) {
@@ -692,6 +847,11 @@
             document.removeEventListener("change", this.onchange)
             document.removeEventListener("select", this.onselect)
             document.removeEventListener("customRecorderEvent", this.oncustomevent)
+            window.removeEventListener("scroll", this.onscroll, true)
+            for (const pending of this._pendingScrolls.values()) {
+                clearTimeout(pending.timer)
+            }
+            this._pendingScrolls.clear()
             this.mutationObserver.disconnect()
             this._teardownRouteTracking()
         }
@@ -771,7 +931,22 @@
             }
             let addNewEvent = true
             let last = this.testcase.peek()
-            if (last != undefined && last.eventType == evt.eventType && (evt.eventStart - last.eventStart) < 1000) {
+            const locatorPair = last == undefined ? null : [
+                [last.fullxpath, evt.fullxpath],
+                [last.fullcsspath, evt.fullcsspath],
+                [last.xpath, evt.xpath],
+                [last.csspath, evt.csspath],
+                [last.target, evt.target]
+            ].find(([previous, current]) => previous && current)
+            const sameElement = Boolean(locatorPair && locatorPair[0] === locatorPair[1])
+            // Some sites emit a synthetic click immediately after the native
+            // click. Collapse only that same-element duplicate. A one-second,
+            // event-type-only gate dropped legitimate rapid actions on two
+            // different controls (for example adding two products).
+            if (last != undefined
+                && last.eventType == evt.eventType
+                && sameElement
+                && (evt.eventStart - last.eventStart) < 100) {
                 addNewEvent = false
             }
 
@@ -837,6 +1012,79 @@
             if (evt.xpath == "/") return false
             this.testcase.append(evt)
             return true
+        }
+
+        isPtkOwnedElement(element) {
+            if (!element || element === document.documentElement || element === document.body) return false
+            const owned = element.closest?.('[id^="ptk_"], [class^="ptk_"], [class*=" ptk_"]')
+            return Boolean(owned)
+        }
+
+        normalizeScrollTarget(rawTarget) {
+            if (rawTarget === window
+                || rawTarget === document
+                || rawTarget === document.documentElement
+                || rawTarget === document.body
+                || rawTarget === document.scrollingElement) {
+                return { key: window, target: document.documentElement, isWindowTarget: true }
+            }
+            if (rawTarget?.nodeType === Node.ELEMENT_NODE && rawTarget.isConnected) {
+                return { key: rawTarget, target: rawTarget, isWindowTarget: false }
+            }
+            return null
+        }
+
+        readScrollPosition(target, isWindowTarget) {
+            const rawX = isWindowTarget ? window.scrollX : target.scrollLeft
+            const rawY = isWindowTarget ? window.scrollY : target.scrollTop
+            const x = Math.max(-1000000, Math.min(1000000, Math.round(Number(rawX) || 0)))
+            const y = Math.max(-1000000, Math.min(1000000, Math.round(Number(rawY) || 0)))
+            return { x, y }
+        }
+
+        onscroll(e) {
+            if (window.ptk_replayer?.sessionId && !window.ptk_replayer?.cancelled) return
+            const normalized = this.normalizeScrollTarget(e?.target)
+            if (!normalized || this.isPtkOwnedElement(normalized.target)) return
+            const position = this.readScrollPosition(normalized.target, normalized.isWindowTarget)
+            const current = this._pendingScrolls.get(normalized.key)
+            if (current?.timer) clearTimeout(current.timer)
+            const pending = {
+                ...normalized,
+                event: e,
+                ...position,
+                timer: setTimeout(() => this.flushScroll(normalized.key), this._scrollDebounceMs)
+            }
+            this._pendingScrolls.set(normalized.key, pending)
+        }
+
+        flushScroll(key) {
+            const pending = this._pendingScrolls.get(key)
+            if (!pending) return
+            this._pendingScrolls.delete(key)
+            if (!pending.isWindowTarget && !pending.target?.isConnected) return
+
+            const evt = new ptk_event_scroll(
+                pending.event,
+                pending.target,
+                pending.x,
+                pending.y,
+                pending.isWindowTarget
+            )
+            const last = this.testcase.peek()
+            const sameTarget = last?.eventType === EventTypes.Scroll
+                && last?.scrollTarget === evt.scrollTarget
+                && (evt.scrollTarget === 'window' || last?.target === evt.target)
+            if (sameTarget) {
+                last.data = evt.data
+                last.x = evt.x
+                last.y = evt.y
+                last.eventStart = evt.eventStart
+                this.testcase.poke(last)
+                this.testcase.sync()
+                return
+            }
+            this.testcase.append(evt)
         }
 
         onkeypress(e) {
@@ -942,14 +1190,31 @@
 
     window.addEventListener("message", (event) => {
         const data = event?.data
-        if (!isIframe || !data || typeof data !== 'object' || Array.isArray(data)) return
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return
+        if (data.channel === 'ptk_recorder_ready' && data.message === 'frame_ready') {
+            window.ptk_recorder?.registerFrameRoute(event)
+            return
+        }
+        if (!isIframe) return
         if (data.channel !== 'frameInfo' || !isExpectedParentMessage(event)) return
         if (!window.ptk_recorder?.sessionId || data.sessionId !== window.ptk_recorder.sessionId) return
 
         const approvedFrameInfo = normalizeFrameInfo(data.item)
         if (!approvedFrameInfo) return
+        window.ptk_recorder.confirmFrameRoute()
         frameInfo = approvedFrameInfo
         window.ptk_recorder.broadcastFrameInfo(frameInfo.stack)
+    })
+
+    browser.runtime.onMessage.addListener((message) => {
+        if (!isIframe || message?.channel !== 'ptk_background2content_recorder' || message?.type !== 'frame_info') return
+        if (!window.ptk_recorder?.sessionId || message.sessionId !== window.ptk_recorder.sessionId) return
+        const approvedFrameInfo = normalizeFrameInfo(message.frameInfo)
+        if (!approvedFrameInfo) return
+        window.ptk_recorder.confirmFrameRoute()
+        frameInfo = approvedFrameInfo
+        window.ptk_recorder.broadcastFrameInfo(frameInfo.stack)
+        return Promise.resolve({ success: true })
     })
 
     browser.storage.onChanged.addListener(function (changes, namespace) {

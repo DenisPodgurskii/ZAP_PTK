@@ -49,6 +49,23 @@ export function buildRequestContextKey({ method, normalizedPath, sourceType, tar
     return `${m}|${p}|${s}|${t}`
 }
 
+export function ptkRegexCaptureNumber(value, pattern, flags = "", groupIndex = 1) {
+    if (value === undefined || value === null || typeof pattern !== "string") return null
+    const normalizedFlags = flags === undefined || flags === null ? "" : String(flags)
+    if (!/^[dgimsuvy]*$/.test(normalizedFlags)) return null
+    const index = Number(groupIndex)
+    if (!Number.isInteger(index) || index < 0) return null
+
+    try {
+        const match = new RegExp(pattern, normalizedFlags).exec(String(value))
+        if (!match || index >= match.length || match[index] === undefined) return null
+        const numeric = Number(match[index])
+        return Number.isFinite(numeric) ? numeric : null
+    } catch (_) {
+        return null
+    }
+}
+
 export class ptk_module {
     constructor(module) {
         Object.assign(this, module)
@@ -65,6 +82,7 @@ export class ptk_module {
         jsonLogic.add_operation("regex", this.op_regex)
         jsonLogic.add_operation("proof", this.op_proof)
         jsonLogic.add_operation("ptkExecutedDiffers", this.op_executedDiffers)
+        jsonLogic.add_operation("ptkRegexCaptureNumber", ptkRegexCaptureNumber)
     }
 
     _moduleExecutionConfig() {

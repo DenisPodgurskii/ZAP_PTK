@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PTK Auto</title>
+    <link rel="stylesheet" href="popup.css">
+    <script defer src="../packages/browser-polyfill/browser-polyfill.min.js"></script>
+    <script defer src="popup.js"></script>
+</head>
+<body>
+    <main class="popup-shell">
+        <header class="brand">
+            <img class="brand-icon" src="../browser/assets/images/ptk_auto_icon_128.png" alt="">
+            <div class="brand-copy">
+                <div class="brand-title-row">
+                    <h1>PTK Auto</h1>
+                    <span id="version" class="version">v—</span>
+                </div>
+                <p>Browser security runtime for automation</p>
+            </div>
+        </header>
+
+        <section class="runtime" aria-labelledby="runtime-heading">
+            <h2 id="runtime-heading">Runtime status</h2>
+            <div class="status-row">
+                <span id="status-dot" class="status-dot" data-status="starting" aria-hidden="true"></span>
+                <strong id="status-label">Starting</strong>
+            </div>
+            <p id="status-detail" class="status-detail" aria-live="polite">Checking the PTK Auto runtime.</p>
+            <p class="description">PTK Auto is the browser security runtime used by PTK Agent in automated tests, CLI workflows, CI/CD pipelines and supported browser-testing platforms.</p>
+        </section>
+
+        <nav class="links" aria-label="PTK resources">
+            <a href="https://owasp.org/www-project-penetration-testing-kit/" target="_blank" rel="noopener noreferrer">OWASP PTK</a>
+            <a href="https://www.npmjs.com/package/pentestkit" target="_blank" rel="noopener noreferrer">PTK Agent on npm</a>
+            <a href="https://github.com/ptklabs/ptk-agent/blob/main/docs/npm/README.md" target="_blank" rel="noopener noreferrer">Automation documentation</a>
+        </nav>
+
+        <footer>Use only on applications you are authorised to test.</footer>
+    </main>
+</body>
+</html>

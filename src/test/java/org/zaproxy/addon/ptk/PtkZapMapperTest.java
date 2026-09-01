@@ -64,6 +64,13 @@ class PtkZapMapperTest {
     }
 
     @Test
+    void jwtBodyCarrierProbesHaveStableAlertReferences() {
+        assumeMappingLoaded();
+        assertEquals("200003-8", mapper.getZapAlertReference("jwt_injection", "jwt_probe_no_form"));
+        assertEquals("200003-9", mapper.getZapAlertReference("jwt_injection", "jwt_probe_no_json"));
+    }
+
+    @Test
     void getModuleIdAndRuleId_returnsExpectedModuleAndRule() {
         assumeMappingLoaded();
         PtkZapMapper.ModuleAndRule mar = mapper.getModuleIdAndRuleId("220000-1");
