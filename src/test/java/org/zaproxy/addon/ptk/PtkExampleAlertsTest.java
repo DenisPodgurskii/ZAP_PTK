@@ -113,6 +113,10 @@ class PtkExampleAlertsTest {
                 CommonAlertTag.OWASP_2021_A03_INJECTION.getValue(),
                 tags.get(CommonAlertTag.OWASP_2021_A03_INJECTION.getTag()));
         assertEquals(PtkAlertBuilder.TAG_TOOL_PTK_URL, tags.get(PtkAlertBuilder.TAG_TOOL_PTK));
+        assertFalse(
+                tags.containsKey(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT),
+                "no-inner-outer-html is excluded from the recommended SAST defaults");
+        assertFalse(tags.containsKey(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT));
 
         assertTrue(alert instanceof ExampleAlert, "Alert should be an ExampleAlert");
         ExampleAlert exampleAlert = (ExampleAlert) alert;
@@ -170,6 +174,10 @@ class PtkExampleAlertsTest {
                 CommonAlertTag.OWASP_2021_A03_INJECTION.getValue(),
                 tags.get(CommonAlertTag.OWASP_2021_A03_INJECTION.getTag()));
         assertEquals(PtkAlertBuilder.TAG_TOOL_PTK_URL, tags.get(PtkAlertBuilder.TAG_TOOL_PTK));
+        assertFalse(
+                tags.containsKey(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT),
+                "sql_injection is excluded from the recommended DAST defaults");
+        assertFalse(tags.containsKey(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT));
 
         assertTrue(alert instanceof ExampleAlert, "Alert should be an ExampleAlert");
         ExampleAlert exampleAlert = (ExampleAlert) alert;
@@ -179,5 +187,41 @@ class PtkExampleAlertsTest {
                 exampleAlert.getCodeLink());
         assertEquals(
                 "src/ptk/background/dast/modules/modules.json", exampleAlert.getCodeLinkText());
+    }
+
+    @Test
+    void sastDomXssTaintAngularHasPassiveDefaultTag() {
+        // SAST dom-xss module, rule override recommended=true: dom-xss-taint-angular → 220000-9
+        Alert alert =
+                alerts.stream()
+                        .filter(a -> "220000-9".equals(a.getAlertRef()))
+                        .findFirst()
+                        .orElse(null);
+        assertNotNull(alert, "Alert 220000-9 (dom-xss-taint-angular) must be present");
+
+        Map<String, String> tags = alert.getTags();
+        assertNotNull(tags);
+        assertEquals(
+                PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT_URL,
+                tags.get(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT));
+        assertFalse(tags.containsKey(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT));
+    }
+
+    @Test
+    void dastJwtNoneAlgAttackHasActiveDefaultTag() {
+        // DAST jwt_injection module (recommended by default), attack jwt_1 → 200003-4
+        Alert alert =
+                alerts.stream()
+                        .filter(a -> "200003-4".equals(a.getAlertRef()))
+                        .findFirst()
+                        .orElse(null);
+        assertNotNull(alert, "Alert 200003-4 (jwt_1) must be present");
+
+        Map<String, String> tags = alert.getTags();
+        assertNotNull(tags);
+        assertEquals(
+                PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT_URL,
+                tags.get(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT));
+        assertFalse(tags.containsKey(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT));
     }
 }
