@@ -46,6 +46,22 @@ public final class PtkAlertBuilder {
     public static final String TAG_TOOL_PTK_URL =
             "https://www.zaproxy.org/docs/desktop/addons/owasp-ptk/";
 
+    /**
+     * Tag applied to SAST and IAST alerts whose rule is enabled under "Use recommended defaults".
+     */
+    public static final String TAG_TOOL_PTK_PASSIVE_DEFAULT = "TOOL_PTK_PASSIVE_DEFAULT";
+
+    /** URL for the TOOL_PTK_PASSIVE_DEFAULT tag. */
+    public static final String TAG_TOOL_PTK_PASSIVE_DEFAULT_URL =
+            "https://www.zaproxy.org/docs/desktop/addons/owasp-ptk/#tool_ptk_passive_default";
+
+    /** Tag applied to DAST alerts whose rule is enabled under "Use recommended defaults". */
+    public static final String TAG_TOOL_PTK_ACTIVE_DEFAULT = "TOOL_PTK_ACTIVE_DEFAULT";
+
+    /** URL for the TOOL_PTK_ACTIVE_DEFAULT tag. */
+    public static final String TAG_TOOL_PTK_ACTIVE_DEFAULT_URL =
+            "https://www.zaproxy.org/docs/desktop/addons/owasp-ptk/#tool_ptk_active_default";
+
     private static final Map<String, String> OWASP_TAG_URLS =
             Stream.of(CommonAlertTag.values())
                     .filter(t -> t.getTag().startsWith("OWASP_"))
@@ -72,11 +88,14 @@ public final class PtkAlertBuilder {
     static ExampleAlert buildExampleAlert(
             String alertRef,
             String engine,
+            String moduleId,
             String moduleName,
+            String ruleOrAttackId,
             String ruleOrAttackName,
             PtkModuleMetadata meta,
             String ruleSeverity,
-            String ruleDescription) {
+            String ruleDescription,
+            PtkResourcesLoader.LoadedPtkResources resources) {
         int pluginId = parseBaseAlertId(alertRef);
         if (pluginId < 0) {
             return null;
@@ -93,6 +112,7 @@ public final class PtkAlertBuilder {
         int cweId = parseFirstCwe(meta);
         Map<String, String> tags = owaspToZapTags(meta);
         tags.put(TAG_TOOL_PTK, TAG_TOOL_PTK_URL);
+        addRecommendedDefaultTag(tags, engine, moduleId, ruleOrAttackId, resources);
 
         Alert.Builder builder =
                 Alert.builder()
@@ -162,6 +182,8 @@ public final class PtkAlertBuilder {
         int cweId = parseFirstCwe(meta);
         Map<String, String> tags = owaspToZapTags(meta);
         tags.put(TAG_TOOL_PTK, TAG_TOOL_PTK_URL);
+        String lookupId = finding.getRuleId() != null ? finding.getRuleId() : finding.getAttackId();
+        addRecommendedDefaultTag(tags, engine, finding.getModuleId(), lookupId, resources);
 
         String uri = finding.getUri() != null ? finding.getUri() : "about:blank";
         String param = finding.getParam();
@@ -481,6 +503,30 @@ public final class PtkAlertBuilder {
             }
         }
         return tags;
+    }
+
+    /**
+     * Adds {@link #TAG_TOOL_PTK_PASSIVE_DEFAULT} (SAST/IAST) or {@link
+     * #TAG_TOOL_PTK_ACTIVE_DEFAULT} (DAST) when the given rule/attack is enabled under "Use
+     * recommended defaults".
+     */
+    private static void addRecommendedDefaultTag(
+            Map<String, String> tags,
+            String engine,
+            String moduleId,
+            String ruleOrAttackId,
+            PtkResourcesLoader.LoadedPtkResources resources) {
+        if (resources == null || engine == null || moduleId == null || ruleOrAttackId == null) {
+            return;
+        }
+        if (!resources.isRecommendedEnabled(engine, moduleId, ruleOrAttackId)) {
+            return;
+        }
+        if ("DAST".equalsIgnoreCase(engine)) {
+            tags.put(TAG_TOOL_PTK_ACTIVE_DEFAULT, TAG_TOOL_PTK_ACTIVE_DEFAULT_URL);
+        } else if ("SAST".equalsIgnoreCase(engine) || "IAST".equalsIgnoreCase(engine)) {
+            tags.put(TAG_TOOL_PTK_PASSIVE_DEFAULT, TAG_TOOL_PTK_PASSIVE_DEFAULT_URL);
+        }
     }
 
     static String formatReferences(PtkModuleMetadata meta) {

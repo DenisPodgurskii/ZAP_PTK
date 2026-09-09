@@ -50,11 +50,14 @@ public final class PtkExampleAlerts {
                                 PtkAlertBuilder.buildExampleAlert(
                                         alertRef,
                                         engine,
+                                        module.getId(),
                                         moduleName,
+                                        rule.getId(),
                                         rule.getName() != null ? rule.getName() : rule.getId(),
                                         meta,
                                         rule.getSeverity(),
-                                        PtkAlertBuilder.parseRuleDescription(rule.getMetadata()));
+                                        PtkAlertBuilder.parseRuleDescription(rule.getMetadata()),
+                                        resources);
                         if (alert != null) {
                             alerts.add(alert);
                         }
@@ -71,13 +74,16 @@ public final class PtkExampleAlerts {
                                 PtkAlertBuilder.buildExampleAlert(
                                         alertRef,
                                         engine,
+                                        module.getId(),
                                         moduleName,
+                                        attack.getId(),
                                         attack.getName() != null
                                                 ? attack.getName()
                                                 : attack.getId(),
                                         meta,
                                         null,
-                                        null);
+                                        null,
+                                        resources);
                         if (alert != null) {
                             alerts.add(alert);
                         }

@@ -22,6 +22,7 @@ import org.parosproxy.paros.core.scanner.Alert;
 import org.zaproxy.addon.commonlib.CommonAlertTag;
 import org.zaproxy.addon.ptk.model.PtkFinding;
 import org.zaproxy.addon.ptk.model.PtkFindingBatch;
+import org.zaproxy.addon.ptk.model.PtkFindingLocation;
 
 /**
  * Tests for PTK alert handling using the temp-example JSON files. Verifies parsing, mapping to ZAP
@@ -135,6 +136,10 @@ class PtkAlertHandlerTest {
         assertEquals(
                 CommonAlertTag.OWASP_2021_A03_INJECTION.getValue(),
                 tags.get(CommonAlertTag.OWASP_2021_A03_INJECTION.getTag()));
+        assertEquals(
+                PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT_URL,
+                tags.get(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT));
+        assertNull(tags.get(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT));
     }
 
     @Test
@@ -167,6 +172,10 @@ class PtkAlertHandlerTest {
                 CommonAlertTag.OWASP_2021_A05_SEC_MISCONFIG.getValue(),
                 tags.get(CommonAlertTag.OWASP_2021_A05_SEC_MISCONFIG.getTag()));
         assertEquals(PtkAlertBuilder.TAG_TOOL_PTK_URL, tags.get(PtkAlertBuilder.TAG_TOOL_PTK));
+        assertNull(
+                tags.get(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT),
+                "headers module is excluded from the recommended DAST defaults");
+        assertNull(tags.get(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT));
     }
 
     @Test
@@ -189,6 +198,28 @@ class PtkAlertHandlerTest {
         assertEquals("Missing or weak Referrer-Policy", alert.getName());
         assertEquals(200005, alert.getPluginId());
         assertTrue(alert.getDescription().contains("HTTP response headers"));
+    }
+
+    @Test
+    void dastRecommendedAttackFindingHasActiveDefaultTag() {
+        assumeResourcesLoaded();
+        // jwt_injection is recommended by default (no override in zap-mapping.json).
+        PtkFinding jwtFinding = new PtkFinding();
+        jwtFinding.setModuleId("jwt_injection");
+        jwtFinding.setRuleId("jwt_1");
+        jwtFinding.setAttackId("jwt_1");
+        PtkFindingLocation location = new PtkFindingLocation();
+        location.setUrl("http://localhost:3001/");
+        jwtFinding.setLocation(location);
+
+        Alert alert = PtkAlertBuilder.buildFromFinding(jwtFinding, "DAST", mapper, resources);
+        assertNotNull(alert);
+        Map<String, String> tags = alert.getTags();
+        assertNotNull(tags);
+        assertEquals(
+                PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT_URL,
+                tags.get(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT));
+        assertNull(tags.get(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT));
     }
 
     @Test
