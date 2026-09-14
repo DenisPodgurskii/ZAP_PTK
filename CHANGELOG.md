@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## Unreleased
 ### Added
 - Added TAG_TOOL_PTK_PASSIVE_DEFAULT, TAG_TOOL_PTK_ACTIVE_DEFAULT tags.
+- Added POLICY_DEV_FULL, POLICY_QA_STD, POLICY_QA_FULL, POLICY_SEQUENCE tags to the PTK Scan Rules alert (230000).
 
 ## 0.9.0 - 2026-09-01
 ### Changed
