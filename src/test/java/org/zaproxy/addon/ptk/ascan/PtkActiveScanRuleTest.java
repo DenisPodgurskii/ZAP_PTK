@@ -3,9 +3,9 @@ package org.zaproxy.addon.ptk.ascan;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Set;
 import org.apache.commons.httpclient.URI;
 import org.apache.commons.httpclient.URIException;
 import org.junit.jupiter.api.Test;
@@ -14,6 +14,7 @@ import org.parosproxy.paros.core.scanner.Category;
 import org.parosproxy.paros.network.HttpMalformedHeaderException;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpRequestHeader;
+import org.zaproxy.addon.commonlib.PolicyTag;
 import org.zaproxy.zap.model.StructuralNode;
 
 class PtkActiveScanRuleTest {
@@ -27,7 +28,13 @@ class PtkActiveScanRuleTest {
         assertEquals(0, rule.getCweId());
         assertEquals(0, rule.getWascId());
         assertNotNull(rule.getAlertTags());
-        assertTrue(rule.getAlertTags().isEmpty());
+        assertEquals(
+                Set.of(
+                        PolicyTag.DEV_FULL.getTag(),
+                        PolicyTag.QA_STD.getTag(),
+                        PolicyTag.QA_FULL.getTag(),
+                        PolicyTag.SEQUENCE.getTag()),
+                rule.getAlertTags().keySet());
     }
 
     // ---- getFirstStartNodeUrl(List<?>) ----

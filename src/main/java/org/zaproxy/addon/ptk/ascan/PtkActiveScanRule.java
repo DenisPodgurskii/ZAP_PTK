@@ -2,6 +2,7 @@ package org.zaproxy.addon.ptk.ascan;
 
 import java.lang.reflect.Field;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.commons.httpclient.URI;
@@ -20,6 +21,7 @@ import org.zaproxy.addon.client.ExtensionClientIntegration;
 import org.zaproxy.addon.client.spider.ClientSpider;
 import org.zaproxy.addon.client.spider.ClientSpiderOptions;
 import org.zaproxy.addon.client.spider.ScanOptions;
+import org.zaproxy.addon.commonlib.PolicyTag;
 import org.zaproxy.addon.ptk.ExtensionPtk;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.model.Context;
@@ -39,6 +41,17 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
     private static final String MESSAGE_PREFIX = "ptk.ascan.";
 
     private static final long POLL_INTERVAL_MS = 500L;
+
+    private static final Map<String, String> ALERT_TAGS;
+
+    static {
+        Map<String, String> alertTags = new LinkedHashMap<>();
+        alertTags.put(PolicyTag.DEV_FULL.getTag(), "");
+        alertTags.put(PolicyTag.QA_STD.getTag(), "");
+        alertTags.put(PolicyTag.QA_FULL.getTag(), "");
+        alertTags.put(PolicyTag.SEQUENCE.getTag(), "");
+        ALERT_TAGS = Collections.unmodifiableMap(alertTags);
+    }
 
     @Override
     public int getId() {
@@ -87,7 +100,7 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
 
     @Override
     public Map<String, String> getAlertTags() {
-        return Collections.emptyMap();
+        return ALERT_TAGS;
     }
 
     @Override
