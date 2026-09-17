@@ -52,7 +52,7 @@ See <a href="ptk.html#tool_ptk_passive_default">ZAP Alerts</a> for the alert tag
 exposed via the PTK API (<code>mode:auto</code>). It is disabled while the active scan rule is enabled.
 When unchecked, PTK will still be active in the browser but no automated scanning will take place.
 <p>
-<strong>Browser</strong>, <strong>Action Wait Time (seconds)</strong>, and <strong>Number of Browser Windows to Open</strong>
+<strong>Browser</strong>, and <strong>Number of Browser Windows to Open</strong>
 apply to the PTK active scan rule. The default thread count is half the number of available processor cores.
 
 <H2>Command-Line Configuration</H2>
@@ -73,7 +73,6 @@ ZAP rules in due course.
   <li><code>ptk.activescan.rule.enabled</code> — enable or disable the PTK active scan rule</li>
   <li><code>ptk.automatedScanning.enabled</code> — enable or disable automated scanning (deprecated; use the active scan rule instead)</li>
   <li><code>ptk.activescan.browserId</code> — browser ID for the PTK active scan rule (see Selenium documentation for valid IDs)</li>
-  <li><code>ptk.activescan.actionWaitTime</code> — action wait time in seconds for the PTK active scan rule</li>
   <li><code>ptk.activescan.threadCount</code> — number of browser windows (threads) for the PTK active scan rule</li>
 </ul>
 Engine names are <code>SAST</code>, <code>IAST</code>, and <code>DAST</code>.
@@ -137,10 +136,9 @@ Enable automated scanning (deprecated):
 zap.sh -config ptk.automatedScanning.enabled=true
 </pre>
 
-Configure the PTK active scan rule browser, action wait time, and thread count:
+Configure the PTK active scan rule browser, and thread count:
 <pre>
 zap.sh -config ptk.activescan.browserId=firefox-headless \
-        -config ptk.activescan.actionWaitTime=2 \
         -config ptk.activescan.threadCount=4
 </pre>
 

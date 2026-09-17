@@ -46,9 +46,6 @@ class PtkParamTest {
         assertFalse(param.isAutomatedScanningEnabled());
         assertTrue(param.isActiveScanRuleEnabled());
         assertEquals(PtkParam.DEFAULT_ACTIVE_SCAN_BROWSER_ID, param.getActiveScanBrowserId());
-        assertEquals(
-                PtkParam.DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME,
-                param.getActiveScanActionWaitTimeInSecs());
         assertEquals(PtkParam.getDefaultActiveScanThreadCount(), param.getActiveScanThreadCount());
     }
 
@@ -56,7 +53,6 @@ class PtkParamTest {
     void activeScanOptions_persistedAndReloaded() {
         param.setActiveScanRuleEnabled(true);
         param.setActiveScanBrowserId(ClientSpiderOptions.DEFAULT_BROWSER_ID);
-        param.setActiveScanActionWaitTimeInSecs(5);
         param.setActiveScanThreadCount(3);
 
         PtkParam reloaded = new PtkParam();
@@ -64,7 +60,6 @@ class PtkParamTest {
 
         assertTrue(reloaded.isActiveScanRuleEnabled());
         assertEquals(ClientSpiderOptions.DEFAULT_BROWSER_ID, reloaded.getActiveScanBrowserId());
-        assertEquals(5, reloaded.getActiveScanActionWaitTimeInSecs());
         assertEquals(3, reloaded.getActiveScanThreadCount());
     }
 

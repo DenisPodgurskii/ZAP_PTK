@@ -60,8 +60,6 @@ public class PtkParam extends VersionedAbstractParam {
     private static final String ACTIVE_SCAN_RULE_ENABLED_KEY =
             BASE_KEY + ".activescan.rule.enabled";
     private static final String ACTIVE_SCAN_BROWSER_ID_KEY = BASE_KEY + ".activescan.browserId";
-    private static final String ACTIVE_SCAN_ACTION_WAIT_TIME_KEY =
-            BASE_KEY + ".activescan.actionWaitTime";
     private static final String ACTIVE_SCAN_THREAD_COUNT_KEY = BASE_KEY + ".activescan.threadCount";
     private static final String ENGINE_RUN_LOCATION_KEY_FORMAT =
             BASE_KEY + ".engine.%s.runLocation";
@@ -69,12 +67,6 @@ public class PtkParam extends VersionedAbstractParam {
     /** Default browser for the PTK active scan rule (same as the Client add-on). */
     public static final String DEFAULT_ACTIVE_SCAN_BROWSER_ID =
             ClientSpiderOptions.DEFAULT_BROWSER_ID;
-
-    /**
-     * Default action wait for the PTK active scan rule. The Client add-on defaults to {@code 0};
-     * PTK uses {@code 2} seconds so automated active scans allow pages to settle.
-     */
-    public static final int DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME = 2;
 
     public static final EngineRunLocation DEFAULT_DAST_RUN_LOCATION =
             EngineRunLocation.ACTIVE_SCAN_RULE;
@@ -87,7 +79,6 @@ public class PtkParam extends VersionedAbstractParam {
     private boolean activeScanRuleEnabled = true;
     private boolean useRecommendedDefaults = true;
     private String activeScanBrowserId = DEFAULT_ACTIVE_SCAN_BROWSER_ID;
-    private int activeScanActionWaitTimeInSecs = DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME;
     private int activeScanThreadCount = getDefaultActiveScanThreadCount();
     private EngineRunLocation dastRunLocation = DEFAULT_DAST_RUN_LOCATION;
     private EngineRunLocation sastRunLocation = DEFAULT_SAST_RUN_LOCATION;
@@ -104,8 +95,6 @@ public class PtkParam extends VersionedAbstractParam {
         activeScanRuleEnabled = getConfig().getBoolean(ACTIVE_SCAN_RULE_ENABLED_KEY, true);
         useRecommendedDefaults = getConfig().getBoolean(USE_RECOMMENDED_DEFAULTS_KEY, true);
         activeScanBrowserId = getString(ACTIVE_SCAN_BROWSER_ID_KEY, DEFAULT_ACTIVE_SCAN_BROWSER_ID);
-        activeScanActionWaitTimeInSecs =
-                getInt(ACTIVE_SCAN_ACTION_WAIT_TIME_KEY, DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME);
         activeScanThreadCount =
                 Math.max(
                         1, getInt(ACTIVE_SCAN_THREAD_COUNT_KEY, getDefaultActiveScanThreadCount()));
@@ -284,15 +273,6 @@ public class PtkParam extends VersionedAbstractParam {
     public void setActiveScanBrowserId(String browserId) {
         this.activeScanBrowserId = browserId;
         getConfig().setProperty(ACTIVE_SCAN_BROWSER_ID_KEY, browserId);
-    }
-
-    public int getActiveScanActionWaitTimeInSecs() {
-        return activeScanActionWaitTimeInSecs;
-    }
-
-    public void setActiveScanActionWaitTimeInSecs(int actionWaitTimeInSecs) {
-        this.activeScanActionWaitTimeInSecs = actionWaitTimeInSecs;
-        getConfig().setProperty(ACTIVE_SCAN_ACTION_WAIT_TIME_KEY, actionWaitTimeInSecs);
     }
 
     public int getActiveScanThreadCount() {

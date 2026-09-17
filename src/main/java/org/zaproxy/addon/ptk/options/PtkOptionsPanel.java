@@ -53,8 +53,6 @@ public class PtkOptionsPanel extends AbstractParamPanel {
     private static final String MESSAGE_PREFIX = "ptk.options.";
 
     private static final String CLIENT_LABEL_BROWSER = "client.scandialog.label.browser";
-    private static final String CLIENT_LABEL_ACTION_WAIT_TIME =
-            "client.options.label.actionwaittime";
     private static final String CLIENT_LABEL_THREAD_COUNT = "client.options.label.browsers";
 
     /**
@@ -71,7 +69,6 @@ public class PtkOptionsPanel extends AbstractParamPanel {
     private final JCheckBox enableActiveScanRuleCheckBox;
     private final JCheckBox enableAutomatedScanningCheckBox;
     private final JComboBox<String> browserComboBox;
-    private final ZapNumberSpinner actionWaitTimeSpinner;
     private final ZapNumberSpinner threadCountSpinner;
     private final JCheckBoxTree tree;
     private final JCheckBox useRecommendedDefaultsCheckBox;
@@ -94,9 +91,6 @@ public class PtkOptionsPanel extends AbstractParamPanel {
                                 MESSAGE_PREFIX + "enableAutomatedScanningDeprecated"),
                         false);
         browserComboBox = new JComboBox<>();
-        actionWaitTimeSpinner =
-                new ZapNumberSpinner(
-                        0, PtkParam.DEFAULT_ACTIVE_SCAN_ACTION_WAIT_TIME, Integer.MAX_VALUE);
         threadCountSpinner =
                 new ZapNumberSpinner(
                         1, PtkParam.getDefaultActiveScanThreadCount(), Integer.MAX_VALUE);
@@ -178,19 +172,6 @@ public class PtkOptionsPanel extends AbstractParamPanel {
                         0, row, GridBagConstraints.RELATIVE, 1.0, new Insets(2, 2, 2, 2)));
         activeScanTab.add(
                 browserComboBox,
-                LayoutHelper.getGBC(
-                        1, row, GridBagConstraints.REMAINDER, 1.0, new Insets(2, 2, 2, 2)));
-        row++;
-
-        JLabel actionWaitLabel =
-                new JLabel(Constant.messages.getString(CLIENT_LABEL_ACTION_WAIT_TIME));
-        actionWaitLabel.setLabelFor(actionWaitTimeSpinner);
-        activeScanTab.add(
-                actionWaitLabel,
-                LayoutHelper.getGBC(
-                        0, row, GridBagConstraints.RELATIVE, 1.0, new Insets(2, 2, 2, 2)));
-        activeScanTab.add(
-                actionWaitTimeSpinner,
                 LayoutHelper.getGBC(
                         1, row, GridBagConstraints.REMAINDER, 1.0, new Insets(2, 2, 2, 2)));
         row++;
@@ -366,7 +347,6 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         enableActiveScanRuleCheckBox.setSelected(param.isActiveScanRuleEnabled());
         enableAutomatedScanningCheckBox.setSelected(param.isAutomatedScanningEnabled());
         updateBrowsers(param.getActiveScanBrowserId());
-        actionWaitTimeSpinner.setValue(param.getActiveScanActionWaitTimeInSecs());
         threadCountSpinner.setValue(param.getActiveScanThreadCount());
         sastRunLocationComboBox.setSelectedItem(param.getSastRunLocation());
         iastRunLocationComboBox.setSelectedItem(param.getIastRunLocation());
@@ -400,7 +380,6 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         if (browserId != null) {
             param.setActiveScanBrowserId(browserId);
         }
-        param.setActiveScanActionWaitTimeInSecs(actionWaitTimeSpinner.getValue());
         param.setActiveScanThreadCount(threadCountSpinner.getValue());
         param.setSastRunLocation(
                 getSelectedRunLocation(
@@ -571,7 +550,6 @@ public class PtkOptionsPanel extends AbstractParamPanel {
         boolean activeScanRuleEnabled = enableActiveScanRuleCheckBox.isSelected();
         enableAutomatedScanningCheckBox.setEnabled(!activeScanRuleEnabled);
         browserComboBox.setEnabled(activeScanRuleEnabled);
-        actionWaitTimeSpinner.setEnabled(activeScanRuleEnabled);
         threadCountSpinner.setEnabled(activeScanRuleEnabled);
         if (activeScanRuleEnabled) {
             enableAutomatedScanningCheckBox.setSelected(false);
