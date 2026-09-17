@@ -160,17 +160,7 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
         }
         ClientSpiderOptions options = extClient.getClientSpiderParam().clone();
         options.setBrowserId(ptkParam.getActiveScanBrowserId());
-        options.setActionWaitTimeInSecs(ptkParam.getActiveScanActionWaitTimeInSecs());
         options.setThreadCount(ptkParam.getActiveScanThreadCount());
-        // TODO - inherit these from the client spider
-        /*
-        options.setPageLoadTimeInSecs(1);
-        options.setInitialLoadTimeInSecs(5);
-        options.setMaxDepth(5);
-        options.setMaxChildren(0);
-        options.setShutdownTimeInSecs(5);
-        options.setMaxDuration(0);
-        */
 
         ScanOptions scanOptions =
                 ScanOptions.builder()
