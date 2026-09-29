@@ -2,8 +2,13 @@
 ;(function() {
     'use strict'
 
-    const automationEnabledAttr = document.currentScript?.dataset?.ptkAutomationEnabled
-    const initialAutomationEnabled = automationEnabledAttr === '1' || automationEnabledAttr === 'true'
+    const bridgeScript = document.currentScript
+    const declarativeAutomationBootstrap = !bridgeScript
+    const automationEnabledAttr = bridgeScript?.dataset?.ptkAutomationEnabled
+    const initialAutomationEnabled = declarativeAutomationBootstrap
+        || automationEnabledAttr === '1' || automationEnabledAttr === 'true'
+    const AUTOMATION_REQUEST_EVENT = 'ptk-automation-request'
+    const AUTOMATION_RESPONSE_EVENT = 'ptk-automation-response'
     let isTopFrame = true
     try {
         isTopFrame = window.top === window
@@ -11,19 +16,21 @@
         isTopFrame = true
     }
 
-    const VERSION = document.currentScript?.dataset?.ptkVersion || 'unknown'
-    const EXTENSION_ORIGIN = document.currentScript?.dataset?.ptkExtensionOrigin || ''
+    const VERSION = bridgeScript?.dataset?.ptkVersion || 'unknown'
+    const EXTENSION_ORIGIN = bridgeScript?.dataset?.ptkExtensionOrigin || ''
     const BRIDGE_ID = 'ptk-automation-bridge'
     const bridgeGeneration = Number(window.__PTK_AUTOMATION_BRIDGE_GENERATION__ || 0) + 1
     window.__PTK_AUTOMATION_BRIDGE_GENERATION__ = bridgeGeneration
     if (typeof window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__ === 'function') {
         try {
-            window.removeEventListener('message', window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__)
+            document.removeEventListener(AUTOMATION_RESPONSE_EVENT, window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__)
         } catch (_) { }
     }
 
-    // In Cypress, AUT runs in an iframe. Allow bridge there only when automation is enabled.
-    if (!isTopFrame && !initialAutomationEnabled) return
+    // The declarative pre-IAST Auto bridge is top-frame only, matching the
+    // content_automation controller. Preserve explicit enabled iframe support
+    // for Cypress and other existing injected-bridge callers.
+    if (!isTopFrame && (declarativeAutomationBootstrap || !initialAutomationEnabled)) return
     const PTK_AUTOMATION_CAPABILITIES = Object.freeze([
         'startSession',
         'endSession',
@@ -38,9 +45,39 @@
     // Marker value shared with ptkAgentAutomation.js (PTK_AGENT_SESSION_SCOPE);
     // callers passing this opt into strict lookup in getFindings().
     const PTK_AGENT_SESSION_SCOPE = 'current-tab'
-    let currentNonce = document.currentScript?.dataset?.ptkNonce || ''
+    let currentNonce = bridgeScript?.dataset?.ptkNonce || ''
     if (!currentNonce) {
         currentNonce = `ptk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    }
+    if (isTopFrame || initialAutomationEnabled) {
+        let nonceEl = document.getElementById('__ptk_automation_nonce__')
+        if (!nonceEl) {
+            nonceEl = document.createElement('div')
+            nonceEl.id = '__ptk_automation_nonce__'
+            nonceEl.style.display = 'none'
+            ;(document.documentElement || document.head)?.appendChild(nonceEl)
+        }
+        if (nonceEl) {
+            nonceEl.dataset.nonce = currentNonce
+            nonceEl.dataset.automationEnabled = initialAutomationEnabled ? '1' : '0'
+            nonceEl.dataset.bridgeOwned = '1'
+        }
+    }
+
+    function parseAutomationEvent(event) {
+        try {
+            return JSON.parse(String(event?.detail || ''), (_, value) => value?.__ptkType === 'Uint8Array'
+                ? Uint8Array.from(value.data || [])
+                : value)
+        } catch (_) {
+            return null
+        }
+    }
+
+    function dispatchAutomationRequest(payload) {
+        document.dispatchEvent(new CustomEvent(AUTOMATION_REQUEST_EVENT, {
+            detail: JSON.stringify(payload)
+        }))
     }
 
     const pendingRequests = new Map()
@@ -94,13 +131,13 @@
                 }
             }, 300000)
 
-            window.postMessage({
+            dispatchAutomationRequest({
                 source: 'ptk-automation',
                 nonce: currentNonce,  // Include nonce in every message
                 requestId,
                 type,
                 ...payload
-            }, '*')
+            })
         })
     }
 
@@ -155,21 +192,20 @@
 
     const bridgeMessageHandler = (event) => {
         if (window.__PTK_AUTOMATION_BRIDGE_GENERATION__ !== bridgeGeneration) return
-        // Only accept messages from same window
-        if (event.source !== window) return
-
-        const data = event.data
+        const data = parseAutomationEvent(event)
         if (data?.source !== 'ptk-extension') return
 
         if (data.type === 'automation-status') {
-            // The page can forge postMessage payloads, so this status message is
-            // intentionally non-authoritative for enabling automation. The bridge
-            // starts enabled only from the injected script dataset. Disabling is
-            // allowed as a defensive state transition; re-enabling requires a new
-            // injected bridge instance from the extension content script.
-            if (data.enabled === false && window.PTK_AUTOMATION) {
-                window.PTK_AUTOMATION._automationEnabled = false
+            if (data.nonce !== currentNonce || !window.PTK_AUTOMATION) return
+            // Page bridge state is compatibility/UI state, never scan authority.
+            // Only the isolated content listener and background authorize and
+            // execute requests, so a forged page-visible status cannot start a
+            // scan or create that privileged listener.
+            if (typeof data.version === 'string' && data.version) window.PTK_AUTOMATION.version = data.version
+            if (typeof data.extensionOrigin === 'string' && data.extensionOrigin) {
+                window.PTK_AUTOMATION.extensionOrigin = data.extensionOrigin
             }
+            if (typeof data.enabled === 'boolean') window.PTK_AUTOMATION._automationEnabled = data.enabled
             return
         }
 
@@ -188,13 +224,14 @@
         }
     }
     window.__PTK_AUTOMATION_BRIDGE_MESSAGE_HANDLER__ = bridgeMessageHandler
-    window.addEventListener('message', bridgeMessageHandler)
+    document.addEventListener(AUTOMATION_RESPONSE_EVENT, bridgeMessageHandler)
 
     // PTK_AUTOMATION low-level compatibility bridge. The extension deliberately
     // overwrites page-owned objects with the same name; ZAP close decisions must
     // flow through this bridge and then through background session lookup.
     window.PTK_AUTOMATION = {
         version: VERSION,
+        extensionOrigin: EXTENSION_ORIGIN || undefined,
         bridgeId: BRIDGE_ID,
 
         /**
@@ -212,7 +249,7 @@
                     ? Array.from(PTK_AUTOMATION_CAPABILITIES)
                     : [],
                 automationEnabled: enabled,
-                extensionOrigin: EXTENSION_ORIGIN || undefined,
+                extensionOrigin: this.extensionOrigin,
                 error: enabled ? undefined : 'automation_disabled'
             }
         },

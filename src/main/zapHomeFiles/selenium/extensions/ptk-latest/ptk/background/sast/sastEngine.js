@@ -605,34 +605,32 @@ export class sastEngine {
       }
 
       const pageSourceScripts = await this.collectPageSourceScripts(file);
-      if (pageSourceScripts.length) {
-        const indexByKey = new Map();
-        const merged = [];
-        const keyForScript = (script) => {
-          if (script?.src) return `src:${script.src}`;
-          const code = typeof script?.code === "string" ? script.code : "";
-          return code.trim() ? `inline:${code}` : "";
-        };
-        const addScript = (script) => {
-          const key = keyForScript(script);
-          if (!key) return;
-          if (indexByKey.has(key)) {
-            const index = indexByKey.get(key);
-            const existing = merged[index] || null;
-            const existingCode = typeof existing?.code === "string" ? existing.code : "";
-            const nextCode = typeof script?.code === "string" ? script.code : "";
-            if (!existingCode.trim() && nextCode.trim()) {
-              merged[index] = script;
-            }
-            return;
+      const indexByKey = new Map();
+      const merged = [];
+      const keyForScript = (script) => {
+        if (script?.src) return `src:${script.src}`;
+        const code = typeof script?.code === "string" ? script.code : "";
+        return code.trim() ? `inline:${code}` : "";
+      };
+      const addScript = (script) => {
+        const key = keyForScript(script);
+        if (!key) return;
+        if (indexByKey.has(key)) {
+          const index = indexByKey.get(key);
+          const existing = merged[index] || null;
+          const existingCode = typeof existing?.code === "string" ? existing.code : "";
+          const nextCode = typeof script?.code === "string" ? script.code : "";
+          if (!existingCode.trim() && nextCode.trim()) {
+            merged[index] = script;
           }
-          indexByKey.set(key, merged.length);
-          merged.push(script);
-        };
-        (Array.isArray(scripts) ? scripts : []).forEach(addScript);
-        pageSourceScripts.forEach(addScript);
-        scripts = merged;
-      }
+          return;
+        }
+        indexByKey.set(key, merged.length);
+        merged.push(script);
+      };
+      (Array.isArray(scripts) ? scripts : []).forEach(addScript);
+      pageSourceScripts.forEach(addScript);
+      scripts = merged;
 
       scripts = (Array.isArray(scripts) ? scripts : []).sort((a, b) => {
         const aIsInline = a.src === null;

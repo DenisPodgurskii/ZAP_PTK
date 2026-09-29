@@ -8,6 +8,8 @@ const runtime = shared.runtime || ((typeof browser !== 'undefined' && browser?.r
     ? browser.runtime
     : (typeof chrome !== 'undefined' && chrome?.runtime ? chrome.runtime : null));
 const PTK_AGENT_AUTOMATION_SCRIPT_ID = 'ptk-agent-automation-layer';
+const AUTOMATION_REQUEST_EVENT = 'ptk-automation-request';
+const AUTOMATION_RESPONSE_EVENT = 'ptk-automation-response';
 const ptkAutomationManifest = (() => {
     try {
         return runtime?.getManifest ? runtime.getManifest() : null;
@@ -140,13 +142,27 @@ function injectPtkAgentAutomationLayer() {
 
 function notifyAutomationStatus(enabled, nonce) {
     try {
-        window.postMessage({
+        const bridgeUrl = runtimeGetURL('ptk/automationBridge.js');
+        dispatchAutomationResponse({
             source: 'ptk-extension',
             type: 'automation-status',
             enabled: enabled === true,
-            nonce: nonce || ''
-        }, '*');
+            nonce: nonce || '',
+            version: ptkAutomationVersion,
+            extensionOrigin: bridgeUrl ? new URL(bridgeUrl).origin : ''
+        });
     } catch (_) { }
+}
+
+function parseAutomationRequestEvent(event) {
+    try { return JSON.parse(String(event?.detail || '')); } catch (_) { return null; }
+}
+
+function dispatchAutomationResponse(payload) {
+    const detail = JSON.stringify(payload, (_, value) => value instanceof Uint8Array
+        ? { __ptkType: 'Uint8Array', data: Array.from(value) }
+        : value);
+    document.dispatchEvent(new CustomEvent(AUTOMATION_RESPONSE_EVENT, { detail }));
 }
 
 function handleAutomationBridgeMessage(data) {
@@ -177,19 +193,19 @@ function handleAutomationBridgeMessage(data) {
 
     sendRuntimeMessage(payload).then((response) => {
         const normalizedResponse = normalizeAutomationBridgeResponse(data.type, response);
-        window.postMessage({
+        dispatchAutomationResponse({
             source: 'ptk-extension',
             nonce: automationNonce,
             requestId: data.requestId,
             ...normalizedResponse
-        }, '*');
+        });
     }).catch((error) => {
-        window.postMessage({
+        dispatchAutomationResponse({
             source: 'ptk-extension',
             nonce: automationNonce,
             requestId: data.requestId,
             error: error?.message || 'PTK automation error'
-        }, '*');
+        });
     });
 }
 
@@ -198,12 +214,17 @@ function enableAutomationBridge() {
     automationMessageHandlerInstalled = true;
     window.__PTK_CONTENT_AUTOMATION_ACTIVE__ = true;
     const automationRuntime = isPtkAutomationAgentManifest ? 'agent' : 'zap';
-    automationNonce = `ptk-${automationRuntime}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    let nonceEl = document.getElementById('__ptk_automation_nonce__');
+    const preIastBridgeOwned = nonceEl?.dataset?.bridgeOwned === '1'
+        && typeof nonceEl?.dataset?.nonce === 'string'
+        && nonceEl.dataset.nonce.startsWith('ptk-');
+    automationNonce = preIastBridgeOwned
+        ? nonceEl.dataset.nonce
+        : `ptk-${automationRuntime}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
     // The nonce is exposed to the WebDriver-controlled page as a correlation
     // guard, not a secret. Browser-close safety is trusted only after the
     // background verifies tab ownership and session state.
-    let nonceEl = document.getElementById('__ptk_automation_nonce__');
     if (!nonceEl) {
         nonceEl = document.createElement('div');
         nonceEl.id = '__ptk_automation_nonce__';
@@ -217,7 +238,8 @@ function enableAutomationBridge() {
         nonceEl.dataset.automationRuntime = automationRuntime;
     }
 
-    installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true);
+    if (preIastBridgeOwned) injectPtkAgentAutomationLayer();
+    else installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true);
     notifyAutomationStatus(true, automationNonce);
     [50, 250, 1000].forEach((delayMs) => {
         try {
@@ -225,9 +247,8 @@ function enableAutomationBridge() {
         } catch (_) { }
     });
 
-    window.addEventListener('message', (event) => {
-        if (event.source !== window) return;
-        const data = event.data;
+    document.addEventListener(AUTOMATION_REQUEST_EVENT, (event) => {
+        const data = parseAutomationRequestEvent(event);
         if (data?.source !== 'ptk-automation') return;
         if (data.nonce !== automationNonce) return;
         handleAutomationBridgeMessage(data);
@@ -263,7 +284,7 @@ if (automationTopFrame) {
 
         if (message?.channel === 'ptk_background2content_automation' && message?.payload) {
             try {
-                window.postMessage(message.payload, '*');
+                dispatchAutomationResponse(message.payload);
             } catch (_) { }
             return Promise.resolve({ ok: true });
         }

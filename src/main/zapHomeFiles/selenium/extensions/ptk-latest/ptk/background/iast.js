@@ -212,30 +212,27 @@ function formatIastRegistrationMatchHost(hostname = '') {
 function buildIastAgentScriptRegistrationScope({ host = '', targetUrl = '' } = {}) {
     const normalized = normalizeIastRegistrationHost({ host, targetUrl })
     if (!normalized) return null
-    const matchHost = formatIastRegistrationMatchHost(normalized.hostname)
+    const matchHost = normalized.hostWithPort || formatIastRegistrationMatchHost(normalized.hostname)
     if (!matchHost) return null
 
     const registrationTarget = normalizeIastRegistrationTarget(targetUrl)
-    const scope = registrationTarget
-        ? { matches: [`${registrationTarget.protocol}//${matchHost}/*`] }
+    return registrationTarget
+        ? {
+            matches: registrationTarget.pathname === '/'
+                ? [`${registrationTarget.origin}/*`]
+                : registrationTarget.pathname.endsWith('/')
+                    ? [`${registrationTarget.origin}${registrationTarget.pathname}*`]
+                    : [
+                        `${registrationTarget.origin}${registrationTarget.pathname}`,
+                        `${registrationTarget.origin}${registrationTarget.pathPrefix}*`
+                    ]
+        }
         : {
             matches: [
                 `http://${matchHost}/*`,
                 `https://${matchHost}/*`
             ]
         }
-    if (registrationTarget) {
-        const pathGlob = registrationTarget.pathname === '/'
-            ? '/*'
-            : `${registrationTarget.pathPrefix}*`
-        scope.includeGlobs = [`${registrationTarget.origin}${pathGlob}`]
-    } else if (normalized.hostWithPort && normalized.hostWithPort !== normalized.hostname) {
-        scope.includeGlobs = [
-            `http://${normalized.hostWithPort}/*`,
-            `https://${normalized.hostWithPort}/*`
-        ]
-    }
-    return scope
 }
 
 function isIastNavigationUrlInScope(rawUrl = '', { host = '', targetUrl = '' } = {}) {
@@ -4272,9 +4269,6 @@ export class ptk_iast {
                     world: 'MAIN',
                     persistAcrossSessions: false
                 }
-                if (Array.isArray(registrationScope.includeGlobs) && registrationScope.includeGlobs.length) {
-                    contentScript.includeGlobs = registrationScope.includeGlobs
-                }
                 try {
                     await browser.scripting.registerContentScripts([contentScript])
                     return true
@@ -4302,9 +4296,6 @@ export class ptk_iast {
                     runAt: 'document_start',
                     allFrames: false,
                     matchAboutBlank: false
-                }
-                if (Array.isArray(registrationScope.includeGlobs) && registrationScope.includeGlobs.length) {
-                    contentScript.includeGlobs = registrationScope.includeGlobs
                 }
                 this.firefoxIastContentScriptRegistration = await browser.contentScripts.register(contentScript)
                 return true

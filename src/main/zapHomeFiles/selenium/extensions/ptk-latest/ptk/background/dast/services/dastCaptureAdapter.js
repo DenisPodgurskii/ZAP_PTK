@@ -479,7 +479,11 @@ export class DastCaptureAdapter {
     _recordCaptureDiagnostic(event) {
         try {
             if (typeof this.engine?._appendRuntimeEvent === "function") {
-                this.engine._appendRuntimeEvent(Object.assign({ ts: new Date().toISOString(), source: "dast_capture" }, event || {}))
+                Promise.resolve(this.engine._appendRuntimeEvent(Object.assign({ ts: new Date().toISOString(), source: "dast_capture" }, event || {})))
+                    .catch((error) => console.error("[PTK DAST] Capture diagnostic append failed", {
+                        active: this.engine?.isRunning === true,
+                        error: error?.message || String(error)
+                    }))
             }
         } catch (_) { }
     }
@@ -716,21 +720,23 @@ export class DastCaptureAdapter {
                 type: entry?.type || "xmlhttprequest",
                 statusCode: entry?.statusCode || 200
             }
-            this.engine?.enqueue?.({
-                raw: rawRequest,
-                url: entry?.url,
-                method: entry?.method || "GET",
-                ui_url: entry?.ui_url || entry?.url,
-                responseType: response.type,
-                capturedRequest: cloneCapturedRequest({
+            try {
+                await this.engine?.enqueue?.({
+                    raw: rawRequest,
                     url: entry?.url,
-                    ui_url: entry?.ui_url || entry?.url,
                     method: entry?.method || "GET",
-                    requestHeaders: entry?.requestHeaders || [],
-                    requestBody: entry?.requestBody || null
-                })
-            }, response)
-            proxySeeded += 1
+                    ui_url: entry?.ui_url || entry?.url,
+                    responseType: response.type,
+                    capturedRequest: cloneCapturedRequest({
+                        url: entry?.url,
+                        ui_url: entry?.ui_url || entry?.url,
+                        method: entry?.method || "GET",
+                        requestHeaders: entry?.requestHeaders || [],
+                        requestBody: entry?.requestBody || null
+                    })
+                }, response)
+                proxySeeded += 1
+            } catch (_) { }
         }
 
         const historySeedUrls = Array.isArray(options?.historySeedUrls) ? options.historySeedUrls : []
@@ -747,7 +753,7 @@ export class DastCaptureAdapter {
             try {
                 const parsed = new URL(url)
                 const raw = `GET ${url} HTTP/1.1\r\nHost: ${parsed.host}\r\n\r\n`
-                this.engine?.enqueue?.({
+                await this.engine?.enqueue?.({
                     raw,
                     url,
                     method: "GET",
@@ -880,7 +886,7 @@ export class DastCaptureAdapter {
                 const firstLine = String(rawRequest || "").split(/\r?\n/)[0] || ""
                 if (!/^[A-Z]+\s+https?:\/\//.test(firstLine)) return false
                 const uiUrl = this._extractUiUrlFromRaw(rawRequest, response.ui_url || response.url)
-                this.engine?.enqueue?.({
+                await this.engine?.enqueue?.({
                     raw: rawRequest,
                     url: response.url,
                     method: response.method,

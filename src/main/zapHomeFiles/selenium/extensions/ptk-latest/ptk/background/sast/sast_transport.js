@@ -1,5 +1,7 @@
 /* Author: Denis Podgurskii */
 
+import { OffscreenRuntimeManager } from "../offscreen/offscreenRuntimeManager.js";
+
 const worker = self;
 
 export class SastTransport {
@@ -10,6 +12,7 @@ export class SastTransport {
     chromeApi = typeof chrome !== "undefined" ? chrome : null,
     WorkerCtor = typeof Worker !== "undefined" ? Worker : null,
     disableRemote = false,
+    offscreenManager = null,
   } = {}) {
     this.asyncSession = asyncSession;
     this.eventHandler = typeof eventHandler === "function" ? eventHandler : null;
@@ -17,6 +20,7 @@ export class SastTransport {
     this.chromeApi = chromeApi;
     this.WorkerCtor = WorkerCtor;
     this.disableRemote = disableRemote === true;
+    this.offscreenManager = offscreenManager || new OffscreenRuntimeManager({ chromeApi });
     this.sastWorker = null;
     this.offscreenInitPromise = null;
   }
@@ -66,25 +70,7 @@ export class SastTransport {
 
   async ensureOffscreenDocument() {
     if (worker.isFirefox) return false;
-    if (typeof this.chromeApi === "undefined" || !this.chromeApi?.offscreen?.createDocument) return false;
-
-    if (!this.offscreenInitPromise) {
-      this.offscreenInitPromise = (async () => {
-        if (this.chromeApi.offscreen.hasDocument) {
-          const has = await this.chromeApi.offscreen.hasDocument();
-          if (has) return true;
-        }
-
-        await this.chromeApi.offscreen.createDocument({
-          url: "ptk/offscreen/sast_offscreen.html",
-          reasons: ["IFRAME_SCRIPTING"],
-          justification: "Run CPU-heavy SAST engine outside the MV3 service worker",
-        });
-        return true;
-      })();
-    }
-
-    return this.offscreenInitPromise;
+    return this.offscreenManager.ensureDocument();
   }
 
   async tryEnsureOffscreenDocument(reason = "unknown") {

@@ -90,7 +90,7 @@ function applyCountersUpdate(target, meta) {
 class rbuilderUI {
 
     constructor() {
-        this.storage = []
+        this.storage = {}
         this.updating = false
         this.scanCounters = createEmptyCounters()
         this.scanFilterScope = 'all'
@@ -158,7 +158,7 @@ class rbuilderUI {
                     rules: [{
                         prompt: 'URL is required',
                         type: 'regExp',
-                        value: /^(?:([A-Za-z]+):)?(\/{0,3})([0-9.\-A-Za-z]+)(?::(\d+))?(?:\/([^?#]*))?(?:\?([^#]*))?(?:#(.*))?$/i,
+                        value: /^(?:\/[^\s]*|(?:([A-Za-z]+):)?(\/{0,3})([0-9.\-A-Za-z]+)(?::(\d+))?(?:\/([^?#]*))?(?:\?([^#]*))?(?:#(.*))?)$/i,
                     }]
                 }
             }
@@ -168,6 +168,7 @@ class rbuilderUI {
     }
 
     resetAll() {
+        this.storage = {}
         $('.menu_item').each(function (i, obj) {
             $(obj).parent().parent().remove()
         })
@@ -578,9 +579,14 @@ jQuery(function () {
         return false
     })
 
-    $(document).on("click", ".resetall", function () {
-        controller.resetAll()
-        rbuilder.resetAll()
+    $(document).on("click", ".resetall", async function () {
+        try {
+            await controller.resetAll()
+            rbuilder.resetAll()
+        } catch (error) {
+            $('#traffic_error_message').text(error?.message || 'Could not reset saved requests.')
+            $('.mini.modal').modal('show')
+        }
     })
 
     $(document).on('change', "[name=request_method], [name=request_protocol], [name=request_url], [name=override_headers], [name=follow_redirect], [name=update_content_length], [name=use_content_type]", function (e) {
@@ -880,18 +886,23 @@ browser.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         }
     }
     if (message.channel == "ptk_background2popup_rbuilder") {
+        if (message.type == "scan progress") {
+            rbuilder.bindAttackProgress(message)
+        }
         if (message.type == "scan completed") {
             //bindScanResult(message.scanResult)
             let key = $('.menu_item.active').attr('key')
-            rbuilder.storage[key].scanResult = message.scanResult
-            rbuilder.bindScanResult(key)
+            if (key && rbuilder.storage[key]) {
+                rbuilder.storage[key].scanResult = message.scanResult
+                rbuilder.bindScanResult(key)
+            }
         }
         if (message.type == "scan_failed") {
-            $('#scan_error_message').text(message.error || 'Could not scan the current request.')
+            $('#traffic_error_message').text(message.error || 'Could not scan the current request.')
             $('.mini.modal').modal('show')
         }
         if (message.type == "attack failed") {
-            $('#scan_error_message').text(message.info)
+            $('#traffic_error_message').text(message.info)
             $('.mini.modal').modal('show')
         }
     }

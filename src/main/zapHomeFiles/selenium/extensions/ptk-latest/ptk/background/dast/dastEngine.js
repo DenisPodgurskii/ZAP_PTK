@@ -25,6 +25,9 @@ import { DastTaskPlanner } from "./services/dastTaskPlanner.js"
 import { DastTaskScheduler } from "./services/dastTaskScheduler.js"
 import { DastConfirmationService } from "./services/dastConfirmationService.js"
 import { AuthzDiffService } from "../bugbounty/authzDiffService.js"
+import { LocalDastBrowserOperations } from "./runtime/browserOperations.js"
+import { isDastResponseAllowed } from "./services/dastAdmission.js"
+import { dastSimpleFingerprint } from "./services/dastDedupe.js"
 
 const DEFAULT_SCAN_STRATEGY = 'SMART'
 const DEFAULT_DAST_REQUEST_TIMEOUT_MS = 15000
@@ -37,6 +40,14 @@ const HTML_LINK_DISCOVERY_BUDGETS = Object.freeze({
     wide: 1024
 })
 const TASK_FAMILY_FAIRNESS_LOAD_SHED_THRESHOLD = 128
+export const DAST_PHASE_PERFORMANCE_KEYS = Object.freeze([
+    "planAdmission",
+    "readyQueueWait",
+    "intentPersistence",
+    "taskExecution",
+    "completionCommit",
+    "uiPersistencePause"
+])
 const HTML_DISCOVERY_SEED_BATCH_SIZE = 8
 const HTML_LINK_DISCOVERY_SOURCE = "html_link"
 const HTML_LINK_DISCOVERY_LABEL = "Auto-discovered"
@@ -276,7 +287,9 @@ export class dastEngine {
     /**
      * settings: { maxRequestsPerSecond, concurrency, modulesUrl, ... }
      */
-    constructor(settings = {}) {
+    constructor(settings = {}, { browserOperations = null, requestFactory = null } = {}) {
+        this.browserOperations = browserOperations || new LocalDastBrowserOperations()
+        this.requestFactory = typeof requestFactory === "function" ? requestFactory : () => new ptk_request()
         this.settings = settings
         this.maxRequestsPerSecond = settings.maxRequestsPerSecond
         this.concurrency = settings.concurrency
@@ -363,12 +376,23 @@ export class dastEngine {
         this._oastCallbackListener = null
     }
 
+    _browserCall(method, args = []) {
+        if (this.browserOperations?.call) return this.browserOperations.call(method, args)
+        const [namespace, name] = String(method || "").split(".")
+        const fn = globalThis.browser?.[namespace]?.[name]
+        if (typeof fn !== "function") throw new Error("dast_browser_operation_unavailable")
+        return fn.apply(globalThis.browser[namespace], args)
+    }
+
     setSessionProfileStore(store = null) {
         this.sessionProfileStore = store || null
         this._refreshModuleStatuses()
     }
 
     reset() {
+        if (this._firefoxBrowserNavHarnessRegistration) {
+            this._browserNavHarnessCleanupPromise = this._unregisterBrowserNavHarnessScript().catch(() => false)
+        }
         this._scheduleCloseZapAttackWindow?.('reset')
         this._detachOastCallbackProbe()
         this.isRunning = false
@@ -529,10 +553,12 @@ export class dastEngine {
 
     _supportsH2ObservationTransport() {
         return !this._isFirefoxRuntime()
-            && !!browser?.debugger
-            && !!browser?.tabs?.create
-            && !!browser?.tabs?.remove
-            && !!browser?.scripting?.executeScript
+            && (this.browserOperations?.remote === true || (
+                !!browser?.debugger
+                && !!browser?.tabs?.create
+                && !!browser?.tabs?.remove
+                && !!browser?.scripting?.executeScript
+            ))
     }
 
     _supportsMultiIdentityExecution() {
@@ -864,6 +890,16 @@ export class dastEngine {
     }
 
     _createPerformanceTelemetry() {
+        const phases = {}
+        for (const phase of DAST_PHASE_PERFORMANCE_KEYS) {
+            phases[phase] = {
+                count: 0,
+                totalMs: 0,
+                maxMs: 0,
+                byType: {},
+                byFamily: {}
+            }
+        }
         return {
             planner: {
                 plansBuilt: 0,
@@ -898,8 +934,28 @@ export class dastEngine {
                 maxMs: 0,
                 byModule: Object.create(null),
                 byFamily: Object.create(null)
-            }
+            },
+            phases
         }
+    }
+
+    _recordPerformancePhase(phase, durationMs = 0, { type = "unknown", family = "unknown" } = {}) {
+        const bucket = this._performanceTelemetry?.phases?.[phase]
+        if (!bucket) return
+        const elapsedMs = Math.max(0, Number(durationMs || 0))
+        bucket.count += 1
+        bucket.totalMs += elapsedMs
+        bucket.maxMs = Math.max(bucket.maxMs || 0, elapsedMs)
+        const recordGrouped = (store, key) => {
+            const normalized = String(key || "unknown")
+            const grouped = store[normalized] || { count: 0, totalMs: 0, maxMs: 0 }
+            grouped.count += 1
+            grouped.totalMs += elapsedMs
+            grouped.maxMs = Math.max(grouped.maxMs || 0, elapsedMs)
+            store[normalized] = grouped
+        }
+        recordGrouped(bucket.byType, type)
+        recordGrouped(bucket.byFamily, family)
     }
 
     _perfModuleBucket(moduleId = "module") {
@@ -1263,6 +1319,10 @@ export class dastEngine {
         planner.maxMs = Math.max(planner.maxMs || 0, Math.max(0, Number(durationMs || 0)))
         planner.tasksPlanned += tasksPlanned
         planner.tasksPlannedMax = Math.max(planner.tasksPlannedMax || 0, tasksPlanned)
+        this._recordPerformancePhase("planAdmission", durationMs, {
+            type: plan?.original?.request?.method || "request",
+            family: "planning"
+        })
         if (plan && (durationMs >= 50 || tasksPlanned >= 10)) {
             this._appendRuntimeEvent({
                 type: "dast_plan_metrics",
@@ -1330,6 +1390,10 @@ export class dastEngine {
             moduleBucket.queueWaitMsTotal += Math.max(0, Number(waitMs || 0))
             moduleBucket.queueWaitMsMax = Math.max(moduleBucket.queueWaitMsMax || 0, Math.max(0, Number(waitMs || 0)))
         }
+        this._recordPerformancePhase("readyQueueWait", waitMs, {
+            type: task?.moduleId || task?.module?.id || task?.moduleName || "module",
+            family: task?._familyKey || this._taskFamilyKey(task)
+        })
     }
 
     _recordTaskExecution(task, durationMs = 0) {
@@ -1351,6 +1415,10 @@ export class dastEngine {
             familyBucket.executionMsTotal += Math.max(0, Number(durationMs || 0))
             familyBucket.executionMsMax = Math.max(familyBucket.executionMsMax || 0, Math.max(0, Number(durationMs || 0)))
         }
+        this._recordPerformancePhase("taskExecution", durationMs, {
+            type: task?.moduleId || task?.module?.id || task?.moduleName || "module",
+            family: task?._familyKey || this._taskFamilyKey(task)
+        })
     }
 
     _normalizePlanningMethods(values) {
@@ -2513,6 +2581,12 @@ export class dastEngine {
             this._requestRecordByDedupeKey = new Map()
         }
         this._recordedRequestDedupeKeys.add(key)
+        this.browserOperations.sendRuntimeMessage({
+            channel: "ptk_dast_runtime_internal",
+            type: "dast_dedupe_delta",
+            key,
+            strong: !this._recordedRequestLooksWeak(record)
+        }).catch(() => {})
         if (record) this._requestRecordByDedupeKey.set(key, record)
     }
 
@@ -2653,34 +2727,7 @@ export class dastEngine {
 
 
     isAllowed(response) {
-        let allowed = true
-        const rawUrl = response?.ui_url || response?.url || ''
-        const sourceUrl = response?.url || rawUrl
-        if (!sourceUrl) return false
-        let url = null
-        try {
-            url = new URL(sourceUrl)
-        } catch (_) {
-            return false
-        }
-        const params = getSearchParamsFromUrlOrHash(rawUrl)
-        const hasParams = [...params.keys()].length > 0
-        const method = String(response?.method || 'GET').toUpperCase()
-        const isStateChanging = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
-        const blacklist = Array.isArray(this.settings?.blacklist) ? this.settings.blacklist : []
-        // Never drop state-changing requests because they frequently carry sink inputs
-        // in body/json (for example auth/login or mutation APIs) without query params.
-        if (blacklist.includes(response.type) && !hasParams && !isStateChanging) {
-            allowed = false
-        } else {
-            const allowedHost = String(this.host || '')
-            const allowedDomains = Array.isArray(this.domains) ? this.domains : []
-            if (!url.host.includes(allowedHost) &&
-                allowedDomains.findIndex(i => url.host.includes(i)) < 0) {
-                allowed = false
-            }
-        }
-        return allowed
+        return isDastResponseAllowed(response, this)
     }
 
     updateScanResult(result, data) {
@@ -2750,7 +2797,7 @@ export class dastEngine {
 
     _emitDeltaMessage(type, delta) {
         if (!delta) return
-        browser.runtime.sendMessage({
+        this.browserOperations.sendRuntimeMessage({
             channel: "ptk_background2popup_rattacker",
             type,
             delta
@@ -3066,10 +3113,12 @@ export class dastEngine {
     stop() {
         this.isRunning = false
         this.inProgress = false
-        this._scheduleCloseZapAttackWindow('stop')
-        this._detachOastCallbackProbe()
-        this._unregisterBrowserNavHarnessScript().catch(() => {})
-        this._unregisterBrowserWorkflowHarnessScript().catch(() => {})
+        this._privilegedCleanupPromise = Promise.allSettled([
+            this._scheduleCloseZapAttackWindow('stop'),
+            this._detachOastCallbackProbe(),
+            this._unregisterBrowserNavHarnessScript(),
+            this._unregisterBrowserWorkflowHarnessScript()
+        ])
         const pendingPlans = this._activePlans ? Array.from(this._activePlans.values()) : []
         for (const plan of pendingPlans) {
             plan.pending = 0
@@ -3086,6 +3135,10 @@ export class dastEngine {
         }
         this._emitProgress({ message: 'Scan stopped' }, { force: true })
         ptk_request.clearStoredHeaders()
+    }
+
+    waitForPrivilegedCleanup() {
+        return this._privilegedCleanupPromise || Promise.resolve()
     }
 
     async run() {
@@ -4412,7 +4465,7 @@ export class dastEngine {
         context?.notified?.add(key)
         const attack = task.attack
         const progress = this._buildProgressSnapshot()
-        browser.runtime.sendMessage({
+        this.browserOperations.sendRuntimeMessage({
             channel: "ptk_background2popup_rattacker",
             type: "attack completed",
             // Avoid cloning full scanResult for progress updates.
@@ -4449,9 +4502,11 @@ export class dastEngine {
         const isolatedZapAttackWindowAvailable = Boolean(
             zapManaged
             && this._zapAttackWindowDisabled !== true
-            && !!browser?.windows?.create
-            && !!browser?.windows?.remove
-            && !!browser?.tabs?.create
+            && (this.browserOperations?.remote === true || (
+                !!browser?.windows?.create
+                && !!browser?.windows?.remove
+                && !!browser?.tabs?.create
+            ))
         )
         return {
             planned,
@@ -4534,7 +4589,7 @@ export class dastEngine {
         }
         this._lastProgressAt = now
         this._lastProgressKey = key
-        browser.runtime.sendMessage({
+        this.browserOperations.sendRuntimeMessage({
             channel: "ptk_background2popup_rattacker",
             type: "dast_progress",
             info: {
@@ -5134,6 +5189,7 @@ export class dastEngine {
 
     _finalizePlan(plan) {
         if (!plan || !this._activePlans?.has(plan.id)) return
+        const commitStartedAt = Date.now()
         this._normalizeResultOrder(plan.attacks)
         if (plan.requestRecord) {
             this._attachAttacksToRequestRecord(plan.attacks, plan.requestRecord)
@@ -5152,6 +5208,10 @@ export class dastEngine {
             requestRecord: plan.requestRecord
         }
         this.updateScanResult(result)
+        this._recordPerformancePhase("completionCommit", Date.now() - commitStartedAt, {
+            type: plan?.original?.request?.method || "request",
+            family: "result"
+        })
         this._activePlans.delete(plan.id)
         plan.context = null
         this._notifyIdleResolvers()
@@ -5337,32 +5397,7 @@ export class dastEngine {
     }
 
     _simpleFingerprint(rawRequest, response) {
-        const raw = typeof rawRequest === 'object' ? rawRequest.raw : rawRequest
-        const line = raw ? raw.split(/\r?\n/)[0] : ''
-        const parts = line.trim().split(/\s+/)
-        const method = (parts[0] || 'GET').toUpperCase()
-        // Prefer real request target for dedupe. ui_url can be page route in SPA contexts and
-        // would otherwise collapse distinct API calls (for example login/graphql) into one key.
-        const objectUrl = (typeof rawRequest === 'object'
-            ? (rawRequest.url || rawRequest.requestUrl || null)
-            : null)
-        const urlPart = parts[1] || objectUrl || (typeof rawRequest === 'object' ? (rawRequest.ui_url || rawRequest.uiUrl) : null) || response?.url || response?.ui_url || '/'
-        const base = response?.url || urlPart
-        try {
-            const urlObj = new URL(urlPart, urlPart && urlPart.startsWith('http') ? undefined : base || 'http://localhost')
-            const host = (urlObj.host || '').toLowerCase()
-            let pathname = urlObj.pathname || '/'
-            if (!pathname.startsWith('/')) pathname = '/' + pathname
-            pathname = pathname.replace(/\/+/g, '/')
-            const queryNames = new Set()
-            urlObj.searchParams.forEach((_, key) => queryNames.add(key.toLowerCase()))
-            const querySig = Array.from(queryNames).sort().join('&')
-            const partsOut = ['http', host, pathname, method]
-            if (querySig) partsOut.push(`q:${querySig}`)
-            return partsOut.join('|')
-        } catch (e) {
-            return ''
-        }
+        return dastSimpleFingerprint(rawRequest, response)
     }
 
     _buildSpaTasks(original, module, attack, rawMeta = {}, defaultFingerprint = null) {
@@ -5426,7 +5461,6 @@ export class dastEngine {
                 })
                 task.attackKey = `${task.attackKey}|${name}`
                 tasks.push(task)
-                this._registerPlannedTask()
             }
         }
         return tasks
@@ -5832,6 +5866,34 @@ export class dastEngine {
 
     _attachOastCallbackProbe() {
         if (this._oastCallbackListener) return
+        if (this.browserOperations?.remote === true) {
+            const state = { unsubscribe: null, promise: null }
+            state.promise = Promise.resolve(this.browserOperations.subscribe(
+                "dast.oast",
+                request => this._handleOastWebRequest(request),
+                {
+                    subscriptionId: `dast-oast:${this.scanId || "scan"}`,
+                    options: {
+                        domains: Array.from(this._oastDomains || []),
+                        requestFilters: ptk_utils.requestFilters || ["xmlhttprequest", "main_frame", "sub_frame", "other"]
+                    }
+                }
+            )).then(unsubscribe => {
+                state.unsubscribe = unsubscribe
+                this._appendRuntimeEvent({
+                    type: 'dast_oast_probe_attached', phase: 'scan_start',
+                    domains: Array.from(this._oastDomains || [])
+                })
+            }).catch(error => {
+                if (this._oastCallbackListener === state) this._oastCallbackListener = null
+                this._appendRuntimeEvent({
+                    type: 'dast_oast_probe_error', phase: 'scan_start', reason: 'attach_failed',
+                    error: error?.message || String(error)
+                })
+            })
+            this._oastCallbackListener = state
+            return
+        }
         if (!browser?.webRequest?.onBeforeRequest?.addListener) return
         const listener = this._handleOastWebRequest.bind(this)
         try {
@@ -5858,7 +5920,13 @@ export class dastEngine {
 
     _detachOastCallbackProbe() {
         const listener = this._oastCallbackListener
-        if (!listener) return
+        if (!listener) return Promise.resolve()
+        if (this.browserOperations?.remote === true) {
+            this._oastCallbackListener = null
+            const detached = Promise.resolve(listener.promise).then(() => listener.unsubscribe?.()).catch(() => {})
+            this._appendRuntimeEvent({ type: 'dast_oast_probe_detached', phase: 'scan_stop' })
+            return detached
+        }
         try {
             if (browser?.webRequest?.onBeforeRequest?.removeListener) {
                 browser.webRequest.onBeforeRequest.removeListener(listener)
@@ -5872,6 +5940,7 @@ export class dastEngine {
         } finally {
             this._oastCallbackListener = null
         }
+        return Promise.resolve()
     }
 
     _handleOastWebRequest(request = {}) {
@@ -6085,6 +6154,10 @@ export class dastEngine {
     }
 
     _shouldSkipTaskDueToStrategy(task) {
+        // Passive rules independently evaluate the same captured response.
+        // A finding from one passive rule must not suppress sibling rules in
+        // the module merely because they share the same URL/parameter scope.
+        if (task?.type === 'passive') return false
         if (this._taskRequiresStrategyContinuation(task)) return false
         return this.taskScheduler.shouldSkipTaskDueToStrategy(task, {
             strategyConfig: this.strategyConfig,
@@ -6096,6 +6169,9 @@ export class dastEngine {
     }
 
     _recordStrategyFinding(task, result) {
+        // Strategy stop-on-first is an active-attack budget. Recording passive
+        // findings in that budget makes rule execution depend on task order.
+        if (task?.type === 'passive') return
         if (!this._shouldCountSuccessAsFindingCandidate(task, result)) {
             return
         }
@@ -6116,10 +6192,12 @@ export class dastEngine {
 
     _supportsActiveRequestTrackingListeners() {
         return !!(
-            typeof browser !== 'undefined'
-            && browser?.webRequest?.onBeforeRequest
-            && browser?.webRequest?.onBeforeSendHeaders
-            && browser?.webRequest?.onHeadersReceived
+            this.browserOperations?.remote === true || (
+                typeof browser !== 'undefined'
+                && browser?.webRequest?.onBeforeRequest
+                && browser?.webRequest?.onBeforeSendHeaders
+                && browser?.webRequest?.onHeadersReceived
+            )
         )
     }
 
@@ -6134,12 +6212,9 @@ export class dastEngine {
     async _injectSpaHarness(tabId, task, taskContext, reason = 'send_failed') {
         let lastError = null
 
-        if (browser?.scripting?.executeScript) {
+        if (!this._isFirefoxRuntime()) {
             try {
-                await browser.scripting.executeScript({
-                    target: { tabId },
-                    files: ['ptk/content/spa_hash_harness.js']
-                })
+                await this._browserCall("scripting.injectFile", [tabId, "ptk/content/spa_hash_harness.js"])
                 await new Promise((resolve) => setTimeout(resolve, 75))
                 return true
             } catch (err) {
@@ -6172,7 +6247,7 @@ export class dastEngine {
 
     async _ensureSpaHarnessReady(tabId, task, taskContext) {
         try {
-            const ping = await browser.tabs.sendMessage(tabId, { type: 'spaPing' })
+            const ping = await this._browserCall("tabs.sendMessage", [tabId, { type: 'spaPing' }])
             if (ping?.ok === true) {
                 return true
             }
@@ -6182,7 +6257,7 @@ export class dastEngine {
         if (!injected) return false
 
         try {
-            const ping = await browser.tabs.sendMessage(tabId, { type: 'spaPing' })
+            const ping = await this._browserCall("tabs.sendMessage", [tabId, { type: 'spaPing' }])
             if (ping?.ok === true) {
                 return true
             }
@@ -6204,23 +6279,45 @@ export class dastEngine {
 
     async _ensureBrowserNavHarnessScript() {
         if (this._browserNavHarnessRegistered) return true
-        if (!browser?.scripting?.registerContentScripts) {
-            return false
+        if (this._isFirefoxRuntime()) {
+            await this._browserNavHarnessCleanupPromise?.catch?.(() => false)
+            this._browserNavHarnessCleanupPromise = null
+            if (this._firefoxBrowserNavHarnessRegistration) {
+                this._browserNavHarnessRegistered = true
+                return true
+            }
+            if (!browser?.contentScripts?.register) return false
+            try {
+                this._firefoxBrowserNavHarnessRegistration = await browser.contentScripts.register({
+                    matches: ['<all_urls>'],
+                    js: [{ file: this._browserNavHarnessFile() }],
+                    runAt: 'document_start',
+                    allFrames: false,
+                    matchAboutBlank: false
+                })
+                this._browserNavHarnessRegistered = true
+                return true
+            } catch (err) {
+                console.warn('[PTK DAST] Failed to register Firefox browser-nav harness', err)
+                this._firefoxBrowserNavHarnessRegistration = null
+                this._browserNavHarnessRegistered = false
+                return false
+            }
         }
         try {
-            if (browser?.scripting?.unregisterContentScripts) {
-                await browser.scripting.unregisterContentScripts({
+            {
+                await this._browserCall("scripting.unregisterContentScripts", [{
                     ids: [DAST_BROWSER_NAV_HARNESS_SCRIPT_ID]
-                }).catch(() => {})
+                }]).catch(() => {})
             }
-            await browser.scripting.registerContentScripts([{
+            await this._browserCall("scripting.registerContentScripts", [[{
                 id: DAST_BROWSER_NAV_HARNESS_SCRIPT_ID,
                 js: [this._browserNavHarnessFile()],
                 matches: ['<all_urls>'],
                 // Keep the browser-nav harness in the extension content-script world
                 // so browser.runtime messaging stays available on Chromium.
                 runAt: 'document_start'
-            }])
+            }]])
             this._browserNavHarnessRegistered = true
             return true
         } catch (err) {
@@ -6232,23 +6329,30 @@ export class dastEngine {
 
     async _unregisterBrowserNavHarnessScript() {
         this._browserNavHarnessRegistered = false
-        if (!browser?.scripting?.unregisterContentScripts) return
+        const firefoxRegistration = this._firefoxBrowserNavHarnessRegistration
+        this._firefoxBrowserNavHarnessRegistration = null
+        if (firefoxRegistration) {
+            try {
+                await firefoxRegistration.unregister()
+                return true
+            } catch (_) {
+                return false
+            }
+        }
+        if (this._isFirefoxRuntime()) return
         try {
-            await browser.scripting.unregisterContentScripts({
+            await this._browserCall("scripting.unregisterContentScripts", [{
                 ids: [DAST_BROWSER_NAV_HARNESS_SCRIPT_ID]
-            })
+            }])
         } catch (_) { }
     }
 
     async _injectBrowserNavHarness(tabId, task, taskContext, reason = 'send_failed') {
         let lastError = null
 
-        if (browser?.scripting?.executeScript) {
+        if (!this._isFirefoxRuntime()) {
             try {
-                await browser.scripting.executeScript({
-                    target: { tabId },
-                    files: ['ptk/content/xss_nav_harness.js']
-                })
+                await this._browserCall("scripting.injectFile", [tabId, "ptk/content/xss_nav_harness.js"])
                 await new Promise((resolve) => setTimeout(resolve, 75))
                 return true
             } catch (err) {
@@ -6281,7 +6385,7 @@ export class dastEngine {
 
     async _ensureBrowserNavHarnessReady(tabId, task, taskContext) {
         try {
-            const ping = await browser.tabs.sendMessage(tabId, { type: 'browserNavPing' })
+            const ping = await this._browserCall("tabs.sendMessage", [tabId, { type: 'browserNavPing' }])
             if (ping?.ok === true && ping?.active === true) {
                 return true
             }
@@ -6291,7 +6395,7 @@ export class dastEngine {
         if (!injected) return false
 
         try {
-            const ping = await browser.tabs.sendMessage(tabId, { type: 'browserNavPing' })
+            const ping = await this._browserCall("tabs.sendMessage", [tabId, { type: 'browserNavPing' }])
             if (ping?.ok === true && ping?.active === true) {
                 return true
             }
@@ -6514,7 +6618,7 @@ export class dastEngine {
             }, Math.max(500, Number(timeoutMs) || DAST_BROWSER_NAV_MESSAGE_TIMEOUT_MS))
         })
         return Promise.race([
-            browser.tabs.sendMessage(tabId, message),
+            this._browserCall("tabs.sendMessage", [tabId, message]),
             timeout
         ]).finally(() => {
             if (timeoutId) clearTimeout(timeoutId)
@@ -6523,21 +6627,9 @@ export class dastEngine {
 
     async _probeBrowserNavMainWorldWindowName(tabId, markerToken) {
         const markerId = String(markerToken || '').trim()
-        if (!tabId || !markerId || !browser?.scripting?.executeScript) return false
+        if (!tabId || !markerId || this._isFirefoxRuntime()) return false
         try {
-            const results = await browser.scripting.executeScript({
-                target: { tabId },
-                world: 'MAIN',
-                func: (marker) => {
-                    try {
-                        const token = `ptk-xss:${String(marker || '').trim()}`
-                        return !!token && String(window.name || '').includes(token)
-                    } catch (_) {
-                        return false
-                    }
-                },
-                args: [markerId]
-            })
+            const results = await this._browserCall("scripting.probeWindowName", [tabId, markerId])
             return Array.isArray(results) && results.some((entry) => entry?.result === true)
         } catch (_) {
             return false
@@ -6546,22 +6638,9 @@ export class dastEngine {
 
     async _probeBrowserNavMainWorldDomMarker(tabId, markerToken) {
         const markerId = String(markerToken || '').trim()
-        if (!tabId || !markerId || !browser?.scripting?.executeScript) return false
+        if (!tabId || !markerId || this._isFirefoxRuntime()) return false
         try {
-            const results = await browser.scripting.executeScript({
-                target: { tabId },
-                world: 'MAIN',
-                func: (marker, attributeName) => {
-                    try {
-                        const root = document.documentElement || document.body
-                        const value = String(root?.getAttribute?.(attributeName) || '')
-                        return value === marker || value.split(/\s+/).includes(marker)
-                    } catch (_) {
-                        return false
-                    }
-                },
-                args: [markerId, 'data-ptk-xss']
-            })
+            const results = await this._browserCall("scripting.probeDomMarker", [tabId, markerId, "data-ptk-xss"])
             return Array.isArray(results) && results.some((entry) => entry?.result === true)
         } catch (_) {
             return false
@@ -6605,15 +6684,24 @@ export class dastEngine {
     }
 
     async _reloadBrowserNavAttackTab(tabId, task, taskContext) {
+        if (this.browserOperations?.remote === true) {
+            await this._browserCall("dast.tabs.reloadAndWait", [tabId, 8000]).catch(() => null)
+            await this._markSpaAttackTab(tabId, {
+                marker: DAST_BROWSER_NAV_TAB_MARKER,
+                domOnly: true
+            })
+            await this._ensureBrowserNavHarnessReady(tabId, task, taskContext)
+            return
+        }
         const ready = this._waitForTabReady(tabId)
         try {
             if (browser?.tabs?.reload) {
-                await browser.tabs.reload(tabId)
+                await this._browserCall("tabs.reload", [tabId])
             } else {
-                const tab = browser?.tabs?.get ? await browser.tabs.get(tabId) : null
+                const tab = await this._browserCall("tabs.get", [tabId]).catch(() => null)
                 const url = tab?.url || tab?.pendingUrl || null
                 if (url && browser?.tabs?.update) {
-                    await browser.tabs.update(tabId, { url })
+                    await this._browserCall("tabs.update", [tabId, { url }])
                 }
             }
         } catch (_) { }
@@ -6721,7 +6809,7 @@ export class dastEngine {
                     }
                 }
                 if (driver === 'form') {
-                    const navigationWaiter = this._watchForTabNavigation(tabId, 4500)
+                    const navigationWaiter = await this._startTabNavigationWatch(tabId, 4500)
                     let submitted = null
                     try {
                         submitted = await this._sendBrowserNavHarnessMessage(tabId, {
@@ -7184,7 +7272,7 @@ export class dastEngine {
                 loggedOutRegex: browserWorkflowCfg.loggedOutRegex || null,
                 loggedInRegex: browserWorkflowCfg.loggedInRegex || null
             }
-            const sendRun = () => browser.tabs.sendMessage(tabId, message)
+            const sendRun = () => this._browserCall("tabs.sendMessage", [tabId, message])
             const ready = await this._ensureBrowserWorkflowHarnessReady(tabId, task, taskContext)
             if (!ready) {
                 return { error: 'harness_not_ready' }
@@ -7315,7 +7403,7 @@ export class dastEngine {
                     markerDomain: payload.markerDomain,
                     markerToken: payload.markerToken
                 }
-                const sendChecks = () => browser.tabs.sendMessage(tabId, message)
+                const sendChecks = () => this._browserCall("tabs.sendMessage", [tabId, message])
 
                 const ready = await this._ensureSpaHarnessReady(tabId, task, taskContext)
                 if (!ready) {
@@ -7679,9 +7767,11 @@ export class dastEngine {
     _shouldUseZapAttackWindow() {
         return this.settings?.zapManaged === true
             && this._zapAttackWindowDisabled !== true
-            && !!browser?.windows?.create
-            && !!browser?.windows?.remove
-            && !!browser?.tabs?.create
+            && (this.browserOperations?.remote === true || (
+                !!browser?.windows?.create
+                && !!browser?.windows?.remove
+                && !!browser?.tabs?.create
+            ))
     }
 
     async _ensureZapAttackWindow() {
@@ -7689,7 +7779,7 @@ export class dastEngine {
 
         if (this._zapAttackWindowId !== null && this._zapAttackWindowId !== undefined) {
             try {
-                await browser.windows.get(this._zapAttackWindowId)
+                await this._browserCall("windows.get", [this._zapAttackWindowId])
                 return this._zapAttackWindowId
             } catch (_) {
                 this._zapAttackWindowId = null
@@ -7699,11 +7789,11 @@ export class dastEngine {
         }
 
         try {
-            const win = await browser.windows.create({
+            const win = await this._browserCall("windows.create", [{
                 url: 'about:blank',
                 focused: false,
                 type: 'normal'
-            })
+            }])
             const windowId = Number(win?.id)
             if (!Number.isInteger(windowId)) {
                 throw new Error('missing_window_id')
@@ -7730,7 +7820,7 @@ export class dastEngine {
             const windowId = await this._ensureZapAttackWindow()
             if (windowId !== null && windowId !== undefined) {
                 try {
-                    const tab = await browser.tabs.create({ windowId, url, active: false })
+                    const tab = await this._browserCall("tabs.create", [{ windowId, url, active: false }])
                     const tabId = Number(tab?.id)
                     if (Number.isInteger(tabId)) {
                         this._zapAttackTabIds.add(tabId)
@@ -7746,7 +7836,7 @@ export class dastEngine {
                 }
             }
         }
-        return browser.tabs.create({ url, active: false })
+        return this._browserCall("tabs.create", [{ url, active: false }])
     }
 
     _isDastAttackTargetInScope(url) {
@@ -7779,7 +7869,7 @@ export class dastEngine {
         if (Number.isInteger(normalizedTabId)) {
             this._zapAttackTabIds?.delete(normalizedTabId)
         }
-        try { await browser.tabs.remove(tabId) } catch (_) { }
+        try { await this._browserCall("tabs.remove", [tabId]) } catch (_) { }
     }
 
     _clearZapAttackWindowState() {
@@ -7789,11 +7879,13 @@ export class dastEngine {
     }
 
     async _removeZapAttackWindow(windowId, reason = 'stop') {
-        if (windowId === null || windowId === undefined || !browser?.windows?.remove) {
+        if (windowId === null || windowId === undefined || (
+            this.browserOperations?.remote !== true && !browser?.windows?.remove
+        )) {
             return
         }
         try {
-            await browser.windows.remove(windowId)
+            await this._browserCall("windows.remove", [windowId])
         } catch (err) {
             if (this._zapAttackWindowWarningShown !== true) {
                 this._zapAttackWindowWarningShown = true
@@ -7814,10 +7906,10 @@ export class dastEngine {
     _scheduleCloseZapAttackWindow(reason = 'stop') {
         const windowId = this._zapAttackWindowId
         if (windowId === null || windowId === undefined) {
-            return
+            return Promise.resolve()
         }
         this._clearZapAttackWindowState()
-        Promise.resolve()
+        return Promise.resolve()
             .then(() => this._removeZapAttackWindow(windowId, reason))
             .catch(() => {})
     }
@@ -7892,15 +7984,18 @@ export class dastEngine {
                 marker: DAST_BROWSER_NAV_TAB_MARKER,
                 runAt: 'document_start'
             })
-            const navigationWaiter = this._watchForTabNavigation(tabId)
+            const navigationWaiter = this.browserOperations?.remote === true
+                ? null
+                : this._watchForTabNavigation(tabId)
             try {
-                await browser.tabs.update(tabId, { url })
-                const navigation = await navigationWaiter.promise
+                const navigation = this.browserOperations?.remote === true
+                    ? await this._browserCall("dast.tabs.navigateAndWait", [tabId, url, 8000])
+                    : await this._browserCall("tabs.update", [tabId, { url }]).then(() => navigationWaiter.promise)
                 if (!navigation?.ready) {
                     await this._waitForTabReady(tabId)
                 }
             } catch (error) {
-                navigationWaiter.cancel('attack_tab_navigation_failed')
+                navigationWaiter?.cancel('attack_tab_navigation_failed')
                 throw error
             }
             // Chromium can lose the pre-navigation marker that was set on about:blank.
@@ -7945,21 +8040,21 @@ export class dastEngine {
 
     async _ensureBrowserWorkflowHarnessScript() {
         if (this._browserWorkflowHarnessRegistered) return true
-        if (!browser?.scripting?.registerContentScripts) {
+        if (this._isFirefoxRuntime()) {
             return false
         }
         try {
-            if (browser?.scripting?.unregisterContentScripts) {
-                await browser.scripting.unregisterContentScripts({
+            {
+                await this._browserCall("scripting.unregisterContentScripts", [{
                     ids: [DAST_BROWSER_WORKFLOW_HARNESS_SCRIPT_ID]
-                }).catch(() => {})
+                }]).catch(() => {})
             }
-            await browser.scripting.registerContentScripts([{
+            await this._browserCall("scripting.registerContentScripts", [[{
                 id: DAST_BROWSER_WORKFLOW_HARNESS_SCRIPT_ID,
                 js: [this._browserWorkflowHarnessFile()],
                 matches: ['<all_urls>'],
                 runAt: 'document_start'
-            }])
+            }]])
             this._browserWorkflowHarnessRegistered = true
             return true
         } catch (err) {
@@ -7971,23 +8066,20 @@ export class dastEngine {
 
     async _unregisterBrowserWorkflowHarnessScript() {
         this._browserWorkflowHarnessRegistered = false
-        if (!browser?.scripting?.unregisterContentScripts) return
+        if (this._isFirefoxRuntime()) return
         try {
-            await browser.scripting.unregisterContentScripts({
+            await this._browserCall("scripting.unregisterContentScripts", [{
                 ids: [DAST_BROWSER_WORKFLOW_HARNESS_SCRIPT_ID]
-            })
+            }])
         } catch (_) { }
     }
 
     async _injectBrowserWorkflowHarness(tabId, task, taskContext, reason = 'send_failed') {
         let lastError = null
 
-        if (browser?.scripting?.executeScript) {
+        if (!this._isFirefoxRuntime()) {
             try {
-                await browser.scripting.executeScript({
-                    target: { tabId },
-                    files: ['ptk/content/auth_workflow_harness.js']
-                })
+                await this._browserCall("scripting.injectFile", [tabId, "ptk/content/auth_workflow_harness.js"])
                 await new Promise((resolve) => setTimeout(resolve, 75))
                 return true
             } catch (err) {
@@ -8020,7 +8112,7 @@ export class dastEngine {
 
     async _ensureBrowserWorkflowHarnessReady(tabId, task, taskContext) {
         try {
-            const ping = await browser.tabs.sendMessage(tabId, { type: 'browserWorkflowPing' })
+            const ping = await this._browserCall("tabs.sendMessage", [tabId, { type: 'browserWorkflowPing' }])
             if (ping?.ok === true && ping?.active === true) {
                 return true
             }
@@ -8030,7 +8122,7 @@ export class dastEngine {
         if (!injected) return false
 
         try {
-            const ping = await browser.tabs.sendMessage(tabId, { type: 'browserWorkflowPing' })
+            const ping = await this._browserCall("tabs.sendMessage", [tabId, { type: 'browserWorkflowPing' }])
             if (ping?.ok === true && ping?.active === true) {
                 return true
             }
@@ -8060,8 +8152,12 @@ export class dastEngine {
                 marker: DAST_BROWSER_WORKFLOW_TAB_MARKER,
                 runAt: 'document_start'
             })
-            await browser.tabs.update(tabId, { url })
-            await this._waitForTabReady(tabId)
+            if (this.browserOperations?.remote === true) {
+                await this._browserCall("dast.tabs.navigateAndWait", [tabId, url, 8000])
+            } else {
+                await this._browserCall("tabs.update", [tabId, { url }])
+                await this._waitForTabReady(tabId)
+            }
             await this._markSpaAttackTab(tabId, {
                 marker: DAST_BROWSER_WORKFLOW_TAB_MARKER
             })
@@ -8109,16 +8205,22 @@ export class dastEngine {
     async _attachDialogAutoDismiss(tabId) {
         const isFirefox = typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo
         if (isFirefox) return false
-        if (!browser?.debugger || !tabId) return false
+        if (!tabId) return false
+        if (this.browserOperations?.remote === true) {
+            const attached = await this._browserCall("dast.dialog.attach", [tabId]).catch(() => false)
+            if (attached) this._debuggerDialogTabs.add(tabId)
+            return attached === true
+        }
+        if (!browser?.debugger) return false
         const target = { tabId }
         try {
-            await browser.debugger.attach(target, "1.3")
+            await this._browserCall("debugger.attach", [target, "1.3"])
         } catch (_) {
             return false
         }
         try {
-            await browser.debugger.sendCommand(target, "Page.enable")
-            await browser.debugger.sendCommand(target, "Runtime.enable")
+            await this._browserCall("debugger.sendCommand", [target, "Page.enable"])
+            await this._browserCall("debugger.sendCommand", [target, "Runtime.enable"])
         } catch (_) { }
         this._ensureDebuggerDialogListener()
         this._debuggerDialogTabs.add(tabId)
@@ -8126,20 +8228,26 @@ export class dastEngine {
     }
 
     async _detachDialogAutoDismiss(tabId) {
-        if (!browser?.debugger || !tabId) return
+        if (!tabId) return
         this._debuggerDialogTabs.delete(tabId)
+        if (this.browserOperations?.remote === true) {
+            await this._browserCall("dast.dialog.detach", [tabId]).catch(() => {})
+            return
+        }
+        if (!browser?.debugger) return
         try {
-            await browser.debugger.detach({ tabId })
+            await this._browserCall("debugger.detach", [{ tabId }])
         } catch (_) { }
     }
 
     _ensureDebuggerDialogListener() {
+        if (this.browserOperations?.remote === true) return
         if (this._debuggerDialogListener || !browser?.debugger?.onEvent) return
         this._debuggerDialogListener = (source, method, params) => {
             if (!source?.tabId || !this._debuggerDialogTabs.has(source.tabId)) return
             if (method !== "Page.javascriptDialogOpening" && method !== "Runtime.javascriptDialogOpening") return
             try {
-                browser.debugger.sendCommand(source, "Page.handleJavaScriptDialog", { accept: true })
+                this._browserCall("debugger.sendCommand", [source, "Page.handleJavaScriptDialog", { accept: true }])
             } catch (_) { }
         }
         browser.debugger.onEvent.addListener(this._debuggerDialogListener)
@@ -8165,13 +8273,9 @@ export class dastEngine {
                 }
             } catch (_) { }
         }
-        if (browser?.scripting?.executeScript) {
+        if (!this._isFirefoxRuntime()) {
             try {
-                await browser.scripting.executeScript({
-                    target: { tabId, allFrames: true },
-                    func: code,
-                    args: [marker, domOnly]
-                })
+                await this._browserCall("scripting.markAttackTab", [tabId, marker, domOnly])
                 return
             } catch (_) { }
         }
@@ -8193,6 +8297,9 @@ export class dastEngine {
                 reason: 'invalid_tab',
                 status: null
             }
+        }
+        if (this.browserOperations?.remote === true) {
+            return this._browserCall("dast.tabs.waitReady", [Number(tabId), timeoutMs])
         }
         return new Promise((resolve) => {
             let settled = false
@@ -8227,7 +8334,7 @@ export class dastEngine {
                 finish(false, 'timeout')
             }, timeoutMs)
             Promise.resolve()
-                .then(() => browser.tabs.get(normalizedTabId))
+                .then(() => this._browserCall("tabs.get", [normalizedTabId]))
                 .then((tab) => {
                     if (tab?.status === 'complete') {
                         finish(true, 'already_complete', tab)
@@ -8299,8 +8406,34 @@ export class dastEngine {
         }
     }
 
+    async _startTabNavigationWatch(tabId, timeoutMs = 8000) {
+        if (this.browserOperations?.remote !== true) return this._watchForTabNavigation(tabId, timeoutMs)
+        const watchId = crypto.randomUUID()
+        await this._browserCall("dast.tabs.navigationWatchStart", [Number(tabId), timeoutMs, watchId])
+        let settled = false
+        return {
+            promise: this._browserCall("dast.tabs.navigationWatchWait", [watchId]).finally(() => { settled = true }),
+            cancel: reason => {
+                if (!settled) this._browserCall("dast.tabs.navigationWatchCancel", [watchId, reason]).catch(() => {})
+            }
+        }
+    }
+
     async _waitForTabNavigation(tabId, timeoutMs = 8000) {
-        return this._watchForTabNavigation(tabId, timeoutMs).promise
+        const watcher = await this._startTabNavigationWatch(tabId, timeoutMs)
+        return watcher.promise
+    }
+
+    async restorePrivilegedRuntime() {
+        if (this.browserOperations?.remote !== true) return
+        if (this._oastCallbackListener && this._oastDomains?.size) {
+            // RemoteBrowserOperations restores the subscription itself.
+        }
+        for (const tabId of Array.from(this._debuggerDialogTabs || [])) {
+            await this._browserCall("dast.dialog.attach", [tabId]).catch(() => false)
+        }
+        if (this._browserNavHarnessRegistered) await this._ensureBrowserNavHarnessScript().catch(() => false)
+        if (this._browserWorkflowHarnessRegistered) await this._ensureBrowserWorkflowHarnessScript().catch(() => false)
     }
 
     async _drainRequestQueue() {
@@ -8957,6 +9090,18 @@ export class dastEngine {
             return null
         })()
 
+        if (this.browserOperations?.remote === true) {
+            return this._browserCall("dast.h2.fetch", [{
+                url: requestUrl,
+                method: schema?.request?.method || "GET",
+                headers: requestHeaders,
+                originalHeaders: cloneValue(schema?.request?.headers || []),
+                body: requestBody,
+                credentials: schema?.opts?.credentials || "include",
+                followRedirect: schema?.opts?.follow_redirect !== false
+            }])
+        }
+
         let tabId = null
         let protocol = null
         let statusCode = null
@@ -8978,11 +9123,11 @@ export class dastEngine {
         }
 
         try {
-            const tab = await browser.tabs.create({ url: "about:blank", active: false })
+            const tab = await this._browserCall("tabs.create", [{ url: "about:blank", active: false }])
             tabId = tab?.id
             if (!tabId) return null
-            await browser.debugger.attach({ tabId }, "1.3")
-            await browser.debugger.sendCommand({ tabId }, "Network.enable")
+            await this._browserCall("debugger.attach", [{ tabId }, "1.3"])
+            await this._browserCall("debugger.sendCommand", [{ tabId }, "Network.enable"])
             browser.debugger.onEvent.addListener(onEvent)
 
             const [execution] = await browser.scripting.executeScript({
@@ -9053,8 +9198,8 @@ export class dastEngine {
                 try { browser.debugger.onEvent.removeListener(onEvent) } catch (_) { }
             }
             if (tabId) {
-                try { await browser.debugger.detach({ tabId }) } catch (_) { }
-                try { await browser.tabs.remove(tabId) } catch (_) { }
+                try { await this._browserCall("debugger.detach", [{ tabId }]) } catch (_) { }
+                try { await this._browserCall("tabs.remove", [tabId]) } catch (_) { }
             }
         }
     }
@@ -9219,7 +9364,9 @@ export class dastEngine {
 
     async activeAttack(schema) {
         try {
-            let request = new ptk_request()
+            let request = typeof this.requestFactory === "function"
+                ? this.requestFactory()
+                : new ptk_request()
             if (!schema.opts) schema.opts = {}
             if (!schema.request || typeof schema.request !== 'object') {
                 schema.request = {}
@@ -9277,7 +9424,9 @@ export class dastEngine {
 
     async executeOriginal(schema) {
         let _schema = JSON.parse(JSON.stringify(schema))
-        let request = new ptk_request()
+        let request = typeof this.requestFactory === "function"
+            ? this.requestFactory()
+            : new ptk_request()
         _schema.opts = _schema.opts || {}
         _schema.opts.ptk_source = 'dast'
         const isFirefox = typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo

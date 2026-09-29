@@ -337,7 +337,7 @@ function hasRenderableSastScanData(scanResult = {}) {
 const IMPORT_TRANSFER_TTL_MS = 10 * 60 * 1000;
 const IMPORT_TRANSFER_MAX_ENTRIES = 2;
 export class ptk_sast {
-  constructor(settings) {
+  constructor(settings, { offscreenManager = null } = {}) {
     this.settings = settings;
     this.storageKey = "ptk_sast";
     this.resultStore = new SastResultStore({
@@ -360,7 +360,8 @@ export class ptk_sast {
     this.transport = new SastTransport({
       asyncSession: this.asyncSession,
       eventHandler: this.handleTransportEvent.bind(this),
-      disableRemote: settings?.disableRemoteWorker === true || settings?.disableRemote === true
+      disableRemote: settings?.disableRemoteWorker === true || settings?.disableRemote === true,
+      offscreenManager
     });
     this.sessionCoordinator = new SastSessionCoordinator({
       transport: this.transport,

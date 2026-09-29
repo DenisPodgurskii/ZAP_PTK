@@ -18,6 +18,11 @@ import { sensitiveArtifactStorage } from "./sensitiveArtifactStore.js"
 import { EvidencePackageStore } from "./bugbounty/evidencePackageStore.js"
 import { scanResultStore } from "./scanResultStore.js"
 import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js"
+import { DastRuntimeController } from "./dast/runtime/dastRuntimeController.js"
+import { ptk_request } from "./rbuilder.js"
+import { applyDastRequestTransportFlags } from "./dast/runtime/browserOperations.js"
+import { DastPrivilegedBrowserAdapter } from "./dast/runtime/privilegedBrowserAdapter.js"
+import { RemoteDastEngineFacade } from "./dast/runtime/remoteDastEngineFacade.js"
 
 
 const worker = self
@@ -84,13 +89,35 @@ function cloneForTransport(value) {
     }
 }
 
+export function createDastRuntimeEngine(settings, runtimeController) {
+    if (runtimeController?.remote === true) {
+        return new RemoteDastEngineFacade({ controller: runtimeController, settings })
+    }
+    return new dastEngine(settings)
+}
+
 export class ptk_rattacker {
 
-    constructor(settings) {
+    constructor(settings, { offscreenManager = null, forceLocalDastRuntime = false } = {}) {
         this.settings = settings
         this.storageKey = "ptk_rattacker"
 
-        this.engine = new dastEngine(this.settings)
+        this.runtimeController = new DastRuntimeController({
+            browserApi: browser,
+            offscreenManager,
+            forceLocal: forceLocalDastRuntime,
+            operationHandler: operation => this._handleDastPrivilegedOperation(operation)
+        })
+        this.privilegedBrowserAdapter = new DastPrivilegedBrowserAdapter({
+            browserApi: browser,
+            onEvent: event => this.runtimeController?.client?.port?.postMessage?.({
+                type: "privileged_event",
+                controllerNonce: this.runtimeController.client.controllerNonce,
+                event
+            })
+        })
+        this.engine = createDastRuntimeEngine(this.settings, this.runtimeController)
+        this.runtimeReady = Promise.resolve().then(() => this._initializeDastRuntime())
         this._persistTimer = null
         this._persistDebounceMs = 1000
         this.scanResultLifecycle = new DastScanResultLifecycleService({
@@ -183,13 +210,30 @@ export class ptk_rattacker {
         })
         this.importTransfers = new Map()
         if (this.engine?.setResultMutationListener) {
-            this.engine.setResultMutationListener((payload = null) => {
+            this.engine.setResultMutationListener(async (payload = null) => {
                 this._setAuthoritativeScanResult(this.engine.scanResult, {
                     markFinished: !!(this.engine?.scanResult?.finishedAt || this.engine?.scanResult?.finished)
                 })
                 this._schedulePersistScanResult()
-                if (payload?.type === "attack_finding") {
-                    worker?.ptk_app?.automation?.zap?.publisher?.requestFlush?.()
+                if (["attack_finding", "runtime_adopted_snapshot", "runtime_replay_snapshot"].includes(payload?.type)) {
+                    const publisher = worker?.ptk_app?.automation?.zap?.publisher
+                    if (typeof publisher?.requestFlushAndWait === "function") {
+                        await publisher.requestFlushAndWait()
+                    } else {
+                        publisher?.requestFlush?.()
+                    }
+                }
+            })
+        }
+        if (this.engine?.setDisplayMessageListener) {
+            this.engine.setDisplayMessageListener(async (message) => {
+                try {
+                    await browser.runtime.sendMessage(message)
+                    return true
+                } catch (_) {
+                    // Match the local engine's best-effort dashboard delivery:
+                    // there might be no open extension page to receive it.
+                    return false
                 }
             })
         }
@@ -205,9 +249,97 @@ export class ptk_rattacker {
         this.scopedTabCoordinator = null
     }
 
+    async _handleDastPrivilegedOperation(operation = {}) {
+        if (operation.type === "request_send") {
+            const request = new ptk_request()
+            applyDastRequestTransportFlags(request, operation.transport)
+            return request.sendRequest(operation.schema)
+        }
+        if (operation.type === "request_reconcile") return { completed: false }
+        if (operation.type === "runtime_message") {
+            return browser.runtime.sendMessage(operation.message)
+        }
+        if (operation.type === "session_profiles_list") {
+            if (!this.sessionProfileStore?.listProfiles) return []
+            return this.sessionProfileStore.listProfiles(operation.options || {})
+        }
+        if (["browser_call", "browser_subscribe", "browser_unsubscribe", "browser_cleanup"].includes(operation.type)) {
+            return this.privilegedBrowserAdapter.execute(operation)
+        }
+        if (operation.type === "controller_disconnect") return this.privilegedBrowserAdapter.cleanup()
+        throw new Error("unsupported_dast_privileged_operation")
+    }
+
+    async _initializeDastRuntime() {
+        try {
+            const connected = await this.runtimeController.ensureConnected()
+            if (!this.runtimeController.remote) return connected
+            const status = await this.runtimeController.reconnect(null)
+            if (!status?.ok) throw new Error(status?.error || "dast_runtime_reconnect_failed")
+            if (status.sessionId && status.executorGeneration && status.status !== "idle") {
+                await this.engine.adopt(status)
+                this._adoptRemoteDastSession(status)
+                return { ok: true, mode: "offscreen", adopted: true, status }
+            }
+            return { ok: true, mode: "offscreen", adopted: false, status }
+        } catch (error) {
+            return {
+                ok: false,
+                mode: this.runtimeController.remote ? "offscreen" : "local",
+                error: error?.message || String(error)
+            }
+        }
+    }
+
+    _adoptRemoteDastSession(status = {}) {
+        if (!this.runtimeController.remote || this.engine?.isRunning !== true) return false
+        const state = this.sessionCoordinator?.getState?.()
+        if (!state) return false
+        const settings = status.executorState?.settings || this.engine.settings || {}
+        const controllerState = status.executorState?.controllerState || this.engine.controllerState || {}
+        state.sentAllAttacksCompleted = false
+        state.acceptIncomingRequests = controllerState.acceptIncomingRequests !== false
+        state.requireUserInteractionBeforeCapture = controllerState.requireUserInteractionBeforeCapture
+            ?? (settings.allowCaptureWithoutInteraction !== true)
+        state.userInteractionUnlocked = controllerState.userInteractionUnlocked
+            ?? !state.requireUserInteractionBeforeCapture
+        state.enableSyntheticRedirectRequests = controllerState.enableSyntheticRedirectRequests
+            ?? (settings.enableSyntheticRedirectRequests === true)
+        state.zapManaged = controllerState.zapManaged ?? (settings.zapManaged === true)
+        state.pendingAutomationSeeds = 0
+        state.automationSession = status.executorState?.automationSessionId
+            ? { id: status.executorState.automationSessionId }
+            : null
+        this.captureAdapter?.addListeners?.()
+        this._setAuthoritativeScanResult(this.engine.scanResult)
+        this._registerScopedTabSession(this.engine.tabId, settings)?.catch?.(() => {})
+        return true
+    }
+
     setScopedTabCoordinator(coordinator) {
         this.scopedTabCoordinator = coordinator || null
         return this
+    }
+
+    async getDastPhasePerformance({ refresh = true } = {}) {
+        await this.runtimeReady
+        const telemetry = typeof this.engine?.getPerformanceTelemetry === "function"
+            ? await this.engine.getPerformanceTelemetry({ refresh })
+            : this.engine?._performanceTelemetry
+        const phases = telemetry?.phases
+        if (!phases || typeof phases !== "object") return null
+        return typeof structuredClone === "function"
+            ? structuredClone(phases)
+            : JSON.parse(JSON.stringify(phases))
+    }
+
+    async refreshDastRuntimeProgress() {
+        const ready = await this.runtimeReady
+        if (ready?.ok === false) throw new Error(ready.error || "dast_runtime_initialization_failed")
+        if (typeof this.engine?.refreshProgress === "function") {
+            return this.engine.refreshProgress()
+        }
+        return this.engine?.getProgressSnapshot?.() || null
     }
 
     _registerScopedTabSession(tabId, settings = {}) {
@@ -324,6 +456,10 @@ export class ptk_rattacker {
             return this._initPromise
         }
         const initPromise = (async () => {
+            const runtimeState = await this.runtimeReady
+            if (this.runtimeController.remote && runtimeState?.ok !== true) {
+                throw new Error(runtimeState?.error || "dast_runtime_initialization_failed")
+            }
             await portalPolicyRuntimeStore.ensureLoaded()
             if (force || !this._analysisStateLoaded) {
                 await this.analysisService.loadState()
@@ -798,7 +934,7 @@ export class ptk_rattacker {
                     : {}
                 const appendSpaUrlDiagnostic = (patch = {}) => {
                     try {
-                        this.engine?._appendRuntimeEvent?.(Object.assign({
+                        const result = this.engine?._appendRuntimeEvent?.(Object.assign({
                             type: 'dast_spa_url_changed',
                             tabId,
                             url: uiUrl || null,
@@ -811,7 +947,16 @@ export class ptk_rattacker {
                             contentReadyState: contentDiagnostic.readyState || null,
                             contentVisibilityState: contentDiagnostic.visibilityState || null
                         }, patch))
-                    } catch (_) { }
+                        Promise.resolve(result).catch((error) => console.error('[PTK DAST] SPA diagnostic append failed', {
+                            active: this.engine?.isRunning === true,
+                            error: error?.message || String(error)
+                        }))
+                    } catch (error) {
+                        console.error('[PTK DAST] SPA diagnostic append failed', {
+                            active: this.engine?.isRunning === true,
+                            error: error?.message || String(error)
+                        })
+                    }
                 }
                 this.requestCaptureStore?.rememberTabUrl?.(tabId, uiUrl)
                     || worker?.ptk_app?.proxy?.tabUrlMap?.set?.(tabId, uiUrl)
@@ -846,7 +991,18 @@ export class ptk_rattacker {
                             type: 'main_frame',
                             tabId: sender.tab.id
                         }
-                        this.engine.enqueue({ raw: rawRequest, ui_url: uiUrl, responseType: 'main_frame', fingerprint: `spa:${uiUrl}` }, response)
+                        Promise.resolve(this.engine.enqueue({ raw: rawRequest, ui_url: uiUrl, responseType: 'main_frame', fingerprint: `spa:${uiUrl}` }, response))
+                            .catch((error) => {
+                                console.error('[PTK DAST] SPA capture enqueue failed', {
+                                    active: this.engine?.isRunning === true,
+                                    error: error?.message || String(error)
+                                })
+                                appendSpaUrlDiagnostic({
+                                    phase: 'error',
+                                    reason: 'enqueue_failed',
+                                    error: error?.message || String(error || 'enqueue_failed')
+                                })
+                            })
                         appendSpaUrlDiagnostic({
                             phase: 'enqueued',
                             cleanedUrl,
@@ -854,6 +1010,10 @@ export class ptk_rattacker {
                         })
                         return Promise.resolve({ ok: true, enqueued: true })
                     } catch (e) {
+                        console.error('[PTK DAST] SPA capture enqueue failed', {
+                            active: this.engine?.isRunning === true,
+                            error: e?.message || String(e)
+                        })
                         appendSpaUrlDiagnostic({
                             phase: 'error',
                             reason: 'enqueue_failed',
@@ -870,8 +1030,8 @@ export class ptk_rattacker {
             }
 
             if (message.type == 'start') {
-                this.runBackgroundScan(sender.tab.id, new URL(sender.origin).host)
-                return Promise.resolve({ success: true, scanResult: this._cloneScanResultForUi() })
+                return this.runBackgroundScan(sender.tab.id, new URL(sender.origin).host)
+                    .then(success => ({ success, scanResult: this._cloneScanResultForUi() }))
             }
 
             if (message.type == 'stop') {
@@ -1612,7 +1772,7 @@ export class ptk_rattacker {
     async msg_run_bg_scan(message) {
         try {
             const effectiveSettings = await this._resolveDastRunSettings(message?.settings || {})
-            const started = this.runBackgroundScan(message.tabId, message.host, message.domains, effectiveSettings)
+            const started = await this.runBackgroundScan(message.tabId, message.host, message.domains, effectiveSettings)
             if (!started || !this.engine.isRunning) {
                 return Promise.resolve({
                     success: false,
@@ -1657,12 +1817,31 @@ export class ptk_rattacker {
         })
     }
 
-    runBackgroundScan(tabId, host, domains, settings) {
+    async msg_runtime_test_status() {
+        if (!this.runtimeController.remote) {
+            return { ok: true, mode: "local", isRunning: this.engine?.isRunning === true }
+        }
+        await this.runtimeReady
+        return this.runtimeController.client.request("status", {})
+    }
+
+    async msg_runtime_test_disconnect_controller() {
+        if (!this.runtimeController.remote) return { ok: false, error: "local_runtime" }
+        const client = this.runtimeController.client
+        const sessionId = this.engine?.sessionId || null
+        const executorGeneration = this.engine?.executorGeneration || null
+        client?.port?.disconnect?.()
+        return { ok: true, sessionId, executorGeneration }
+    }
+
+    async runBackgroundScan(tabId, host, domains, settings) {
+        const runtimeState = await this.runtimeReady
+        if (this.runtimeController.remote && runtimeState?.ok !== true) return false
         const effectiveSettings = Object.assign({}, settings || {})
         // Always send an explicit rulepack value for each run so the engine
         // cannot inherit a portal policy snapshot from a previous scan.
         effectiveSettings.rulepack = effectiveSettings.rulepack || null
-        const started = this.sessionCoordinator.runBackgroundScan(tabId, host, domains, effectiveSettings)
+        const started = await this.sessionCoordinator.runBackgroundScan(tabId, host, domains, effectiveSettings)
         if (started) {
             this._setAuthoritativeScanResult(this.engine.scanResult)
             this._registerScopedTabSession(tabId, effectiveSettings)?.catch?.(() => { })
@@ -1690,7 +1869,12 @@ export class ptk_rattacker {
 
 
     checkConfirmedAttack(data) {
-        this.engine.updateScanResult(null, data)
+        Promise.resolve(this.engine.updateScanResult(null, data)).catch((error) => {
+            console.error('[PTK DAST] Runtime confirmation update failed', {
+                active: this.engine?.isRunning === true,
+                error: error?.message || String(error)
+            })
+        })
     }
 
     async startAutomationSession({ sessionId, tabId, host, domains, settings, policyCode, hooks }) {

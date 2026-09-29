@@ -208,10 +208,11 @@ export class DastSessionCoordinator {
 
     unlockUserInteraction() {
         this.state.userInteractionUnlocked = true
+        this.engine?.setControllerState?.({ userInteractionUnlocked: true })
         return true
     }
 
-    runBackgroundScan(tabId, host, domains, settings) {
+    async runBackgroundScan(tabId, host, domains, settings) {
         if (this.engine?.isRunning) {
             return false
         }
@@ -221,7 +222,7 @@ export class DastSessionCoordinator {
         const normalizedDomains = Array.isArray(domains) ? domains.join(",") : domains
         const targetDomains = normalizedDomains && normalizedDomains.length ? normalizedDomains : host
 
-        this.reset?.()
+        await this.reset?.()
         this.relatedTabs.clear()
         this.state.sentAllAttacksCompleted = false
         this.captureAdapter?.addListeners?.()
@@ -234,14 +235,30 @@ export class DastSessionCoordinator {
         this.state.zapManaged = runtimeSettings.zapManaged === true
         this.state.pendingAutomationSeeds = 0
         this.state.lastAutomationSeedResult = null
+        this.engine?.setControllerState?.({
+            acceptIncomingRequests: true,
+            requireUserInteractionBeforeCapture: this.state.requireUserInteractionBeforeCapture,
+            userInteractionUnlocked: this.state.userInteractionUnlocked,
+            enableSyntheticRedirectRequests: this.state.enableSyntheticRedirectRequests,
+            zapManaged: this.state.zapManaged
+        })
 
-        if (resolvedSettings.ws) {
-            this.registerScript?.()
+        try {
+            if (resolvedSettings.ws) {
+                await this.registerScript?.()
+            }
+            const started = await this.engine?.start?.(tabId, host, this.parseDomains?.(targetDomains), resolvedSettings)
+            if (started === false || this.engine?.isRunning !== true) throw new Error("scan_start_failed")
+            return true
+        } catch (error) {
+            this.state.acceptIncomingRequests = false
+            this.state.userInteractionUnlocked = false
+            this.state.enableSyntheticRedirectRequests = false
+            this.state.zapManaged = false
+            this.captureAdapter?.removeListeners?.()
+            await this.unregisterScript?.().catch?.(() => {})
+            return false
         }
-
-        this.engine?.start?.(tabId, host, this.parseDomains?.(targetDomains), resolvedSettings)
-
-        return true
     }
 
     async stopBackgroundScan(options = {}) {
@@ -255,6 +272,12 @@ export class DastSessionCoordinator {
         this.state.zapManaged = false
         this.state.pendingAutomationSeeds = 0
         this.relatedTabs.clear()
+        this.engine?.setControllerState?.({
+            acceptIncomingRequests: false,
+            userInteractionUnlocked: false,
+            enableSyntheticRedirectRequests: false,
+            zapManaged: false
+        })
 
         if (waitForIdleBeforeStop) {
             try {
@@ -262,7 +285,7 @@ export class DastSessionCoordinator {
             } catch (_) { }
         }
 
-        this.engine?.stop?.()
+        await this.engine?.stop?.()
         this.setScanResult?.(this.engine?.scanResult)
         const scanResult = this.getScanResult?.() || this.engine?.scanResult || null
         if (scanResult) {
@@ -305,7 +328,11 @@ export class DastSessionCoordinator {
         if (policyCode) {
             resolvedSettings.policyCode = policyCode
         }
-        this.runBackgroundScan(tabId, host, domains || host, resolvedSettings)
+        const started = await this.runBackgroundScan(tabId, host, domains || host, resolvedSettings)
+        if (!started) {
+            if (this.state.automationSession?.id === sessionId) this.state.automationSession = null
+            throw new Error("scan_start_failed")
+        }
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks({
                 sessionId,

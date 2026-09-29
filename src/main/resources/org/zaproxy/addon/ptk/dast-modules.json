@@ -10951,7 +10951,7 @@
                   "dom_xss"
                 ],
                 "payloads": [
-                  "<img src=x onerror=\"window.postMessage({source:'ptk-xss',id:'PTK_SPA_DOM_XSS_%%random%%'},'*')\">"
+                  "<img src=\"data:image/png;base64,AA==\" onerror=\"document.documentElement.setAttribute('data-ptk-spa-xss','PTK_SPA_DOM_XSS_%%random%%');window.postMessage({source:'ptk-xss',id:'PTK_SPA_DOM_XSS_%%random%%'},'*')\">"
                 ],
                 "markerToken": "PTK_SPA_DOM_XSS_%%random%%"
               }

@@ -26,9 +26,7 @@ export class ptk_controller_rbuilder {
         return browser.runtime.sendMessage({
             channel: "ptk_popup2background_request",
             type: "reset_all"
-        }).then(response => {
-            return response
-        }).catch(e => e)
+        })
     }
 
 

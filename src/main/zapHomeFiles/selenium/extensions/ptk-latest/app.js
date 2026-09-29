@@ -23,6 +23,7 @@ import { ptk_sast } from "./ptk/background/sast.js"
 import { ptk_automation } from "./ptk/background/automation.js"
 import { zapBridge } from "./ptk/background/integration/zap/index.js"
 import { ScopedTabSessionCoordinator } from "./ptk/background/common/scopedTabSessionCoordinator.js"
+import { OffscreenRuntimeManager } from "./ptk/background/offscreen/offscreenRuntimeManager.js"
 import { loadDevLocalConfig } from "./ptk/common/devLocalConfig.js"
 import { initializePortalRuntimeConfig } from "./ptk/common/portalConfig.js"
 import {
@@ -111,6 +112,7 @@ export class ptk_app {
         this.settings = new ptk_settings(settings)
         this.secretStore = new SecretStore()
         this.scopedTabSessions = new ScopedTabSessionCoordinator({ browserApi: browser })
+        this.offscreenRuntimeManager = new OffscreenRuntimeManager({ chromeApi: globalThis.chrome })
         this.updated = false
         this._pendingUpdate = false
         this._bootstrapped = false
@@ -120,7 +122,7 @@ export class ptk_app {
         worker.ptk_app = this
         this.request_manager = new ptk_request_manager(this.settings.rbuilder)
         ptk_ruleManager.resetSession()
-        this.dast = new ptk_dast(this.settings.rattacker)
+        this.dast = new ptk_dast(this.settings.rattacker, { offscreenManager: this.offscreenRuntimeManager })
         this.rattacker = this.dast
         this.decoder_manager = new ptk_decoder_manager()
         this.sca = new ptk_sca()
@@ -129,7 +131,7 @@ export class ptk_app {
         this.portscanner = new ptk_portscanner()
         this.jwt = new ptk_jwt()
         this.iast = new ptk_iast()
-        this.sast = new ptk_sast()
+        this.sast = new ptk_sast(undefined, { offscreenManager: this.offscreenRuntimeManager })
         this.dast.setScopedTabCoordinator?.(this.scopedTabSessions)
         this.sca.setScopedTabCoordinator?.(this.scopedTabSessions)
         this.iast.setScopedTabCoordinator?.(this.scopedTabSessions)

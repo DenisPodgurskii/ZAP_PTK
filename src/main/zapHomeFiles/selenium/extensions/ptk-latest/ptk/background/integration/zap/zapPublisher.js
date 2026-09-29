@@ -188,6 +188,13 @@ export default class ZapPublisher {
         void this._pollOnce()
     }
 
+    async requestFlushAndWait() {
+        if (this.disabled) return
+        this.flushRequested = true
+        await this._pollOnce()
+        await this._waitForPollIdle()
+    }
+
     async flushPendingForTerminal({ maxPasses = 4 } = {}) {
         if (this.disabled) {
             return {

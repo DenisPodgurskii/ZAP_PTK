@@ -4502,7 +4502,16 @@ function getIastMessageTargetLabel(target, prefix = 'target') {
 
 function isIastInternalMessagePayload(data) {
     if (!data || typeof data !== 'object') return false;
-    if (data.ptk_iast || data.ptk_ws || data.source === 'ptk-automation' || data.source === 'ptk-extension') return true;
+    if (data.ptk_iast || data.ptk_ws || [
+        'ptk-automation',
+        'ptk-extension',
+        'ptk-spa-net',
+        'ptk-spa',
+        'ptk-leak',
+        'ptk-leak-set',
+        'ptk-pmtest',
+        'ptk-xss'
+    ].includes(data.source)) return true;
     return typeof data.channel === 'string' && data.channel.startsWith('ptk_');
 }
 
@@ -4564,54 +4573,6 @@ function looksLikeJsonString(value) {
         || (trimmed.startsWith('[') && trimmed.endsWith(']'));
 }
 
-function registerJsonBodySources(jsonValue) {
-    if (!jsonValue || typeof jsonValue !== 'object') return;
-    const maybeGraphqlVariables = jsonValue && typeof jsonValue === 'object' && !Array.isArray(jsonValue)
-        ? jsonValue.variables
-        : null;
-    if (maybeGraphqlVariables && typeof maybeGraphqlVariables === 'object') {
-        collectJsonPrimitiveEntries(maybeGraphqlVariables).forEach((entry) => {
-            registerDynamicTaintSource(`graphql:variables:${entry.path}`, entry.value, {
-                type: 'graphqlVariable',
-                sourceKind: 'graphqlVariable',
-                label: `GraphQL variable "${entry.path}"`,
-                detail: entry.path,
-                taintKind: 'user_input'
-            });
-        });
-    }
-
-    collectJsonPrimitiveEntries(jsonValue).forEach((entry) => {
-        registerDynamicTaintSource(`body:json:${entry.path}`, entry.value, {
-            type: 'jsonBodyField',
-            sourceKind: 'jsonBodyField',
-            label: `JSON body field "${entry.path}"`,
-            detail: entry.path,
-            taintKind: 'user_input'
-        });
-    });
-}
-
-function registerUrlEncodedBodySources(rawBody) {
-    const serialized = safeSerializeValue(rawBody);
-    if (!serialized) return;
-    try {
-        const params = new URLSearchParams(serialized);
-        let seen = 0;
-        for (const [key, value] of params.entries()) {
-            registerDynamicTaintSource(`body:param:${key}`, value, {
-                type: 'bodyParam',
-                sourceKind: 'bodyParam',
-                label: `Request body parameter "${key}"`,
-                detail: key,
-                taintKind: 'user_input'
-            });
-            seen += 1;
-            if (seen >= 24) break;
-        }
-    } catch (_) { }
-}
-
 function extractContentTypeFromHeaders(headerSets = []) {
     let contentType = '';
     headerSets.forEach((headerSet) => {
@@ -4641,54 +4602,6 @@ function extractContentTypeFromHeaders(headerSets = []) {
         }
     });
     return contentType;
-}
-
-function registerRequestBodySources(body, options = {}) {
-    if (body == null) return;
-    const contentType = String(options.contentType || '').toLowerCase();
-
-    if (typeof FormData !== 'undefined' && body instanceof FormData) {
-        let count = 0;
-        body.forEach((value, key) => {
-            if (count >= 24) return;
-            if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-                registerDynamicTaintSource(`body:formdata:${key}`, value, {
-                    type: 'formDataField',
-                    sourceKind: 'formDataField',
-                    label: `FormData field "${key}"`,
-                    detail: key,
-                    taintKind: 'user_input'
-                });
-                count += 1;
-            }
-        });
-        return;
-    }
-
-    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
-        registerUrlEncodedBodySources(body.toString());
-        return;
-    }
-
-    if (typeof body === 'string') {
-        const trimmed = body.trim();
-        if (!trimmed) return;
-        if (contentType.includes('json') || looksLikeJsonString(trimmed)) {
-            try {
-                const parsed = JSON.parse(trimmed);
-                registerJsonBodySources(parsed);
-                return;
-            } catch (_) { }
-        }
-        if (contentType.includes('x-www-form-urlencoded') || /^[^=&?#\s]+=[^&]*(&[^=&?#\s]+=[^&]*)*$/.test(trimmed)) {
-            registerUrlEncodedBodySources(trimmed);
-        }
-        return;
-    }
-
-    if (typeof body === 'object') {
-        registerJsonBodySources(body);
-    }
 }
 
 function isNetworkActivityHookEnabled() {
@@ -5044,6 +4957,16 @@ function cleanTraceFrames(trace) {
     };
 }
 
+function isPlaywrightUtilityScriptEvaluation(trace) {
+    if (!trace) return false;
+    const frames = String(trace).split('\n').slice(1).map(line => line.trim()).filter(Boolean).filter(line => {
+        if (line.includes('chrome-extension://') || line.includes('moz-extension://')) return false;
+        if (line.includes('ptk/content/iast.js')) return false;
+        return true;
+    });
+    return frames.length > 0 && frames.every(line => /\bUtilityScript(?:\.|<)/.test(line));
+}
+
 function parseCookieAssignment(rawCookie) {
     if (!rawCookie) return null;
     const parts = String(rawCookie).split(';').map(part => part.trim()).filter(Boolean);
@@ -5092,14 +5015,15 @@ function markCache(cache, key) {
     pruneFindingCache(cache);
 }
 
-function buildFindingDedupKey({ ruleId, sinkId, sourceKey, location, elementId, attribute }) {
+function buildFindingDedupKey({ ruleId, sinkId, sourceKey, location, elementId, attribute, transportCarrierKey }) {
     return [
         ruleId || '',
         sinkId || '',
         sourceKey || '',
         location || '',
         elementId || '',
-        attribute || ''
+        attribute || '',
+        transportCarrierKey || ''
     ].join('|');
 }
 
@@ -5508,15 +5432,63 @@ function evaluateIastSuppression({ ruleId, sinkId, context, detection }) {
     return null;
 }
 
-function buildNetworkDedupKey({ sinkId, headerName, destOrigin, location }) {
-    if (!sinkId || !headerName || !destOrigin || !location) return null;
-    return [
-        'net',
-        sinkId,
-        String(headerName).toLowerCase(),
-        destOrigin,
-        location
-    ].join('|');
+function isIastTransportSink(sinkId) {
+    const normalizedSinkId = String(sinkId || '').trim();
+    return normalizedSinkId.startsWith('http.') || normalizedSinkId.startsWith('realtime.');
+}
+
+function normalizeIastTransportPath(pathname) {
+    const path = String(pathname || '/').split('/').map((segment) => {
+        if (!segment) return '';
+        if (/^\d+$/.test(segment)) return ':id';
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(segment)) return ':uuid';
+        if (segment.length >= 24 && /^[a-z0-9_-]+$/i.test(segment) && /\d/.test(segment)) return ':token';
+        return segment.slice(0, 96);
+    }).join('/');
+    return (path || '/').slice(0, 384);
+}
+
+function normalizeIastTransportQuery(searchParams) {
+    const names = [];
+    try {
+        for (const name of searchParams.keys()) {
+            const normalizedName = String(name || '').trim().slice(0, 64);
+            if (normalizedName) names.push(normalizedName);
+        }
+    } catch (_) { }
+    const boundedNames = Array.from(new Set(names)).sort().slice(0, 16);
+    return boundedNames.length
+        ? `?keys=${boundedNames.map((name) => encodeURIComponent(name)).join(',')}`
+        : '';
+}
+
+function buildIastTransportCarrierKey(sinkId, context = {}, baseUrl = window.location.href) {
+    if (!isIastTransportSink(sinkId)) return null;
+    const method = String(context.method || '').trim().toUpperCase().slice(0, 16);
+    const headerName = String(context.headerName || '').trim().toLowerCase().slice(0, 96);
+    const rawUrl = context.destUrl
+        || context?.networkTarget?.url
+        || context.requestUrl
+        || context.url
+        || context.destOrigin
+        || context?.networkTarget?.origin
+        || '';
+    let destination = '';
+    if (rawUrl) {
+        try {
+            const parsed = new URL(String(rawUrl), baseUrl);
+            const queryShape = normalizeIastTransportQuery(parsed.searchParams);
+            destination = `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${normalizeIastTransportPath(parsed.pathname)}${queryShape}`;
+        } catch (_) {
+            destination = String(rawUrl).split(/[?#]/, 1)[0].slice(0, 384);
+        }
+    }
+    return ['carrier-v1', String(sinkId || '').trim(), method, destination, headerName].join('|').slice(0, 640);
+}
+
+function buildNetworkDedupKey({ transportCarrierKey, location }) {
+    if (!transportCarrierKey || !location) return null;
+    return ['net', transportCarrierKey, location].join('|');
 }
 
 function isHighFrequencyAuthHeader({ sinkId, headerName, destOrigin, location }) {
@@ -5541,9 +5513,22 @@ function isHighFrequencyAuthHeader({ sinkId, headerName, destOrigin, location })
     return false;
 }
 
+function shouldUseActiveElementForIastSink(sinkId) {
+    const normalizedSinkId = String(sinkId || '').trim();
+    if (!normalizedSinkId) return true;
+    return !normalizedSinkId.startsWith('http.')
+        && !normalizedSinkId.startsWith('realtime.');
+}
+
+function resolveIastSinkElement(sinkId, contextElement, activeElement = null) {
+    if (typeof contextElement !== 'undefined') return contextElement;
+    return shouldUseActiveElementForIastSink(sinkId) ? (activeElement || null) : null;
+}
+
 function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOverride = null) {
     if (__IAST_DISABLE_HOOKS__) return false;
     const context = Object.assign({ value }, contextExtras);
+    const sinkId = info.sinkId || info.sink || null;
     const match = matchOverride || matchesTaint(value);
     const taintEntry = getTaintEntry(value);
     const taintedSources = match ? normalizeTaintedSources(match.allSources, match.raw) : [];
@@ -5551,11 +5536,15 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
     if (heuristicDecision.skip) return false;
     if (!match && !taintEntry) return false;
     if (typeof context.element === 'undefined') {
-        context.element = document?.activeElement || null;
+        context.element = resolveIastSinkElement(sinkId, context.element, document?.activeElement || null);
     }
     const location = window.location.href;
     if (!context.location) {
         context.location = location;
+    }
+    const transportCarrierKey = buildIastTransportCarrierKey(sinkId, context, location);
+    if (transportCarrierKey) {
+        context.transportCarrierKey = transportCarrierKey;
     }
     const sinkMeta = {
         sinkId: info.sinkId || info.sink || null,
@@ -5571,7 +5560,6 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
     if (flow.length) {
         context.flow = flow;
     }
-    const sinkId = info.sinkId || info.sink || null;
     const explicitRule = info.ruleId ? getIastRuleByRuleId(info.ruleId) : null;
     const sinkCandidates = sinkId ? getIastRulesBySinkId(sinkId) : [];
     // A browser-observed navigation has already been classified to one concrete
@@ -5628,14 +5616,15 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
         confidence: taintEntry?.matchType === 'id' ? 95 : 80
     }];
     const isSmart = isSmartScanStrategy();
-    const sinkPageKey = sinkId && location ? `${sinkId}|${location}` : null;
+    const transportCarrierIsPrimary = Boolean(transportCarrierKey) && sinkId !== 'http.image.src';
+    const sinkPageKey = sinkId && location
+        ? `${sinkId}|${location}|${transportCarrierKey || ''}`
+        : null;
     if (isSmart && sinkPageKey && isCacheHit(IAST_SINK_SEEN, sinkPageKey)) {
         return false;
     }
     const networkDedupKey = buildNetworkDedupKey({
-        sinkId,
-        headerName: context.headerName || null,
-        destOrigin: context.destOrigin || context?.networkTarget?.origin || null,
+        transportCarrierKey,
         location
     });
     if (isSmart && networkDedupKey && isCacheHit(IAST_FINDING_DEDUP, networkDedupKey)) {
@@ -5706,8 +5695,9 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
                 sinkId,
                 sourceKey,
                 location,
-                elementId: context.elementId || null,
-                attribute: context.attribute || null
+                elementId: transportCarrierIsPrimary ? null : (context.elementId || null),
+                attribute: transportCarrierIsPrimary ? null : (context.attribute || null),
+                transportCarrierKey
             });
             if (isCacheHit(IAST_FINDING_DEDUP, dedupKey)) {
                 continue;
@@ -5858,8 +5848,9 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
                 sinkId,
                 sourceKey,
                 location,
-                elementId: context.elementId || null,
-                attribute: context.attribute || null
+                elementId: transportCarrierIsPrimary ? null : (context.elementId || null),
+                attribute: transportCarrierIsPrimary ? null : (context.attribute || null),
+                transportCarrierKey
             });
             markCache(IAST_FINDING_DEDUP, dedupKey);
             if (networkDedupKey) {
@@ -5911,6 +5902,13 @@ function scanInlineEvents(htmlFragment) {
     const originalEval = window.eval;
     window.eval = function (code) {
         if (!isHookGroupEnabled('hook.code.exec')) {
+            return originalEval.call(this, code);
+        }
+        // Playwright serializes its own page-evaluation helpers through
+        // UtilityScript. Those helpers are scanner/test control code, not
+        // target application execution. Suppress only stacks made entirely of
+        // UtilityScript frames; an application frame keeps the sink visible.
+        if (isPlaywrightUtilityScriptEvaluation((new Error('PTK eval caller')).stack)) {
             return originalEval.call(this, code);
         }
         runIastHookGuard('hook.code.exec', 'window.eval.pre', () => {
@@ -7824,9 +7822,13 @@ if (!isTrustedTypesHtmlRestricted()) {
                     : null;
                 isGraphqlRequest = isLikelyGraphqlRequest(url, requestBody, contentType);
                 const method = resolveRequestMethod(resource, init);
-                if (networkHooksEnabled && requestBody != null) {
-                    registerRequestBodySources(requestBody, { contentType });
-                }
+                // An outbound request body is a sink/carrier, not an independent
+                // attacker-controlled source. Registering its fields here makes
+                // the request match values that it introduced itself and creates
+                // tautological exfiltration findings. Independently observed
+                // sources (URL, user input, storage, messages, responses, etc.)
+                // are already present in the taint registry and still match the
+                // request body and headers below.
                 let hasProtectiveHeader = false;
                 if (exfilHooksEnabled && suspiciousUrl) {
                     headerCandidates.forEach(candidate => {
@@ -8002,7 +8004,6 @@ if (!isTrustedTypesHtmlRestricted()) {
                     body,
                     contentType
                 );
-                registerRequestBodySources(body, { contentType });
                 const serialized = coerceBodyString(body);
                 if (exfilHooksEnabled && serialized && this.__ptk_iast_exfil_suspicious) {
                     const networkTarget = this.__ptk_iast_networkTarget || buildNetworkTarget(this.__ptk_iast_url || null);
@@ -8573,6 +8574,9 @@ if (!isTrustedTypesHtmlRestricted()) {
     if (typeof window.postMessage !== 'function') return;
     const origPostMessage = window.postMessage;
     window.postMessage = function (message, targetOrigin, transfer) {
+        if (isIastInternalMessagePayload(message)) {
+            return origPostMessage.apply(this, arguments);
+        }
         if (!isHookGroupEnabled('hook.postMessage')) {
             runIastHookGuard('hook.postMessage', 'window.postMessage.runtimeSignal', () => {
                 const originValue = targetOrigin == null ? '*' : targetOrigin;

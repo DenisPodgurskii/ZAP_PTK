@@ -10,21 +10,63 @@ export class ptk_request_manager {
 
     constructor(settings) {
         this.storageKey = 'ptk_rbuilder'
-        this.storage = []
+        this.storage = {}
         this.settings = settings
-        this.init()
+        this.storageEpoch = 0
+        this.storageMutation = Promise.resolve()
+        this.initPromise = this.init()
         this.addMessageListeners()
     }
 
     async init() {
         this.storage = await ptk_storage.getItem(this.storageKey)
+        return this.storage
+    }
+
+    _queueStorageMutation(callback) {
+        const run = async () => {
+            await this.initPromise
+            return callback()
+        }
+        const result = this.storageMutation.then(run, run)
+        this.storageMutation = result.catch(() => {})
+        return result
+    }
+
+    async _captureStorageEpoch() {
+        await this.initPromise
+        await this.storageMutation
+        return this.storageEpoch
+    }
+
+    _mutateStorageIfCurrent(epoch, callback) {
+        return this._queueStorageMutation(async () => {
+            if (epoch !== this.storageEpoch) return false
+            await callback()
+            return true
+        })
+    }
+
+    _storeScanResult(formId, scanResult, epoch) {
+        return this._mutateStorageIfCurrent(epoch, async () => {
+            if (!this.storage?.[formId]) return
+            this.storage[formId].scanResult = scanResult
+            await ptk_storage.setItem(this.storageKey, this.storage)
+        })
     }
 
     async clear(index) {
-        this.init()
-        if (index) delete this.storage[index]
-        else this.storage = []
-        await ptk_storage.setItem(this.storageKey, this.storage)
+        return this._queueStorageMutation(async () => {
+            if (index !== undefined && index !== null) {
+                delete this.storage[index]
+                await ptk_storage.setItem(this.storageKey, this.storage)
+            } else {
+                this.storageEpoch += 1
+                this.storage = {}
+                await ptk_storage.removeItem(this.storageKey)
+            }
+            return JSON.parse(JSON.stringify(this.storage))
+        })
     }
 
     findLastIndex(obj, requestId) {
@@ -61,98 +103,124 @@ export class ptk_request_manager {
     }
 
     async msg_init(message) {
-        this.storage = await ptk_storage.getItem(this.storageKey)
-        this.storage = this.storage ? this.resort(this.storage) : []
-        return Promise.resolve(JSON.parse(JSON.stringify(this.storage)))
+        return this._queueStorageMutation(async () => {
+            this.storage = await ptk_storage.getItem(this.storageKey)
+            this.storage = this.storage ? this.resort(this.storage) : []
+            return JSON.parse(JSON.stringify(this.storage))
+        })
     }
 
-    msg_clear(message) {
-        this.clear(message.index)
-        return Promise.resolve()
+    async msg_clear(message) {
+        await this.clear(message.index)
     }
 
-    msg_reset_all(message) {
-        this.clear()
-        return Promise.resolve()
+    async msg_reset_all(message) {
+        await this.clear()
+        return { success: true }
     }
 
     async msg_parse_request(message) {
         let rbObj = ptk_request.parseRawRequest(message.raw, message.opts)
+        const admittedEpoch = message.formId ? await this._captureStorageEpoch() : null
         if (message.formId) {
-
-            if (!this.storage[message.formId]) {
-                this.storage[message.formId] = rbObj
-                this.storage[message.formId].sort = Object.keys(this.storage).length
-            } else {
-                this.storage[message.formId].opts = message.opts
-                this.storage[message.formId].request = rbObj.request
-            }
-            await ptk_storage.setItem(this.storageKey, this.storage)
+            await this._mutateStorageIfCurrent(admittedEpoch, async () => {
+                if (!this.storage[message.formId]) {
+                    this.storage[message.formId] = rbObj
+                    this.storage[message.formId].sort = Object.keys(this.storage).length
+                } else {
+                    this.storage[message.formId].opts = message.opts
+                    this.storage[message.formId].request = rbObj.request
+                }
+                await ptk_storage.setItem(this.storageKey, this.storage)
+            })
         }
         return Promise.resolve(rbObj)
     }
 
     async msg_update_request(message) {
         let rbObj = ptk_request.updateRawRequest(message.schema, message.params, message.opts)
+        const admittedEpoch = await this._captureStorageEpoch()
         if (message.formId) {
-            if (!this.storage[message.formId]) {
-                this.storage[message.formId] = rbObj
-                this.storage[message.formId].sort = Object.keys(this.storage).length
-            } else {
-                this.storage[message.formId].opts = message.opts
-                this.storage[message.formId].request = rbObj.request
-            }
-            await ptk_storage.setItem(this.storageKey, this.storage)
+            await this._mutateStorageIfCurrent(admittedEpoch, async () => {
+                if (!this.storage[message.formId]) {
+                    this.storage[message.formId] = rbObj
+                    this.storage[message.formId].sort = Object.keys(this.storage).length
+                } else {
+                    this.storage[message.formId].opts = message.opts
+                    this.storage[message.formId].request = rbObj.request
+                }
+                await ptk_storage.setItem(this.storageKey, this.storage)
+            })
         }
         return Promise.resolve(rbObj)
     }
 
     async msg_delete_request(message) {
-        if (this.storage[message.formId]) {
+        await this._queueStorageMutation(async () => {
+            if (!this.storage[message.formId]) return
             delete this.storage[message.formId]
             await ptk_storage.setItem(this.storageKey, this.resort(this.storage))
-        }
+        })
         return Promise.resolve(JSON.parse(JSON.stringify(this.storage)))
     }
 
     async msg_send_request(message) {
-        let self = this
         let request = new ptk_request()
         request.isolatedRedirectSession = true
         request.isolatedPreserveRawHeaders = true
         if (message.useListeners) request.useListeners = true
-        return request.sendRequest(message.schema).then(function (response) {
+        const admittedEpoch = message.formId ? await this._captureStorageEpoch() : null
+        return request.sendRequest(message.schema).then(async response => {
             if (message.formId) {
-                if (!self.storage[message.formId]) {
-                    self.storage[message.formId] = { sort: Object.keys(self.storage).length }
-                }
-                const sort = typeof self.storage[message.formId].sort === "number"
-                    ? self.storage[message.formId].sort
-                    : Object.keys(self.storage).length
-                self.storage[message.formId] = response
-                self.storage[message.formId].sort = sort
-                delete self.storage[message.formId].scanResult
-                ptk_storage.setItem(self.storageKey, self.storage)
+                await this._mutateStorageIfCurrent(admittedEpoch, async () => {
+                    if (!this.storage[message.formId]) {
+                        this.storage[message.formId] = { sort: Object.keys(this.storage).length }
+                    }
+                    const sort = typeof this.storage[message.formId].sort === "number"
+                        ? this.storage[message.formId].sort
+                        : Object.keys(this.storage).length
+                    this.storage[message.formId] = response
+                    this.storage[message.formId].sort = sort
+                    delete this.storage[message.formId].scanResult
+                    await ptk_storage.setItem(this.storageKey, this.storage)
+                })
             }
             return Promise.resolve(response)
         })
     }
 
     async msg_scan_request(message) {
-        const rawRequest = message?.schema?.request?.raw || message?.raw || null
-        const dastApp = worker.ptk_app?.rattacker || worker.ptk_app?.dast || null
-        const scanFn = dastApp?.engine?.onetimeScanRequest
-        if (typeof scanFn !== 'function') {
-            throw new Error('dast_engine_not_available')
-        }
-        if (!rawRequest) {
-            throw new Error('scan_request_raw_missing')
-        }
         try {
+            let rawRequest = message?.schema?.request?.raw || message?.raw || null
+            const dastApp = worker.ptk_app?.rattacker || worker.ptk_app?.dast || null
+            const scanFn = dastApp?.engine?.onetimeScanRequest
+            if (typeof scanFn !== 'function') throw new Error('dast_engine_not_available')
+            if (!rawRequest) throw new Error('scan_request_raw_missing')
+            const requestManager = worker.ptk_app?.request_manager || null
+            const admittedEpoch = typeof requestManager?._captureStorageEpoch === 'function'
+                ? await requestManager._captureStorageEpoch()
+                : null
+            const requestUrl = String(message?.schema?.request?.url || '').trim()
+            if (requestUrl && !/^[a-z][a-z0-9+.-]*:\/\//iu.test(requestUrl)) {
+                const requestHeaders = Array.isArray(message?.schema?.request?.headers)
+                    ? message.schema.request.headers
+                    : []
+                const host = String(
+                    message?.schema?.request?.host
+                    || requestHeaders.find((header) => String(header?.name || '').toLowerCase() === 'host')?.value
+                    || ''
+                ).trim()
+                if (!host || host === 'unspecified-host') throw new Error('scan_request_host_missing')
+                const scheme = String(message?.schema?.request?.scheme || 'http').replace(/:$/u, '')
+                const scanSchema = JSON.parse(JSON.stringify(message.schema))
+                scanSchema.request.url = new URL(requestUrl, `${scheme}://${host}`).toString()
+                rawRequest = ptk_request.updateRawRequest(scanSchema, null, scanSchema.opts).request.raw
+            }
             const scanResult = await scanFn.call(dastApp.engine, rawRequest, true)
             const cloned = JSON.parse(JSON.stringify(scanResult))
-            const requestManager = worker.ptk_app?.request_manager || null
-            if (requestManager?.storage?.[message.formId]) {
+            if (typeof requestManager?._storeScanResult === 'function') {
+                await requestManager._storeScanResult(message.formId, cloned, admittedEpoch)
+            } else if (requestManager?.storage?.[message.formId]) {
                 requestManager.storage[message.formId].scanResult = cloned
                 await ptk_storage.setItem(requestManager.storageKey, requestManager.storage)
             }
@@ -174,9 +242,12 @@ export class ptk_request_manager {
     }
 
     async msg_sync_storage(message) {
+        const admittedEpoch = await this._captureStorageEpoch()
         if (message.storage) {
-            this.storage = this.resort(message.storage)
-            await ptk_storage.setItem(this.storageKey, this.storage)
+            await this._mutateStorageIfCurrent(admittedEpoch, async () => {
+                this.storage = this.resort(message.storage)
+                await ptk_storage.setItem(this.storageKey, this.storage)
+            })
         }
         return Promise.resolve(JSON.parse(JSON.stringify(this.storage)))
     }

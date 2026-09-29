@@ -5,6 +5,12 @@ const ZAP_MODE_MANUAL = 'manual'
 const ZAP_PROGRESS_STATUS_CALLBACK = 'callback'
 const ZAP_PROGRESS_STATUS_COMPLETED = 'completed'
 const ZAP_PROGRESS_STATUS_ERROR = 'error'
+const ZAP_BOOTSTRAP_RECOVERY_STORAGE_KEY = 'ptk.zap.bootstrapRecovery.v1'
+const ZAP_BOOTSTRAP_RECOVERY_ALARM_PREFIX = 'ptk-zap-bootstrap-retry:'
+const ZAP_BOOTSTRAP_RECOVERY_VERSION = 1
+const ZAP_BOOTSTRAP_RECOVERY_MAX_AGE_MS = 2 * 60 * 1000
+const ZAP_BOOTSTRAP_RECOVERY_DELAYS_MS = [1000, 2500, 5000, 10000, 15000, 30000]
+const ZAP_TRANSIENT_CONFIG_ERRORS = new Set(['zap_config_unavailable'])
 
 export const ZAP_AUTOMATION_STATES = Object.freeze({
     IDLE: 'idle',
@@ -50,14 +56,69 @@ function createRunId() {
     return `zap-run-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
 }
 
+function sanitizeIdentifier(value, maxLength = 256) {
+    const text = toNonEmptyString(value)
+    if (!text || text.length > maxLength || !/^[A-Za-z0-9_.:-]+$/.test(text)) return null
+    return text
+}
+
+function sanitizeConfigDiagnostics(diagnostics = []) {
+    if (!Array.isArray(diagnostics)) return []
+    return diagnostics.slice(-12).map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+        const sanitized = {}
+        for (const key of ['attempt', 'status']) {
+            if (Number.isFinite(Number(entry[key]))) sanitized[key] = Number(entry[key])
+        }
+        for (const key of ['kind', 'errorName']) {
+            const value = sanitizeIdentifier(entry[key], 96)
+            if (value) sanitized[key] = value
+        }
+        return Object.keys(sanitized).length ? sanitized : null
+    }).filter(Boolean)
+}
+
+function recoveryAlarmName(zapid) {
+    return `${ZAP_BOOTSTRAP_RECOVERY_ALARM_PREFIX}${encodeURIComponent(zapid)}`
+}
+
+function zapidFromRecoveryAlarm(name) {
+    if (typeof name !== 'string' || !name.startsWith(ZAP_BOOTSTRAP_RECOVERY_ALARM_PREFIX)) return null
+    try {
+        return sanitizeIdentifier(decodeURIComponent(name.slice(ZAP_BOOTSTRAP_RECOVERY_ALARM_PREFIX.length)))
+    } catch (_) {
+        return null
+    }
+}
+
 export class ZapAutomationController {
-    constructor({ bridge = null, transport = null, targetUrlWaitMs = 120000, targetTabWaitMs = 5000 } = {}) {
+    constructor({
+        bridge = null,
+        transport = null,
+        targetUrlWaitMs = 120000,
+        targetTabWaitMs = 5000,
+        recoveryStorage = globalThis.browser?.storage?.session || null,
+        recoveryAlarms = globalThis.browser?.alarms || null,
+        recoveryMaxAgeMs = ZAP_BOOTSTRAP_RECOVERY_MAX_AGE_MS,
+        recoveryDelaysMs = ZAP_BOOTSTRAP_RECOVERY_DELAYS_MS,
+        now = () => Date.now()
+    } = {}) {
         this.bridge = bridge
         this.transport = transport
         this.targetUrlWaitMs = targetUrlWaitMs
         this.targetTabWaitMs = targetTabWaitMs
         this.runsByKey = new Map()
         this.inFlightByKey = new Map()
+        this.recoveryStorage = recoveryStorage
+        this.recoveryAlarms = recoveryAlarms
+        this.recoveryMaxAgeMs = Math.max(1000, Number(recoveryMaxAgeMs) || ZAP_BOOTSTRAP_RECOVERY_MAX_AGE_MS)
+        this.recoveryDelaysMs = Array.isArray(recoveryDelaysMs) && recoveryDelaysMs.length
+            ? recoveryDelaysMs.map(value => Math.max(0, Number(value) || 0))
+            : ZAP_BOOTSTRAP_RECOVERY_DELAYS_MS.slice()
+        this.now = typeof now === 'function' ? now : () => Date.now()
+        this._recoveryAlarmRegistered = false
+        this._recoveryAlarmHandler = null
+        this._recoveryStorageMutation = Promise.resolve()
     }
 
     setDependencies({ bridge = this.bridge, transport = this.transport } = {}) {
@@ -71,6 +132,268 @@ export class ZapAutomationController {
 
     getRuns() {
         return Array.from(this.runsByKey.values())
+    }
+
+    start() {
+        this._registerRecoveryAlarmListener()
+        return this._rearmPersistedRecoveries()
+    }
+
+    dispose() {
+        if (this._recoveryAlarmRegistered && this._recoveryAlarmHandler && this.recoveryAlarms?.onAlarm?.removeListener) {
+            try {
+                this.recoveryAlarms.onAlarm.removeListener(this._recoveryAlarmHandler)
+            } catch (_) {
+                // The MV3 worker may already be tearing down.
+            }
+        }
+        this._recoveryAlarmRegistered = false
+        this._recoveryAlarmHandler = null
+    }
+
+    _registerRecoveryAlarmListener() {
+        if (this._recoveryAlarmRegistered || !this.recoveryAlarms?.onAlarm?.addListener) return this._recoveryAlarmRegistered
+        this._recoveryAlarmHandler = (alarm = {}) => {
+            if (!zapidFromRecoveryAlarm(alarm?.name)) return
+            void this.handleRecoveryAlarm(alarm)
+        }
+        try {
+            this.recoveryAlarms.onAlarm.addListener(this._recoveryAlarmHandler)
+            this._recoveryAlarmRegistered = true
+        } catch (_) {
+            this._recoveryAlarmHandler = null
+        }
+        return this._recoveryAlarmRegistered
+    }
+
+    async _readRecoveryRecords() {
+        if (!this.recoveryStorage?.get) return {}
+        try {
+            const stored = await this.recoveryStorage.get(ZAP_BOOTSTRAP_RECOVERY_STORAGE_KEY)
+            const records = stored?.[ZAP_BOOTSTRAP_RECOVERY_STORAGE_KEY]
+            return records && typeof records === 'object' && !Array.isArray(records)
+                ? records
+                : {}
+        } catch (_) {
+            return {}
+        }
+    }
+
+    async _mutateRecoveryRecords(mutator) {
+        if (!this.recoveryStorage?.get || !this.recoveryStorage?.set) return null
+        const operation = this._recoveryStorageMutation.then(async () => {
+            const records = await this._readRecoveryRecords()
+            const result = await mutator(records)
+            if (Object.keys(records).length) {
+                await this.recoveryStorage.set({ [ZAP_BOOTSTRAP_RECOVERY_STORAGE_KEY]: records })
+            } else if (this.recoveryStorage.remove) {
+                await this.recoveryStorage.remove(ZAP_BOOTSTRAP_RECOVERY_STORAGE_KEY)
+            } else {
+                await this.recoveryStorage.set({ [ZAP_BOOTSTRAP_RECOVERY_STORAGE_KEY]: {} })
+            }
+            return result
+        })
+        this._recoveryStorageMutation = operation.catch(() => null)
+        return operation
+    }
+
+    _sanitizeRecoveryRecord(record = {}) {
+        if (Number(record.version) !== ZAP_BOOTSTRAP_RECOVERY_VERSION) return null
+        const zapid = sanitizeIdentifier(record.zapid)
+        if (!zapid) return null
+        const startedAt = Number(record.startedAt)
+        const expiresAt = Number(record.expiresAt)
+        if (!Number.isFinite(startedAt) || !Number.isFinite(expiresAt) || expiresAt <= startedAt) return null
+        return {
+            version: ZAP_BOOTSTRAP_RECOVERY_VERSION,
+            zapid,
+            browserid: sanitizeIdentifier(record.browserid) || null,
+            callbackTabId: isValidTabId(record.callbackTabId) ? record.callbackTabId : null,
+            targetUrl: toHttpUrl(record.targetUrl),
+            startedAt,
+            expiresAt,
+            retryCount: Math.max(0, Number(record.retryCount) || 0),
+            nextRetryAt: Number.isFinite(Number(record.nextRetryAt)) ? Number(record.nextRetryAt) : null,
+            lastError: ZAP_TRANSIENT_CONFIG_ERRORS.has(record.lastError) ? record.lastError : 'zap_config_unavailable',
+            diagnostics: sanitizeConfigDiagnostics(record.diagnostics)
+        }
+    }
+
+    _recoveryDelayMs(retryCount) {
+        const index = Math.max(0, Math.min(Number(retryCount) || 0, this.recoveryDelaysMs.length - 1))
+        return this.recoveryDelaysMs[index]
+    }
+
+    async _armRecoveryAlarm(record, delayMs = null) {
+        if (!record?.zapid || !this.recoveryAlarms?.create) return false
+        this._registerRecoveryAlarmListener()
+        const now = this.now()
+        const requestedDelay = delayMs == null ? this._recoveryDelayMs(record.retryCount) : Math.max(0, Number(delayMs) || 0)
+        const when = Math.min(record.expiresAt, now + requestedDelay)
+        try {
+            await this.recoveryAlarms.create(recoveryAlarmName(record.zapid), { when })
+            return true
+        } catch (_) {
+            return false
+        }
+    }
+
+    async _persistBootstrapRecovery(payload, context, rawConfig) {
+        const zapid = sanitizeIdentifier(context?.zapid)
+        if (!zapid || !this.recoveryStorage?.get || !this.recoveryStorage?.set || !this.recoveryAlarms?.create) {
+            return null
+        }
+        const now = this.now()
+        const record = await this._mutateRecoveryRecords((records) => {
+            const previous = this._sanitizeRecoveryRecord(records[zapid])
+            const detectedAt = Number(payload?.detectedAt)
+            const startedAt = previous?.startedAt
+                || (Number.isFinite(detectedAt) && detectedAt > 0 && detectedAt <= now ? detectedAt : now)
+            const retryCount = (previous?.retryCount || 0) + 1
+            const next = this._sanitizeRecoveryRecord({
+                version: ZAP_BOOTSTRAP_RECOVERY_VERSION,
+                zapid,
+                browserid: context?.browserid,
+                callbackTabId: context?.tabId,
+                targetUrl: payload?.targetUrl,
+                startedAt,
+                expiresAt: startedAt + this.recoveryMaxAgeMs,
+                retryCount,
+                nextRetryAt: Math.min(startedAt + this.recoveryMaxAgeMs, now + this._recoveryDelayMs(retryCount - 1)),
+                lastError: rawConfig?.error,
+                diagnostics: rawConfig?.diagnostics
+            })
+            records[zapid] = next
+            return next
+        }).catch(() => null)
+        if (!record) return null
+        if (record.expiresAt <= now) return record
+        const armed = await this._armRecoveryAlarm(record, Math.max(0, record.nextRetryAt - now))
+        return armed ? record : null
+    }
+
+    async cancelBootstrapRecovery(zapid, { reason = 'cancelled' } = {}) {
+        const safeZapId = sanitizeIdentifier(zapid)
+        if (!safeZapId) return false
+        await this._mutateRecoveryRecords((records) => {
+            delete records[safeZapId]
+            return true
+        }).catch(() => null)
+        try {
+            await this.recoveryAlarms?.clear?.(recoveryAlarmName(safeZapId))
+        } catch (_) {
+            // Cleanup remains best-effort during worker teardown.
+        }
+        this.bridge?._debugLog?.('[PTK ZAP] Bootstrap recovery cancelled:', {
+            zapid: safeZapId,
+            reason: sanitizeIdentifier(reason, 96) || 'cancelled'
+        })
+        return true
+    }
+
+    async _rearmPersistedRecoveries() {
+        this._registerRecoveryAlarmListener()
+        const records = await this._readRecoveryRecords()
+        const now = this.now()
+        for (const [key, rawRecord] of Object.entries(records)) {
+            const record = this._sanitizeRecoveryRecord(rawRecord)
+            if (!record || record.zapid !== key || record.expiresAt <= now) {
+                await this.cancelBootstrapRecovery(key, { reason: 'invalid_or_expired' })
+                continue
+            }
+            await this._armRecoveryAlarm(record, Math.max(0, (record.nextRetryAt || now) - now))
+        }
+        return true
+    }
+
+    async _terminalizeConfigFailure(run, context, rawConfig, reason = 'config_fetch_failed') {
+        await this.cancelBootstrapRecovery(context?.zapid, { reason })
+        this.bridge?._clearPendingStart?.(context?.sessionKey)
+        this._transition(run, ZAP_AUTOMATION_STATES.FAILED, {
+            error: rawConfig?.error || 'zap_config_unavailable',
+            reason
+        })
+        this.bridge?._scheduleTerminalProgress?.({
+            sessionKey: context?.sessionKey,
+            zapid: context?.zapid,
+            requiredEngines: [],
+            status: ZAP_PROGRESS_STATUS_ERROR,
+            message: reason === 'config_retry_budget_exhausted'
+                ? 'ZAP automation config fetch timed out'
+                : 'ZAP automation config fetch failed'
+        })
+        return run
+    }
+
+    async _resolveRecoveryPayload(record) {
+        let route = this.transport?._getCallbackRoute?.({ zapid: record.zapid }) || null
+        if (!route && this.transport?.scanOpenTabsForDirectCallbackUrls) {
+            const observed = await this.transport.scanOpenTabsForDirectCallbackUrls('zap.bootstrap.recovery.alarm')
+            if (observed) return { rediscovered: true, payload: null }
+            route = this.transport?._getCallbackRoute?.({ zapid: record.zapid }) || null
+        }
+        if (!route?.baseUrl) return { rediscovered: false, payload: null }
+        return {
+            rediscovered: false,
+            payload: {
+                baseUrl: route.baseUrl,
+                zapid: record.zapid,
+                browserid: record.browserid || this.transport?.getBrowserId?.() || null,
+                tabId: isValidTabId(record.callbackTabId) ? record.callbackTabId : route.tabId,
+                targetUrl: record.targetUrl,
+                source: 'bootstrap_recovery_alarm'
+            }
+        }
+    }
+
+    async handleRecoveryAlarm(alarm = {}) {
+        const zapid = zapidFromRecoveryAlarm(alarm?.name)
+        if (!zapid) return { ok: false, reason: 'unrelated_alarm' }
+        const records = await this._readRecoveryRecords()
+        const record = this._sanitizeRecoveryRecord(records[zapid])
+        if (!record) {
+            await this.cancelBootstrapRecovery(zapid, { reason: 'record_missing' })
+            return { ok: false, reason: 'record_missing' }
+        }
+        if (record.expiresAt <= this.now()) {
+            const context = this._buildRunContext({ zapid, browserid: record.browserid, tabId: record.callbackTabId })
+            const run = this._getOrCreateRun(context)
+            await this._terminalizeConfigFailure(run, context, { error: record.lastError }, 'config_retry_budget_exhausted')
+            return { ok: false, reason: 'config_retry_budget_exhausted' }
+        }
+        if (this.transport?.isSessionTerminal?.({ zapid }) === true) {
+            await this.cancelBootstrapRecovery(zapid, { reason: 'zap_session_terminal' })
+            return { ok: false, reason: 'zap_session_terminal' }
+        }
+        const automation = this.bridge?.app?.automation
+        if (!automation || typeof automation.startZapConfiguredSession !== 'function') {
+            await this._armRecoveryAlarm(record)
+            return { ok: false, reason: 'automation_module_unavailable' }
+        }
+        const resolved = await this._resolveRecoveryPayload(record)
+        if (resolved.rediscovered) return { ok: true, reason: 'callback_rediscovered' }
+        if (!resolved.payload) {
+            const nextRecord = await this._mutateRecoveryRecords((allRecords) => {
+                const current = this._sanitizeRecoveryRecord(allRecords[zapid]) || record
+                current.retryCount += 1
+                current.nextRetryAt = Math.min(current.expiresAt, this.now() + this._recoveryDelayMs(current.retryCount))
+                allRecords[zapid] = current
+                return current
+            }).catch(() => null)
+            if (nextRecord) await this._armRecoveryAlarm(nextRecord, Math.max(0, nextRecord.nextRetryAt - this.now()))
+            return { ok: false, reason: 'callback_route_unavailable' }
+        }
+        try {
+            const control = await this.transport?.postControlJson?.({ zapid })
+            if (control?.data?.closeRequested === true) {
+                await this.cancelBootstrapRecovery(zapid, { reason: 'zap_close_requested' })
+                return { ok: false, reason: 'zap_close_requested' }
+            }
+        } catch (_) {
+            // Config retry remains authoritative when the optional control route is unavailable.
+        }
+        const run = await this.handleZapDetected(resolved.payload)
+        return { ok: true, reason: 'retry_finished', run }
     }
 
     _buildSessionKey(baseUrl, zapid) {
@@ -254,20 +577,21 @@ export class ZapAutomationController {
         })
 
         if (rawConfig?.ptkConfigFetchFailed === true) {
-            bridge._clearPendingStart?.(context.sessionKey)
-            this._transition(run, ZAP_AUTOMATION_STATES.FAILED, {
-                error: rawConfig?.error || 'zap_config_unavailable',
-                reason: 'config_fetch_failed'
-            })
-            bridge._scheduleTerminalProgress?.({
-                sessionKey: context.sessionKey,
-                zapid: context.zapid,
-                requiredEngines: [],
-                status: ZAP_PROGRESS_STATUS_ERROR,
-                message: 'ZAP automation config fetch failed'
-            })
-            return run
+            const error = rawConfig?.error || 'zap_config_unavailable'
+            if (ZAP_TRANSIENT_CONFIG_ERRORS.has(error)) {
+                const recovery = await this._persistBootstrapRecovery(payload, context, rawConfig)
+                if (recovery && recovery.expiresAt > this.now()) {
+                    this._transition(run, ZAP_AUTOMATION_STATES.CONFIG_FETCHING, {
+                        error,
+                        reason: 'config_fetch_retry_scheduled'
+                    })
+                    return run
+                }
+            }
+            return this._terminalizeConfigFailure(run, context, rawConfig)
         }
+
+        await this.cancelBootstrapRecovery(context.zapid, { reason: 'config_ready' })
 
         const parsedConfig = bridge._parseConfig(rawConfig)
         bridge._resolvedConfig = {

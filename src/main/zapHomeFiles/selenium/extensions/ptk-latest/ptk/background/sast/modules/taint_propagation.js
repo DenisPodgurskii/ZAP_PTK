@@ -67,8 +67,11 @@ function scopeIdsFromAncestorList(ancestors) {
   return ids;
 }
 
-function stateKey(nodeId, sanitized) {
-  return `${nodeId}|${sanitized ? 1 : 0}`;
+function stateKey(nodeId, sanitized, callStack = []) {
+  const context = Array.isArray(callStack) && callStack.length
+    ? callStack.join(".")
+    : "-";
+  return `${nodeId}|${sanitized ? 1 : 0}|${context}`;
 }
 
 function markFunctionParamsAsMessage(fnNode) {
@@ -274,14 +277,22 @@ function sourceIdForUrlSourceHint(hint) {
   }
 }
 
-function stableMemberStoreKey(node) {
+function stableMemberStoreKey(node, options = {}) {
   if (!node || node.type !== "MemberExpression") return null;
   const parts = memberChainParts(node);
   if (!parts || parts.length < 2) return null;
   const normalized = parts.map((part) => String(part || ""));
   const first = normalized[0].toLowerCase();
-  if (GLOBAL_ASSIGNED_FN_BASES.has(first)) normalized[0] = "window";
-  return normalized.join(".");
+  if (GLOBAL_ASSIGNED_FN_BASES.has(first)) {
+    normalized[0] = "window";
+    return `global:${normalized.join(".")}`;
+  }
+  if (options.bindingId != null) {
+    return `binding:${options.bindingId}:${normalized.slice(1).join(".")}`;
+  }
+  const sourceFile = String(node.sourceFile || node.loc?.sourceFile || "<unknown>");
+  const scopeKey = String(options.scopeKey || "root");
+  return `file:${sourceFile}:scope:${scopeKey}:${normalized.join(".")}`;
 }
 
 function maybeMarkScriptFromCall(callNode, callName) {
@@ -315,6 +326,62 @@ function nodeFromPathKey(key, graph) {
   const id = Number(idStr);
   if (!Number.isFinite(id)) return null;
   return graph.astNodeForId(id);
+}
+
+function isLocationMember(node, property) {
+  if (!node || node.type !== "MemberExpression") return false;
+  const parts = memberChainParts(node);
+  if (!parts || parts.length < 2) return false;
+  const normalized = parts.map((part) => String(part || "").toLowerCase());
+  const tail = normalized.slice(-2).join(".");
+  return tail === `location.${String(property || "").toLowerCase()}`;
+}
+
+function flattenStringConcatenation(node, output = []) {
+  if (node?.type === "BinaryExpression" && node.operator === "+") {
+    flattenStringConcatenation(node.left, output);
+    flattenStringConcatenation(node.right, output);
+  } else if (node) {
+    output.push(node);
+  }
+  return output;
+}
+
+function isSameOriginPinnedUrlExpression(node) {
+  if (!node) return false;
+  if (isLocationMember(node, "origin")) return true;
+  if (node.type !== "BinaryExpression" || node.operator !== "+") return false;
+  const parts = flattenStringConcatenation(node);
+  if (parts.length < 3) return false;
+
+  if (isLocationMember(parts[0], "origin")) return true;
+  return isLocationMember(parts[0], "protocol") &&
+    literalStringValue(parts[1]) === "//" &&
+    isLocationMember(parts[2], "host");
+}
+
+function isNumericNarrowing(node) {
+  if (!node) return false;
+  if (node.type === "UnaryExpression" && node.operator === "+") return true;
+  if (node.type !== "CallExpression") return false;
+  const name = String(calleeNameFromCall(node) || "").toLowerCase();
+  return name === "number" || name === "parseint" || name === "parsefloat";
+}
+
+function destinationPathIsConstrained(ruleId, pathKeys, graph) {
+  if (![
+    "open-redirection-taint",
+    "network-destination-url-taint"
+  ].includes(String(ruleId || ""))) {
+    return false;
+  }
+  for (const key of pathKeys || []) {
+    const node = nodeFromPathKey(key, graph);
+    if (isNumericNarrowing(node) || isSameOriginPinnedUrlExpression(node)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Build a quick lookup: sanitizer callee name -> [sanitizerId, ...]
@@ -602,10 +669,15 @@ function buildFunctionIndex(ast) {
   const byName = new Map();
   const returnNodeByFn = new WeakMap();
 
-  const register = (name, node, ancestors) => {
+  const register = (name, node, ancestors, options = {}) => {
     if (!name || !node) return;
     ensureFunctionId(node);
-    const entry = { node, scopeIds: scopeIdsFromAncestorList(ancestors || []) };
+    const entry = {
+      node,
+      scopeIds: scopeIdsFromAncestorList(ancestors || []),
+      sourceFile: node.sourceFile || node.loc?.sourceFile || null,
+      explicitGlobal: options.explicitGlobal === true
+    };
     if (!byName.has(name)) byName.set(name, []);
     byName.get(name).push(entry);
   };
@@ -623,7 +695,8 @@ function buildFunctionIndex(ast) {
           left.object?.type === "Identifier" &&
           GLOBAL_ASSIGNED_FN_BASES.has(left.object.name)
         ) {
-          register(left.property.name, funcNode, ancestors);
+          register(left.property.name, funcNode, ancestors, { explicitGlobal: true });
+          register(`window.${left.property.name}`, funcNode, ancestors, { explicitGlobal: true });
           break;
         }
       }
@@ -675,10 +748,15 @@ function buildFunctionIndex(ast) {
     return [];
   }
 
-  function registerAlias(name, node) {
+  function registerAlias(name, node, options = {}) {
     if (!name || !node) return;
     const scopeIds = Array.isArray(node._ptkScopeIds) ? node._ptkScopeIds : [];
-    const entry = { node, scopeIds };
+    const entry = {
+      node,
+      scopeIds,
+      sourceFile: node.sourceFile || node.loc?.sourceFile || null,
+      explicitGlobal: options.explicitGlobal === true
+    };
     if (!byName.has(name)) byName.set(name, []);
     byName.get(name).push(entry);
   }
@@ -701,7 +779,9 @@ function buildFunctionIndex(ast) {
       if (!fnNodes.length) continue;
       for (const base of bases) {
         const aliasName = `${base}.${keyName}`;
-        fnNodes.forEach((fnNode) => registerAlias(aliasName, fnNode));
+        const baseRoot = String(base).split(".")[0];
+        const explicitGlobal = GLOBAL_NAMES.has(baseRoot);
+        fnNodes.forEach((fnNode) => registerAlias(aliasName, fnNode, { explicitGlobal }));
       }
     }
   }
@@ -747,9 +827,14 @@ function buildFunctionIndex(ast) {
   return { byName, returnNodeByFn };
 }
 
-function selectFunctionForCall(name, callScopeIds, fnIndex) {
+function selectFunctionForCall(name, callScopeIds, fnIndex, callNode = null) {
   if (!fnIndex?.byName?.has(name)) return null;
-  const entries = fnIndex.byName.get(name);
+  const callSourceFile = callNode?.sourceFile || callNode?.loc?.sourceFile || null;
+  const entries = fnIndex.byName.get(name).filter((entry) => (
+    entry?.explicitGlobal === true ||
+    entry?.sourceFile === callSourceFile ||
+    (!entry?.sourceFile && !callSourceFile)
+  ));
   if (!entries || !entries.length) return null;
   const scope = Array.isArray(callScopeIds) ? callScopeIds : [];
   let bestEntry = null;
@@ -788,7 +873,19 @@ export function buildGlobalTaintContext(ast, options = {}) {
   const propertyStores = new Map();
 
   const fileCache = { map: new Map(), list: [] };
-  const rootScope = { parent: null, bindings: new Map(), isFunctionScope: true };
+  const rootScopesByFile = new Map();
+  const rootScopeFor = (node) => {
+    const sourceFile = String(node?.sourceFile || node?.loc?.sourceFile || "<unknown>");
+    if (!rootScopesByFile.has(sourceFile)) {
+      rootScopesByFile.set(sourceFile, {
+        parent: null,
+        bindings: new Map(),
+        isFunctionScope: true,
+        sourceFile
+      });
+    }
+    return rootScopesByFile.get(sourceFile);
+  };
   const fallbackOrigins = [];
 
   function bind(scope, name, node, opts = {}) {
@@ -816,6 +913,17 @@ export function buildGlobalTaintContext(ast, options = {}) {
       cur = cur.parent;
     }
     return null;
+  }
+
+  function propertyStoreKey(node, scope, fnStack = []) {
+    const parts = memberChainParts(node);
+    const rootName = Array.isArray(parts) && parts.length ? String(parts[0] || "") : "";
+    const rootBinding = rootName ? lookup(scope, rootName) : null;
+    const bindingId = rootBinding ? graph.nodeIdForAstNode(rootBinding) : null;
+    const scopeKey = Array.isArray(fnStack) && fnStack.length
+      ? fnStack.join(".")
+      : "root";
+    return stableMemberStoreKey(node, { bindingId, scopeKey });
   }
 
   function resolveFnFromBinding(binding) {
@@ -1097,7 +1205,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
         visit(node.right, scope, nextParents, activeFnStack);
         visit(node.left, scope, nextParents, activeFnStack);
         graph.addEdge(node.right, node.left, "assign");
-        const storeKey = stableMemberStoreKey(node.left);
+        const storeKey = propertyStoreKey(node.left, scope, activeFnStack);
         if (storeKey) {
           if (!propertyStores.has(storeKey)) propertyStores.set(storeKey, []);
           propertyStores.get(storeKey).push(node.right);
@@ -1143,7 +1251,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
         if (node.object) graph.addEdge(node.object, node, "member");
         if (node.computed && node.property) graph.addEdge(node.property, node, "member");
         if (!isAssignmentTarget) {
-          const storeKey = stableMemberStoreKey(node);
+          const storeKey = propertyStoreKey(node, scope, activeFnStack);
           const stores = storeKey ? propertyStores.get(storeKey) : null;
           if (stores && stores.length) {
             stores.forEach((storedNode) => storedNode && graph.addEdge(storedNode, node, "property_store"));
@@ -1322,19 +1430,20 @@ export function buildGlobalTaintContext(ast, options = {}) {
         if (node.type === "CallExpression" && node.callee && (node.callee.type === "FunctionExpression" || node.callee.type === "ArrowFunctionExpression")) {
           targetFn = node.callee;
         } else if (node.type === "CallExpression" && callName && fnIndex.byName.has(callName)) {
-          targetFn = selectFunctionForCall(callName, activeFnStack, fnIndex);
+          targetFn = selectFunctionForCall(callName, activeFnStack, fnIndex, node);
         }
         if (targetFn) {
+          const callSiteId = graph.nodeIdForAstNode(node);
           const params = targetFn.params || [];
           params.forEach((param, idx) => {
             if (param?.type === "Identifier" && node.arguments[idx]) {
-              graph.addEdge(node.arguments[idx], param, "arg_to_param");
+              graph.addEdge(node.arguments[idx], param, "arg_to_param", { callSiteId });
             }
           });
           const retNode = fnIndex.returnNodeByFn.get(targetFn);
           if (retNode) {
             graph.nodeIdForAstNode(retNode);
-            graph.addEdge(retNode, node, "ret_to_call");
+            graph.addEdge(retNode, node, "ret_to_call", { callSiteId });
           }
         }
         shouldWalkChildren = false;
@@ -1462,7 +1571,13 @@ export function buildGlobalTaintContext(ast, options = {}) {
     }
   }
 
-  visit(ast, rootScope, [ast], []);
+  if (ast?.type === "Program" && Array.isArray(ast.body)) {
+    for (const statement of ast.body) {
+      visit(statement, rootScopeFor(statement), [ast], []);
+    }
+  } else {
+    visit(ast, rootScopeFor(ast), [ast], []);
+  }
   for (const entry of fallbackOrigins) {
     const objOrigins = entry.objNodeId ? graph.getOrigins(entry.objNodeId) : null;
     if (objOrigins && objOrigins.size > 0) {
@@ -1488,12 +1603,12 @@ export function queryTaintForRule(globalCtx, rulePack, sinkPayloadNode, queryOpt
   const startId = graph.nodeIdForAstNode(sinkPayloadNode);
   if (!startId) return [];
 
-  const queue = [{ nodeId: startId, sanitized: false, depth: 0, key: stateKey(startId, false) }];
-  const visited = new Set([stateKey(startId, false)]);
+  const queue = [{ nodeId: startId, sanitized: false, callStack: [], depth: 0, key: stateKey(startId, false, []) }];
+  const visited = new Set([stateKey(startId, false, [])]);
   const parent = new Map();
   let hits = [];
 
-  const startKey = stateKey(startId, false);
+  const startKey = stateKey(startId, false, []);
   parent.set(startKey, null);
 
   while (queue.length) {
@@ -1534,6 +1649,7 @@ export function queryTaintForRule(globalCtx, rulePack, sinkPayloadNode, queryOpt
           key = parent.get(key) || null;
         }
         if (shouldSkipBaseIdentifierOrigin(origin, path, graph)) continue;
+        if (destinationPathIsConstrained(rulePack?.metadata?.id, path, graph)) continue;
         hits.push({
           origin,
           originNode: origin.node,
@@ -1551,11 +1667,28 @@ export function queryTaintForRule(globalCtx, rulePack, sinkPayloadNode, queryOpt
       continue;
     }
     for (const edge of upstream) {
-      const key = stateKey(edge.fromNodeId, nextSanitized);
+      let nextCallStack = cur.callStack;
+      const edgeCallSiteId = Number(edge?.meta?.callSiteId);
+      if (edge.edgeKind === "ret_to_call" && Number.isFinite(edgeCallSiteId)) {
+        nextCallStack = [...cur.callStack, edgeCallSiteId];
+      } else if (edge.edgeKind === "arg_to_param" && cur.callStack.length) {
+        const expectedCallSiteId = cur.callStack[cur.callStack.length - 1];
+        if (!Number.isFinite(edgeCallSiteId) || edgeCallSiteId !== expectedCallSiteId) {
+          continue;
+        }
+        nextCallStack = cur.callStack.slice(0, -1);
+      }
+      const key = stateKey(edge.fromNodeId, nextSanitized, nextCallStack);
       if (visited.has(key)) continue;
       visited.add(key);
       parent.set(key, cur.key);
-      queue.push({ nodeId: edge.fromNodeId, sanitized: nextSanitized, depth: cur.depth + 1, key });
+      queue.push({
+        nodeId: edge.fromNodeId,
+        sanitized: nextSanitized,
+        callStack: nextCallStack,
+        depth: cur.depth + 1,
+        key
+      });
     }
   }
 

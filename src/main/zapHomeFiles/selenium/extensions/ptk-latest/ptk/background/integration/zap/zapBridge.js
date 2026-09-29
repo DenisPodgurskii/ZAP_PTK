@@ -278,6 +278,7 @@ class ZapBridge {
         })
         this.transport.init()
         this._registerControlAlarmListener()
+        void this._automationController?.start?.()
         this.bootstrapped = true
 
         this._debugLog('[PTK ZAP] zapBridge bootstrapped, waiting for ZAP detection')
@@ -1250,6 +1251,9 @@ class ZapBridge {
         if (!control || typeof control !== 'object' || control.closeRequested !== true) {
             return
         }
+        void this._automationController?.cancelBootstrapRecovery?.(monitor?.zapid, {
+            reason: 'zap_close_requested'
+        })
         const closeRequestId = toNonEmptyString(control.closeRequestId)
             || `${monitor.zapid || 'zap'}-${createBatchId()}`
         if (monitor.closeRequest?.id && monitor.closeRequest.id !== closeRequestId && monitor.closeRequest.acked === true) {
@@ -1330,6 +1334,9 @@ class ZapBridge {
     }
 
     _scheduleTerminalProgress({ sessionKey, sessionId = null, zapid = null, requiredEngines = null, status = ZAP_PROGRESS_STATUS_ERROR, message = null, engines = null } = {}) {
+        void this._automationController?.cancelBootstrapRecovery?.(zapid, {
+            reason: 'terminal_progress_scheduled'
+        })
         const payload = this._buildProgressMonitorPayload({
             progress: 100,
             status,

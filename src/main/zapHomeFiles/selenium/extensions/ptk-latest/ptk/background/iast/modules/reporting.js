@@ -37,7 +37,7 @@ export function createFindingFromIAST(details = {}, meta = {}) {
     const description = details?.description || details?.meta?.description || null
     const recommendation = details?.recommendation || details?.meta?.recommendation || null
     const links = details?.links || details?.meta?.links || null
-    const contextKey = extractContextKey(details?.context)
+    const contextKey = extractContextKey(details?.context, location.url, sinkId)
     const fingerprint = buildFingerprint({
         url: location.url,
         sink: sinkId,
@@ -108,7 +108,7 @@ export function getFindingFingerprint(finding = {}) {
     const evidence = getIastEvidencePayload(finding) || {}
     const fallbackSource = finding?.taintSummary?.primarySource || finding?.source || null
     const contextKey =
-        extractContextKey(evidence?.context) ||
+        extractContextKey(evidence?.context, extractLocationUrl(finding?.location), evidence?.sinkId || finding?.sinkId || null) ||
         extractContextKey(finding?.location) ||
         null
     return buildFingerprint({
@@ -841,7 +841,47 @@ function normalizeUrl(url) {
     }
 }
 
-function extractContextKey(context = {}) {
+export function buildIastTransportCarrierKey(sinkId, context = {}, baseUrl = null) {
+    const normalizedSinkId = String(sinkId || "").trim()
+    if (!normalizedSinkId.startsWith("http.") && !normalizedSinkId.startsWith("realtime.")) return null
+    const method = String(context?.method || "").trim().toUpperCase().slice(0, 16)
+    const headerName = String(context?.headerName || "").trim().toLowerCase().slice(0, 96)
+    const rawUrl = context?.destUrl
+        || context?.networkTarget?.url
+        || context?.requestUrl
+        || context?.url
+        || context?.destOrigin
+        || context?.networkTarget?.origin
+        || ""
+    let destination = ""
+    if (rawUrl) {
+        try {
+            const parsed = new URL(String(rawUrl), baseUrl || undefined)
+            const path = String(parsed.pathname || "/").split("/").map(segment => {
+                if (!segment) return ""
+                if (/^\d+$/.test(segment)) return ":id"
+                if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(segment)) return ":uuid"
+                if (segment.length >= 24 && /^[a-z0-9_-]+$/i.test(segment) && /\d/.test(segment)) return ":token"
+                return segment.slice(0, 96)
+            }).join("/").slice(0, 384) || "/"
+            const queryNames = []
+            for (const name of parsed.searchParams.keys()) {
+                const normalizedName = String(name || "").trim().slice(0, 64)
+                if (normalizedName) queryNames.push(normalizedName)
+            }
+            const boundedNames = Array.from(new Set(queryNames)).sort().slice(0, 16)
+            const queryShape = boundedNames.length
+                ? `?keys=${boundedNames.map(name => encodeURIComponent(name)).join(",")}`
+                : ""
+            destination = `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${path}${queryShape}`
+        } catch (_) {
+            destination = String(rawUrl).split(/[?#]/, 1)[0].slice(0, 384)
+        }
+    }
+    return ["carrier-v1", normalizedSinkId, method, destination, headerName].join("|").slice(0, 640)
+}
+
+function extractContextKey(context = {}, baseUrl = null, sinkId = null) {
     if (!context) return null
     if (typeof context !== "object") {
         try {
@@ -850,7 +890,16 @@ function extractContextKey(context = {}) {
             return null
         }
     }
-    return context.domPath || context.elementId || context.attribute || context.property || context.method || null
+    const carrierKey = context.transportCarrierKey || buildIastTransportCarrierKey(sinkId, context, baseUrl)
+    const transportCarrierIsPrimary = Boolean(carrierKey) && sinkId !== "http.image.src"
+    if (transportCarrierIsPrimary) return carrierKey
+    return context.domPath
+        || context.elementId
+        || context.attribute
+        || context.property
+        || carrierKey
+        || context.method
+        || null
 }
 
 function sanitizeNumber(value) {

@@ -429,8 +429,11 @@
                 includeSecrets: false,
                 exportMode: 'evidence',
                 allowChunked: true,
-                // Force the low-level exporter into chunked mode so exportFullReport
-                // always returns a retrieval-plan descriptor instead of inline data.
+                // Tell the background exporter this workflow requires a retrieval
+                // descriptor; avoid preparing an inline payload only to reject it.
+                forceChunked: true,
+                // Retain the one-byte ceiling as a compatibility fallback for
+                // backgrounds that do not yet understand forceChunked.
                 maxExportBytes: 1
             }
             delete exportOptions.transfer

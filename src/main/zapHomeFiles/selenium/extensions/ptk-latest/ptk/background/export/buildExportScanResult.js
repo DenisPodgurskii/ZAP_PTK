@@ -3,6 +3,7 @@ import { scanResultStore } from "../scanResultStore.js"
 import { applyScanAnalysis } from "../analysis/scanAnalysisEngine.js"
 import { normalizeEngineName } from "../analysis/canonicalize.js"
 import { shouldIncludeScanAnalysisInExport } from "../analysis/featureFlags.js"
+import { createCredentialRedactor, isCredentialKey } from "./credentialRedaction.js"
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
@@ -59,7 +60,7 @@ const SENSITIVE_HEADER_NAMES = new Set([
 
 const SECRET_KEY_REGEX = /("(?:password|passwd|pwd|token|access_token|api[_-]?key|secret)"\s*:\s*")([^"]{4,})(")/gi
 const SECRET_QUERY_REGEX = /((?:\?|&)(?:password|passwd|pwd|token|access_token|api[_-]?key|secret)=)([^&#\s]+)/gi
-const SECRET_ASSIGN_REGEX = /((?:password|passwd|pwd|token|access_token|api[_-]?key|secret)\s*[=:]\s*)([^\s,'";]{4,})/gi
+const SECRET_ASSIGN_REGEX = /((?:password|passwd|pwd|token|access_token|api[_-]?key|secret)\s*[=:]\s*)([^\s,'";&#]{4,})/gi
 const BEARER_REGEX = /(Bearer\s+)([A-Za-z0-9._~+\-/=]{20,})/gi
 const JWT_REGEX = /\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b/g
 const OPENAI_REGEX = /\bsk-[A-Za-z0-9]{16,}\b/g
@@ -107,9 +108,27 @@ function deriveExtraEnginesPresent(relatedScans = []) {
 }
 
 function maskSecret(value) {
-    if (!value || typeof value !== "string") return "[REDACTED]"
-    if (value.length <= 10) return "[REDACTED]"
-    return `${value.slice(0, 6)}...${value.slice(-4)}`
+    return "[REDACTED]"
+}
+
+// Applied to the export clone only. Shape and non-credential evidence remain
+// intact, including deeply nested configuration and custom header entries.
+function redactStructuredCredentials(root) {
+    const pending = [root]
+    const seen = new WeakSet()
+    while (pending.length) {
+        const value = pending.pop()
+        if (!value || typeof value !== "object" || seen.has(value)) continue
+        seen.add(value)
+        if (isCredentialKey(value.name || value.key) && Object.prototype.hasOwnProperty.call(value, "value")) {
+            value.value = "[REDACTED]"
+        }
+        for (const key of Object.keys(value)) {
+            if (isCredentialKey(key) && value[key] != null) value[key] = "[REDACTED]"
+            else if (value[key] && typeof value[key] === "object") pending.push(value[key])
+        }
+    }
+    return root
 }
 
 export function redactSensitiveStrings(input) {
@@ -198,6 +217,12 @@ function sanitizeScanConfiguration(settings, opts = {}) {
 function sanitizeBodyObject(body, limits, labelPrefix, opts = {}) {
     if (!body || typeof body !== "object") return
     if (typeof body.text === "string") {
+        if (opts?.includeSecrets !== true) {
+            try {
+                const parsed = JSON.parse(body.text)
+                if (parsed && typeof parsed === "object") body.text = JSON.stringify(redactStructuredCredentials(parsed))
+            } catch (_) { /* Non-JSON bodies retain the existing string sanitizer. */ }
+        }
         body.text = sanitizeString(body.text, limits.bodyLimit, `${labelPrefix}.body.text`, opts)
     }
     if (Array.isArray(body.params)) {
@@ -1038,6 +1063,15 @@ function rebuildStats(findings = []) {
 
 export function sanitizeScanResult(scanResult, opts = {}) {
     if (!scanResult || typeof scanResult !== "object") return scanResult
+    if (String(scanResult.engine || "").toUpperCase() === "SCA" && scanResult.tabId != null) {
+        if (typeof scanResult.tabId === "number" && Number.isSafeInteger(scanResult.tabId) && scanResult.tabId >= 0) {
+            scanResult.tabId = String(scanResult.tabId)
+        } else if (typeof scanResult.tabId !== "string") {
+            throw new Error("invalid_sca_export_tab_id")
+        }
+    }
+    const redactCredentials = opts?.includeSecrets === true ? null : createCredentialRedactor(scanResult)
+    redactCredentials?.(scanResult)
     const findings = Array.isArray(scanResult.findings) ? scanResult.findings : []
     findings.forEach(finding => sanitizeFinding(finding, opts))
     enrichFindingsForExport(findings)
@@ -1090,6 +1124,10 @@ export function sanitizeScanResult(scanResult, opts = {}) {
         scanResult.meta.privacy.replayableRequests = true
     }
     sanitizeCodeArtifacts(scanResult.codeArtifacts)
+    if (opts?.includeSecrets !== true) redactStructuredCredentials(scanResult)
+    // Analysis may synthesize copies after the initial pre-truncation pass.
+    // Do not reinterpret already-masked attack payloads as unknown credentials.
+    redactCredentials?.(scanResult.analysis, { maskPayloads: false })
     return scanResult
 }
 

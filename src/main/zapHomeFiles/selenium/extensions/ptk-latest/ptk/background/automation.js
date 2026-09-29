@@ -2586,6 +2586,29 @@ export class ptk_automation {
                 })
         }
 
+        if (resolution.session?.engines?.includes?.('DAST')) {
+            const dast = this.app?.dast || this.app?.rattacker || null
+            try {
+                await dast?.refreshDastRuntimeProgress?.()
+            } catch (error) {
+                debugAutomationLog('[PTK Automation] Failed to refresh DAST runtime progress', {
+                    sessionId: resolution.sessionId,
+                    error: error?.message || String(error)
+                })
+            }
+        }
+
+        let diagnostics = null
+        if (options?.includeDiagnostics === true && resolution.session?.engines?.includes?.('DAST')) {
+            const dast = this.app?.dast || this.app?.rattacker || null
+            const phasePerformance = await dast?.getDastPhasePerformance?.({ refresh: true })
+            diagnostics = {
+                dast: {
+                    phasePerformance: phasePerformance || null
+                }
+            }
+        }
+
         const snapshot = this.getSessionProgressSnapshot(resolution.sessionId)
         if (!snapshot?.ok) {
             return { ok: false, error: snapshot?.error || 'session_not_found', requestId, sessionLookup: resolution.sessionLookup }
@@ -2660,6 +2683,7 @@ export class ptk_automation {
         return {
             ...snapshot,
             ...zapCloseProgress,
+            ...(diagnostics ? { diagnostics } : {}),
             requestId,
             sessionLookup: resolution.sessionLookup
         }
@@ -3230,6 +3254,7 @@ export class ptk_automation {
         const warnings = []
         const exports = []
         const allowChunked = options.allowChunked !== false
+        const forceChunked = allowChunked && exportOptions.forceChunked === true
 
         for (const engine of enginesToExport) {
             let scanId = session.scanIds[engine]
@@ -3250,16 +3275,23 @@ export class ptk_automation {
 
             try {
                 let scanExport = null
-                try {
-                    scanExport = await this._buildEngineExport(engine, scanId, session, exportOptions)
-                } catch (err) {
-                    if (!allowChunked || String(err?.message || '') !== 'export_too_large') {
-                        throw err
-                    }
+                if (forceChunked) {
                     scanExport = await this._buildEngineChunkedExport(engine, session, {
                         ...exportOptions,
                         owner: this._pageExportOwner(session, sender, engine, PAGE_EXPORT_MODE)
                     })
+                } else {
+                    try {
+                        scanExport = await this._buildEngineExport(engine, scanId, session, exportOptions)
+                    } catch (err) {
+                        if (!allowChunked || String(err?.message || '') !== 'export_too_large') {
+                            throw err
+                        }
+                        scanExport = await this._buildEngineChunkedExport(engine, session, {
+                            ...exportOptions,
+                            owner: this._pageExportOwner(session, sender, engine, PAGE_EXPORT_MODE)
+                        })
+                    }
                 }
                 exports.push(scanExport)
             } catch (err) {

@@ -38,6 +38,7 @@ export class SastSessionCoordinator {
     this.multiPageScanActive = false;
     this.spaPageSet = new Set();
     this.spaScanInFlight = new Set();
+    this.staleWarningPairs = new Set();
     this.scanHeartbeatTimer = null;
     this.scanStartMs = null;
     this.scanningRequest = false;
@@ -99,6 +100,7 @@ export class SastSessionCoordinator {
     this.lastCompletedArtifactsCount = null;
     this.lastCompletedAt = null;
     this.initialCollectionDeferred = null;
+    this.staleWarningPairs = new Set();
     this.startHeartbeat();
   }
 
@@ -337,9 +339,27 @@ export class SastSessionCoordinator {
     }
     if (this.spaPageSet.has(url)) return false;
     this.spaPageSet.add(url);
-    scanResult.pages.push(url);
-    this.schedulePersist();
+    const alreadyRecorded = scanResult.pages.some(entry => {
+      const recordedUrl = typeof entry === "string" ? entry : entry?.url;
+      return recordedUrl === url;
+    });
+    if (!alreadyRecorded) {
+      scanResult.pages.push(url);
+      this.schedulePersist();
+    }
     return true;
+  }
+
+  recordStalePayload(expectedUrl, actualUrl) {
+    this.recordTiming("sast.payload.stale", {
+      expectedUrl,
+      actualUrl
+    }, null, "sast.payload.stale");
+    if (expectedUrl) this.spaPageSet.delete(expectedUrl);
+    const warningKey = `${String(expectedUrl || "")}|${String(actualUrl || "")}`;
+    if (this.staleWarningPairs.has(warningKey)) return;
+    this.staleWarningPairs.add(warningKey);
+    console.warn("[SAST] Dropping stale collected payload; expectedUrl=", expectedUrl, "actualUrl=", actualUrl);
   }
 
   async onSpaUrlChanged(rawUrl, tabId, scanResult, payload = null) {
@@ -441,11 +461,7 @@ export class SastSessionCoordinator {
         retryDelayMs
       });
       if (opts?.expectedUrl && payload?.file && !sameDocumentUrl(payload.file, opts.expectedUrl)) {
-        this.recordTiming("sast.payload.stale", {
-          expectedUrl: opts.expectedUrl,
-          actualUrl: payload.file
-        }, null, "sast.payload.stale");
-        console.warn("[SAST] Dropping stale collected payload; expectedUrl=", opts.expectedUrl, "actualUrl=", payload.file);
+        this.recordStalePayload(opts.expectedUrl, payload.file);
         return [];
       }
       const scriptsCount = Array.isArray(payload?.scripts) ? payload.scripts.length : 0;
@@ -510,11 +526,7 @@ export class SastSessionCoordinator {
     if (!this.isTrackedScanTab(tabId)) return [];
     if (!this.isCollectedPayloadUsable(payload)) return [];
     if (opts?.expectedUrl && payload?.file && !sameDocumentUrl(payload.file, opts.expectedUrl)) {
-      this.recordTiming("sast.payload.stale", {
-        expectedUrl: opts.expectedUrl,
-        actualUrl: payload.file
-      }, null, "sast.payload.stale");
-      console.warn("[SAST] Dropping stale collected payload; expectedUrl=", opts.expectedUrl, "actualUrl=", payload.file);
+      this.recordStalePayload(opts.expectedUrl, payload.file);
       return [];
     }
 

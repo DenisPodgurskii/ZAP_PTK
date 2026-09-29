@@ -70,6 +70,18 @@ function _matchMemberChain(node, chain) {
   return true;
 }
 
+function _isDefinitelyNonWindowPostMessageCallee(callee) {
+  if (!callee || callee.type !== "MemberExpression") return false;
+  if (String(_memberPropertyName(callee) || "").toLowerCase() !== "postmessage") return false;
+  const receiver = callee.object;
+  if (!receiver || receiver.type !== "MemberExpression") return false;
+  const receiverProp = String(_memberPropertyName(receiver) || "").toLowerCase();
+  // MessageChannel.port1/port2 use postMessage(message[, transfer]) and do not
+  // have Window.postMessage's targetOrigin parameter. This shape is definitive
+  // without guessing the type of arbitrary `worker.postMessage(...)` aliases.
+  return receiverProp === "port1" || receiverProp === "port2";
+}
+
 function _canonicalizeBasePart(name) {
   if (!name) return name;
   const lowered = String(name).toLowerCase();
@@ -220,8 +232,26 @@ export function isStringIshExpression(expr) {
 
 function _isDynamicStringCarrier(expr) {
   if (!expr) return false;
-  if (isStringIshExpression(expr)) return true;
-  return expr.type === "MemberExpression";
+  if (expr.type === "Literal") return typeof expr.value === "string";
+  if (expr.type === "StringLiteral" || expr.type === "TemplateLiteral") return true;
+  if (expr.type === "BinaryExpression" && expr.operator === "+") {
+    return _isDynamicStringCarrier(expr.left) || _isDynamicStringCarrier(expr.right);
+  }
+  if (expr.type === "ConditionalExpression") {
+    return _isDynamicStringCarrier(expr.consequent) && _isDynamicStringCarrier(expr.alternate);
+  }
+  if (expr.type === "LogicalExpression") {
+    return _isDynamicStringCarrier(expr.left) && _isDynamicStringCarrier(expr.right);
+  }
+  if (expr.type === "SequenceExpression") {
+    const expressions = expr.expressions || [];
+    return expressions.length > 0 && _isDynamicStringCarrier(expressions[expressions.length - 1]);
+  }
+  // Identifiers and member expressions are type-ambiguous in JavaScript. In
+  // particular, normal callback assignments such as element.onload = handler
+  // must not be reported as string-code execution. Tainted values are covered
+  // by the dedicated source-to-sink rule instead of this syntax-only rule.
+  return false;
 }
 
 const INLINE_EVENT_HANDLER_PROPERTIES = new Set([
@@ -250,7 +280,7 @@ export function isOnEventProperty(memberExpr) {
   return INLINE_EVENT_HANDLER_PROPERTIES.has(String(prop).toLowerCase());
 }
 
-export function getEventHandlerSink(node) {
+export function getEventHandlerSink(node, { allowAmbiguousValue = false } = {}) {
   if (!node) return null;
   if (node.type === "CallExpression") {
     const callee = node.callee;
@@ -262,7 +292,7 @@ export function getEventHandlerSink(node) {
     const valueNode = node.arguments?.[1];
     const name = _nodeToStaticString(nameNode);
     if (!name || !/^on[a-z]+$/i.test(String(name))) return null;
-    if (!_isDynamicStringCarrier(valueNode)) return null;
+    if (!allowAmbiguousValue && !_isDynamicStringCarrier(valueNode)) return null;
     return { api: "setAttribute", eventName: String(name), valueNode };
   }
   if (node.type === "AssignmentExpression") {
@@ -270,7 +300,7 @@ export function getEventHandlerSink(node) {
     if (!left || left.type !== "MemberExpression") return null;
     if (!isOnEventProperty(left)) return null;
     const valueNode = node.right;
-    if (!_isDynamicStringCarrier(valueNode)) return null;
+    if (!allowAmbiguousValue && !_isDynamicStringCarrier(valueNode)) return null;
     const prop = _memberPropertyName(left);
     return { api: "property", eventName: String(prop || ""), valueNode };
   }
@@ -624,11 +654,18 @@ export function compilePattern(pattern) {
     if (pattern.call) {
       const p = pattern.call;
       const hasDisc = !!(p.callee || p.calleeProp || p.calleePropRegex);
-      testers.push((node) => {
+      testers.push((node, ancestors = []) => {
         if (!node || node.type !== "CallExpression") return false;
         if (typeof p.maxArgs === "number" && node.arguments.length > p.maxArgs) return false;
         if (!hasDisc && !(Array.isArray(p.args) && p.args.length)) return false;
         if (p.callee && !_matchCallee(node.callee, p.callee)) return false;
+        if (
+          typeof p.maxArgs === "number" &&
+          p.maxArgs <= 1 &&
+          _isDefinitelyNonWindowPostMessageCallee(node.callee)
+        ) {
+          return false;
+        }
         if (p.calleeProp) {
           if (node.callee?.type !== "MemberExpression") return false;
           const prop = _memberPropertyName(node.callee);
@@ -639,6 +676,13 @@ export function compilePattern(pattern) {
           const prop = _memberPropertyName(node.callee) || "";
           const re = _getCachedRegex(p, "call.calleePropRegex", p.calleePropRegex, p.calleePropCaseInsensitive ? "i" : "");
           if (!re.test(String(prop))) return false;
+        }
+        if (p.chainMember) {
+          let parent = ancestors[ancestors.length - 1] || null;
+          if (parent === node) parent = ancestors[ancestors.length - 2] || null;
+          if (!parent || parent.type !== "MemberExpression" || parent.object !== node) return false;
+          const prop = _memberPropertyName(parent);
+          if (!_wildEq(prop, p.chainMember)) return false;
         }
         if (Array.isArray(p.args)) {
           for (const argSpec of p.args) {
