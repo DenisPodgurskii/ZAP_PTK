@@ -91,6 +91,8 @@ class rbuilderUI {
 
     constructor() {
         this.storage = {}
+        this.scanOperations = new Map()
+        this.uiGeneration = 0
         this.updating = false
         this.scanCounters = createEmptyCounters()
         this.scanFilterScope = 'all'
@@ -168,11 +170,55 @@ class rbuilderUI {
     }
 
     resetAll() {
+        this.uiGeneration++
+        this.scanOperations.clear()
         this.storage = {}
         $('.menu_item').each(function (i, obj) {
             $(obj).parent().parent().remove()
         })
         this.resetForm()
+    }
+
+    async scanRequest(formId, raw, opts) {
+        const operationId = ptk_utils.UUID()
+        const token = { operationId, generation: this.uiGeneration, entry: this.storage[formId] }
+        this.scanOperations.set(formId, token)
+        const isCurrent = () => this.uiGeneration === token.generation
+            && this.scanOperations.get(formId) === token && this.storage[formId] === token.entry
+        try {
+            const schema = await controller.parseRawRequest(raw, opts, formId)
+            if (!isCurrent()) return
+            this.storage[formId] = schema
+            token.entry = schema
+            return await controller.scanRequest(schema, formId, operationId, token.generation)
+        } catch (error) {
+            if (isCurrent()) this.handleScanMessage({
+                type: 'scan_failed', formId, operationId, uiGeneration: token.generation,
+                error: error?.message || 'Could not scan the current request.'
+            })
+        }
+    }
+
+    handleScanMessage(message) {
+        const token = this.scanOperations.get(message.formId)
+        if (!token || token.operationId !== message.operationId
+            || token.generation !== message.uiGeneration || this.uiGeneration !== token.generation
+            || !token.entry || this.storage[message.formId] !== token.entry) return false
+        const selected = $('.menu_item.active').attr('key') === message.formId
+        if (message.type === 'scan progress') {
+            if (selected) this.bindAttackProgress(message)
+        } else if (message.type === 'scan completed') {
+            token.entry.scanResult = message.scanResult
+            if (selected) this.bindScanResult(message.formId)
+            this.scanOperations.delete(message.formId)
+        } else if (message.type === 'scan_failed') {
+            if (selected) {
+                $('#traffic_error_message').text(message.error || 'Could not scan the current request.')
+                $('.mini.modal').modal('show')
+            }
+            this.scanOperations.delete(message.formId)
+        }
+        return true
     }
 
     getCurl(key) {
@@ -206,6 +252,8 @@ class rbuilderUI {
     }
 
     buildFromStorage(storage) {
+        this.uiGeneration++
+        this.scanOperations.clear()
         this.storage = storage
         let result = this.storage
 
@@ -634,6 +682,8 @@ jQuery(function () {
 
     $(document).on("click", ".window.close.icon", function () {
         let key = $(this).parent().attr('key')
+        rbuilder.scanOperations.delete(key)
+        delete rbuilder.storage[key]
         $(this).parent().parent().parent().remove()
         $(".menu_item").removeClass('active')
         controller.deleteSavedRequest(key).then(result => {
@@ -701,9 +751,7 @@ jQuery(function () {
             let opts = rbuilder.getOpts()
 
             $('.showScanResult').show()
-            controller.parseRawRequest(values['request'], opts, key).then(function (schema) {
-                controller.scanRequest(schema, key)
-            })
+            rbuilder.scanRequest(key, values['request'], opts)
         }
     })
 
@@ -880,26 +928,9 @@ jQuery(function () {
 /* Chrome runtime events handlers */
 ////////////////////////////////////
 browser.runtime.onMessage.addListener(function (message, sender, sendResponse) {
-    if (message.channel == "ptk_background2popup_rattacker") {
-        if (message.type == "attack completed") {
-            rbuilder.bindAttackProgress(message)
-        }
-    }
     if (message.channel == "ptk_background2popup_rbuilder") {
-        if (message.type == "scan progress") {
-            rbuilder.bindAttackProgress(message)
-        }
-        if (message.type == "scan completed") {
-            //bindScanResult(message.scanResult)
-            let key = $('.menu_item.active').attr('key')
-            if (key && rbuilder.storage[key]) {
-                rbuilder.storage[key].scanResult = message.scanResult
-                rbuilder.bindScanResult(key)
-            }
-        }
-        if (message.type == "scan_failed") {
-            $('#traffic_error_message').text(message.error || 'Could not scan the current request.')
-            $('.mini.modal').modal('show')
+        if (["scan progress", "scan completed", "scan_failed"].includes(message.type)) {
+            rbuilder.handleScanMessage(message)
         }
         if (message.type == "attack failed") {
             $('#traffic_error_message').text(message.info)

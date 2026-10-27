@@ -876,17 +876,24 @@ jQuery(function () {
     }
 
 
+    let initializedTarget = null
+
     function init() {
-        controller.init().then(result => {
+        return controller.init().then(result => {
+            initializedTarget = result?.tab?.tabId
+                ? { tabId: result.tab.tabId, url: result.tab.url }
+                : null
             tokens = []
             initControls()
             if (result?.storage?.token) {
                 tokens.push(['none', "none", result.storage.token])
             }
-            bindTokens(tokens)
             if (result?.tab?.tabId) {
                 $('#dashboard_message_text').text(result.tab.url)
                 checkCookies(result.cookies)
+            }
+            bindTokens(tokens)
+            if (result?.tab?.tabId) {
                 browser.tabs.sendMessage(result.tab.tabId, {
                     channel: "ptk_popup2content",
                     type: "get_storage"
@@ -907,15 +914,17 @@ jQuery(function () {
                 await updateDashboardTab(active.id, active.url)
             }
         } catch (_) { }
-        init()
+        return init()
     }
 
-    initWithActiveTab()
+    const initialInit = initWithActiveTab()
 
     registerDashboardTabListener({
         onTabChange: async ({ tabId, url }) => {
+            await initialInit
+            if (initializedTarget?.tabId === tabId && initializedTarget.url === url) return
             await updateDashboardTab(tabId, url)
-            init()
+            await init()
         }
     })
 

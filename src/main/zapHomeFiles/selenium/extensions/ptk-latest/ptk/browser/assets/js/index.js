@@ -54,6 +54,7 @@ let $dashboardHtmlLinkDiscoveryInput = null
 let $dashboardHtmlLinkDiscoveryCheckboxWrapper = null
 let $dashboardHtmlLinkDiscoveryBudget = null
 let dashboardActionInProgress = false
+let dashboardStopFailureVisible = false
 const DASHBOARD_DAST_MACRO_STATE = {
     requested: false,
     started: false
@@ -360,6 +361,7 @@ function setDashboardExportProgress(percent, message, options = {}) {
     const safePercent = Math.max(0, Math.min(100, Number(percent) || 0))
     setDashboardProgressTitle(options.title || 'Export')
     $progress.show()
+    $bar.parent().show()
     $bar.css('width', `${safePercent}%`)
     $text.text(message || `Exporting... ${safePercent}%`)
 }
@@ -1013,18 +1015,74 @@ async function populateManageScansDialog(result = {}, activeTab = null, options 
     return true
 }
 
+function beginDashboardStopFeedback(jobs, trigger) {
+    const labels = new Set(jobs.flatMap(job => String(job.label || '').split(' + ')))
+    const buttons = new Map()
+    const clear = () => {
+        for (const [element, html] of buttons) {
+            try { $(element).html(html).removeClass('loading').attr('aria-busy', 'false') } catch (_) { }
+        }
+        try { $('#dashboard_export_progress').attr('aria-busy', 'false') } catch (_) { }
+    }
+    const mark = ($button) => {
+        $button.each(function () {
+            if (buttons.has(this)) return
+            const $control = $(this)
+            buttons.set(this, $control.html())
+            $control.addClass('disabled loading').attr('aria-busy', 'true').text('Stop requested…')
+        })
+    }
+    try {
+        for (const engine of ['DAST', 'IAST', 'SAST', 'SCA']) {
+            if (labels.has(engine)) mark($(`.${engine.toLowerCase()}_scan_stop`))
+        }
+        if (trigger?.length) mark(trigger)
+        $('#dashboard_export_progress').attr('aria-busy', 'true')
+    } catch (error) {
+        clear()
+        throw error
+    }
+    clear.start = (job) => {
+        for (const engine of String(job.label || '').split(' + ')) {
+            if (['DAST', 'IAST', 'SAST', 'SCA'].includes(engine) && labels.has(engine)) {
+                $(`.${engine.toLowerCase()}_scan_stop`).text('Stopping…')
+            }
+        }
+    }
+    return clear
+}
+
+function createDashboardEngineProgress(jobs) {
+    const engines = new Set(['DAST', 'IAST', 'SAST', 'SCA'])
+    const requested = new Set(jobs.flatMap(job => String(job.label || '').split(' + ')).filter(label => engines.has(label)))
+    const settled = new Set()
+    return {
+        percent: () => requested.size ? Math.round(settled.size / requested.size * 100) : 0,
+        settle(job) {
+            for (const label of String(job.label || '').split(' + ')) {
+                if (requested.has(label)) settled.add(label)
+            }
+        }
+    }
+}
 async function runDashboardProgressAction({ title, initialMessage, jobs, successMessage, emptyMessage, activeTab = null, trigger = null } = {}) {
     if (dashboardActionInProgress || dashboardExportInProgress) return false
     const queue = Array.isArray(jobs) ? jobs.filter((job) => job && typeof job.run === 'function') : []
+    const isStopAction = title === 'Stop scans'
+    const engineProgress = isStopAction || title === 'Run scans' ? createDashboardEngineProgress(queue) : null
     dashboardActionInProgress = true
-    if (trigger && trigger.length) {
-        trigger.addClass('disabled loading')
-    }
-    updateManageScanActions(controller.scans)
-
-    setDashboardExportProgress(2, initialMessage || `${title}: preparing...`, { title })
-
+    dashboardStopFailureVisible = false
+    let clearStopFeedback = null
+    let keepStopFailureVisible = false
     try {
+        clearStopFeedback = isStopAction ? beginDashboardStopFeedback(queue, trigger) : null
+        if (trigger && trigger.length) {
+            trigger.addClass('disabled loading')
+        }
+        updateManageScanActions(controller.scans)
+
+        setDashboardExportProgress(engineProgress ? 0 : 2, isStopAction ? 'Stopping scans…' : (initialMessage || `${title}: preparing...`), { title })
+
         if (!queue.length) {
             setDashboardExportProgress(100, emptyMessage || 'No scans selected.', { title })
             const refreshed = await refreshDashboardScanState(activeTab)
@@ -1036,25 +1094,39 @@ async function runDashboardProgressAction({ title, initialMessage, jobs, success
         const skipped = []
         let priorJobFailed = false
         const total = queue.length
-        for (let i = 0; i < total; i += 1) {
-            const job = queue[i]
-            const base = Math.floor((i / total) * 100)
-            const done = Math.floor(((i + 1) / total) * 100)
+        const runJob = async (job, i) => {
+            // The selected engine set is fixed for the operation. Completion
+            // order, macro jobs and duplicate notifications cannot inflate it.
+            const base = engineProgress ? engineProgress.percent() : Math.floor((i / total) * 100)
+            const done = () => {
+                engineProgress?.settle(job)
+                return engineProgress ? engineProgress.percent() : Math.floor(((i + 1) / total) * 100)
+            }
             if (job.requiresAnyPreviousSuccess === true && completed.length === 0) {
                 const skipMessage = `${job.label} (no required earlier action succeeded)`
                 skipped.push(skipMessage)
-                setDashboardExportProgress(done, `${job.label}: skipped`, { title })
-                continue
+                setDashboardExportProgress(done(), `${job.label}: skipped`, { title })
+                return
             }
             if (job.requiresPreviousSuccess === true && priorJobFailed) {
                 const skipMessage = `${job.label} (a required earlier action failed)`
                 skipped.push(skipMessage)
-                setDashboardExportProgress(done, `${job.label}: skipped`, { title })
-                continue
+                setDashboardExportProgress(done(), `${job.label}: skipped`, { title })
+                return
             }
-            setDashboardExportProgress(base, `${job.label}: in progress...`, { title })
+            clearStopFeedback?.start(job)
+            setDashboardExportProgress(base, isStopAction ? 'Stopping scans…' : `${job.label}: in progress...`, { title })
             try {
                 const result = await Promise.resolve(job.run())
+                if (isStopAction && (result instanceof Error || result?.success === false || result?.result === false)) {
+                    throw new Error('scan_stop_failed')
+                }
+                const nativeOutcome = result?.outcomes?.[String(job.label || '').toLowerCase()]?.status
+                if (isStopAction && nativeOutcome === 'failed') throw new Error('scan_stop_failed')
+                if (isStopAction && result?.scans && String(job.label || '').split(' + ')
+                    .some(label => result.scans[label.toLowerCase()] === true)) {
+                    throw new Error('selected_scan_still_running')
+                }
                 const outcome = result && typeof result === 'object'
                     ? String(result.__dashboardActionOutcome || '').trim().toLowerCase()
                     : ''
@@ -1063,20 +1135,24 @@ async function runDashboardProgressAction({ title, initialMessage, jobs, success
                         const skipMessage = String(result?.message || '').trim()
                         skipped.push(skipMessage ? `${job.label} (${skipMessage})` : job.label)
                     }
-                    setDashboardExportProgress(done, `${job.label}: skipped`, { title })
-                    continue
+                    setDashboardExportProgress(done(), `${job.label}: skipped`, { title })
+                    return
                 }
                 completed.push(job.label)
-                setDashboardExportProgress(done, `${job.label}: complete`, { title })
+                setDashboardExportProgress(done(), isStopAction ? 'Stopping scans…' : `${job.label}: complete`, { title })
             } catch (err) {
                 priorJobFailed = true
                 errors.push(`${job.label}: ${err?.message || 'action_failed'}`)
-                setDashboardExportProgress(done, `${job.label}: failed`, { title })
+                setDashboardExportProgress(done(), `${job.label}: failed`, { title })
             }
         }
+        if (isStopAction) await Promise.all(queue.map(runJob))
+        else for (let i = 0; i < total; i += 1) await runJob(queue[i], i)
 
         if (errors.length) {
-            setDashboardExportProgress(100, `${successMessage || title} complete with ${errors.length} error(s).`, { title })
+            keepStopFailureVisible = isStopAction
+            dashboardStopFailureVisible = isStopAction
+            setDashboardExportProgress(100, isStopAction ? 'Stop failed.' : `${successMessage || title} complete with ${errors.length} error(s).`, { title })
             const loggableErrors = title === 'Upload'
                 ? errors.filter((message) => !isDashboardHandledUploadErrorMessage(message))
                 : errors
@@ -1084,19 +1160,27 @@ async function runDashboardProgressAction({ title, initialMessage, jobs, success
                 console.error(`[PTK Dashboard] ${title} errors`, loggableErrors)
             }
         } else {
-            setDashboardExportProgress(100, successMessage || `${title} complete.`, { title })
+            setDashboardExportProgress(100, isStopAction ? 'Scans stopped.' : (successMessage || `${title} complete.`), { title })
         }
 
         const refreshed = await refreshDashboardScanState(activeTab)
         return { refreshed, completed, errors, skipped }
+    } catch (error) {
+        if (isStopAction) {
+            keepStopFailureVisible = true
+            dashboardStopFailureVisible = true
+            try { setDashboardExportProgress(engineProgress?.percent() ?? 100, 'Stop failed.', { title }) } catch (_) { }
+        }
+        throw error
     } finally {
         dashboardActionInProgress = false
+        clearStopFeedback?.()
         if (trigger && trigger.length) {
             trigger.removeClass('loading')
         }
         updateManageScanActions(controller.scans)
-        setTimeout(() => {
-            if (!dashboardActionInProgress && !dashboardExportInProgress) {
+        if (!keepStopFailureVisible) setTimeout(() => {
+            if (!dashboardActionInProgress && !dashboardExportInProgress && !dashboardStopFailureVisible) {
                 hideDashboardExportProgress({ title: 'Export', message: 'Preparing export...' })
             }
         }, 1200)
@@ -2095,28 +2179,13 @@ $(document).on("click", "#stop_all_scans", function () {
             run: async () => stopDashboardScanMacroReplay()
         })
     }
-    const siblingSelection = {
-        dast: false,
-        iast: !!scans.iast,
-        sast: !!scans.sast,
-        sca: !!scans.sca
-    }
-    const siblingLabels = []
-    if (siblingSelection.iast) siblingLabels.push('IAST')
-    if (siblingSelection.sast) siblingLabels.push('SAST')
-    if (siblingSelection.sca) siblingLabels.push('SCA')
-    if (siblingLabels.length) {
+    for (const engine of ['iast', 'sast', 'sca', 'dast']) {
+        if (!scans[engine]) continue
         jobs.push({
-            label: `${siblingLabels.join(' + ')}`,
-            run: async () => controller.stopBackgroundScan(siblingSelection)
-        })
-    }
-    if (scans.dast) {
-        jobs.push({
-            label: 'DAST',
+            label: engine.toUpperCase(),
             run: async () => {
-                const response = await controller.stopBackgroundScan({ dast: true, iast: false, sast: false, sca: false })
-                await stopDashboardDastMacroRecording()
+                const response = await controller.stopBackgroundScan({ dast: false, iast: false, sast: false, sca: false, [engine]: true })
+                if (engine === 'dast') await stopDashboardDastMacroRecording()
                 return response
             }
         })

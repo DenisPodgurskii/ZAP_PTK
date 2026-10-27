@@ -3,7 +3,22 @@ import { sanitizeOneTimeDastProgressMessage } from "../background/dast/runtime/o
 
 const runtime = globalThis.chrome?.runtime || globalThis.browser?.runtime || null
 const workerUrl = runtime?.getURL("ptk/background/sast/sast_worker.js")
-const sastWorker = workerUrl ? new Worker(workerUrl, { type: "module" }) : null
+let sastWorker = null
+const sastOwners = new Set()
+function ensureSastWorker() {
+  if (!sastWorker && workerUrl) {
+    const instance = new Worker(workerUrl, { type: 'module' })
+    sastWorker = instance
+    const relay = data => {
+      if (sastWorker === instance) runtime?.sendMessage({ channel: 'ptk_offscreen2background_sast', ...data })
+    }
+    instance.onmessage = event => relay(event.data || {})
+    instance.onerror = error => relay({ type: 'error', error: error?.message || String(error) })
+    instance.onmessageerror = error => relay({ type: 'error', error: error?.message || 'sast_worker_message_error' })
+  }
+  return sastWorker
+}
+ensureSastWorker()
 const dastWorkerUrl = runtime?.getURL("ptk/offscreen/dast_runtime_worker.js")
 const dastWorker = dastWorkerUrl ? new Worker(dastWorkerUrl, { type: "module" }) : null
 const dastPending = new Map()
@@ -113,12 +128,26 @@ if (dastWorker) {
   }
 }
 
-runtime?.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!msg || msg.channel !== "ptk_bg2offscreen_sast" || !sastWorker) return undefined
+runtime?.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.channel !== "ptk_bg2offscreen_sast") return undefined
   const { type, scanId } = msg
+  if (type === 'cancel_scan') {
+    if (sender?.id !== runtime.id || sender?.tab || sastOwners.size !== 1 || !sastOwners.has(scanId) || !sastWorker) {
+      sendResponse?.({ ok: false, cancelled: false }); return true
+    }
+    const stopped = sastWorker
+    stopped.terminate()
+    sastWorker = null
+    sastOwners.clear()
+    sendResponse?.({ ok: true, cancelled: true })
+    return true
+  }
   if (type === "start_scan") {
+    if (typeof scanId !== 'string' || !scanId || !ensureSastWorker()) return undefined
+    sastOwners.add(scanId)
     sastWorker.postMessage({ type, scanId, scanStrategy: msg.scanStrategy, policy: msg.policy, opts: msg.opts })
   } else if (type === "scan_code") {
+    if (!sastWorker || !sastOwners.has(scanId)) return undefined
     sastWorker.postMessage({
       type,
       scanId,
@@ -129,17 +158,11 @@ runtime?.onMessage.addListener((msg, _sender, sendResponse) => {
       collectionId: msg.collectionId
     })
   } else if (type === "stop_scan") {
-    sastWorker.postMessage({ type, scanId })
+    sastWorker?.postMessage({ type, scanId })
+    sastOwners.delete(scanId)
   } else {
     return undefined
   }
   sendResponse?.({ ok: true })
   return true
 })
-
-const relay = (data) => runtime?.sendMessage({ channel: "ptk_offscreen2background_sast", ...data })
-if (sastWorker) {
-  sastWorker.onmessage = (event) => relay(event.data || {})
-  sastWorker.onerror = (error) => relay({ type: "error", error: error?.message || String(error) })
-  sastWorker.onmessageerror = (error) => relay({ type: "error", error: error?.message || "sast_worker_message_error" })
-}

@@ -38,6 +38,7 @@ export class RemoteDastEngineFacade {
         this.modules = []
         this.scanResult = {}
         this.progress = { isIdle: true }
+        this.progressDrains = 0
         this._performanceTelemetry = null
         this.automationHooks = null
         this.resultMutationListener = null
@@ -46,11 +47,15 @@ export class RemoteDastEngineFacade {
         this.captureSequence = 0
         this.strongRecordedKeys = new Set()
         this.publicationCursor = 0
+        this.appliedEventCursor = 0
         this.controllerState = null
         this.automationSessionId = null
         this.eventApplyChain = Promise.resolve()
         this.resultDeltaRevision = 0
         this.terminalState = null
+        this._remoteCleanup = null
+        this._cleanupAttempt = null
+        this._cleanupSessionBinding = null
         controller?.onEngineMessage?.((message, cursor) => this._queueEngineMessage(message, cursor))
     }
 
@@ -63,6 +68,12 @@ export class RemoteDastEngineFacade {
 
     _applyRuntimeState(response = {}) {
         const state = response.executorState || {}
+        if ((response.sessionId && response.sessionId !== this.sessionId)
+            || (response.executorGeneration && response.executorGeneration !== this.executorGeneration)
+            || (state.automationSessionId && state.automationSessionId !== this.automationSessionId)
+            || (state.scanResult?.scanId && state.scanResult.scanId !== this.scanResult?.scanId)) {
+            this._invalidateRemoteCleanup()
+        }
         this.sessionId = response.sessionId || this.sessionId
         this.executorGeneration = response.executorGeneration || this.executorGeneration
         this.tabId = state.tabId ?? this.tabId
@@ -82,10 +93,13 @@ export class RemoteDastEngineFacade {
         this.resultDeltaRevision = Math.max(this.resultDeltaRevision, Number(state.resultDeltaRevision) || 0)
         this.isRunning = response.status === "running" || response.status === "stopping" || state.isRunning === true
         this.publicationCursor = Math.max(this.publicationCursor, Number(response.acknowledgedEventCursor) || 0)
+        this.appliedEventCursor = Math.max(this.appliedEventCursor, this.publicationCursor)
         return this
     }
 
     async adopt(response = {}) {
+        this._invalidateRemoteCleanup()
+        this._cleanupSessionBinding = null
         if (!response?.ok) throw new Error(response?.error || "dast_runtime_adopt_failed")
         if (!response.sessionId || !response.executorGeneration || response.status === "idle") return false
         this._applyRuntimeState(response)
@@ -94,12 +108,19 @@ export class RemoteDastEngineFacade {
         // external consumer (notably the ZAP publisher) completed its flush.
         // Re-presenting the authoritative snapshot is idempotent for consumers
         // and closes that publication gap without creating a second executor.
-        await this._notifyResultMutation({ type: "runtime_adopted_snapshot" })
-        await this.drainEvents()
+        try {
+            await this._notifyResultMutation({ type: "runtime_adopted_snapshot" })
+            await this.drainEvents()
+        } catch (error) {
+            this.progress = { ...this.progress, isIdle: false }
+            throw error
+        }
         return true
     }
 
     async start(tabId, host, domains, settings = {}) {
+        this._invalidateRemoteCleanup()
+        this._cleanupSessionBinding = null
         const sessionId = this.sessionIdFactory()
         const controllerState = {
             acceptIncomingRequests: true,
@@ -128,6 +149,7 @@ export class RemoteDastEngineFacade {
             : this._performanceTelemetry
         this.controllerState = response.executorState?.controllerState || controllerState
         this.publicationCursor = Math.max(0, Number(response.acknowledgedEventCursor) || 0)
+        this.appliedEventCursor = this.publicationCursor
         this.resultDeltaRevision = Number(response.executorState?.resultDeltaRevision) || 0
         this.terminalState = null
         await this.drainEvents()
@@ -170,14 +192,15 @@ export class RemoteDastEngineFacade {
         return response == null ? null : response.result
     }
 
-    async onetimeScanRequest(raw) {
-        const operationId = crypto.randomUUID()
+    async onetimeScanRequest(raw, _legacy = true, display = {}) {
+        const operationId = display.operationId || crypto.randomUUID()
         let displayChain = Promise.resolve()
         const unregister = this.client.onOneTimeDisplay?.(operationId, message => {
-            const progress = toRequestBuilderProgressMessage(operationId, message)
-            if (!progress || typeof this.displayMessageListener !== "function") return
+            const progress = toRequestBuilderProgressMessage(operationId, message, display)
+            const listener = display.onProgress || this.displayMessageListener
+            if (!progress || typeof listener !== "function") return
             displayChain = displayChain
-                .then(() => this.displayMessageListener(this._clone(progress)))
+                .then(() => listener(this._clone(progress)))
                 .catch(() => false)
         }) || (() => {})
         try {
@@ -195,24 +218,43 @@ export class RemoteDastEngineFacade {
     }
 
     async waitForIdle(timeoutMs) {
-        const result = await this._call("waitForIdle", [timeoutMs])
-        this.progress = { ...(result || {}), isIdle: true }
-        return result
+        // The local wait resolves without a value both on idle and expiration.
+        // Only the executor's subsequent counters establish settlement.
+        await this._call("waitForIdle", [timeoutMs])
+        return this.refreshProgress()
     }
-    getProgressSnapshot() { return { ...this.progress } }
+    getProgressSnapshot() {
+        return { ...this.progress, ...(this.progressDrains > 0 ? { isIdle: false } : {}) }
+    }
     async refreshProgress() {
         if (this.sessionId && this.executorGeneration) {
             const response = await this._callResponse("getProgressSnapshot")
             const progress = response?.result
-            if (progress && typeof progress === "object") this.progress = this._clone(progress)
-            if (progress?.isIdle === true) {
+            if (!progress || typeof progress !== "object") {
+                throw new Error("dast_runtime_progress_unavailable")
+            }
+            if (progress.isIdle === true || Number.isFinite(response?.eventCursor)) {
+                this.progress = { ...this._clone(progress), isIdle: false }
                 // The executor and controller advance independently. An idle
                 // executor can already have published its final result delta
                 // while the controller is still applying earlier display
                 // events. Do not expose idle until this facade has consumed
                 // the exact event watermark returned with the progress call.
-                await this.drainEvents({ throughCursor: response?.eventCursor })
+                this.progressDrains++
+                try {
+                    await this.drainEvents({ throughCursor: response?.eventCursor })
+                } catch (error) {
+                    // Snapshot/live progress replay can contain executor idle,
+                    // but a failed publication is not controller settlement.
+                    this.progress = { ...this._clone(progress), isIdle: false }
+                    throw error
+                } finally {
+                    this.progressDrains--
+                }
             }
+            // Older queued progress events must not overwrite this newer
+            // authoritative observation while its watermark is being drained.
+            this.progress = this._clone(progress)
         }
         return this.getProgressSnapshot()
     }
@@ -222,16 +264,45 @@ export class RemoteDastEngineFacade {
         }
         return this._clone(this._performanceTelemetry)
     }
+    async getRequestSnapshot(requestId, attackId = null) {
+        return this._clone(await this._call("__getRequestSnapshot", [requestId, attackId]))
+    }
     async stop() {
+        const overlapping = this.terminalState === "stopping" || this.terminalState === "stopped"
+        this._invalidateRemoteCleanup()
+        const owner = { client: this.client, port: this.client?.port,
+            nonce: this.client?.controllerNonce, sessionId: this.sessionId,
+            generation: this.executorGeneration, hooksSessionId: this.automationSessionId,
+            automationSessionId: this.automationSessionId || this._cleanupSessionBinding?.automationSessionId,
+            binding: this._cleanupSessionBinding,
+            scanId: this.scanResult?.scanId }
+        const attempt = {}
+        this._cleanupAttempt = attempt
+        const current = () => this._cleanupAttempt === attempt && this.client === owner.client
+            && this.client?.port === owner.port && this.client?.controllerNonce === owner.nonce
+            && this.sessionId === owner.sessionId && this.executorGeneration === owner.generation
+            && this.automationSessionId === owner.hooksSessionId
+            && this._cleanupSessionBinding === owner.binding
+            && (!owner.binding || (owner.binding.client === owner.client && owner.binding.port === owner.port
+                && owner.binding.nonce === owner.nonce && owner.binding.sessionId === owner.sessionId
+                && owner.binding.generation === owner.generation && owner.binding.scanId === owner.scanId))
+            && this.scanResult?.scanId === owner.scanId
+        let stoppedClean = false
+        try {
         this.terminalState = "stopping"
         const response = await this.client.request(DAST_RUNTIME_MESSAGE.STOP, {
-            sessionId: this.sessionId, executorGeneration: this.executorGeneration
+            sessionId: owner.sessionId, executorGeneration: owner.generation
         })
         if (!response?.ok) {
             this.terminalState = null
             throw new Error(response?.error || "scan_stop_failed")
         }
+        stoppedClean = !overlapping && current() && !!owner.sessionId && !!owner.generation
+            && !!owner.automationSessionId && !!owner.scanId
+            && response.sessionId === owner.sessionId && response.executorGeneration === owner.generation
+            && response.status === "stopped" && response.duplicate !== true
         await this.drainEvents()
+        stoppedClean = stoppedClean && current()
         this.scanResult = response?.result?.scanResult ? this._clone(response.result.scanResult) : this.scanResult
         if (this.scanResult?.performance?.dast) {
             this._performanceTelemetry = this._clone(this.scanResult.performance.dast)
@@ -239,20 +310,48 @@ export class RemoteDastEngineFacade {
         this.isRunning = false
         this.terminalState = "stopped"
         this.progress = { ...this.progress, isIdle: true }
-        const released = await this.client.request(DAST_RUNTIME_MESSAGE.RELEASE, {
-            sessionId: this.sessionId, executorGeneration: this.executorGeneration
+        const released = await owner.client.request(DAST_RUNTIME_MESSAGE.RELEASE, {
+            sessionId: owner.sessionId, executorGeneration: owner.generation
         })
         if (!released?.ok) throw new Error(released?.error || "scan_release_failed")
+        const clean = stoppedClean && current() && released.released === true
+            && released.status === "idle" && released.sessionId === null && released.executorGeneration === null
+            && this.client?.pending?.size === 0
         this.sessionId = null
         this.executorGeneration = null
         this.terminalState = "released"
+        if (clean) this._remoteCleanup = owner
         return this.scanResult
+        } catch (error) {
+            this._invalidateRemoteCleanup()
+            throw error
+        }
+    }
+    _invalidateRemoteCleanup() {
+        this._remoteCleanup = null
+        this._cleanupAttempt = null
+    }
+    getRemoteCleanupReceipt({ sessionId, scanId } = {}) {
+        const receipt = this._remoteCleanup
+        if (!receipt || receipt.automationSessionId !== sessionId || receipt.scanId !== scanId
+            || this.client !== receipt.client || this.client?.port !== receipt.port
+            || this.client?.controllerNonce !== receipt.nonce || this.client?.pending?.size !== 0
+            || this.automationSessionId !== receipt.hooksSessionId || this._cleanupSessionBinding !== receipt.binding
+            || this.scanResult?.scanId !== scanId
+            || this.sessionId !== null || this.executorGeneration !== null || this.terminalState !== "released") {
+            this._remoteCleanup = null
+            return null
+        }
+        return receipt
     }
     async reset() {
+        this._invalidateRemoteCleanup()
+        this._cleanupSessionBinding = null
         if (this.sessionId && this.isRunning) await this._call("reset")
         this.scanResult = {}
         this.strongRecordedKeys.clear()
         this.publicationCursor = 0
+        this.appliedEventCursor = 0
         this.controllerState = null
         this.automationSessionId = null
         this.resultDeltaRevision = 0
@@ -265,6 +364,14 @@ export class RemoteDastEngineFacade {
     }
     async updateScanResult(result, data) { return this._call("updateScanResult", [result, data]) }
     setAutomationHooks(hooks) {
+        if (this.automationSessionId !== (hooks?.sessionId || null)) this._invalidateRemoteCleanup()
+        // The coordinator deliberately removes callbacks before native Stop.
+        // Retain only that exact native-owner binding, not callbacks or results.
+        if (hooks?.sessionId) this._cleanupSessionBinding = {
+            automationSessionId: hooks.sessionId, client: this.client, port: this.client?.port,
+            nonce: this.client?.controllerNonce, sessionId: this.sessionId,
+            generation: this.executorGeneration, scanId: this.scanResult?.scanId
+        }
         this.automationHooks = hooks || null
         this.automationSessionId = hooks?.sessionId || null
         if (this.sessionId && this.executorGeneration) {
@@ -312,19 +419,41 @@ export class RemoteDastEngineFacade {
         const normalizedCursor = Number(cursor)
         this.eventApplyChain = this.eventApplyChain.then(async () => {
             if (Number.isFinite(normalizedCursor) && normalizedCursor > 0 && normalizedCursor <= this.publicationCursor) return
-            await this.applyEngineMessage(message)
+            if (Number.isFinite(normalizedCursor) && normalizedCursor > this.publicationCursor + 1) {
+                throw new Error("dast_runtime_event_cursor_gap")
+            }
+            if (!(Number.isFinite(normalizedCursor) && normalizedCursor > 0 && normalizedCursor <= this.appliedEventCursor)) {
+                await this.applyEngineMessage(message)
+                if (Number.isFinite(normalizedCursor) && normalizedCursor > 0) this.appliedEventCursor = normalizedCursor
+            }
             if (Number.isFinite(normalizedCursor) && normalizedCursor > 0 && this.sessionId && this.executorGeneration) {
                 const ack = await this.client.request(DAST_RUNTIME_MESSAGE.ACK_EVENTS, {
                     sessionId: this.sessionId,
                     executorGeneration: this.executorGeneration,
                     cursor: normalizedCursor
                 })
-                if (ack?.ok) this.publicationCursor = Math.max(this.publicationCursor, normalizedCursor)
+                if (!ack?.ok) throw new Error(ack?.error || "dast_runtime_event_ack_failed")
+                this.publicationCursor = normalizedCursor
             }
-        }).catch(() => {})
+        })
+        // Live-port callers do not await this promise. Observe the rejection
+        // without converting the ordered chain back to success: later events
+        // must not cumulatively acknowledge an unapplied/failed receipt.
+        void this.eventApplyChain.catch(error => {
+            this.progress = { ...this.progress, isIdle: false }
+            this._reportLateCallFailure("apply_engine_event", error)
+        })
         return this.eventApplyChain
     }
-    async drainEvents({ throughCursor = null } = {}) {
+    async drainEvents(options = {}) {
+        try {
+            return await this._drainEvents(options)
+        } catch (error) {
+            this.progress = { ...this.progress, isIdle: false }
+            throw error
+        }
+    }
+    async _drainEvents({ throughCursor = null } = {}) {
         if (!this.sessionId || !this.executorGeneration) return
         const requiredCursor = throughCursor !== null
             && throughCursor !== undefined
@@ -334,7 +463,14 @@ export class RemoteDastEngineFacade {
         // Live port events may already cover the requested watermark. Let the
         // existing ordered chain finish before requesting replay pages, which
         // avoids queueing duplicate copies of the same durable events.
-        await this.eventApplyChain
+        try {
+            await this.eventApplyChain
+        } catch (_) {
+            // The worker retains unacknowledged events. Reuse its existing
+            // replay path from the last successful receipt; a repeated failure
+            // below rejects drainage rather than silently skipping the event.
+            this.eventApplyChain = Promise.resolve()
+        }
         if (requiredCursor !== null && this.publicationCursor >= requiredCursor) return
         while (true) {
             const response = await this.client.request(DAST_RUNTIME_MESSAGE.EVENTS_PAGE, {
@@ -344,11 +480,18 @@ export class RemoteDastEngineFacade {
                 limit: 200
             })
             if (!response?.ok) throw new Error(response?.error || "dast_runtime_event_replay_failed")
+            // An ACK can commit at the worker even if its response is lost.
+            // Reconcile only receipts this controller actually applied; never
+            // use a worker cursor to skip an unapplied event.
+            this.publicationCursor = Math.max(this.publicationCursor, Math.min(
+                this.appliedEventCursor, Number(response.acknowledgedEventCursor) || 0
+            ))
             if (response.page?.resetRequired === true) {
                 this._applyRuntimeState(response)
                 await this._notifyResultMutation({ type: "runtime_replay_snapshot" })
                 const resetCursor = Number(response.page?.resetCursor) || 0
                 if (resetCursor > this.publicationCursor) {
+                    this.appliedEventCursor = Math.max(this.appliedEventCursor, resetCursor)
                     const resetAck = await this.client.request(DAST_RUNTIME_MESSAGE.ACK_EVENTS, {
                         sessionId: this.sessionId,
                         executorGeneration: this.executorGeneration,
@@ -422,8 +565,8 @@ export class RemoteDastEngineFacade {
         }
         if (isDastDisplayMessage(message) && typeof this.displayMessageListener === "function") {
             // Apply the authoritative engine event before notifying the UI, and
-            // await the relay so the durable worker cursor is not acknowledged
-            // until the service-worker-owned browser message has been sent.
+            // await relay dispatch before acknowledging the durable worker
+            // cursor, not the optional dashboard receiver's response.
             await this.displayMessageListener(this._clone(message))
         }
     }

@@ -23,3 +23,6 @@ gradle-app.setting
 *.project
 *.settings
 /bin
+
+# Local Codex workspace instructions
+/AGENTS.md

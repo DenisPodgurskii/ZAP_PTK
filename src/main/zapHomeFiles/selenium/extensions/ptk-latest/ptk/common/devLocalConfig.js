@@ -25,6 +25,23 @@ function normalizeHttpOrigin(value) {
     }
 }
 
+function normalizeCypressControllerScope(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || value.version !== 1 || value.namespace !== "__cypress"
+        || !Array.isArray(value.origins) || !value.origins.length || value.origins.length > 32) return null
+    const origins = []
+    for (const entry of value.origins) {
+        if (typeof entry !== "string" || !entry.trim() || entry.length > 2048) return null
+        try {
+            const parsed = new URL(entry.trim())
+            if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password
+                || parsed.hostname.includes("*") || parsed.pathname !== "/" || parsed.search || parsed.hash) return null
+            origins.push(parsed.origin)
+        } catch (_) { return null }
+    }
+    return { version: 1, namespace: "__cypress", origins: Array.from(new Set(origins)) }
+}
+
 function normalizeDevLocalConfig(payload) {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
         return {}
@@ -47,6 +64,9 @@ function normalizeDevLocalConfig(payload) {
             normalized.automationChildFrameBootstrapOrigins = origins
         }
     }
+
+    const cypressControllerScope = normalizeCypressControllerScope(payload.cypressControllerScope)
+    if (cypressControllerScope) normalized.cypressControllerScope = cypressControllerScope
 
     const portalBaseUrl = normalizeString(payload.portalBaseUrl || payload.portalUrl)
     if (portalBaseUrl) {

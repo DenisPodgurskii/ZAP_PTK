@@ -110,7 +110,6 @@ export class OffscreenDastClient {
         const longRunning = new Set([
             DAST_RUNTIME_MESSAGE.START,
             DAST_RUNTIME_MESSAGE.CAPTURE,
-            DAST_RUNTIME_MESSAGE.STOP,
             DAST_RUNTIME_MESSAGE.ENGINE_CALL,
             DAST_RUNTIME_MESSAGE.ONE_TIME_SCAN
         ])

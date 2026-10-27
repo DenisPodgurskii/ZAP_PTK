@@ -240,6 +240,16 @@ if (!window.__ptkBrowserNavHarnessLoaded) {
             const nameValue = String(window.name || '')
             if (nameValue.includes(`ptk-xss:${markerId}`)) {
                 recordExecutionMarker(markerId)
+                return
+            }
+        } catch (_) { }
+        // Firefox Xrays expose the native name, not a page-defined accessor.
+        // Auto's MAIN-world instrumentation can retain the marker in that accessor.
+        try {
+            if (!/Firefox\//.test(navigator.userAgent || '')) return
+            const pageName = window.wrappedJSObject?.name
+            if (typeof pageName === 'string' && pageName.includes(`ptk-xss:${markerId}`)) {
+                recordExecutionMarker(markerId)
             }
         } catch (_) { }
     }

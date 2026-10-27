@@ -4,6 +4,7 @@ import { ptk_logger, ptk_notifications, ptk_utils } from "./utils.js"
 import { sensitiveArtifactStorage as ptk_storage } from "./sensitiveArtifactStore.js"
 import { ptk_exporter } from "./exporter.js"
 import { normalizeFlow } from './macro/flow.js'
+import { captureIdentity } from './capture/captureStore.js'
 
 const worker = self
 
@@ -14,6 +15,23 @@ function createRecorderSessionId() {
     const bytes = new Uint8Array(24)
     globalThis.crypto.getRandomValues(bytes)
     return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
+}
+
+// Match the content replayer's initial navigation contract, using absolute tab URLs.
+function initialReplayDestinationMatchesTab(startUrl, tabUrl) {
+    try {
+        const expected = new URL(String(startUrl || ''))
+        const current = new URL(String(tabUrl || ''))
+        if (expected.href === current.href) return true
+        const rootHashes = new Set(['', '#', '#/', '#/?'])
+        return expected.origin === current.origin
+            && expected.pathname === current.pathname
+            && expected.search === current.search
+            && rootHashes.has(expected.hash)
+            && rootHashes.has(current.hash)
+    } catch (_) {
+        return false
+    }
 }
 
 function replayItemSummary(item, index) {
@@ -77,7 +95,6 @@ export class ptk_recorder {
 
         this.storageKey = 'ptk_recorder'
         this.storage = { 'savedMacro': '', 'savedFlow': null, 'savedFormat': 'xml', 'recording': {} }
-        this.debuggerTargets = new Set()
         this.lastActiveTabId = null
         this.activeReplayTabId = null
         this.pendingReplayTabs = new Set()
@@ -102,31 +119,6 @@ export class ptk_recorder {
         this.onRemoved = this.onRemoved.bind(this)
         browser.tabs.onRemoved.addListener(this.onRemoved)
 
-        this.onBeforeRequest = this.onBeforeRequest.bind(this)
-        browser.webRequest.onBeforeRequest.addListener(this.onBeforeRequest, { urls: ["<all_urls>"], types: ptk_utils.requestFilters },
-            ["requestBody"].concat(ptk_utils.extraInfoSpec)
-        )
-
-        this.onSendHeaders = this.onSendHeaders.bind(this)
-        browser.webRequest.onSendHeaders.addListener(this.onSendHeaders, { urls: ["<all_urls>"], types: ptk_utils.requestFilters },
-            ["requestHeaders"].concat(ptk_utils.extraInfoSpec)
-        )
-
-        this.onHeadersReceived = this.onHeadersReceived.bind(this)
-        browser.webRequest.onHeadersReceived.addListener(this.onHeadersReceived, { urls: ["<all_urls>"], types: ptk_utils.requestFilters },
-            ["responseHeaders"].concat(ptk_utils.extraInfoSpec)
-        )
-
-        this.onBeforeRedirect = this.onBeforeRedirect.bind(this)
-        browser.webRequest.onBeforeRedirect.addListener(this.onBeforeRedirect, { urls: ["<all_urls>"], types: ptk_utils.requestFilters },
-            ["responseHeaders"].concat(ptk_utils.extraInfoSpec)
-        )
-
-        this.onCompleted = this.onCompleted.bind(this)
-        browser.webRequest.onCompleted.addListener(this.onCompleted, { urls: ["<all_urls>"], types: ptk_utils.requestFilters },
-            ["responseHeaders"].concat(ptk_utils.extraInfoSpec)
-        )
-
     }
 
     removeListiners() {
@@ -135,11 +127,6 @@ export class ptk_recorder {
         browser.tabs.onUpdated.removeListener(this.onUpdated)
         browser.tabs.onRemoved.removeListener(this.onRemoved)
 
-        browser.webRequest.onBeforeRequest.removeListener(this.onBeforeRequest)
-        browser.webRequest.onSendHeaders.removeListener(this.onSendHeaders)
-        browser.webRequest.onHeadersReceived.removeListener(this.onHeadersReceived)
-        browser.webRequest.onBeforeRedirect.removeListener(this.onBeforeRedirect)
-        browser.webRequest.onCompleted.removeListener(this.onCompleted)
     }
 
     onCreated(tab) {
@@ -150,7 +137,9 @@ export class ptk_recorder {
             }
             return
         }
+        if (!Number.isInteger(tab?.id) || !this.isTracking(tab?.openerTabId)) return
         this.tabs.push(tab.id)
+        if (this.mode === 'recording') this.ensureDebugger(tab.id).catch(() => {})
     }
 
     onActivated(info) {
@@ -279,74 +268,14 @@ export class ptk_recorder {
         if (tabId == this.openerTabId) {
             if (this.mode == "recording") this.stopRecording(info).catch(() => {})
             else if (this.mode == "replay") this.stopReplay(info).catch(() => {})
-        }
-    }
-
-    onBeforeRequest(request) {
-        if (ptk_utils.exclude(request.url) || request.type.match(/(ping)/) || !this.isTracking(request.tabId)) return
-
-        if (this.mode == "recording") {
-            try {
-                let item = {
-                    requestId: request.requestId, type: request.type, request: request, response: {}
-                }
-
-                this.recording.recordingRequests.push(item)
-
-                if (worker.isFirefox) {
-                    let filter = browser.webRequest.filterResponseData(item.requestId)
-                    let decoder = new TextDecoder("utf-8")
-
-                    filter.ondata = (event => {
-                        let str = decoder.decode(event.data, { stream: true })
-                        filter.write(event.data)
-                        filter.disconnect()
-                        let r = this.recording.recordingRequests[this.findLastIndex(this.recording.recordingRequests, item.requestId)]
-                        r.response.body = str
-                        r.response.base64Encoded = false
-                    }).bind(this)
-                }
+        } else {
+            const entry = this.captureLeases?.get(tabId)
+            if (entry) {
+                entry.active = false
+                this.captureLeases.delete(tabId)
+                entry.lease?.release('tab_closed').catch(() => {})
             }
-            catch (e) { e => ptk_logger(e, "Could not update recording request", "warning") }
-        }
-    }
-
-    onSendHeaders(request) {
-        if (this.isTracking(request.tabId) && this.mode == "recording") {
-            let r = this.recording.recordingRequests[this.findLastIndex(this.recording.recordingRequests, request.requestId)]
-            if (r) r.requestHeaders = request.requestHeaders
-        }
-    }
-
-    onHeadersReceived(response) {
-        if (!this.isTracking(response.tabId)) return
-        if (this.mode == "recording") {
-            let r = this.recording.recordingRequests[this.findLastIndex(this.recording.recordingRequests, response.requestId)]
-            if (r) {
-                r.responseHeaders = response.responseHeaders
-                r.response.statusCode = response.statusCode
-                r.response.statusLine = response.statusLine
-            }
-        }
-    }
-
-    onBeforeRedirect(response) {
-        if (!this.isTracking(response.tabId)) return
-        if (this.mode == "recording") {
-            let r = this.recording.recordingRequests[this.findLastIndex(this.recording.recordingRequests, response.requestId)]
-            if (r) {
-                r.redirectUrl = response.redirectUrl
-            }
-        }
-    }
-
-    onCompleted(response) {
-        if (!this.isTracking(response.tabId)) return
-        if (this.mode == "recording") {
-            let r = this.recording.recordingRequests[this.findLastIndex(this.recording.recordingRequests, response.requestId)]
-            if (r) {
-                r.serverIPAddress = response.ip
-            }
+            this.tabs = this.tabs.filter(id => id !== tabId)
         }
     }
 
@@ -365,29 +294,10 @@ export class ptk_recorder {
             browser.windows.update(win.id, { "height": parseInt(this.windowHeight), "width": parseInt(this.windowWidth) })
         }
 
-        setTimeout(function () {
-            if (!worker.isFirefox && this.mode == 'recording') {
-                // Attach debugger for Network only during recording
-                this.ensureDebugger(this.openerTabId).then((attached) => {
-                    if (attached) {
-                        const debugTarget = { tabId: this.openerTabId }
-                        chrome.debugger.sendCommand(debugTarget, "Network.setCacheDisabled", { cacheDisabled: true }, () => {
-                            if (chrome.runtime.lastError) {
-                                // ignore missing tab
-                            }
-                        })
-                        chrome.debugger.sendCommand(debugTarget, "Network.enable", {}, () => {
-                            if (chrome.runtime.lastError) {
-                                // ignore missing tab
-                            }
-                        })
-                    }
-                })
-            }
-
-            browser.tabs.update(this.openerTabId, { url: startUrl })
-
-        }.bind(this), 300)
+        setTimeout(async () => {
+            if (this.mode === 'recording') await this.ensureDebugger(this.openerTabId)
+            await browser.tabs.update(this.openerTabId, { url: startUrl })
+        }, 300)
     }
 
     async startInActiveTab(startUrl) {
@@ -403,23 +313,7 @@ export class ptk_recorder {
             this.activeReplayTabId = this.openerTabId
         }
 
-        if (!worker.isFirefox && this.mode == 'recording') {
-            this.ensureDebugger(this.openerTabId).then((attached) => {
-                if (attached) {
-                    const debugTarget = { tabId: this.openerTabId }
-                    chrome.debugger.sendCommand(debugTarget, "Network.setCacheDisabled", { cacheDisabled: true }, () => {
-                        if (chrome.runtime.lastError) {
-                            // ignore missing tab
-                        }
-                    })
-                    chrome.debugger.sendCommand(debugTarget, "Network.enable", {}, () => {
-                        if (chrome.runtime.lastError) {
-                            // ignore missing tab
-                        }
-                    })
-                }
-            })
-        }
+        if (this.mode === 'recording') await this.ensureDebugger(this.openerTabId)
 
         const skipNavigation = this.mode === 'recording' && this.bootstrap?.skipNavigation === true
         if (skipNavigation) {
@@ -436,6 +330,14 @@ export class ptk_recorder {
         this.openerTabId = tab.id
         this.lastActiveTabId = tab.id
         this.activeReplayTabId = tab.id
+        if (this.mode === 'replay' && this.scanOwnedReplay) {
+            const currentTab = await browser.tabs.get(tab.id)
+            if (initialReplayDestinationMatchesTab(startUrl, currentTab?.url)) {
+                await browser.tabs.update(tab.id, { active: true })
+                await this.injectScriptsForTab(tab.id, currentTab.url)
+                return
+            }
+        }
         await browser.tabs.update(tab.id, { active: true, url: startUrl })
     }
 
@@ -548,54 +450,6 @@ export class ptk_recorder {
         return -1
     }
 
-    onAttach(tabId) {
-        this.onEvent = this.onEvent.bind(this)
-        chrome.debugger.onEvent.addListener(this.onEvent)
-        this.onDetach = this.onDetach.bind(this)
-        chrome.debugger.onDetach.addListener(this.onDetach)
-    }
-
-    onDetach(source, reason) {
-        if (source?.tabId) this.debuggerTargets.delete(source.tabId)
-        chrome.debugger.onEvent.removeListener(this.onEvent)
-        chrome.debugger.onDetach.removeListener(this.onDetach)
-    }
-
-    onEvent(debuggeeId, message, params) {
-        let err = browser.runtime.lastError
-        if (!this.isTracking(debuggeeId.tabId)) return
-        if (!this.recording || !this.recording.requests) return
-
-        if (params?.request?.url?.includes("-extension://")) return
-        if (params?.response?.url?.includes("-extension://")) return
-
-        let item = {
-            requestId: params.requestId,
-            parentId: params.loaderId,
-            type: params.type,
-            response: {},
-            timing: {}
-        }
-        let reverseIndex = this.findLastIndex(this.recording.requests, item.requestId)
-
-        if (message == "Network.requestWillBeSent") {
-            if (params.redirectResponse ||
-                !this.recording.requests.some(e => e.requestId === params.requestId)) {
-                item.request = params.request
-                this.recording.requests.push(item)
-            }
-        }
-        if (message == "Network.loadingFinished" && reverseIndex > -1) {
-            chrome.debugger.sendCommand(debuggeeId, "Network.getResponseBody", { "requestId": params.requestId },
-                function (response) {
-                    if (response?.body) {
-                        this.recording.requests[reverseIndex].response.body = response.body
-                        this.recording.requests[reverseIndex].response.base64Encoded = response.base64Encoded
-                    }
-                }.bind(this))
-        }
-    }
-
     addMessageListeners() {
         this.onMessage = this.onMessage.bind(this)
         browser.runtime.onMessage.addListener(this.onMessage)
@@ -688,7 +542,7 @@ export class ptk_recorder {
             return Promise.resolve({ success: false, error: 'recording_or_replay_already_started' })
         }
         await ptk_storage.setItem(this.storageKey, {})
-        this.startRecording(message.clean_cookie, message.url, message.bootstrap)
+        await this.startRecording(message.clean_cookie, message.url, message.bootstrap)
         return Promise.resolve({ success: true })
     }
 
@@ -1106,7 +960,7 @@ export class ptk_recorder {
         return appliedCount
     }
 
-    startRecording(cleanCookie, startUrl, bootstrap) {
+    async startRecording(cleanCookie, startUrl, bootstrap) {
         if (this.mode == null) {
             this.reset()
 
@@ -1125,9 +979,8 @@ export class ptk_recorder {
             if (cleanCookie) this.cleanCookie(startUrl)
 
             this.addListiners()
-            let self = this
             browser.webRequest.handlerBehaviorChanged() //FF caching
-            browser.storage.local.set({
+            await browser.storage.local.set({
                 "ptk_recording_items": [],
                 "ptk_recording_timing": [],
                 "ptk_recording": {
@@ -1140,11 +993,14 @@ export class ptk_recorder {
                 "ptk_recording_confirm_required": true,
                 "ptk_path_to_icons": this.pathToIcons,
                 "ptk_double_click": this.doubleClick
-            }).then(function () {
-                self.startInActiveTab(startUrl).catch((e) => {
-                    console.warn('Failed to start recording in active tab', e)
-                })
             })
+            try {
+                await this.startInActiveTab(startUrl)
+            } catch (error) {
+                await this.detachAllDebuggers('start_failed')
+                this.reset()
+                throw error
+            }
         } else {
             ptk_notifications.notify("Recording/playback already started", "Stop recording before start a new one");
         }
@@ -1152,48 +1008,31 @@ export class ptk_recorder {
 
     async stopRecording(params) {
         if (this.stopRecordingPromise) return this.stopRecordingPromise
+        this.stopRecordingPromise = (async () => {
         const recording = this.recording
+        try {
+            await this.detachAllDebuggers('stopped')
+        } finally {
         worker.ptk_recorder_active = false
         this.mode = null
         this.openerWinId = -1
         this.openerTabId = -1
         this.tabs = []
-        this.detachAllDebuggers()
         this.removeListiners()
+        }
 
         if (this.cancelled) {
             this.reset()
             return
         }
 
-        this.stopRecordingPromise = (async () => {
             const result = await browser.storage.local.get(["ptk_recording_items", "ptk_recording_timing"])
             if (!result) return
             if (!recording) throw new Error('recording_state_missing')
 
-            let a = recording.requests
             let b = result.ptk_recording_timing || []
 
             for (let l = 0; l < recording.recordingRequests.length; l++) {
-
-                for (let k = 0; k < a.length; k++) {
-                    let r = a[k].request
-                    let u = r.urlFragment ? r.url + r.urlFragment : r.url
-                    if (recording.recordingRequests[l].request.url == u) {
-                        recording.recordingRequests[l].response.body = a[k].response.body
-                        recording.recordingRequests[l].response.base64Encoded = a[k].response.base64Encoded
-                        if (r.postData) {
-                            if (recording.recordingRequests[l]?.request?.requestBody) {
-                                recording.recordingRequests[l].request.requestBody.postData = r.postData
-                                recording.recordingRequests[l].request.requestBody.postDataEntries = r.postDataEntries
-                            } else {
-                                console.warn('No request body for postData', recording.recordingRequests[l]?.request)
-                            }
-                        }
-                        a.splice(k, 1)
-                        break
-                    }
-                }
 
                 for (let k = 0; k < b.length; k++) {
                     if (recording.recordingRequests[l].request.url == b[k].name) {
@@ -1354,7 +1193,7 @@ export class ptk_recorder {
         this.pendingReplayTabs.clear()
         this.scanOwnedReplay = null
         this.replayResult = null
-        this.detachAllDebuggers()
+        await this.detachAllDebuggers()
         this.removeListiners()
         await browser.storage.local.set({
             "ptk_replay_step": -1,
@@ -1392,7 +1231,15 @@ export class ptk_recorder {
         this.confirmationClaimed = false
         this.savedMacro = ""
         this.cancelled = false
-        this.detachAllDebuggers()
+        for (const entry of this.captureLeases?.values() || []) {
+            entry.active = false
+            entry.lease?.release('reset').catch(() => {})
+        }
+        this.captureLeases?.clear()
+        this.captureItems = new Map()
+        this.capturePostData = new Map()
+        this.captureResponseExtraInfo = new WeakSet()
+        this.captureNativeFacts = new WeakMap()
         delete worker.ptk_recorder_active
         browser.storage.local.remove(
             [
@@ -1410,94 +1257,176 @@ export class ptk_recorder {
         this.removeListiners()
     }
 
-    ensureDebugger(tabId) {
-        return new Promise((resolve) => {
-            if (typeof chrome === "undefined" || !chrome.debugger || worker.isFirefox) {
-                resolve(false)
-                return
-            }
-
-            if (this.debuggerTargets.has(tabId)) {
-                resolve(true)
-                return
-            }
-
-            browser.tabs.get(tabId).then(() => {
-                const debugTarget = { tabId: tabId }
-                chrome.debugger.attach(debugTarget, "1.3", () => {
-                    if (chrome.runtime.lastError) {
-                        resolve(false)
-                        return
-                    }
-                    this.debuggerTargets.add(tabId)
-                    this.onAttach()
-                    resolve(true)
-                })
-            }).catch(() => resolve(false))
-        })
+    setBrowserCaptureManager(manager) {
+        this.browserCaptureManager = manager
+        this.captureLeases ||= new Map()
+        this.captureItems ||= new Map()
+        this.capturePostData ||= new Map()
+        return this
     }
 
-    detachAllDebuggers() {
-        if (typeof chrome === "undefined" || !chrome.debugger || worker.isFirefox) return
-        for (const tabId of this.debuggerTargets) {
-            const debugTarget = { tabId: tabId }
-            chrome.debugger.detach(debugTarget, () => {
-                if (chrome.runtime.lastError) {
-                    // ignore missing tab
-                }
-            })
+    isBrowserCaptureOwnerActive({ ownerId, tabId }) {
+        const entry = this.captureLeases?.get(tabId)
+        return entry?.active === true && entry.ownerId === ownerId
+    }
+
+    async ensureDebugger(tabId) {
+        if (!this.browserCaptureManager || this.mode !== 'recording' || !this.isTracking(tabId)) throw new Error('capture_owner_unavailable')
+        this.captureLeases ||= new Map()
+        this.captureItems ||= new Map()
+        this.capturePostData ||= new Map()
+        if (this.captureLeases.has(tabId)) return this.captureLeases.get(tabId).promise
+        const sessionId = this.sessionId
+        const entry = { ownerId: 'Recorder:' + sessionId, active: true, lease: null }
+        this.captureLeases.set(tabId, entry)
+        entry.promise = this.browserCaptureManager.acquire({
+            ownerId: entry.ownerId, tabId,
+            scope: { targetUrl: this.recording.startUrl }, capabilities: ['network', 'recording', 'input']
+        }).then(async lease => {
+            if (!entry.active || this.sessionId !== sessionId || this.captureLeases.get(tabId) !== entry) {
+                await lease.release('replaced')
+                throw new Error('capture_owner_unavailable')
+            }
+            entry.lease = lease
+            lease.subscribe(event => this._captureRecordingEvent(event, entry))
+            return true
+        }).catch(error => {
+            if (this.captureLeases.get(tabId) === entry) this.captureLeases.delete(tabId)
+            throw error
+        })
+        return entry.promise
+    }
+
+    async _captureRecordingEvent(event, entry) {
+        if (!entry.active || !this.recording) return
+        const record = event.record || {}
+        const key = captureIdentity(record)
+        const headers = value => Array.isArray(value) ? value.map(header => ({ ...header }))
+            : Object.entries(value || {}).map(([name, value]) => ({ name, value: String(value ?? '') }))
+        const nativeIdentity = value => JSON.stringify([value.epoch, value.tabId, value.sessionId || '', value.requestId,
+            value.hop || 0, value.frameId, value.documentId, value.loaderId, value.sessionGeneration, value.navigationGeneration])
+        const conditional = value => headers(value).some(header => /^(if-none-match|if-modified-since)$/i.test(header.name)
+            && String(header.value || '').trim().length > 0)
+        this.captureNativeFacts ||= new WeakMap()
+        if (event.type === 'gap') {
+            if (record.reason === 'redirect_body_unavailable') return
+            const item = this.captureItems.get(key), facts = item && this.captureNativeFacts.get(item)
+            if (['request_cancelled', 'response_body_unavailable'].includes(record.reason)
+                && record.requestId && record.frameId !== undefined && (record.documentId || record.loaderId)
+                && facts?.entry === entry && facts.identity === nativeIdentity(record)
+                && facts.conditional && facts.responseStatus === 304 && item.response.body === undefined) return
+            throw new Error('recording_capture_incomplete')
         }
-        this.debuggerTargets.clear()
+        this.captureResponseExtraInfo ||= new WeakSet()
+        let item = this.captureItems.get(key)
+        if (event.type === 'request') {
+            if (item) return
+            const previousKey = captureIdentity({ ...record, hop: (record.hop || 0) - 1 })
+            const previous = record.hop > 0 ? this.captureItems.get(previousKey) : null
+            if (previous) {
+                previous.redirectUrl = record.url
+                if (record.redirectResponse) {
+                    previous.response.statusCode = record.redirectResponse.status
+                    previous.response.statusLine = record.redirectResponse.statusText
+                    if (!this.captureResponseExtraInfo.has(previous)) previous.responseHeaders = headers(record.redirectResponse.headers)
+                }
+            }
+            const request = { ...record.request, url: record.url, method: record.request?.method || record.method,
+                requestId: record.requestId, tabId: record.tabId, type: record.resourceType, timeStamp: record.timeStamp }
+            if (Array.isArray(request.requestBody?.raw)) {
+                request.requestBody = { ...request.requestBody, raw: request.requestBody.raw.map(part => {
+                    if (!Array.isArray(part?.bytes)) return { ...part }
+                    if (!part.bytes.every(value => Number.isInteger(value) && value >= 0 && value <= 255)) throw new Error('recording_capture_incomplete')
+                    return { ...part, bytes: new Uint8Array(part.bytes).buffer }
+                }) }
+            }
+            item = { requestId: record.requestId, type: record.resourceType, request, response: {} }
+            if (request.headers) item.requestHeaders = headers(request.headers)
+            this.captureItems.set(key, item)
+            this.captureNativeFacts.set(item, { entry, identity: nativeIdentity(record),
+                conditional: conditional(request.headers), responseStatus: undefined })
+            this.recording.recordingRequests.push(item)
+            if (!worker.isFirefox && request.hasPostData && !request.postData) {
+                const pending = entry.lease.sendCommand('Network.getRequestPostData', { requestId: record.requestId }, record.sessionId)
+                this.capturePostData.set(key, pending)
+                let result
+                try { result = await pending } finally {
+                    if (this.capturePostData.get(key) === pending) this.capturePostData.delete(key)
+                }
+                if (entry.active && this.captureItems.get(key) === item && result?.postData !== undefined) {
+                    request.requestBody ||= {}
+                    request.requestBody.postData = result.postData
+                }
+            } else if (request.postData !== undefined) {
+                request.requestBody ||= {}
+                request.requestBody.postData = request.postData
+                request.requestBody.postDataEntries = request.postDataEntries
+            }
+        } else if (item && event.type === 'response') {
+            if (!this.captureResponseExtraInfo.has(item)) item.responseHeaders = headers(record.response?.headers)
+            item.response.statusCode = record.response?.status
+            item.response.statusLine = record.response?.statusLine || record.response?.statusText
+            item.serverIPAddress = record.response?.remoteIPAddress || record.ip
+            const facts = this.captureNativeFacts.get(item)
+            if (facts?.entry === entry && facts.identity === nativeIdentity(record) && !this.captureResponseExtraInfo.has(item)) facts.responseStatus = record.response?.status
+            if (facts?.responseStatus === 304) item.response.statusCode = 304
+        } else if (item && event.type === 'body') {
+            item.response.body = record.body
+            item.response.base64Encoded = record.base64Encoded
+            try { await this.capturePostData.get(key) } finally { entry.lease.consume(key) }
+        } else if (item && event.type === 'protocol' && event.method === 'Network.requestWillBeSentExtraInfo') {
+            item.requestHeaders = headers(event.params?.headers)
+            const facts = this.captureNativeFacts.get(item)
+            if (facts?.entry === entry && facts.identity === nativeIdentity(record)) facts.conditional = conditional(event.params?.headers)
+        } else if (item && event.type === 'protocol' && event.method === 'Network.responseReceivedExtraInfo') {
+            item.responseHeaders = headers(event.params?.headers)
+            this.captureResponseExtraInfo.add(item)
+            if (event.params?.statusCode !== undefined) item.response.statusCode = event.params.statusCode
+            const facts = this.captureNativeFacts.get(item)
+            if (facts?.entry === entry && facts.identity === nativeIdentity(record)) facts.responseStatus = event.params?.statusCode
+        } else if (item && event.type === 'requestHeaders') {
+            item.requestHeaders = headers(record.requestHeaders)
+            const facts = this.captureNativeFacts.get(item)
+            if (facts?.entry === entry && facts.identity === nativeIdentity(record)) facts.conditional = conditional(record.requestHeaders)
+        } else if (item && event.type === 'redirect') {
+            item.redirectUrl = record.redirectUrl
+        } else if (item && event.type === 'complete') {
+            item.serverIPAddress = record.ip
+        }
     }
 
-    msg_debugger_click(message, sender) {
-        if (this.mode !== 'recording') return Promise.resolve({ success: false })
+    async detachAllDebuggers(reason = 'stopped') {
+        const entries = [...this.captureLeases?.entries() || []]
+        for (const [, entry] of entries) entry.lease?.freeze()
+        const results = await Promise.all(entries.map(async ([tabId, entry]) => {
+            await entry.promise.catch(() => {})
+            try {
+                if (!entry.lease) return { complete: false }
+                entry.lease.freeze()
+                return await entry.lease.drain()
+            } finally {
+                if (entry.lease) await entry.lease.release(reason)
+                entry.active = false
+                if (this.captureLeases.get(tabId) === entry) this.captureLeases.delete(tabId)
+            }
+        }))
+        if (results.some(result => !result.complete)) throw new Error('recording_capture_incomplete')
+    }
+
+    async msg_debugger_click(message, sender) {
+        if (this.mode !== 'recording' || worker.isFirefox) return { success: false }
         const tabId = sender?.tab?.id
-        if (!tabId) return Promise.resolve({ success: false })
-        return this.ensureDebugger(tabId).then((attached) => {
-            if (!attached) return { success: false }
-            const debugTarget = { tabId: tabId }
-            const x = Math.max(0, Math.floor(message.x || 0))
-            const y = Math.max(0, Math.floor(message.y || 0))
-            const clickCount = message.clickCount || 1
-            return new Promise((resolve) => {
-                chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
-                    type: "mouseMoved",
-                    x: x,
-                    y: y
-                }, () => {
-                    if (chrome.runtime.lastError) {
-                        resolve({ success: false })
-                        return
-                    }
-                    chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
-                        type: "mousePressed",
-                        x: x,
-                        y: y,
-                        button: "left",
-                        clickCount: clickCount
-                    }, () => {
-                        if (chrome.runtime.lastError) {
-                            resolve({ success: false })
-                            return
-                        }
-                        chrome.debugger.sendCommand(debugTarget, "Input.dispatchMouseEvent", {
-                            type: "mouseReleased",
-                            x: x,
-                            y: y,
-                            button: "left",
-                            clickCount: clickCount
-                        }, () => {
-                            if (chrome.runtime.lastError) {
-                                resolve({ success: false })
-                                return
-                            }
-                            resolve({ success: true })
-                        })
-                    })
-                })
-            })
-        })
+        if (!Number.isInteger(tabId) || !this.isTracking(tabId)) return { success: false }
+        try {
+            await this.ensureDebugger(tabId)
+            const lease = this.captureLeases.get(tabId)?.lease
+            const x = Math.max(0, Math.floor(message.x || 0)), y = Math.max(0, Math.floor(message.y || 0))
+            for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+                await lease.sendCommand('Input.dispatchMouseEvent', { type, x, y,
+                    ...(type === 'mouseMoved' ? {} : { button: 'left', clickCount: message.clickCount || 1 }) })
+            }
+            return { success: true }
+        } catch (_) { return { success: false } }
     }
 
     analyse() {

@@ -1,12 +1,14 @@
 package org.zaproxy.addon.ptk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +22,19 @@ import org.junit.jupiter.api.Test;
 /** Smoke-level tests for the PTK browser close contract. */
 @SuppressWarnings("auxiliaryclass")
 class ExtensionPtkCloseContractTest {
+
+    @Test
+    void progressAndAlertsDoNotDependOnClientSpiderPrivateShutdownClock() throws Exception {
+        // Inspect the compiled callback owner, not a source copy that might differ
+        // from the tested add-on. Referencing this private field let otherwise idle
+        // PTK progress keep rearming Client Spider indefinitely.
+        try (var stream = ExtensionPtk.class.getResourceAsStream("ExtensionPtk.class")) {
+            assertNotNull(stream);
+            String compiled = new String(stream.readAllBytes(), StandardCharsets.ISO_8859_1);
+            assertFalse(compiled.contains("lastEventReceivedtime"));
+            assertFalse(compiled.contains("touchActiveClientSpidersForPtkActivity"));
+        }
+    }
 
     @Test
     void timeoutConstantsDescribeCloseContractBudget() {

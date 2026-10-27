@@ -199,6 +199,19 @@ function memberChainParts(node) {
   return parts;
 }
 
+// Only these one/two-level receivers can be the browser Location object.
+// Walking the entire chain for every nested member is quadratic in its depth.
+function trustedLocationReceiverRoot(node) {
+  if (node?.type !== 'MemberExpression' || memberPropName(node) == null
+    || node.computed && node.property?.type !== 'Literal') return null;
+  const receiver = node.object;
+  if (receiver?.type === 'Identifier' && receiver.name === 'location') return 'location';
+  if (receiver?.type !== 'MemberExpression' || receiver.computed && receiver.property?.type !== 'Literal'
+    || memberPropName(receiver) !== 'location' || receiver.object?.type !== 'Identifier') return null;
+  const root = receiver.object.name;
+  return ['window', 'document', 'self', 'globalThis'].includes(root) ? root : null;
+}
+
 function calleeNameFromNew(node) {
   if (!node || node.type !== "NewExpression") return null;
   if (node.callee?.type === "Identifier") return node.callee.name;
@@ -331,10 +344,8 @@ function nodeFromPathKey(key, graph) {
 function isLocationMember(node, property) {
   if (!node || node.type !== "MemberExpression") return false;
   const parts = memberChainParts(node);
-  if (!parts || parts.length < 2) return false;
-  const normalized = parts.map((part) => String(part || "").toLowerCase());
-  const tail = normalized.slice(-2).join(".");
-  return tail === `location.${String(property || "").toLowerCase()}`;
+  if (!parts || !node._ptkTrustedLocation) return false;
+  return parts[parts.length - 1] === property;
 }
 
 function flattenStringConcatenation(node, output = []) {
@@ -352,12 +363,17 @@ function isSameOriginPinnedUrlExpression(node) {
   if (isLocationMember(node, "origin")) return true;
   if (node.type !== "BinaryExpression" || node.operator !== "+") return false;
   const parts = flattenStringConcatenation(node);
-  if (parts.length < 3) return false;
-
-  if (isLocationMember(parts[0], "origin")) return true;
-  return isLocationMember(parts[0], "protocol") &&
+  let authorityEnd = -1;
+  if (isLocationMember(parts[0], "origin")) authorityEnd = 1;
+  else if (isLocationMember(parts[0], "protocol") &&
     literalStringValue(parts[1]) === "//" &&
-    isLocationMember(parts[2], "host");
+    isLocationMember(parts[2], "host")) authorityEnd = 3;
+  if (authorityEnd < 0) return false;
+  if (authorityEnd === parts.length) return true;
+  // An origin/host prefix is still inside the authority until a delimiter.
+  // Browser pathname begins with '/', unlike search/hash (possibly empty).
+  const next = parts[authorityEnd];
+  return /^[/?#]/.test(literalStringValue(next) || '') || isLocationMember(next, 'pathname');
 }
 
 function isNumericNarrowing(node) {
@@ -676,7 +692,8 @@ function buildFunctionIndex(ast) {
       node,
       scopeIds: scopeIdsFromAncestorList(ancestors || []),
       sourceFile: node.sourceFile || node.loc?.sourceFile || null,
-      explicitGlobal: options.explicitGlobal === true
+      explicitGlobal: options.explicitGlobal === true,
+      scriptKind: node._ptkScriptKind
     };
     if (!byName.has(name)) byName.set(name, []);
     byName.get(name).push(entry);
@@ -755,7 +772,8 @@ function buildFunctionIndex(ast) {
       node,
       scopeIds,
       sourceFile: node.sourceFile || node.loc?.sourceFile || null,
-      explicitGlobal: options.explicitGlobal === true
+      explicitGlobal: options.explicitGlobal === true,
+      scriptKind: node._ptkScriptKind
     };
     if (!byName.has(name)) byName.set(name, []);
     byName.get(name).push(entry);
@@ -832,7 +850,8 @@ function selectFunctionForCall(name, callScopeIds, fnIndex, callNode = null) {
   const callSourceFile = callNode?.sourceFile || callNode?.loc?.sourceFile || null;
   const entries = fnIndex.byName.get(name).filter((entry) => (
     entry?.explicitGlobal === true ||
-    entry?.sourceFile === callSourceFile ||
+    (entry?.sourceFile === callSourceFile && entry?.scriptKind === callNode?._ptkScriptKind) ||
+    (entry?.scriptKind === 'classic' && entry.scopeIds.length === 0 && callNode?._ptkScriptKind) ||
     (!entry?.sourceFile && !callSourceFile)
   ));
   if (!entries || !entries.length) return null;
@@ -840,7 +859,7 @@ function selectFunctionForCall(name, callScopeIds, fnIndex, callNode = null) {
   let bestEntry = null;
   let bestScore = -1;
   for (const entry of entries) {
-    const fnScope = entry.scopeIds || [];
+    const fnScope = entry.explicitGlobal ? [] : entry.scopeIds || [];
     if (fnScope.length > scope.length) continue;
     let matches = true;
     for (let i = 0; i < fnScope.length; i++) {
@@ -855,7 +874,7 @@ function selectFunctionForCall(name, callScopeIds, fnIndex, callNode = null) {
       bestScore = fnScope.length;
     }
   }
-  return bestEntry ? bestEntry.node : entries[0]?.node || null;
+  return bestEntry ? bestEntry.node : null;
 }
 
 export function buildGlobalTaintContext(ast, options = {}) {
@@ -874,17 +893,20 @@ export function buildGlobalTaintContext(ast, options = {}) {
 
   const fileCache = { map: new Map(), list: [] };
   const rootScopesByFile = new Map();
+  const documentScope = { parent: null, bindings: new Map(), isFunctionScope: true };
   const rootScopeFor = (node) => {
+    if (node?._ptkScriptKind === 'classic') return documentScope;
     const sourceFile = String(node?.sourceFile || node?.loc?.sourceFile || "<unknown>");
-    if (!rootScopesByFile.has(sourceFile)) {
-      rootScopesByFile.set(sourceFile, {
-        parent: null,
+    const key = `${node?._ptkScriptKind || 'unknown'}:${sourceFile}`;
+    if (!rootScopesByFile.has(key)) {
+      rootScopesByFile.set(key, {
+        parent: node?._ptkScriptKind ? documentScope : null,
         bindings: new Map(),
         isFunctionScope: true,
         sourceFile
       });
     }
-    return rootScopesByFile.get(sourceFile);
+    return rootScopesByFile.get(key);
   };
   const fallbackOrigins = [];
 
@@ -896,6 +918,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
       (target || scope).bindings.set(name, node);
       return;
     }
+    if (opts.declaration) { scope.bindings.set(name, node); return; }
     let target = scope;
     while (target) {
       if (target.bindings.has(name)) {
@@ -913,6 +936,37 @@ export function buildGlobalTaintContext(ast, options = {}) {
       cur = cur.parent;
     }
     return null;
+  }
+
+  function bindingIdentifiers(pattern) {
+    if (!pattern) return [];
+    if (pattern.type === 'Identifier') return [pattern];
+    if (pattern.type === 'AssignmentPattern') return bindingIdentifiers(pattern.left);
+    if (pattern.type === 'RestElement') return bindingIdentifiers(pattern.argument);
+    if (pattern.type === 'ArrayPattern') return pattern.elements.flatMap(bindingIdentifiers);
+    if (pattern.type === 'ObjectPattern') return pattern.properties.flatMap(prop =>
+      bindingIdentifiers(prop.type === 'RestElement' ? prop.argument : prop.value));
+    return [];
+  }
+
+  // Local declarations shadow browser names throughout their lexical scope.
+  function seedDeclarations(statements, scope) {
+    for (const statement of statements || []) {
+      if (statement.type === 'VariableDeclaration') {
+        for (const decl of statement.declarations || []) {
+          for (const identifier of bindingIdentifiers(decl.id)) bind(scope, identifier.name, identifier,
+            { declaration: true, hoistToFunction: statement.kind === 'var' });
+        }
+      } else if (statement.type === 'FunctionDeclaration' && statement.id) {
+        bind(scope, statement.id.name, statement, { declaration: true });
+      } else if (statement.type === 'ClassDeclaration' && statement.id) {
+        bind(scope, statement.id.name, statement.id, { declaration: true });
+      } else if (statement.type === 'ImportDeclaration') {
+        for (const specifier of statement.specifiers || []) {
+          if (specifier.local) bind(scope, specifier.local.name, specifier.local, { declaration: true });
+        }
+      }
+    }
   }
 
   function propertyStoreKey(node, scope, fnStack = []) {
@@ -1137,15 +1191,23 @@ export function buildGlobalTaintContext(ast, options = {}) {
 
       case "BlockStatement": {
         const childScope = { parent: scope, bindings: new Map(), isFunctionScope: false };
+        seedDeclarations(node.body, childScope);
         node.body.forEach((stmt) => visit(stmt, childScope, nextParents, activeFnStack));
         return;
       }
 
+      case 'CatchClause': {
+        const catchScope = { parent: scope, bindings: new Map(), isFunctionScope: false };
+        for (const identifier of bindingIdentifiers(node.param)) bind(catchScope, identifier.name, identifier, { declaration: true });
+        visit(node.body, catchScope, nextParents, activeFnStack);
+        return;
+      }
+
       case "FunctionDeclaration": {
-        if (node.id?.name) bind(scope, node.id.name, node);
+        if (node.id?.name) bind(scope, node.id.name, node, { declaration: true });
         const fnScope = { parent: scope, bindings: new Map(), isFunctionScope: true };
         (node.params || []).forEach((p) => {
-          if (p.type === "Identifier") bind(fnScope, p.name, p);
+          for (const identifier of bindingIdentifiers(p)) bind(fnScope, identifier.name, identifier, { declaration: true });
         });
         const fnId = ensureFunctionId(node);
         const childStack = fnId ? activeFnStack.concat(fnId) : activeFnStack;
@@ -1158,7 +1220,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
         const fnScope = { parent: scope, bindings: new Map(), isFunctionScope: true };
         if (node.id?.name) bind(scope, node.id.name, node);
         (node.params || []).forEach((p) => {
-          if (p.type === "Identifier") bind(fnScope, p.name, p);
+          for (const identifier of bindingIdentifiers(p)) bind(fnScope, identifier.name, identifier, { declaration: true });
         });
         const fnId = ensureFunctionId(node);
         const childStack = fnId ? activeFnStack.concat(fnId) : activeFnStack;
@@ -1179,7 +1241,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
         if (node.id?.type === "Identifier") {
           const idNode = node.id;
           const hoist = node._ptkDeclKind === "var";
-          bind(scope, idNode.name, idNode, { hoistToFunction: hoist });
+          bind(scope, idNode.name, idNode, { hoistToFunction: hoist, declaration: true });
           if (node.init) graph.addEdge(node.init, idNode, "init");
           if (node.init && (node.init.type === "FunctionExpression" || node.init.type === "ArrowFunctionExpression")) {
             // register function aliases handled in buildFunctionIndex
@@ -1241,6 +1303,8 @@ export function buildGlobalTaintContext(ast, options = {}) {
       }
 
       case "MemberExpression": {
+        const locationRoot = trustedLocationReceiverRoot(node);
+        node._ptkTrustedLocation = !!locationRoot && !lookup(scope, locationRoot);
         const isAssignmentTarget = parents[parents.length - 2]?.type === "AssignmentExpression" && parents[parents.length - 2].left === node;
         if (node.object?._ptkIsScript) node._ptkIsScript = true;
         if (node.object?._ptkIsURLInstance) node._ptkIsURLInstance = true;
@@ -1295,6 +1359,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
 
       case "ChainExpression": {
         if (node.expression) visit(node.expression, scope, nextParents, activeFnStack);
+        shouldWalkChildren = false;
         break;
       }
 
@@ -1430,7 +1495,8 @@ export function buildGlobalTaintContext(ast, options = {}) {
         if (node.type === "CallExpression" && node.callee && (node.callee.type === "FunctionExpression" || node.callee.type === "ArrowFunctionExpression")) {
           targetFn = node.callee;
         } else if (node.type === "CallExpression" && callName && fnIndex.byName.has(callName)) {
-          targetFn = selectFunctionForCall(callName, activeFnStack, fnIndex, node);
+          const binding = node.callee?.type === 'Identifier' ? lookup(scope, node.callee.name) : null;
+          targetFn = binding ? resolveFnFromBinding(binding) : selectFunctionForCall(callName, activeFnStack, fnIndex, node);
         }
         if (targetFn) {
           const callSiteId = graph.nodeIdForAstNode(node);
@@ -1572,6 +1638,7 @@ export function buildGlobalTaintContext(ast, options = {}) {
   }
 
   if (ast?.type === "Program" && Array.isArray(ast.body)) {
+    for (const statement of ast.body) seedDeclarations([statement], rootScopeFor(statement));
     for (const statement of ast.body) {
       visit(statement, rootScopeFor(statement), [ast], []);
     }

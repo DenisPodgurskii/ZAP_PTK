@@ -224,7 +224,7 @@ function isTrustedCallbackEndpoint(rawUrl, endpoint = null) {
     try {
         const parsed = new URL(rawUrl)
         if (parsed.origin !== TRUSTED_ZAP_ORIGIN || parsed.search || parsed.hash) return false
-        const match = parsed.pathname.match(/^\/zapCallBackUrl\/[A-Za-z0-9_-]+\/ptk\/(config|alert|progress|control)$/i)
+        const match = parsed.pathname.match(/^\/zapCallBackUrl\/[A-Za-z0-9_-]+\/ptk\/(config|alert|progress|control|browser-capture)$/i)
         if (!match) return false
         return !endpoint || match[1].toLowerCase() === endpoint
     } catch (_) {
@@ -734,6 +734,22 @@ class ZapTransport {
 
     getBrowserId() {
         return this.browserid
+    }
+
+    async browserCaptureRequest(payload) {
+        const baseUrl = this.getBaseUrl({ zapid: payload?.zapid })
+        const url = baseUrl ? `${baseUrl}/ptk/browser-capture` : null
+        if (!isTrustedCallbackEndpoint(url, 'browser-capture')) throw new Error('browser_capture_callback_unavailable')
+        let response
+        try {
+            response = await this._postJsonWithRetry(url, payload, 'browser_capture_callback', {
+                timeoutMs: 10000, retryDelaysMs: []
+            })
+        } catch (error) {
+            if (/^browser_capture_callback_http_\d{1,3}$/.test(error?.message || '')) throw error
+            throw new Error('browser_capture_callback_network_failed')
+        }
+        try { return await response.json() } catch (_) { throw new Error('browser_capture_callback_invalid_json') }
     }
 
     getConfigUrl(options = {}) {

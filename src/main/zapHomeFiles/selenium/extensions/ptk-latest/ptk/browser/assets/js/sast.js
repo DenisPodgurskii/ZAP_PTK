@@ -321,7 +321,9 @@ function hasRenderableSastData(scanResult) {
   if (Array.isArray(items) && items.length) return true;
   if (items && typeof items === "object" && Object.keys(items).length) return true;
   if (countSastDiscoveryItems(scanResult) > 0) return true;
-  return false;
+  const started = Date.parse(scanResult.startedAt), finished = Date.parse(scanResult.finishedAt);
+  return typeof scanResult.scanId === 'string' && !!scanResult.scanId.trim()
+    && Number.isFinite(started) && Number.isFinite(finished) && finished >= started;
 }
 
 function normalizeLegacySastItems(items) {
@@ -2408,8 +2410,9 @@ function applySastFindingsDelta(message) {
     sastFlushTimer = setTimeout(flushSastQueue, SAST_FLUSH_INTERVAL_MS);
   }
   if (message?.stats) {
-    rutils.bindStats(message.stats, "sast");
-    updateSastScopeUI();
+    controller.scanViewModel.stats = Object.assign({}, controller.scanViewModel.stats, message.stats);
+    // Raw engine totals include hints. The existing queue flush publishes the
+    // selected scope after these findings have been admitted.
   }
   if (message?.progress) {
     scheduleSastProgressUpdate({ message: "Analyzing code", progress: message.progress });

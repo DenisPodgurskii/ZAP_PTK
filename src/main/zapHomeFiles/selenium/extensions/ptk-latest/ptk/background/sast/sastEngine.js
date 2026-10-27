@@ -57,6 +57,7 @@ function isThirdPartyScriptForPage(scriptUrl, pageUrl) {
 
 function isLikelyTruncatedExternalScriptCapture(script, code) {
   if (!script?.src || typeof code !== "string") return false;
+  if (script.capturedSource === true && script.truncated === false) return false;
   if (script.truncated === true) return true;
   const length = code.length;
   return length === 512 * 1024 || length === 1024 * 1024;
@@ -215,15 +216,16 @@ function classifyFileLibrary(fileMeta, active) {
 /* ───────────────────────────────────────────────────────────────────────────── */
 
 export class sastEngine {
-  constructor(scanStrategy, opts) {
+  constructor(scanStrategy, opts, { synchronousEvents = false } = {}) {
     // Old (sync) approach depended on immediate imports.
     // Now we load JSON packs asynchronously, so keep a promise.
     this.rules = [];
     this._scanStrategy = scanStrategy;
     this._scanId = opts?.scanId || null;
     this._FINDINGS_LIMIT = opts?.FINDINGS_LIMIT || 300
-    this._allowFetchExternalScripts = opts?.allowFetchExternalScripts !== false;
-    this._allowFetchPageSourceScripts = opts?.allowFetchPageSourceScripts !== false;
+    // Browser sources are capture-owned. Legacy options cannot restore target IO.
+    this._allowFetchExternalScripts = false;
+    this._allowFetchPageSourceScripts = false;
     this._maxFetchedPageSourceBytes = Number.isFinite(Number(opts?.maxFetchedPageSourceBytes))
       ? Math.max(0, Number(opts.maxFetchedPageSourceBytes))
       : 2 * 1024 * 1024;
@@ -237,33 +239,13 @@ export class sastEngine {
 
     this._setCatalog(opts?.catalog || {});
     this._setRulepack(opts?.rulepack || opts?.modules || {});
-    this.events = createEmitter({ async: true, replay: 1 });
+    // Dedicated workers can post each result without waiting for the complete
+    // synchronous rule pass; local callers keep their existing async delivery.
+    this.events = createEmitter({ async: !synchronousEvents, replay: 1 });
   }
 
   async fetchExternalScriptCode(scriptUrl, pageUrl = "") {
-    let script;
-    let page;
-    try {
-      script = new URL(String(scriptUrl || ""));
-      page = new URL(String(pageUrl || ""));
-    } catch {
-      throw new Error("invalid_script_url");
-    }
-    if (!["http:", "https:"].includes(script.protocol) || !["http:", "https:"].includes(page.protocol)) {
-      throw new Error("unsupported_script_protocol");
-    }
-    if (script.origin !== page.origin) {
-      throw new Error("external_script_outside_page_origin");
-    }
-    const res = await fetch(script.href, {
-      credentials: "include",
-      cache: "force-cache",
-      redirect: "error"
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    return res.text();
+    throw new Error("sast_target_fetch_disabled");
   }
 
   _setCatalog(catalog) {
@@ -520,10 +502,11 @@ export class sastEngine {
       const src = script.src || null;
       const code = src ? null : String(script.code || "");
       if (!src && !code.trim()) return;
-      const key = src ? `src:${src}` : `inline:${code}`;
+      const scriptKind = script.scriptKind === 'module' ? 'module' : 'classic';
+      const key = `${scriptKind}:${src ? `src:${src}` : `inline:${code}`}`;
       if (seen.has(key)) return;
       seen.add(key);
-      scripts.push({ src, code });
+      scripts.push({ src, code, scriptKind });
     };
 
     let match;
@@ -534,57 +517,25 @@ export class sastEngine {
         try {
           const resolved = new URL(attrs.src, pageUrl).href;
           if (pageOrigin && safeOrigin(resolved) !== pageOrigin) continue;
-          addScript({ src: resolved, code: null });
+          addScript({ src: resolved, code: null, scriptKind: attrs.type?.trim().toLowerCase() === 'module' ? 'module' : 'classic' });
         } catch (_) { }
         continue;
       }
-      addScript({ src: null, code: decodeHtmlEntities(match[2] || "") });
+      addScript({ src: null, code: decodeHtmlEntities(match[2] || ""), scriptKind: attrs.type?.trim().toLowerCase() === 'module' ? 'module' : 'classic' });
     }
 
     return scripts;
   }
 
   async collectPageSourceScripts(pageUrl = "") {
-    if (!this._allowFetchPageSourceScripts || !pageUrl) return [];
-    let fetchUrl;
-    try {
-      const parsed = new URL(pageUrl);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return [];
-      parsed.hash = "";
-      fetchUrl = parsed.href;
-    } catch (_) {
-      return [];
-    }
-
-    if (this._pageSourceScriptCache.has(fetchUrl)) {
-      return this._pageSourceScriptCache.get(fetchUrl);
-    }
-
-    try {
-      const response = await fetch(fetchUrl, { credentials: "include" });
-      if (!response?.ok) {
-        this._pageSourceScriptCache.set(fetchUrl, []);
-        return [];
-      }
-      const text = await response.text();
-      const bounded = this._maxFetchedPageSourceBytes > 0 && text.length > this._maxFetchedPageSourceBytes
-        ? text.slice(0, this._maxFetchedPageSourceBytes)
-        : text;
-      const scripts = this.extractScriptsFromPageSource(bounded, fetchUrl);
-      this._pageSourceScriptCache.set(fetchUrl, scripts);
-      return scripts;
-    } catch (err) {
-      console.warn("[SAST] page source fetch failed:", fetchUrl, err?.message || String(err));
-      this._pageSourceScriptCache.set(fetchUrl, []);
-      return [];
-    }
+    return [];
   }
 
   async scanCodeDetailed(scripts, html = "", file = "", options = {}) {
+    const generation = Number(options?.generation || 0) || null;
+    const collectionId = options?.collectionId || null;
     try {
       await this._ensureRuntimeAssets();
-      const generation = Number(options?.generation || 0) || null;
-      const collectionId = options?.collectionId || null;
 
       if (!Array.isArray(this.modules) || !this.modules.length) {
         console.warn("SAST: modules not loaded; skipping scan.");
@@ -608,9 +559,10 @@ export class sastEngine {
       const indexByKey = new Map();
       const merged = [];
       const keyForScript = (script) => {
-        if (script?.src) return `src:${script.src}`;
+        const kind = script?.scriptKind || 'unknown';
+        if (script?.src) return `${kind}:src:${script.src}`;
         const code = typeof script?.code === "string" ? script.code : "";
-        return code.trim() ? `inline:${code}` : "";
+        return code.trim() ? `${kind}:inline:${code}` : "";
       };
       const addScript = (script) => {
         const key = keyForScript(script);
@@ -791,10 +743,12 @@ export class sastEngine {
 
         const comments = [];
         let thisAST = null;
+        let scriptKind = script.scriptKind === 'module' ? 'module'
+          : script.scriptKind === 'classic' || !script.capturedSource ? 'classic' : 'unknown';
         try {
-          thisAST = acorn.parse(code, {
+          const parseOptions = {
             ecmaVersion: "latest",
-            sourceType: "module",
+            sourceType: scriptKind === 'module' ? 'module' : 'script',
             locations: true,
             onComment: (isBlock, text, start, end, startLoc, endLoc) => {
               comments.push({
@@ -804,7 +758,17 @@ export class sastEngine {
                 sourceFile: fileId,
               });
             },
-          });
+          };
+          try {
+            thisAST = acorn.parse(code, parseOptions);
+          } catch (error) {
+            // Native captures can lack a DOM declaration (e.g. imported modules).
+            // Only unknown kinds may be derived from actual module-only syntax.
+            if (script.scriptKind === 'module' || script.scriptKind === 'classic') throw error;
+            comments.length = 0;
+            thisAST = acorn.parse(code, { ...parseOptions, sourceType: 'module' });
+            scriptKind = 'module';
+          }
         } catch (e) {
           console.warn("Failed to parse <script>:", fileId, e);
           parseFailures.push({
@@ -816,6 +780,7 @@ export class sastEngine {
 
         full(thisAST, (node) => {
           node.sourceFile = fileId;
+          node._ptkScriptKind = scriptKind;
         });
         if (!templateAST) {
           templateAST = thisAST;
@@ -866,7 +831,7 @@ ${normalizedSnippet}
               continue;
             }
           }
-          full(snippetAST, (node) => { node.sourceFile = fileId; });
+          full(snippetAST, (node) => { node.sourceFile = fileId; node._ptkScriptKind = 'handler'; });
           if (!templateAST) {
             templateAST = snippetAST;
           }
@@ -1049,6 +1014,8 @@ ${normalizedSnippet}
           this.events.emit("findings:partial", {
             scanId: this._scanId,
             file,
+            generation,
+            collectionId,
             moduleId: module.id,
             findings: partialFindings
           });

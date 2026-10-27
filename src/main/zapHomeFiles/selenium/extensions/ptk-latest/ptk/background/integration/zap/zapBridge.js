@@ -7,6 +7,7 @@ import zapTransport, {
 } from './zapTransport.js'
 import ZapPublisher from './zapPublisher.js'
 import ZapAutomationController from './zapAutomationController.js'
+import { ZapBrowserCapture } from './zapBrowserCapture.js'
 
 const SOURCE = 'ptk'
 const TYPE_ALERTS_BATCH = 'alerts_batch'
@@ -290,6 +291,10 @@ class ZapBridge {
         this.app = app || this.app
         this.resultsRegistry = resultsRegistry || this.resultsRegistry
         this._syncDebugFlagFromApp()
+
+        if (this.app?.browserCaptureManager && !this.browserCapture) {
+            this.browserCapture = new ZapBrowserCapture({ transport: this.transport, manager: this.app.browserCaptureManager, sast: this.app.sast })
+        }
 
         if (this.app && this.resultsRegistry && !this.publisher) {
             this.publisher = new ZapPublisher(this.app, this, this.resultsRegistry)
@@ -1706,7 +1711,10 @@ class ZapBridge {
 
         const stopRequested = Boolean(runtimeSnapshot?.stopRequestedAt)
         if (stopRequested) {
-            const cancelled = this._areRequiredEnginesSettled(engineStates, requiredEngines)
+            // Quiet engines can precede the owning stop's final qualification.
+            // Only the existing owner finalizer may release that boundary.
+            const cancelled = runtimeSnapshot?.sessionStatus !== 'stopping'
+                && this._areRequiredEnginesSettled(engineStates, requiredEngines)
             const incomplete = cancelled && this._hasIncompleteEngine(engineStates, requiredEngines)
             return {
                 status: cancelled
@@ -1723,7 +1731,21 @@ class ZapBridge {
             }
         }
 
-        const completed = this._updateZapIdleGraceWindow(monitor, engineStates, runtimeSnapshot, requiredEngines)
+        // Passive engines can be idle between natural page admissions. Their
+        // current-work quietness is not irreversible session completion: ZAP
+        // cannot accept active progress again after terminal acknowledgement.
+        const passiveAdmissionOpen = requiredEngines.some((engineName) => {
+            if (!['SAST', 'IAST'].includes(engineName)) return false
+            const entry = runtimeSnapshot?.engines?.[engineName]
+            const state = String(entry?.state || '').trim().toLowerCase()
+            if (['completed', 'stopped', 'error', 'cancelled'].includes(state)) return false
+            return ['running', 'starting', 'deferred_start', ''].includes(state)
+                || entry?.telemetry?.isRunning === true
+                || entry?.telemetry?.isScanRunning === true
+        })
+        if (passiveAdmissionOpen) monitor.quietSince = null
+        const completed = !passiveAdmissionOpen
+            && this._updateZapIdleGraceWindow(monitor, engineStates, runtimeSnapshot, requiredEngines)
         if (completed) {
             return {
                 status: ZAP_PROGRESS_STATUS_COMPLETED,
@@ -1761,7 +1783,7 @@ class ZapBridge {
             const previousRuntimeEntry = monitor?.lastRuntimeSnapshot?.engines?.[engineName] || null
 
             if (engineName === 'DAST') {
-                engines[engineName] = this._deriveZapDastEngineState(runtimeEntry, previousRuntimeEntry)
+                engines[engineName] = this._deriveZapDastEngineState(runtimeEntry, previousRuntimeEntry, monitor)
                 continue
             }
             if (engineName === 'IAST') {
@@ -1781,7 +1803,7 @@ class ZapBridge {
         return engines
     }
 
-    _deriveZapDastEngineState(runtimeEntry, previousRuntimeEntry = null) {
+    _deriveZapDastEngineState(runtimeEntry, previousRuntimeEntry = null, monitor = null) {
         if (!runtimeEntry || typeof runtimeEntry !== 'object') {
             return { status: 'starting', progress: 0 }
         }
@@ -1848,6 +1870,20 @@ class ZapBridge {
         }
         const state = String(runtimeEntry.state || '').toLowerCase()
         const completionStatus = String(runtime?.completionStatus || '').toLowerCase()
+        const cleanup = runtime.localCleanup
+        // Fixed metadata only, in ZAP's nested diagnostic details, never the
+        // ordinary engine/UI message or attack-completion qualification.
+        if (['cancelled', 'stopped', 'completed'].includes(state)
+            && cleanup?.sessionId === monitor?.sessionId
+            && cleanup?.closeRequestId && cleanup.closeRequestId === monitor?.closeRequest?.id) {
+            details.message = 'ptk_local_cleanup_v1'
+        }
+        const remoteCleanup = runtime.remoteCleanup
+        if (!cleanup && ['cancelled', 'stopped', 'completed'].includes(state)
+            && remoteCleanup?.sessionId === monitor?.sessionId
+            && remoteCleanup?.closeRequestId && remoteCleanup.closeRequestId === monitor?.closeRequest?.id) {
+            details.message = 'ptk_remote_cleanup_v1'
+        }
         if (state === 'cancelled' || state === 'engine_incomplete' || completionStatus === 'engine_incomplete') {
             return {
                 status: ZAP_PROGRESS_STATUS_CANCELLED,
@@ -1994,8 +2030,14 @@ class ZapBridge {
         }
 
         const runtime = runtimeEntry.telemetry || {}
+        const counters = {}
+        for (const [field, value] of [['totalFiles', runtime.totalFiles], ['completedFiles', runtime.completedFiles], ['findingsCount', runtime.findings]]) {
+            counters[field] = typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+        }
+        const counterDetails = { details: counters }
         const error = toNonEmptyString(runtime?.error)
         const errorDetails = {
+            ...counters,
             error: error || null,
             message: error || null
         }
@@ -2023,27 +2065,30 @@ class ZapBridge {
             && pendingCollectionCount === 0
 
         if (runtimeEntry.state === 'starting' || runtimeEntry.state === 'deferred_start') {
-            return { status: 'starting', progress: 0 }
+            return { status: 'starting', progress: 0, ...counterDetails }
         }
         const state = String(runtimeEntry.state || '').toLowerCase()
         if (state === 'cancelled' || state === 'engine_incomplete') {
             return {
                 status: ZAP_PROGRESS_STATUS_CANCELLED,
                 progress: 100,
-                completionStatus: 'engine_incomplete'
+                completionStatus: 'engine_incomplete',
+                ...counterDetails
             }
         }
         if (state === 'stopped' || state === 'completed') {
             return {
                 status: 'idle',
                 progress: 100,
-                completionStatus: 'completed'
+                completionStatus: 'completed',
+                ...counterDetails
             }
         }
         if (!hasObservedWork && waitingForFuturePageActivity) {
             return {
                 status: ZAP_PROGRESS_STATUS_READY,
-                progress: 0
+                progress: 0,
+                ...counterDetails
             }
         }
         if (!firstCollectionStarted
@@ -2055,25 +2100,29 @@ class ZapBridge {
             || collectionState === 'scan_in_flight') {
             return {
                 status: ZAP_PROGRESS_STATUS_RUNNING,
-                progress: clampProgress(progress, 99)
+                progress: clampProgress(progress, 99),
+                ...counterDetails
             }
         }
         if (activePhases.has(phase)) {
             return {
                 status: ZAP_PROGRESS_STATUS_RUNNING,
-                progress: clampProgress(progress, 99)
+                progress: clampProgress(progress, 99),
+                ...counterDetails
             }
         }
         if (!hasObservedWork) {
             return {
                 status: ZAP_PROGRESS_STATUS_READY,
-                progress: 0
+                progress: 0,
+                ...counterDetails
             }
         }
 
         return {
             status: 'idle',
-            progress: 100
+            progress: 100,
+            ...counterDetails
         }
     }
 
@@ -3159,7 +3208,7 @@ class ZapBridge {
         const automation = this.app?.automation
         if (!automation || typeof automation.startZapConfiguredSession !== 'function') {
             console.warn('[PTK ZAP] Automation module unavailable for ZAP-managed session start')
-            return
+            return { status: 'error', error: 'zap_automation_unavailable' }
         }
 
         const safeTabId = Number.isInteger(tabId) ? tabId : null
@@ -3171,7 +3220,7 @@ class ZapBridge {
                 targetUrl,
                 skipped: 'missing_tab_or_target'
             })
-            return
+            return { status: 'error', error: 'zap_missing_tab_or_target' }
         }
 
         const safeEngines = Array.isArray(engines) && engines.length
@@ -3261,7 +3310,7 @@ class ZapBridge {
                     requiredEngines: safeEngines
                 })
             }
-            return
+            return { status: 'already_running', sessionId: previousSessionId || null, requiredEngines: safeEngines }
         }
 
         this._debugLog('[PTK ZAP] Starting ZAP-driven automation:', {
@@ -3298,6 +3347,7 @@ class ZapBridge {
 
         const status = startResult?.status
         if (status === 'starting' || status === 'started' || status === 'already_running') {
+            if (!safeEngines.includes('SAST')) await this.browserCapture?.stop()
             this._lastStartKey = startKey
             this._lastStartSessionId = startResult?.sessionId || this._lastStartSessionId
             this._lastStartsByKey.set(startKey, {
@@ -3311,9 +3361,10 @@ class ZapBridge {
                 zapid: effectiveZapId,
                 requiredEngines: startResult?.requiredEngines || safeEngines
             })
-            return
+            return startResult
         }
 
+        await this.browserCapture?.stop()
         this._clearPendingStart(effectiveSessionKey)
         this._scheduleTerminalProgress({
             sessionKey: effectiveSessionKey,
@@ -3324,6 +3375,7 @@ class ZapBridge {
             message: this._buildStartFailureMessage(startResult),
             engines: this._buildStartupFailureEngineStates(startResult, startResult?.requiredEngines || safeEngines)
         })
+        return startResult
     }
 
     _mergeEngineConfigs(baseConfigs = {}, overlayConfigs = {}) {

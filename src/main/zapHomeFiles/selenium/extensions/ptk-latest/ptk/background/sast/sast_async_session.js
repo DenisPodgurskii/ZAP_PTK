@@ -46,9 +46,13 @@ export class SastAsyncSession {
     this.pendingScanResults.clear()
   }
 
-  resolveScriptRequest(requestId, payload) {
+  resolveScriptRequest(requestId, payload, sender) {
     if (!requestId || !this.pendingScriptRequests.has(requestId)) return false
     const pending = this.pendingScriptRequests.get(requestId)
+    // Invalid/foreign responses must not consume an owned pending request.
+    if (pending.accept) {
+      try { payload = pending.accept(payload, sender) } catch (_) { return false }
+    }
     this.pendingScriptRequests.delete(requestId)
     if (pending?.timer) clearTimeout(pending.timer)
     pending.resolve(payload)
@@ -64,13 +68,13 @@ export class SastAsyncSession {
     return true
   }
 
-  createScriptRequest(requestId, timeoutMs = 8000) {
+  createScriptRequest(requestId, timeoutMs = 8000, accept = null) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingScriptRequests.delete(requestId)
         reject(new Error("sast_scripts_timeout"))
       }, timeoutMs)
-      this.pendingScriptRequests.set(requestId, { timer, resolve, reject })
+      this.pendingScriptRequests.set(requestId, { timer, resolve, reject, accept })
     })
   }
 
@@ -79,17 +83,18 @@ export class SastAsyncSession {
     if (this.pendingScanResults.has(file)) {
       return this.pendingScanResults.get(file).promise
     }
-    let resolve
-    const promise = new Promise((res) => {
+    let resolve, reject
+    const promise = new Promise((res, rej) => {
       resolve = res
+      reject = rej
     })
     const timer = setTimeout(() => {
       if (this.pendingScanResults.has(file)) {
         this.pendingScanResults.delete(file)
       }
-      resolve([])
+      reject(new Error('sast_analysis_timeout'))
     }, timeoutMs)
-    this.pendingScanResults.set(file, { resolve, timer, promise })
+    this.pendingScanResults.set(file, { resolve, reject, timer, promise })
     return promise
   }
 
@@ -101,6 +106,22 @@ export class SastAsyncSession {
     this.pendingScanResults.delete(file)
     pending.resolve(findings || [])
     return true
+  }
+
+  rejectScanResult(file, error, expectedPromise = null) {
+    const pending = this.pendingScanResults.get(file)
+    if (!pending || expectedPromise && pending.promise !== expectedPromise) return false
+    clearTimeout(pending.timer)
+    this.pendingScanResults.delete(file)
+    pending.reject(error)
+    return true
+  }
+
+  cancelPendingScanResults(error = new Error('sast_scan_cancelled')) {
+    for (const [file, pending] of [...this.pendingScanResults]) {
+      this.rejectScanResult(file, error, pending.promise)
+    }
+    for (const requestId of [...this.pendingScriptRequests.keys()]) this.rejectScriptRequest(requestId, error)
   }
 }
 

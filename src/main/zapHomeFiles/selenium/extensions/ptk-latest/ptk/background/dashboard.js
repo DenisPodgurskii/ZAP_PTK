@@ -1063,34 +1063,54 @@ export class ptk_dashboard {
     async msg_stop_bg_scan(message) {
         const engines = this._getScanEngines()
         const dastEngine = engines.dast || engines.rattacker || null
-        const siblingStops = []
-
-        if (message.scans.iast && typeof engines.iast?.stopBackgroundScan === 'function') {
-            siblingStops.push(Promise.resolve().then(() => engines.iast.stopBackgroundScan()).catch(() => { }))
-        }
-        if (message.scans.sast && typeof engines.sast?.stopBackgroundScan === 'function') {
-            siblingStops.push(Promise.resolve().then(() => engines.sast.stopBackgroundScan()).catch(() => { }))
-        }
-        if (message.scans.sca && typeof engines.sca?.stopBackgroundScan === 'function') {
-            siblingStops.push(Promise.resolve().then(() => engines.sca.stopBackgroundScan()).catch(() => { }))
-        }
-
-        if (siblingStops.length) {
-            await Promise.allSettled(siblingStops)
-        }
-
-        if (message.scans.dast && typeof dastEngine?.stopBackgroundScan === 'function') {
+        const outcomes = {}
+        await Promise.all(['iast', 'sast', 'sca', 'dast'].filter(name => message.scans[name]).map(async name => {
+            const engine = name === 'dast' ? dastEngine : engines[name]
+            const scanId = engine?.scanResult?.scanId || null
+            const nativeStopOutcome = {}
             try {
-                await dastEngine.stopBackgroundScan({
-                    runDeferredSeed: false,
-                    waitForIdleBeforeStop: false
-                })
+                if (typeof engine?.stopBackgroundScan !== 'function') throw new Error('stop_unavailable')
+                const result = await engine.stopBackgroundScan(name === 'dast'
+                    ? { runDeferredSeed: false, waitForIdleBeforeStop: false } : name === 'sast' ? { manualCancel: true, dashboardStopOutcome: nativeStopOutcome } : {})
+                if (result instanceof Error || result === false || result?.success === false || result?.result === false) throw new Error('stop_failed')
+                if (nativeStopOutcome.status === 'failed') throw new Error('analysis_failed')
+                if (engine.scanResult?.scanId !== scanId || this._buildLiveScansState()[name] === true) throw new Error('stop_owner_or_state_changed')
+                const partial = nativeStopOutcome.status === 'partial' || result?.partial === true || result?.status === 'engine_incomplete'
+                    || result?.status === 'partial' || result?.analysisState === 'error' || result?.collectionState === 'collection_failed'
+                outcomes[name] = { scanId, status: partial ? 'partial' : 'stopped' }
+            } catch (_) {
+                outcomes[name] = { scanId, status: 'failed' }
+            }
+        }))
+        return { scans: JSON.parse(JSON.stringify(this._buildLiveScansState())), outcomes }
+    }
+
+    _dashboardNativeProgress() {
+        const engines = this._getScanEngines()
+        const progress = {}
+        for (const name of ['dast', 'iast', 'sast', 'sca']) {
+            const engine = engines[name] || (name === 'dast' ? engines.rattacker : null)
+            // Cached/native reads only: never refresh a worker/RPC to paint UI.
+            let native = null
+            try {
+                native = name === 'sast' ? { ...engine?._buildSastProgressSnapshot?.(), ...engine?.sessionCoordinator?.getAutomationState?.() }
+                    : name === 'dast' ? engine?.engine?.getProgressSnapshot?.() : null
             } catch (_) { }
+            const item = { scanId: engine?.scanResult?.scanId || null }
+            if (native?.scanId && native.scanId !== item.scanId) native = null
+            for (const key of ['activeCount', 'pendingCount', 'pendingCollectionCount', 'activeCollectionCount',
+                'completedFiles', 'totalFiles', 'completedModules', 'totalModules',
+                'activeTasks', 'taskQueue', 'requestQueue', 'pendingPlans', 'pendingCaptures', 'pendingHtmlDiscovery',
+                'analysisState', 'collectionState']) {
+                const value = native?.[key]
+                if (typeof value === 'number' && Number.isFinite(value) && value >= 0) item[key] = value
+                if (['analysisState', 'collectionState'].includes(key) && ['idle', 'running', 'complete', 'error',
+                    'collecting', 'analyzing', 'collection_pending', 'payload_received', 'completed',
+                    'collection_failed', 'waiting_for_page_activity'].includes(value)) item[key] = value
+            }
+            progress[name] = item
         }
-
-        let scans = this._buildLiveScansState()
-
-        return Promise.resolve(Object.assign({}, { scans: JSON.parse(JSON.stringify(scans)) }))
+        return progress
     }
 
     async msg_get(message) {
@@ -1109,6 +1129,9 @@ export class ptk_dashboard {
     }
 
     async msg_get_scans(message) {
+        if (message?.stopProgress === true) {
+            return { success: true, scans: this._buildLiveScansState(), nativeProgress: this._dashboardNativeProgress() }
+        }
         if (message?.tabId) {
             worker.ptk_app.proxy.setDashboardTab(message.tabId, message.url || '')
         }

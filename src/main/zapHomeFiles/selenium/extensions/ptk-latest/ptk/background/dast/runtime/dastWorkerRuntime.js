@@ -12,11 +12,47 @@ export class DastWorkerRuntime {
         this.oneTimeScanLedger = new Map()
         this.oneTimeScanInFlight = null
         this.stopInFlight = null
+        this.releaseInFlight = null
+        this.ownerStates = new WeakMap()
         this.eventLimit = Math.max(100, Number(eventLimit) || 10000)
         this.eventCursor = 0
         this.acknowledgedEventCursor = 0
         this.eventReplayFloor = 0
         this.eventJournal = []
+    }
+
+    _registerOwner(context) {
+        this.ownerStates.set(context, { phase: "starting", calls: new Set(),
+            ownerId: JSON.stringify([context.sessionId, context.executorGeneration, context.oneTime === true ? context.operationId : null]) })
+        return context
+    }
+
+    _ownedState(owner) {
+        const state = owner && this.ownerStates.get(owner)
+        if (!state || state.phase === "released") throw new Error("stale_executor_owner")
+        return state
+    }
+
+    _isCleanupOperation(operation) {
+        return operation?.type === "browser_unsubscribe" || operation?.type === "browser_cleanup"
+            || (operation?.type === "browser_call" && ["tabs.remove", "windows.remove",
+                "scripting.unregisterContentScripts", "dast.tabs.navigationWatchCancel", "dast.dialog.detach"].includes(operation.method))
+    }
+
+    async _settleOwnerOperations(owner) {
+        while (true) {
+            const pending = [...this.operationLedger.values()].filter(entry => entry.owner === owner && entry.promise).map(entry => entry.promise)
+            if (!pending.length) return
+            await Promise.allSettled(pending)
+        }
+    }
+
+    _pendingOperations() {
+        return [...this.captureLedger.values(), ...this.operationLedger.values()].some(entry => entry.promise)
+    }
+
+    _retireOwnerOperations(owner) {
+        for (const [key, entry] of this.operationLedger) if (entry.owner === owner && !entry.promise) this.operationLedger.delete(key)
     }
 
     describe() {
@@ -60,7 +96,15 @@ export class DastWorkerRuntime {
             if (payload.sessionId && this.session && payload.sessionId !== this.session.sessionId) {
                 return { ok: false, error: "session_not_found", ...this.describe() }
             }
-            await this.session?.executor?.controllerReplaced?.()
+            if (payload.executorGeneration && this.session && payload.executorGeneration !== this.session.executorGeneration) {
+                return { ok: false, error: "stale_executor_generation", ...this.describe() }
+            }
+            if (this.session && this._ownedState(this.session.owner).phase === "running") {
+                const state = this._ownedState(this.session.owner)
+                const call = Promise.resolve().then(() => this.session.executor?.controllerReplaced?.())
+                state.calls.add(call)
+                try { await call } finally { state.calls.delete(call) }
+            }
             return { ok: true, ...await this.describeWithExecutor({ includeSnapshot: true }) }
         }
         if (message.type === DAST_RUNTIME_MESSAGE.EVENTS_PAGE) return this.eventsPage(payload)
@@ -77,6 +121,7 @@ export class DastWorkerRuntime {
     async start(payload = {}) {
         const sessionId = String(payload.sessionId || "")
         if (!sessionId) return { ok: false, error: "missing_session_id" }
+        if (this.releaseInFlight) return { ok: false, error: "executor_busy" }
         if (this.session) {
             if (this.session.sessionId !== sessionId) return { ok: false, error: "executor_busy" }
             return { ok: true, duplicate: true, ...this.describe() }
@@ -88,15 +133,26 @@ export class DastWorkerRuntime {
         this.startingSessionId = sessionId
         this.startInFlight = (async () => {
             const executorGeneration = this.generationFactory()
+            const owner = this._registerOwner({ sessionId, executorGeneration, payload })
             let executor
             try {
-                executor = await this.executorFactory?.({ sessionId, executorGeneration, payload })
+                executor = await this.executorFactory?.(owner)
                 await executor?.start?.(payload)
             } catch (error) {
-                try { await executor?.release?.({ sessionId, executorGeneration, reason: "start_failed" }) } catch (_) { /* preserve start failure */ }
+                this._ownedState(owner).phase = "stopping"
+                try {
+                    const cleanup = await executor?.release?.({ sessionId, executorGeneration, reason: "start_failed" })
+                    if (cleanup === false) throw new Error("executor_cleanup_unproved")
+                    await this._settleOwnerOperations(owner)
+                    this._retireOwnerOperations(owner)
+                    this._ownedState(owner).phase = "released"
+                } catch (cleanupError) {
+                    this.session = { sessionId, executorGeneration, executor, owner, status: "failed" }
+                }
                 throw error
             }
-            this.session = { sessionId, executorGeneration, executor, status: "running" }
+            this._ownedState(owner).phase = "running"
+            this.session = { sessionId, executorGeneration, executor, owner, status: "running" }
             const executorState = await executor?.describe?.({ includeSnapshot: true })
             return { ok: true, duplicate: false, ...this.describe(), executorState: executorState || null }
         })().finally(() => {
@@ -200,65 +256,72 @@ export class DastWorkerRuntime {
     async engineCall(payload = {}) {
         if (!this.session || payload.sessionId !== this.session.sessionId) return { ok: false, error: "session_not_found" }
         if (payload.executorGeneration !== this.session.executorGeneration) return { ok: false, error: "stale_executor_generation" }
-        const result = await this.session.executor?.call?.(payload.method, Array.isArray(payload.args) ? payload.args : [])
-        return { ok: true, ...this.describe(), result }
+        const session = this.session
+        const state = this._ownedState(session.owner)
+        const readOnly = ["getProgressSnapshot", "waitForIdle", "__getPerformanceTelemetry", "__getRequestSnapshot", "isRecordedStrongTopFrameResponseDuplicate"].includes(payload.method)
+        if (state.phase !== "running" && !readOnly) return { ok: false, error: "executor_terminal", ...this.describe() }
+        const call = Promise.resolve().then(() => session.executor?.call?.(payload.method, Array.isArray(payload.args) ? payload.args : []))
+        if (!readOnly) state.calls.add(call)
+        try {
+            const result = await call
+            return { ok: true, ...this.describe(), result }
+        } finally { state.calls.delete(call) }
     }
 
     async oneTimeScan(payload = {}) {
         const operationId = String(payload.operationId || "")
         if (!operationId) return { ok: false, error: "missing_operation_id" }
-        if (!payload.raw || !["string", "object"].includes(typeof payload.raw)) {
-            return { ok: false, error: "scan_request_raw_missing" }
+        if (!payload.raw || !["string", "object"].includes(typeof payload.raw)) return { ok: false, error: "scan_request_raw_missing" }
+        let entry = this.oneTimeScanLedger.get(operationId)
+        if (entry?.status === "completed") return { ok: true, duplicate: true, result: structuredClone(entry.result) }
+        if (entry?.promise) return entry.promise.then(result => ({ ok: true, duplicate: true, result: structuredClone(result) }))
+        if (this.oneTimeScanInFlight && this.oneTimeScanInFlight !== operationId) return { ok: false, error: "one_time_scan_busy" }
+        if (this.releaseInFlight) return { ok: false, error: "executor_busy" }
+        const duplicate = !!entry
+        if (!entry) {
+            const ownerId = "one-time:" + operationId
+            const owner = this._registerOwner({ sessionId: ownerId, executorGeneration: ownerId, operationId,
+                payload: { sessionId: ownerId, settings: payload.settings || {}, extensionVersion: payload.extensionVersion }, oneTime: true })
+            entry = { status: "pending", promise: null, result: null, owner, executor: null, scanError: null }
+            this.oneTimeScanLedger.set(operationId, entry)
         }
-
-        const existing = this.oneTimeScanLedger.get(operationId)
-        if (existing?.status === "completed") {
-            return { ok: true, duplicate: true, result: structuredClone(existing.result) }
-        }
-        if (existing?.promise) {
-            return existing.promise.then(result => ({ ok: true, duplicate: true, result: structuredClone(result) }))
-        }
-        if (this.oneTimeScanInFlight && this.oneTimeScanInFlight !== operationId) {
-            return { ok: false, error: "one_time_scan_busy" }
-        }
-
-        const entry = { status: "pending", promise: null, result: null }
-        this.oneTimeScanLedger.set(operationId, entry)
         this.oneTimeScanInFlight = operationId
-        entry.promise = (async () => {
-            const ownerId = `one-time:${operationId}`
-            let executor
-            try {
-                executor = await this.executorFactory?.({
-                    sessionId: ownerId,
-                    executorGeneration: ownerId,
-                    operationId,
-                    payload: {
-                        sessionId: ownerId,
-                        settings: payload.settings || {},
-                        extensionVersion: payload.extensionVersion
-                    },
-                    oneTime: true
-                })
-                const result = await executor?.oneTimeScan?.(payload.raw)
-                if (!result || typeof result !== "object") throw new Error("one_time_scan_result_missing")
-                entry.result = structuredClone(result)
-                entry.status = "completed"
-                return entry.result
-            } catch (error) {
-                this.oneTimeScanLedger.delete(operationId)
-                throw error
-            } finally {
-                try { await executor?.release?.({ reason: "one_time_scan_complete", operationId }) } catch (_) { /* preserve scan result/error */ }
-                this.oneTimeScanInFlight = null
-                while (this.oneTimeScanLedger.size > 25) {
-                    const oldest = this.oneTimeScanLedger.keys().next().value
-                    if (oldest === operationId) break
-                    this.oneTimeScanLedger.delete(oldest)
-                }
+        const current = entry
+        current.promise = Promise.resolve().then(async () => {
+            if (!duplicate) {
+                try {
+                    current.executor = await this.executorFactory?.(current.owner)
+                    this._ownedState(current.owner).phase = "running"
+                    const result = await current.executor?.oneTimeScan?.(payload.raw)
+                    if (!result || typeof result !== "object") throw new Error("one_time_scan_result_missing")
+                    current.result = structuredClone(result)
+                } catch (error) { current.scanError = error }
             }
-        })()
-        return entry.promise.then(result => ({ ok: true, duplicate: false, result: structuredClone(result) }))
+            this._ownedState(current.owner).phase = "stopping"
+            try {
+                const cleanup = await current.executor?.release?.({ reason: "one_time_scan_complete", operationId })
+                if (cleanup === false) throw new Error("executor_cleanup_unproved")
+                await this._settleOwnerOperations(current.owner)
+            } catch (error) {
+                current.status = "cleanup_failed"
+                throw error
+            }
+            this._ownedState(current.owner).phase = "released"
+            this._retireOwnerOperations(current.owner)
+            this.oneTimeScanInFlight = null
+            if (current.scanError) {
+                this.oneTimeScanLedger.delete(operationId)
+                throw current.scanError
+            }
+            current.status = "completed"
+            while (this.oneTimeScanLedger.size > 25) {
+                const oldest = this.oneTimeScanLedger.keys().next().value
+                if (oldest === operationId) break
+                this.oneTimeScanLedger.delete(oldest)
+            }
+            return current.result
+        }).finally(() => { current.promise = null })
+        return current.promise.then(result => ({ ok: true, duplicate, result: structuredClone(result) }))
     }
 
     async stop(payload = {}) {
@@ -269,14 +332,22 @@ export class DastWorkerRuntime {
         if (this.session.status !== "running" && this.session.status !== "stop_failed") {
             return { ok: false, error: "executor_terminal", ...this.describe() }
         }
-        this.session.status = "stopping"
+        const session = this.session
+        const state = this._ownedState(session.owner)
+        state.phase = "stopping"
+        session.status = "stopping"
         this.stopInFlight = (async () => {
             const admittedCaptures = Array.from(this.captureLedger.values())
                 .map(entry => entry.promise)
                 .filter(Boolean)
-            await Promise.allSettled(admittedCaptures)
+            const captureResults = await Promise.allSettled(admittedCaptures)
             try {
-                const result = await this.session.executor?.stop?.(payload)
+                await Promise.allSettled([...state.calls])
+                const result = await session.executor?.stop?.(payload)
+                if (result === false) throw new Error("executor_cleanup_unproved")
+                await this._settleOwnerOperations(session.owner)
+                const captureFailure = captureResults.find(result => result.status === "rejected")
+                if (captureFailure) throw captureFailure.reason
                 this.session.stopResult = result || null
                 this.session.status = "stopped"
                 return { ok: true, duplicate: false, ...this.describe(), result: this.session.stopResult }
@@ -290,41 +361,54 @@ export class DastWorkerRuntime {
     }
 
     async release(payload = {}) {
-        if (this.startInFlight && payload.sessionId === this.startingSessionId) {
-            return { ok: false, error: "executor_operations_pending" }
-        }
+        if (this.startInFlight && payload.sessionId === this.startingSessionId) return { ok: false, error: "executor_operations_pending" }
         if (!this.session || payload.sessionId !== this.session.sessionId) return { ok: false, error: "session_not_found" }
         if (payload.executorGeneration !== this.session.executorGeneration) return { ok: false, error: "stale_executor_generation" }
-        if (this.startInFlight || this.stopInFlight || this.session.status === "running" || this.session.status === "stopping") {
-            return { ok: false, error: "executor_running" }
-        }
-        const capturePending = Array.from(this.captureLedger.values()).some(entry => entry.promise)
-        const operationPending = Array.from(this.operationLedger.values()).some(entry => entry.promise)
-        if (capturePending || operationPending) return { ok: false, error: "executor_operations_pending" }
-        if (this.session.status !== "stopped" && this.session.status !== "failed") {
-            return { ok: false, error: "executor_not_releasable" }
-        }
-        await this.session.executor?.release?.(payload)
-        this.session = null
-        this.captureLedger.clear()
-        this.operationLedger.clear()
-        this.eventJournal = []
-        this.eventCursor = 0
-        this.acknowledgedEventCursor = 0
-        this.eventReplayFloor = 0
-        return { ok: true, released: true, ...this.describe() }
+        if (this.releaseInFlight) return this.releaseInFlight
+        if (this.startInFlight || this.stopInFlight || this.session.status === "running" || this.session.status === "stopping") return { ok: false, error: "executor_running" }
+        if (this._pendingOperations() || this.oneTimeScanInFlight) return { ok: false, error: "executor_operations_pending" }
+        if (this.session.status !== "stopped" && this.session.status !== "failed") return { ok: false, error: "executor_not_releasable" }
+        const session = this.session
+        const state = this._ownedState(session.owner)
+        state.phase = "releasing"
+        const release = Promise.resolve().then(async () => {
+            const cleanup = await session.executor?.release?.(payload)
+            if (cleanup === false) throw new Error("executor_cleanup_unproved")
+            await this._settleOwnerOperations(session.owner)
+            if (this.session !== session || this.session.executorGeneration !== payload.executorGeneration) return { ok: false, error: "stale_executor_generation" }
+            if (this._pendingOperations() || this.oneTimeScanInFlight) return { ok: false, error: "executor_operations_pending" }
+            state.phase = "released"
+            this.session = null
+            this.captureLedger.clear()
+            this._retireOwnerOperations(session.owner)
+            this.eventJournal = []
+            this.eventCursor = 0
+            this.acknowledgedEventCursor = 0
+            this.eventReplayFloor = 0
+            return { ok: true, released: true, ...this.describe() }
+        })
+        this.releaseInFlight = release
+        try { return await release }
+        finally { if (this.releaseInFlight === release) this.releaseInFlight = null }
     }
 
-    async runPrivilegedOperation(operation, adapter, { maxAttempts = 2 } = {}) {
+    async runPrivilegedOperation(operation, adapter, { maxAttempts = 2, owner } = {}) {
         const operationId = String(operation?.operationId || "")
         if (!operationId) throw new Error("missing_operation_id")
+        const state = this._ownedState(owner)
+        if (operation.ownerId != null && operation.ownerId !== state.ownerId) throw new Error("foreign_executor_owner")
+        if (["browser_call", "browser_subscribe", "browser_unsubscribe", "browser_cleanup"].includes(operation.type)
+            && operation.ownerId !== state.ownerId) throw new Error("foreign_executor_owner")
         const existing = this.operationLedger.get(operationId)
+        if (existing && existing.owner !== owner) throw new Error("foreign_operation_id")
+        if (!["starting", "running"].includes(state.phase) && !this._isCleanupOperation(existing?.operation || operation)
+            && (!existing || (!existing.promise && existing.status !== "completed"))) throw new Error("executor_stopping")
         if (existing?.status === "completed") return existing.result
         if (existing?.promise) return existing.promise
-        const entry = existing || { status: "pending", attempts: 0, operation }
+        const entry = existing || { status: "pending", attempts: 0, operation: structuredClone(operation), owner }
         this.operationLedger.set(operationId, entry)
         entry.promise = (async () => {
-            const observed = await adapter.reconcile(operation)
+            const observed = await adapter.reconcile(entry.operation)
             if (observed?.completed === true) {
                 entry.status = "completed"
                 entry.result = observed.result
@@ -333,12 +417,12 @@ export class DastWorkerRuntime {
             while (entry.attempts < maxAttempts) {
                 entry.attempts += 1
                 try {
-                    entry.result = await adapter.execute({ ...operation, operationId })
+                    entry.result = await adapter.execute({ ...entry.operation, operationId })
                     entry.status = "completed"
                     return entry.result
                 } catch (error) {
                     entry.error = error?.message || String(error)
-                    const reconciled = await adapter.reconcile(operation)
+                    const reconciled = await adapter.reconcile(entry.operation)
                     if (reconciled?.completed === true) {
                         entry.status = "completed"
                         entry.result = reconciled.result
@@ -352,10 +436,10 @@ export class DastWorkerRuntime {
         return entry.promise
     }
 
-    acknowledgePrivilegedOperation(operationId) {
+    acknowledgePrivilegedOperation(operationId, owner) {
         const key = String(operationId || "")
         const entry = this.operationLedger.get(key)
-        if (!entry || entry.promise || entry.status !== "completed") return false
+        if (!entry || entry.owner !== owner || entry.promise || entry.status !== "completed") return false
         this.operationLedger.delete(key)
         return true
     }

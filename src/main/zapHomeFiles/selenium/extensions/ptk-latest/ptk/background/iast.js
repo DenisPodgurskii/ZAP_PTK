@@ -11,6 +11,7 @@ import {
     resolveIastFindingPresentationAggregate
 } from "./iast/modules/reporting.js"
 import { loadCanonicalRulepack } from "./common/moduleRegistry.js"
+import { captureIdentity } from './capture/captureStore.js'
 import { scanResultStore } from "./scanResultStore.js"
 import { normalizeEvidenceRefs } from "./analysis/evidenceRefs.js"
 import {
@@ -1005,20 +1006,6 @@ async function sendIastModulesToContent(tabId, attempt = 1, options = {}) {
 
 const worker = self
 
-async function refreshFinishedDastAnalysisIfNeeded() {
-    const dast = worker?.ptk_app?.dast || worker?.ptk_app?.rattacker
-    if (!dast || typeof dast !== "object") return
-    if (dast?.engine?.isRunning === true) return
-    const scanResult = dast?.scanResult
-    if (!(scanResult?.finishedAt || scanResult?.finished)) return
-    try {
-        await dast.analysisService?.hydratePersistedRelatedScans?.(scanResult)
-        if (typeof dast._applyAnalysis === "function") {
-            dast._applyAnalysis(scanResult, true)
-        }
-        await dast._flushPersistScanResult?.()
-    } catch (_) { }
-}
 const MAX_HTTP_EVENTS = 1000
 const MAX_TRACKED_REQUESTS = 500
 const IMPORT_TRANSFER_TTL_MS = 10 * 60 * 1000
@@ -1542,6 +1529,7 @@ export class ptk_iast {
     }
 
     async reset() {
+        await this.detachDevtoolsDebugger('reset')
         this._clearAllTokenOrigins()
         this.resetScanResult()
         await ptk_storage.setItem(this.storageKey, {})
@@ -1764,6 +1752,12 @@ export class ptk_iast {
     async enrollRelatedScanTab(tabId, meta = {}) {
         if (!this.registerRelatedScanTab(tabId, meta)) return false
         const normalized = this._normalizeTabId(tabId)
+        try {
+            await this.attachDevtoolsDebugger(normalized)
+        } catch (error) {
+            this.releaseRelatedScanTab(normalized)
+            throw error
+        }
         clearIastModuleSendTracking(normalized)
         await this._clearIastBufferForTab(normalized)
         try {
@@ -1787,6 +1781,9 @@ export class ptk_iast {
     releaseRelatedScanTab(tabId) {
         const normalized = this._normalizeTabId(tabId)
         if (normalized === null) return false
+        const capture = this.captureLeases?.get(normalized)
+        this.captureLeases?.delete(normalized)
+        capture?.lease?.release('tab_released').catch(() => {})
         this._clearTokenOriginsForTab(normalized)
         this.relatedScanTabs.delete(normalized)
         activeIastTabs.delete(normalized)
@@ -2458,6 +2455,8 @@ export class ptk_iast {
 
     async msg_init(message) {
         await this.init()
+        const finished = scanResultStore.getScan(this.scanResult?.scanId)
+        if (!this.isScanRunning && finished?.finishedAt) scanResultStore._applyAnalysisSafe(finished, { force: true })
         const response = {
             scanResult: this._getPublicScanResult(),
             isScanRunning: this.isScanRunning,
@@ -3030,73 +3029,86 @@ export class ptk_iast {
         }
         iastScanStrategy = this.scanResult.settings.iastScanStrategy
         this.currentScanId = scanId
-        await this.scopedTabCoordinator?.registerSession?.('IAST', {
-            primaryTabId: tabId,
-            targetUrl: this.scanResult.targetUrl,
-            scopeMode: effectiveOpts?.zapManaged === true && this.scanResult.targetUrl ? 'path' : 'origin',
-            onEnroll: (meta) => this.enrollRelatedScanTab(meta.tabId, meta),
-            onRelease: (meta) => this.releaseRelatedScanTab(meta.tabId)
-        })
-        activeIastTabs.add(tabId)
-        this.scanResult.policyId = policyMeta?.id || (rulepackLoadOptions?.policyId != null ? String(rulepackLoadOptions.policyId) : null)
-        this.scanResult.settings = Object.assign({}, this.scanResult.settings || {}, {
-            iastRulepackSource: customRulepack ? 'custom' : (policyMeta ? 'portal' : 'local'),
-            iastPolicyName: policyMeta?.name || null,
-            iastPackStatus: packStatus,
-            iastPackError: cloneIastValue(policyState?.lastError, null)
-        })
-        if (rulepackLoadOptions?.variant) {
-            this.scanResult.settings.iastRulepackVariant = String(rulepackLoadOptions.variant)
-        }
-        this.scanResult.iastTelemetry = {
-            activation: activationTelemetry,
-            automation: buildDefaultIastAutomationTelemetry({
-                scanStrategy: scanStrategy || 'SMART',
-                expectedTabId: tabId
-            }),
-            noise: computeIastNoiseTelemetry(this.scanResult)
-        }
-        this.broadcastScanUpdate()
-        await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
-            host: this.scanResult.host,
-            targetUrl: this.scanResult.targetUrl || zapTiming?.targetUrl || null
-        })
-        this.addListeners()
+        this._captureScopeMode = effectiveOpts?.zapManaged === true && this.scanResult.targetUrl ? 'path' : 'origin'
         const devtoolsStartedAt = Date.now()
-        await this.attachDevtoolsDebugger(tabId)
+        try {
+            await this.attachDevtoolsDebugger(tabId)
+        } catch (error) {
+            this.isScanRunning = false
+            throw error
+        }
         this._recordZapTiming('iast.devtools.attach.end', zapTiming, {
             durationMs: Date.now() - devtoolsStartedAt
         })
-        // Inject agent into current page using an async loader so scan start does not block on full agent evaluation.
-        const injectStartedAt = Date.now()
-        this._recordZapTiming('iast.agent.inject.start', zapTiming)
         try {
-            await this.injectIastAgent(tabId, this.scanResult.settings.iastScanStrategy || 'SMART')
-            this._recordZapTiming('iast.agent.inject.success', zapTiming, {
-                durationMs: Date.now() - injectStartedAt
+            await this.scopedTabCoordinator?.registerSession?.('IAST', {
+                primaryTabId: tabId,
+                targetUrl: this.scanResult.targetUrl,
+                scopeMode: effectiveOpts?.zapManaged === true && this.scanResult.targetUrl ? 'path' : 'origin',
+                onEnroll: (meta) => this.enrollRelatedScanTab(meta.tabId, meta),
+                onRelease: (meta) => this.releaseRelatedScanTab(meta.tabId)
             })
-        } catch (err) {
-            this._recordZapTiming('iast.agent.inject.failure', zapTiming, {
-                durationMs: Date.now() - injectStartedAt,
-                error: err?.message || String(err)
+            activeIastTabs.add(tabId)
+            this.scanResult.policyId = policyMeta?.id || (rulepackLoadOptions?.policyId != null ? String(rulepackLoadOptions.policyId) : null)
+            this.scanResult.settings = Object.assign({}, this.scanResult.settings || {}, {
+                iastRulepackSource: customRulepack ? 'custom' : (policyMeta ? 'portal' : 'local'),
+                iastPolicyName: policyMeta?.name || null,
+                iastPackStatus: packStatus,
+                iastPackError: cloneIastValue(policyState?.lastError, null)
             })
-            throw err
+            if (rulepackLoadOptions?.variant) {
+                this.scanResult.settings.iastRulepackVariant = String(rulepackLoadOptions.variant)
+            }
+            this.scanResult.iastTelemetry = {
+                activation: activationTelemetry,
+                automation: buildDefaultIastAutomationTelemetry({
+                    scanStrategy: scanStrategy || 'SMART',
+                    expectedTabId: tabId
+                }),
+                noise: computeIastNoiseTelemetry(this.scanResult)
+            }
+            this.broadcastScanUpdate()
+            await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
+                host: this.scanResult.host,
+                targetUrl: this.scanResult.targetUrl || zapTiming?.targetUrl || null
+            })
+            this.addListeners()
+            // Inject agent into current page using an async loader so scan start does not block on full agent evaluation.
+            const injectStartedAt = Date.now()
+            this._recordZapTiming('iast.agent.inject.start', zapTiming)
+            try {
+                await this.injectIastAgent(tabId, this.scanResult.settings.iastScanStrategy || 'SMART')
+                this._recordZapTiming('iast.agent.inject.success', zapTiming, {
+                    durationMs: Date.now() - injectStartedAt
+                })
+            } catch (err) {
+                this._recordZapTiming('iast.agent.inject.failure', zapTiming, {
+                    durationMs: Date.now() - injectStartedAt,
+                    error: err?.message || String(err)
+                })
+                throw err
+            }
+            const modulesSentAt = Date.now()
+            const moduleSendResult = await sendIastModulesToContent(tabId, 1, this.currentRulepackLoadOptions || {})
+            this._recordIastModuleSendResult(moduleSendResult, {
+                persist: false,
+                scanStrategy: this.scanResult.settings.iastScanStrategy || 'SMART'
+            })
+            this._recordZapTiming('iast.modules.sent', zapTiming, {
+                durationMs: Date.now() - modulesSentAt,
+                result: moduleSendResult?.ok === false ? 'error' : (moduleSendResult?.skipped ? 'skipped' : 'ok')
+            })
+            this.broadcastScanUpdate()
+        } catch (error) {
+            await this.stopBackgroundScan({ skipPostStopAnalysis: true }).catch(() => {})
+            throw error
         }
-        const modulesSentAt = Date.now()
-        const moduleSendResult = await sendIastModulesToContent(tabId, 1, this.currentRulepackLoadOptions || {})
-        this._recordIastModuleSendResult(moduleSendResult, {
-            persist: false,
-            scanStrategy: this.scanResult.settings.iastScanStrategy || 'SMART'
-        })
-        this._recordZapTiming('iast.modules.sent', zapTiming, {
-            durationMs: Date.now() - modulesSentAt,
-            result: moduleSendResult?.ok === false ? 'error' : (moduleSendResult?.skipped ? 'skipped' : 'ok')
-        })
-        this.broadcastScanUpdate()
     }
 
     async stopBackgroundScan(options = {}) {
         const trackedTabIds = this._trackedScanTabIds()
+        let captureError = null
+        try { await this.detachDevtoolsDebugger('stopped') } catch (error) { captureError = error }
         this.scopedTabCoordinator?.unregisterSession?.('IAST')
         await Promise.all(trackedTabIds.map(tabId => this._clearIastBufferForTab(tabId)))
         for (const tabId of trackedTabIds) {
@@ -3120,20 +3132,15 @@ export class ptk_iast {
         this._clearNavigationCorrelations()
         this.unregisterScript()
         this.removeListeners()
-        this.detachDevtoolsDebugger()
         if (this.scanResult?.scanId) {
             const finished = new Date().toISOString()
-            scanResultStore.setFinished(this.scanResult.scanId, finished)
+            const stored = scanResultStore.getScan(this.scanResult.scanId)
+            if (stored) stored.finishedAt = finished
             this.scanResult.finishedAt = finished
-        }
-        if (options?.skipPostStopAnalysis !== true) {
-            scanResultStore._applyAnalysisSafe(this.scanResult, { force: true })
         }
         await this._flushPersistScanResult()
         this.broadcastScanUpdate()
-        if (options?.skipPostStopAnalysis !== true) {
-            await refreshFinishedDastAnalysisIfNeeded()
-        }
+        if (captureError) throw captureError
         return this.scanResult
     }
 
@@ -4073,44 +4080,78 @@ export class ptk_iast {
         } catch (_) { }
     }
 
+    setBrowserCaptureManager(manager) {
+        this.browserCaptureManager = manager
+        this.captureLeases ||= new Map()
+        return this
+    }
+
+    isBrowserCaptureOwnerActive({ ownerId, tabId }) {
+        return this.captureLeases?.get(tabId)?.ownerId === ownerId
+    }
+
     async attachDevtoolsDebugger(tabId) {
-        if (worker.isFirefox) return
-        if (typeof chrome === "undefined" || !chrome.debugger) return false
-        if (this.devtoolsAttached && this.devtoolsTarget && this.devtoolsTarget.tabId === tabId) return true
-
-        const target = { tabId }
-        return await new Promise((resolve) => {
-            chrome.debugger.attach(target, "1.3", () => {
-                if (chrome.runtime.lastError) {
-                    console.warn("[PTK IAST] DevTools attach failed:", chrome.runtime.lastError.message)
-                    resolve(false)
-                    return
+        if (!this.browserCaptureManager) throw new Error('capture_manager_unavailable')
+        this.captureLeases ||= new Map()
+        const existing = this.captureLeases.get(tabId)
+        if (existing) return existing.promise
+        const scan = this.scanResult
+        const ownerId = `IAST:${scan.scanId}`
+        const entry = { ownerId, lease: null }
+        this.captureLeases.set(tabId, entry)
+        entry.promise = this.browserCaptureManager.acquire({
+            ownerId, tabId,
+            scope: { targetUrl: scan.targetUrl, mode: this._captureScopeMode || 'origin' },
+            capabilities: ['network', 'authBodies'],
+            selectResource: (record, capability) => capability === 'authBodies' && this.isLikelyAuthEndpoint(record.url)
+        }).then(lease => {
+            if (this.captureLeases.get(tabId) !== entry || this.scanResult !== scan) {
+                return lease.release('replaced').then(() => { throw new Error('capture_owner_unavailable') })
+            }
+            entry.lease = lease
+            lease.subscribe(event => {
+                if (this.captureLeases.get(tabId) !== entry || this.scanResult !== scan) return
+                const record = event.record || {}
+                if (event.type === 'body') {
+                    const headers = record.response?.headers || []
+                    const mimeType = record.response?.mimeType || record.mimeType || (Array.isArray(headers)
+                        ? headers.find(header => String(header.name).toLowerCase() === 'content-type')?.value
+                        : Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-type')?.[1])
+                    this.captureAuthResponseTokens({ tabId, requestId: record.requestId, url: record.url, mimeType, body: record.body, base64Encoded: record.base64Encoded })
+                    lease.consume(captureIdentity(record))
+                } else if (event.type === 'request' || event.type === 'response') {
+                    this.recordHttpEvent({ type: `devtools-http-${event.type}`, time: Date.now(), requestId: record.requestId,
+                        url: record.url, method: record.request?.method || record.method, status: record.response?.status || record.statusCode,
+                        mimeType: record.response?.mimeType || record.mimeType, tabId })
                 }
-
-                this.devtoolsAttached = true
-                this.devtoolsTarget = target
-
-                if (!this.onDevtoolsEvent) {
-                    this.onDevtoolsEvent = this.handleDevtoolsEvent.bind(this)
-                }
-                try {
-                    if (!chrome.debugger.onEvent.hasListener(this.onDevtoolsEvent)) {
-                        chrome.debugger.onEvent.addListener(this.onDevtoolsEvent)
-                    }
-                } catch (_) {
-                    chrome.debugger.onEvent.addListener(this.onDevtoolsEvent)
-                }
-
-                chrome.debugger.sendCommand(target, "Network.enable", {}, () => {
-                    if (chrome.runtime.lastError) {
-                        console.warn("[PTK IAST] Network.enable failed:", chrome.runtime.lastError.message)
-                        resolve(false)
-                        return
-                    }
-                    resolve(true)
-                })
             })
+            return true
+        }).catch(error => {
+            if (this.captureLeases.get(tabId) === entry) this.captureLeases.delete(tabId)
+            throw error
         })
+        return entry.promise
+    }
+
+    async _releaseCaptureTab(tabId, reason) {
+        const entry = this.captureLeases?.get(tabId)
+        if (!entry) return
+        if (reason === 'reset') this.captureLeases.delete(tabId)
+        try {
+            await entry.promise.catch(() => {})
+            if (entry.lease) {
+                if (reason === 'reset') return await entry.lease.release(reason)
+                entry.lease.freeze()
+                try {
+                    const result = await entry.lease.drain()
+                    if (!result.complete) throw new Error('capture_drain_incomplete')
+                } finally {
+                    await entry.lease.release(reason)
+                }
+            }
+        } finally {
+            if (this.captureLeases.get(tabId) === entry) this.captureLeases.delete(tabId)
+        }
     }
 
     async loadModules(options = {}) {
@@ -4121,66 +4162,8 @@ export class ptk_iast {
         return sendIastModulesToContent(tabId, 1, options)
     }
 
-    detachDevtoolsDebugger() {
-        if (!this.devtoolsAttached || !this.devtoolsTarget) return
-        if (typeof chrome === "undefined" || !chrome.debugger) return
-
-        try {
-            if (this.onDevtoolsEvent) {
-                chrome.debugger.onEvent.removeListener(this.onDevtoolsEvent)
-            }
-        } catch (e) {
-            // ignore listener removal errors
-        }
-
-        chrome.debugger.detach(this.devtoolsTarget, () => {
-            if (chrome.runtime.lastError) {
-                console.warn("[PTK IAST] DevTools detach error:", chrome.runtime.lastError.message)
-            }
-            this.devtoolsAttached = false
-            this.devtoolsTarget = null
-            this.onDevtoolsEvent = null
-        })
-    }
-
-    handleDevtoolsEvent(source, method, params) {
-        if (!this.devtoolsTarget || source.tabId !== this.devtoolsTarget.tabId) return
-        if (!this.isScanRunning || !this.scanResult?.tabId || source.tabId !== this.scanResult.tabId) return
-
-        if (method === "Network.requestWillBeSent") {
-            const request = params && params.request ? params.request : {}
-            if (!isHttpUrl(request.url)) return
-            const evt = {
-                type: "devtools-http-request",
-                time: Date.now(),
-                requestId: params && params.requestId ? params.requestId : undefined,
-                url: request.url,
-                method: request.method,
-                tabId: source.tabId
-            }
-            this.recordHttpEvent(evt)
-        }
-
-        if (method === "Network.responseReceived") {
-            const response = params && params.response ? params.response : {}
-            if (!isHttpUrl(response.url)) return
-            const evt = {
-                type: "devtools-http-response",
-                time: Date.now(),
-                requestId: params && params.requestId ? params.requestId : undefined,
-                url: response.url,
-                status: response.status,
-                mimeType: response.mimeType,
-                tabId: source.tabId
-            }
-            this.recordHttpEvent(evt)
-            this.captureAuthResponseTokens({
-                tabId: source.tabId,
-                requestId: params && params.requestId ? params.requestId : null,
-                url: response.url,
-                mimeType: response.mimeType
-            })
-        }
+    async detachDevtoolsDebugger(reason = 'stopped') {
+        await Promise.all([...this.captureLeases?.keys() || []].map(tabId => this._releaseCaptureTab(tabId, reason)))
     }
 
     isLikelyAuthEndpoint(url) {
@@ -4189,15 +4172,11 @@ export class ptk_iast {
         return /(login|auth|token|session)/.test(lower)
     }
 
-    async captureAuthResponseTokens({ tabId, requestId, url, mimeType }) {
+    async captureAuthResponseTokens({ tabId, requestId, url, mimeType, body, base64Encoded = false }) {
         if (!tabId || !requestId || !url) return
         if (!mimeType || !String(mimeType).toLowerCase().includes("json")) return
         if (!this.isLikelyAuthEndpoint(url)) return
-        if (typeof chrome === "undefined" || !chrome.debugger) return
-        const target = { tabId }
-        chrome.debugger.sendCommand(target, "Network.getResponseBody", { requestId }, (resp) => {
-            if (chrome.runtime.lastError || !resp || !resp.body) return
-            const bodyText = resp.base64Encoded ? atob(resp.body) : resp.body
+            const bodyText = base64Encoded ? atob(body || '') : body
             if (!bodyText || bodyText.length > 200000) return
             let parsed
             try {
@@ -4214,7 +4193,6 @@ export class ptk_iast {
                     detail: entry.path
                 })
             }
-        })
     }
 
     extractTokenCandidates(payload, path = "$") {

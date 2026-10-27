@@ -4,6 +4,9 @@ import { applyScanAnalysis } from "../analysis/scanAnalysisEngine.js"
 import { normalizeEngineName } from "../analysis/canonicalize.js"
 import { shouldIncludeScanAnalysisInExport } from "../analysis/featureFlags.js"
 import { createCredentialRedactor, isCredentialKey } from "./credentialRedaction.js"
+import { getCompletedDastAnalysis, stripPrivateDastAnalysisMetadata } from "../dast/services/dastAnalysisService.js"
+
+const PREPARED_DAST_ANALYSIS = Symbol("preparedDastExportAnalysis")
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
@@ -1087,7 +1090,7 @@ export function sanitizeScanResult(scanResult, opts = {}) {
         const extraEnginesPresent = Array.isArray(opts.extraEnginesPresent)
             ? opts.extraEnginesPresent
             : deriveExtraEnginesPresent(relatedScans)
-        applyScanAnalysis(scanResult, {
+        if (!opts[PREPARED_DAST_ANALYSIS]) applyScanAnalysis(scanResult, {
             force: true,
             relatedScans,
             extraEnginesPresent
@@ -1128,6 +1131,7 @@ export function sanitizeScanResult(scanResult, opts = {}) {
     // Analysis may synthesize copies after the initial pre-truncation pass.
     // Do not reinterpret already-masked attack payloads as unknown credentials.
     redactCredentials?.(scanResult.analysis, { maskPayloads: false })
+    stripPrivateDastAnalysisMetadata(scanResult.analysis)
     return scanResult
 }
 
@@ -1135,12 +1139,16 @@ export function buildExportScanResult(scanId, opts = {}) {
     const source = resolveScanResult(scanId, opts.scanResult)
     if (!source) return null
     const cloned = cloneValue(source)
+    // Only a live service-owned receipt can authorize reuse. JSON/native input
+    // cannot forge this capability; changes to native inputs invalidate it.
+    const prepared = getCompletedDastAnalysis(source)
     const relatedScans = resolveRelatedScans(scanId, opts.relatedScans, source)
     const extraEnginesPresent = Array.isArray(opts.extraEnginesPresent)
         ? opts.extraEnginesPresent
         : deriveExtraEnginesPresent(relatedScans)
     return sanitizeScanResult(cloned, {
         ...opts,
+        [PREPARED_DAST_ANALYSIS]: !!prepared,
         relatedScans,
         extraEnginesPresent
     })

@@ -1,6 +1,7 @@
 import { DastWorkerRuntime } from "../background/dast/runtime/dastWorkerRuntime.js"
 import { buildDastResultDeltas, createDastResultProjection } from "../background/dast/runtime/resultDelta.js"
 import { sanitizeOneTimeDastProgressMessage } from "../background/dast/runtime/oneTimeDisplay.js"
+import { DastFindingPresentationService } from "../background/dast/services/dastFindingPresentationService.js"
 
 const privilegedPending = new Map()
 let controllerAvailable = false
@@ -69,7 +70,10 @@ export class RemoteBrowserOperations {
     }
     async subscribe(event, listener, options = {}) {
         const subscriptionId = options.subscriptionId || crypto.randomUUID()
-        browserEventListeners.set(subscriptionId, listener)
+        const previousListener = browserEventListeners.get(subscriptionId)
+        if (previousListener && previousListener.ownerId !== this.ownerId) throw new Error("foreign_browser_owner")
+        const listenerEntry = { ownerId: this.ownerId, listener }
+        browserEventListeners.set(subscriptionId, listenerEntry)
         const descriptor = {
             type: "browser_subscribe", operationId: `subscribe:${subscriptionId}`,
             subscriptionId, ownerId: this.ownerId, event,
@@ -80,14 +84,17 @@ export class RemoteBrowserOperations {
         try {
             await this.runPrivileged(descriptor)
         } catch (error) {
-            browserEventListeners.delete(subscriptionId)
+            if (browserEventListeners.get(subscriptionId) === listenerEntry) {
+                if (previousListener) browserEventListeners.set(subscriptionId, previousListener)
+                else browserEventListeners.delete(subscriptionId)
+            }
             this.desiredSubscriptions.delete(subscriptionId)
             throw error
         }
         return async () => {
+            await this.runPrivileged({ type: "browser_unsubscribe", operationId: crypto.randomUUID(), subscriptionId, ownerId: this.ownerId })
             browserEventListeners.delete(subscriptionId)
             this.desiredSubscriptions.delete(subscriptionId)
-            await this.runPrivileged({ type: "browser_unsubscribe", operationId: `unsubscribe:${subscriptionId}`, subscriptionId })
         }
     }
     async restoreSubscriptions() {
@@ -96,11 +103,12 @@ export class RemoteBrowserOperations {
         }
     }
     async cleanup() {
+        const result = await this.runPrivileged({ type: "browser_cleanup", operationId: crypto.randomUUID(), ownerId: this.ownerId })
         for (const subscriptionId of this.desiredSubscriptions.keys()) {
             browserEventListeners.delete(subscriptionId)
         }
         this.desiredSubscriptions.clear()
-        return this.runPrivileged({ type: "browser_cleanup", operationId: `cleanup:${this.ownerId}`, ownerId: this.ownerId })
+        return result
     }
 }
 
@@ -108,8 +116,10 @@ export function selectExecutorEventEmitter(context, canonicalEmitter) {
     return context?.oneTime === true ? () => {} : canonicalEmitter
 }
 
-class RealDastExecutor {
-    constructor({ payload }, runPrivileged, emitEvent, emitDisplayMessage = emitEvent) {
+export class RealDastExecutor {
+    constructor(context, runPrivileged, emitEvent, emitDisplayMessage = emitEvent) {
+        const { payload } = context
+        this.privilegedOwnerId = JSON.stringify([context.sessionId, context.executorGeneration, context.oneTime === true ? context.operationId : null])
         this.payload = payload
         this.engine = null
         this.runPrivileged = runPrivileged
@@ -141,7 +151,7 @@ class RealDastExecutor {
             }
         }
         const { dastEngine } = await import("../background/dast/dastEngine.js")
-        this.browserOperations = new RemoteBrowserOperations(this.runPrivileged, this.payload?.sessionId)
+        this.browserOperations = new RemoteBrowserOperations(this.runPrivileged, this.privilegedOwnerId)
         this.engine = new dastEngine(this.payload?.settings || {}, {
             requestFactory: () => Object.assign(new RemoteRequestTransport(), { runPrivileged: this.runPrivileged }),
             browserOperations: {
@@ -195,7 +205,7 @@ class RealDastExecutor {
     async oneTimeScan(raw) { return cloneForTransport(await (await this._ensureEngine()).onetimeScanRequest(raw)) }
     async stop() {
         const engine = await this._ensureEngine()
-        engine.stop()
+        await engine.stop()
         await engine.waitForPrivilegedCleanup?.()
         await this.browserOperations?.cleanup()
         return { scanResult: cloneForTransport(engine.scanResult) }
@@ -219,6 +229,12 @@ class RealDastExecutor {
         }
         if (method === "__getPerformanceTelemetry") {
             return cloneForTransport(engine._performanceTelemetry)
+        }
+        if (method === "__getRequestSnapshot") {
+            return new DastFindingPresentationService().getRequestSnapshot(engine.scanResult, {
+                requestId: args?.[0] || null,
+                attackId: args?.[1] || null
+            })
         }
         const allowed = new Set(["getProgressSnapshot", "waitForIdle", "updateScanResult", "reset", "_appendRuntimeEvent", "isRecordedStrongTopFrameResponseDuplicate"])
         if (!allowed.has(method) || typeof engine[method] !== "function") throw new Error("unsupported_engine_call")
@@ -245,7 +261,7 @@ const emitOneTimeDisplayEvent = (operationId, message) => {
   })
   return true
 }
-const runPrivileged = async operation => {
+const runPrivileged = async (owner, operation) => {
   const operationTimeoutMs = operation?.type === "request_send" || operation?.method === "dast.h2.fetch"
     ? 15 * 60 * 1000
     : operation?.method === "dast.tabs.waitReady" || operation?.method === "dast.tabs.navigateAndWait"
@@ -261,14 +277,14 @@ const runPrivileged = async operation => {
         await waitForController()
         return privilegedRequest(current, operationTimeoutMs)
     }
-  }, { maxAttempts: 2 })
-  runtime.acknowledgePrivilegedOperation(operation.operationId)
+  }, { maxAttempts: 2, owner })
+  runtime.acknowledgePrivilegedOperation(operation.operationId, owner)
   return result
 }
 runtime = new DastWorkerRuntime({
   executorFactory: async context => new RealDastExecutor(
     context,
-    runPrivileged,
+    operation => runPrivileged(context, operation),
     selectExecutorEventEmitter(context, emitEngineEvent),
     context?.oneTime === true
       ? message => emitOneTimeDisplayEvent(context.operationId, message)
@@ -292,8 +308,8 @@ self.onmessage = async event => {
         return
     }
     if (data.type === "privileged_event") {
-        const listener = browserEventListeners.get(data.event?.subscriptionId)
-        if (listener) listener(...(data.event?.args || []))
+        const entry = browserEventListeners.get(data.event?.subscriptionId)
+        if (entry && entry.ownerId === data.event?.ownerId) entry.listener(...(data.event?.args || []))
         return
     }
     const { requestId, message } = data

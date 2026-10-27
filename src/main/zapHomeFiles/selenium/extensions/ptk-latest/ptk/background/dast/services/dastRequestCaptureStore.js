@@ -42,6 +42,7 @@ export class DastRequestCaptureStore {
         this.tabs = {}
         this.tabUrlMap = new Map()
         this._tabActivity = new Map()
+        this.pinnedTabId = null
     }
 
     rememberTabUrl(tabId, url = "") {
@@ -62,6 +63,29 @@ export class DastRequestCaptureStore {
     clearTab(tabId) {
         delete this.tabs[tabId]
         this.forgetTab(tabId)
+    }
+
+    restoreRequestEvents(tabId, frameId, requestId, events, uiUrl = '') {
+        if (!Number.isInteger(tabId) || !Number.isInteger(frameId)
+            || typeof requestId !== 'string' || !Array.isArray(events) || !events.length) return false
+        if (!(this.tabs[tabId] instanceof DastCapturedTab)) {
+            this.tabs[tabId] = new DastCapturedTab(tabId, {}, null, {
+                logger: this.logger,
+                runtimeApi: this.runtimeApi
+            })
+            this.reduceTabs(this.maxTabsCount, tabId)
+        }
+        const tab = this.tabs[tabId]
+        if (!tab.frames.has(frameId)) tab.frames.set(frameId, new Map())
+        // Live webRequest events may already have arrived while storage was loading.
+        if (tab.frames.get(frameId).has(requestId)) return false
+        tab.frames.get(frameId).set(requestId, events)
+        tab.rememberRequestOrder(events)
+        tab.tabInfoDirty = true
+        this.trackTabActivity(tabId)
+        this.rememberTabUrl(tabId, uiUrl)
+        tab.reduceTabSize(this.maxRequestsPerTab)
+        return true
     }
 
     resolveTabContext(tab) {
@@ -126,7 +150,7 @@ export class DastRequestCaptureStore {
         if (tabsCount <= maxTabs) return
         let removeKey = [], count = 0
         Object.keys(this.tabs).forEach(key => {
-            if ((tabsCount - count) > maxTabs && key != newTabId) {
+            if ((tabsCount - count) > maxTabs && key != newTabId && key != this.pinnedTabId) {
                 removeKey.push(key)
                 count++
             }
@@ -521,6 +545,8 @@ export class DastCapturedTab {
         this.logger = logger
         this.runtimeApi = runtimeApi
         this.frames = new Map()
+        this._requestOrder = new WeakMap()
+        this._requestSequence = 0
         this.setParams(params, type)
         this.tabInfo = null
         this.tabInfoDirty = true
@@ -535,7 +561,9 @@ export class DastCapturedTab {
                 this.logger.log("Init frames", { frameId: params.frameId, requestId: params.requestId })
             }
             if (!this.frames.get(params.frameId).has(params.requestId)) {
-                this.frames.get(params.frameId).set(params.requestId, new Array())
+                const events = []
+                this.frames.get(params.frameId).set(params.requestId, events)
+                this.rememberRequestOrder(events, params)
             }
             let index = this.frames.get(params.frameId).get(params.requestId).length
             if (type == "start" || index == 0) {
@@ -544,6 +572,13 @@ export class DastCapturedTab {
             } else {
                 for (let p in params) {
                     let requestKey = index == 0 ? 0 : index - 1
+                    // Keep the admitted native start time on the existing
+                    // event record so checkpoint restore retains admission
+                    // chronology. __ptkSeenAtMs still tracks latest activity.
+                    if (p === 'timeStamp') {
+                        const startedAt = Number(this.frames.get(params.frameId).get(params.requestId)[requestKey].timeStamp)
+                        if (Number.isFinite(startedAt) && startedAt > 0) continue
+                    }
                     if (this.frames.get(params.frameId).get(params.requestId)[requestKey][p] != params[p]) {
                         this.frames.get(params.frameId).get(params.requestId)[requestKey][p] = params[p]
                     }
@@ -558,16 +593,40 @@ export class DastCapturedTab {
         }
     }
 
+    rememberRequestOrder(events, firstEvent = null) {
+        if (this._requestOrder.has(events)) return this._requestOrder.get(events)
+        const timestamps = (firstEvent ? [firstEvent] : events)
+            .map(event => Number(event?.timeStamp || event?.__ptkSeenAtMs || 0))
+            .filter(value => Number.isFinite(value) && value > 0)
+        const order = {
+            time: timestamps.length ? Math.min(...timestamps) : Date.now(),
+            sequence: ++this._requestSequence
+        }
+        this._requestOrder.set(events, order)
+        return order
+    }
+
     reduceTabSize(maxRequest) {
         let updated = false
-        this.frames.forEach((frame, fkey) => {
-            frame.forEach((request, rkey) => {
-                if (frame.size >= maxRequest) {
-                    updated = true
-                    frame.delete(rkey)
-                }
-            })
-        })
+        if (!Number.isInteger(maxRequest) || maxRequest < 1) return
+        let count = 0
+        this.frames.forEach(frame => { count += frame.size })
+        if (count <= maxRequest) return
+        // Evict only the oldest requests, across frames, once the configured
+        // limit is exceeded. Never empty a full frame wholesale at the limit.
+        const requests = []
+        for (const frame of this.frames.values()) {
+            for (const [requestId, events] of frame) {
+                requests.push({ frame, requestId, ...this.rememberRequestOrder(events) })
+            }
+        }
+        requests.sort((left, right) => left.time - right.time || left.sequence - right.sequence)
+        for (const { frame, requestId } of requests) {
+            if (count <= maxRequest) break
+            frame.delete(requestId)
+            count--
+            updated = true
+        }
         if (updated) {
             this.tabInfoDirty = true
         }

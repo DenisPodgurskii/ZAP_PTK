@@ -6,6 +6,11 @@ export function isDastResponseAllowed(response = {}, state = {}) {
     if (!sourceUrl) return false
     let url
     try { url = new URL(sourceUrl) } catch (_) { return false }
+    const controller = state?.settings?._cypressControllerAdmission
+    if (controller?.version === 1 && controller.namespace === "__cypress"
+        && Array.isArray(controller.origins) && controller.origins.includes(url.origin)
+        && (url.pathname === "/__cypress" || url.pathname.startsWith("/__cypress/")
+            || url.pathname === "/__" || url.pathname === "/__/")) return false
     const hasParams = Array.from(getSearchParamsFromUrlOrHash(rawUrl).keys()).length > 0
     const method = String(response?.method || "GET").toUpperCase()
     const stateChanging = ["POST", "PUT", "PATCH", "DELETE"].includes(method)

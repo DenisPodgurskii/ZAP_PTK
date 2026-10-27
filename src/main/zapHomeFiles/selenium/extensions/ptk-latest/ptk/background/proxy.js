@@ -1,6 +1,7 @@
 /* Author: Denis Podgurskii */
 import { ptk_logger, ptk_utils } from "./utils.js"
 import { DastRequestCaptureStore } from "./dast/services/dastRequestCaptureStore.js"
+import { ProxySessionHistory } from "./dast/services/proxySessionHistory.js"
 import {
     encodeMultipartHeaderParameter,
     normalizeMultipartBoundary
@@ -53,6 +54,12 @@ export class ptk_proxy {
         this._dashboardTab = null
         this.tabUrlMap = this.captureStore.tabUrlMap
         this._tabActivity = this.captureStore._tabActivity
+        this.scanHistory = new ProxySessionHistory({
+            captureStore: this.captureStore,
+            onError: ({ code, tabId, reason }) => ptk_logger.log(
+                { code, tabId, reason }, "Proxy scan history checkpoint unavailable", "warning"
+            )
+        })
 
         this.addMessageListiners()
         this.addListiners()
@@ -72,6 +79,14 @@ export class ptk_proxy {
         this.tabUrlMap = this.captureStore.tabUrlMap
         this._tabActivity = this.captureStore._tabActivity
         return this.captureStore
+    }
+
+    beginScanHistory(tabId) {
+        this.scanHistory.beginScan(tabId)
+    }
+
+    endScanHistory(tabId) {
+        this.scanHistory.endScan(tabId)
     }
 
     /* Listeners */
@@ -203,7 +218,8 @@ export class ptk_proxy {
     onUpdated(tabId, info, tab) {
         if (tab?.url && ptk_utils.isURL(tab?.url)) {
             this.tabUrlMap.set(tabId, tab.url)
-            this.activeTab = { tabId: tabId, url: tab.url, window: tab.windowId }
+            // Background DAST helper tabs must not take over the Proxy UI.
+            if (tab.active === true) this.activeTab = { tabId: tabId, url: tab.url, window: tab.windowId }
         }
         if (info?.url && ptk_utils.isURL(info.url)) {
             this.tabUrlMap.set(tabId, info.url)
@@ -217,6 +233,8 @@ export class ptk_proxy {
     onRemoved(tabId, info) {
         if (this._previousTab && this._activeTab?.tabId == tabId) this._activeTab = this._previousTab
         if (this.tabUrlMap.has(tabId)) this.tabUrlMap.delete(tabId)
+        this.captureStore.clearTab(tabId)
+        void this.scanHistory.removeTab(tabId)
         if (this._dashboardTab?.tabId === tabId) this._dashboardTab = null
     }
 
@@ -277,8 +295,11 @@ export class ptk_proxy {
 
 
     async msg_get_active_tab(message, tab) {
+        await this.scanHistory.ready
         await this.ensureActiveTabContext({ tabId: message?.tabId, url: message?.url || '' })
-        const resolved = this.resolveTabContext(tab)
+        const resolved = this.activeTab?.tabId != null
+            ? { tab: this.getTab(this.activeTab.tabId), tabId: this.activeTab.tabId }
+            : this.resolveTabContext(tab)
         let base = Object.assign({}, this.activeTab || {})
         if (!base.tabId && resolved.tabId != null) {
             base.tabId = resolved.tabId
@@ -288,6 +309,7 @@ export class ptk_proxy {
         }
         if (!resolved.tab) {
             return Promise.resolve(Object.assign(base, {
+                ...this.scanHistory.status(base.tabId),
                 frames: [],
                 requests: [],
                 domains: [],
@@ -300,7 +322,7 @@ export class ptk_proxy {
         if (!resolved.tab.tabInfo) {
             resolved.tab.tabInfo = await resolved.tab.analyze()
         }
-        return Promise.resolve(Object.assign(base, resolved.tab.tabInfo))
+        return Promise.resolve(Object.assign(base, resolved.tab.tabInfo, this.scanHistory.status(resolved.tabId)))
     }
 
 
@@ -334,10 +356,16 @@ export class ptk_proxy {
         return Promise.resolve(r)
     }
 
-    msg_clear(message, tab) {
-        const resolved = this.resolveTabContext(tab)
-        if (resolved.tabId != null) this.clearTab(resolved.tabId)
-        return Promise.resolve({ result: true })
+    async msg_clear(message, tab) {
+        await this.scanHistory.ready
+        const resolved = this.activeTab?.tabId != null
+            ? { tabId: this.activeTab.tabId }
+            : this.resolveTabContext(tab)
+        if (resolved.tabId != null) {
+            this.clearTab(resolved.tabId)
+            await this.scanHistory.removeTab(resolved.tabId)
+        }
+        return { result: true }
     }
 
     /* End Listeners */
@@ -585,6 +613,10 @@ export class ptk_proxy {
     setTab(tabId, params, t) {
         if (!ptk_utils.isURL(params?.url) ) return
         if (!Number.isInteger(tabId) || tabId < 0) return
+        if (this.scanHistory.activeScanTabId != null
+            && worker?.ptk_app?.dast?.engine?.isRunning === false) {
+            this.endScanHistory()
+        }
         params.__ptkSeenAtMs = Number.isFinite(Number(params.timeStamp))
             ? Number(params.timeStamp)
             : Date.now()
@@ -608,8 +640,10 @@ export class ptk_proxy {
             }
         }
 
-        if (tabId == this._createdTab?.tabId || tabId == this.activeTab?.tabId || shouldTrackForScan || alreadyTracked) 
+        if (tabId == this._createdTab?.tabId || tabId == this.activeTab?.tabId || shouldTrackForScan || alreadyTracked) {
             this.updateTab(tabId, params, t)
+            if (t === 'response') this.scanHistory.recordCompleted(tabId, params.frameId, params.requestId)
+        }
     }
 
     getTab(tabId) {

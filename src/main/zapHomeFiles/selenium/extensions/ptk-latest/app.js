@@ -24,6 +24,9 @@ import { ptk_automation } from "./ptk/background/automation.js"
 import { zapBridge } from "./ptk/background/integration/zap/index.js"
 import { ScopedTabSessionCoordinator } from "./ptk/background/common/scopedTabSessionCoordinator.js"
 import { OffscreenRuntimeManager } from "./ptk/background/offscreen/offscreenRuntimeManager.js"
+import { BrowserCaptureManager } from "./ptk/background/capture/browserCaptureManager.js"
+import { ChromiumCaptureAdapter } from "./ptk/background/capture/chromiumCaptureAdapter.js"
+import { FirefoxCaptureAdapter } from "./ptk/background/capture/firefoxCaptureAdapter.js"
 import { loadDevLocalConfig } from "./ptk/common/devLocalConfig.js"
 import { initializePortalRuntimeConfig } from "./ptk/common/portalConfig.js"
 import {
@@ -111,6 +114,11 @@ export class ptk_app {
     constructor(settings) {
         this.settings = new ptk_settings(settings)
         this.secretStore = new SecretStore()
+        this.browserCaptureManager = new BrowserCaptureManager({
+            adapter: worker.isFirefox ? new FirefoxCaptureAdapter() : new ChromiumCaptureAdapter(),
+            isOwnerActive: identity => [this.dast, this.sast, this.iast, this.sca, this.recorder, this.automation?.zap?.browserCapture]
+                .some(consumer => consumer?.isBrowserCaptureOwnerActive?.(identity) === true)
+        })
         this.scopedTabSessions = new ScopedTabSessionCoordinator({ browserApi: browser })
         this.offscreenRuntimeManager = new OffscreenRuntimeManager({ chromeApi: globalThis.chrome })
         this.updated = false
@@ -132,6 +140,7 @@ export class ptk_app {
         this.jwt = new ptk_jwt()
         this.iast = new ptk_iast()
         this.sast = new ptk_sast(undefined, { offscreenManager: this.offscreenRuntimeManager })
+        for (const consumer of [this.dast, this.sast, this.iast, this.sca]) consumer.setBrowserCaptureManager(this.browserCaptureManager)
         this.dast.setScopedTabCoordinator?.(this.scopedTabSessions)
         this.sca.setScopedTabCoordinator?.(this.scopedTabSessions)
         this.iast.setScopedTabCoordinator?.(this.scopedTabSessions)
@@ -140,6 +149,7 @@ export class ptk_app {
         this.automation = new ptk_automation()
         this.automation.init(this, { zapBridge })
         this.recorder = new ptk_recorder(this.settings.recorder)
+        this.recorder.setBrowserCaptureManager(this.browserCaptureManager)
         this.recorder.addMessageListeners()
 
         this.onMessage = this.onMessage.bind(this)

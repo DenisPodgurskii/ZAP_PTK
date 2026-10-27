@@ -42,15 +42,17 @@ export class ptk_controller_rbuilder {
         })
     }
 
-    async scanRequest(schema, formId) {
+    async scanRequest(schema, formId, operationId = null, uiGeneration = null) {
         return browser.runtime.sendMessage({
             channel: "ptk_popup2background_request",
             type: "scan_request",
             schema: schema,
-            formId: formId
+            formId: formId,
+            operationId,
+            uiGeneration
         }).then(response => {
             return response
-        }).catch(e => e)
+        })
     }
 
 

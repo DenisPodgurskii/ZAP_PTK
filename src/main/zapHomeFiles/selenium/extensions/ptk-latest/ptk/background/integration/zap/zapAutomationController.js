@@ -616,6 +616,56 @@ export class ZapAutomationController {
         const finalEngineConfigs = bridge._buildAutoStartEngineConfigs(parsedConfig, finalEngines)
         const configSeedUrls = bridge._collectConfigSeedUrls(finalEngineConfigs)
         const configSeedTargetUrl = bridge._selectPostCallbackTargetUrl(configSeedUrls)
+        const callbackStillBound = () => {
+            const route = this.transport?._getCallbackRoute?.({ zapid: context.zapid })
+            return isValidTabId(context.tabId) && route?.tabId === context.tabId
+                && route.zapid === context.zapid && route.baseUrl === context.baseUrl
+                && this.transport?.getBrowserId?.() === context.browserid
+        }
+        // Only the already configured target can authorize startup while the
+        // exact native callback tab is still held behind the host's ready gate.
+        // Unseeded discovery retains the existing post-navigation path below.
+        if (finalEngines.includes('SAST') && (configSeedTargetUrl || toHttpUrl(payload?.targetUrl)) && callbackStillBound()) {
+            const targetUrl = await bridge._resolveTargetUrl(Object.assign({}, payload, {
+                zapHistorySeedUrls: configSeedUrls
+            }), 0)
+            if (targetUrl) {
+                const capture = bridge.browserCapture
+                if (!capture) throw new Error('browser_capture_unsupported')
+                this._transition(run, ZAP_AUTOMATION_STATES.CONFIG_READY, {
+                    engines: finalEngines, engineConfigs: finalEngineConfigs, targetUrl
+                })
+                await capture.prepare({ tabId: context.tabId, zapid: context.zapid,
+                    version: rawConfig?.browserCaptureVersion, engines: finalEngines,
+                    startupKey: JSON.stringify([context.sessionKey, targetUrl, finalEngines]),
+                    beforeReady: async () => {
+                        if (!callbackStillBound()) throw new Error('browser_capture_owner_changed')
+                        this._transition(run, ZAP_AUTOMATION_STATES.SESSION_STARTING, {
+                            targetUrl, targetTabId: context.tabId
+                        })
+                        run.startAttempts += 1
+                        const result = await bridge._startZapSession({
+                            tabId: context.tabId, targetUrl, engines: finalEngines,
+                            engineConfigs: finalEngineConfigs, baseUrl: context.baseUrl,
+                            sessionKey: context.sessionKey, zapid: context.zapid
+                        })
+                        if (!callbackStillBound()) throw new Error('browser_capture_owner_changed')
+                        return result
+                    }
+                })
+                this._transition(run, ZAP_AUTOMATION_STATES.SESSION_RUNNING, {
+                    targetUrl, targetTabId: context.tabId
+                })
+                return run
+            }
+        }
+        // Arm natural-response capture before waiting for the first target URL.
+        // The host's separate Selenium hook waits for the installed-listener ACK.
+        if (finalEngines.length) {
+            const capture = bridge.browserCapture
+            if (!capture) throw new Error('browser_capture_unsupported')
+            await capture.prepare({ tabId: context.tabId, zapid: context.zapid, version: rawConfig?.browserCaptureVersion, engines: finalEngines })
+        }
         this._transition(run, ZAP_AUTOMATION_STATES.CONFIG_READY, {
             engines: finalEngines,
             engineConfigs: finalEngineConfigs,

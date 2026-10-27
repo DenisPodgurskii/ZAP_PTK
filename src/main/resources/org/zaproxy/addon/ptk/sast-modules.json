@@ -1801,7 +1801,7 @@
               "description": "Template content contains AngularJS interpolation delimiters. Verify no attacker-controlled value is placed inside the delimiters."
             },
             "execution": {
-              "findingKind": "finding",
+              "findingKind": "hint",
               "maxFindings": 50,
               "originLimit": null,
               "depthLimit": null,
@@ -1830,7 +1830,7 @@
               "description": "Template content contains ng-* expression attributes. Server-side insertion into these attributes is expression injection."
             },
             "execution": {
-              "findingKind": "finding",
+              "findingKind": "hint",
               "maxFindings": 50,
               "originLimit": null,
               "depthLimit": null,

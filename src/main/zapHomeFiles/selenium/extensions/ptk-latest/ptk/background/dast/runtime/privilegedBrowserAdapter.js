@@ -32,9 +32,6 @@ const CALLS = Object.freeze({
             if (!markDomOnly && (!window.name || !window.name.includes(name))) window.name = `${window.name ? `${window.name} ` : ""}${name}`
         }, args: [marker, domOnly]
     }),
-    "debugger.attach": (api, args) => api.debugger.attach(...args),
-    "debugger.sendCommand": (api, args) => api.debugger.sendCommand(...args),
-    "debugger.detach": (api, args) => api.debugger.detach(...args)
 })
 
 function waitForTabState(api, tabId, timeoutMs = 8000, { requireNavigation = false } = {}) {
@@ -167,12 +164,17 @@ async function executeH2Fetch(adapter, operation) {
     const requestUrl = String(payload.url || "").trim()
     if (!requestUrl) return null
     let tabId = null
+    let lease = null
+    const entry = { ownerId: operation.ownerId, active: true, tabId: null, lease: null }
+    adapter.captureOperations.add(entry)
     let protocol = null
     let statusCode = null
     let responseHeaders = []
     let statusLine = null
-    const onEvent = (source, method, params) => {
-        if (source?.tabId !== tabId || method !== "Network.responseReceived" || String(params?.response?.url || "") !== requestUrl) return
+    const onEvent = event => {
+        const record = event.record || {}
+        const params = { response: record.response }
+        if (event.type !== 'response' || record.tabId !== tabId || String(params.response?.url || record.url || '') !== requestUrl) return
         protocol = String(params?.response?.protocol || "").toLowerCase() || null
         statusCode = Number(params?.response?.status) || null
         responseHeaders = Object.entries(params?.response?.headers || {}).map(([name, value]) => ({ name, value: String(value ?? "") }))
@@ -184,26 +186,16 @@ async function executeH2Fetch(adapter, operation) {
         const tab = await api.tabs.create({ url: "about:blank", active: false })
         tabId = tab?.id
         if (!tabId) return null
-        await api.debugger.attach({ tabId }, "1.3")
-        await api.debugger.sendCommand({ tabId }, "Network.enable")
-        api.debugger.onEvent.addListener(onEvent)
-        const [execution] = await api.scripting.executeScript({
-            target: { tabId },
-            func: async request => {
-                const response = await fetch(request.url, {
-                    method: request.method, headers: request.headers, body: request.body,
-                    credentials: request.credentials,
-                    redirect: request.followRedirect ? "follow" : "manual", cache: "no-cache"
-                })
-                return {
-                    status: response.status, statusText: response.statusText || "",
-                    headers: Array.from(response.headers.entries()).map(([name, value]) => ({ name, value })),
-                    body: await response.text()
-                }
-            },
-            args: [payload]
+        entry.tabId = tabId
+        if (!entry.active || !adapter.browserCaptureManager) throw new Error('capture_helper_unavailable')
+        lease = entry.lease = await adapter.browserCaptureManager.acquireH2Helper({
+            ownerId: operation.ownerId, tabId, requestUrl,
+            isOperationActive: () => entry.active && adapter.captureOperations.has(entry)
         })
-        const result = execution?.result || null
+        lease.subscribe(onEvent)
+        const result = await lease.fetch({ url: requestUrl, method: payload.method || "GET", headers: payload.headers || {},
+            body: payload.body, credentials: payload.credentials || "include", followRedirect: payload.followRedirect !== false })
+        if (!entry.active) throw new Error('capture_owner_unavailable')
         return {
             protocol,
             success: /(^|\/)h2$/i.test(String(protocol || "")) || /^http\/2/i.test(String(protocol || "")),
@@ -222,11 +214,8 @@ async function executeH2Fetch(adapter, operation) {
             error: error?.message || String(error)
         }
     } finally {
-        try { api.debugger.onEvent.removeListener(onEvent) } catch (_) { }
-        if (tabId) {
-            try { await api.debugger.detach({ tabId }) } catch (_) { }
-            try { await api.tabs.remove(tabId) } catch (_) { }
-        }
+        entry.active = false
+        await adapter.cleanupCaptureOperation(entry, 'operation_complete')
     }
 }
 
@@ -257,8 +246,6 @@ const EVENTS = Object.freeze({
     "tabs.onUpdated": api => api.tabs.onUpdated,
     "tabs.onRemoved": api => api.tabs.onRemoved,
     "windows.onRemoved": api => api.windows.onRemoved,
-    "debugger.onEvent": api => api.debugger.onEvent,
-    "debugger.onDetach": api => api.debugger.onDetach,
     "webRequest.onBeforeRequest": api => api.webRequest.onBeforeRequest,
     "webRequest.onBeforeSendHeaders": api => api.webRequest.onBeforeSendHeaders,
     "webRequest.onHeadersReceived": api => api.webRequest.onHeadersReceived,
@@ -280,23 +267,38 @@ export class DastPrivilegedBrowserAdapter {
         this.navigationWatches = new Map()
         this.dialogTabs = new Map()
         this.dialogListener = null
+        this.captureOperations = new Set()
+    }
+    setBrowserCaptureManager(manager) { this.browserCaptureManager = manager; return this }
+    isBrowserCaptureOwnerActive({ ownerId, tabId }) {
+        return [...this.captureOperations].some(entry => entry.active && entry.ownerId === ownerId && entry.tabId === tabId)
+            || [...this.dialogTabs.values()].some(entry => entry.active && entry.ownerId === ownerId && entry.tabId === tabId)
     }
     async execute(operation = {}) {
         if (operation.type === "browser_subscribe") return this.subscribe(operation)
-        if (operation.type === "browser_unsubscribe") return this.unsubscribe(operation.subscriptionId)
+        if (operation.type === "browser_unsubscribe") return this.unsubscribe(operation.subscriptionId, operation.ownerId)
         if (operation.type === "browser_cleanup") return this.cleanup(operation.ownerId)
+        const resource = operation.method === "dast.tabs.navigationWatchCancel" || operation.method === "dast.tabs.navigationWatchWait"
+            ? this.navigationWatches.get(String(operation.args?.[0] || ""))
+            : operation.method === "dast.dialog.detach" ? this.dialogTabs.get(Number(operation.args?.[0])) : null
+        if (resource && resource.ownerId !== operation.ownerId) throw new Error("foreign_browser_owner")
         if (Object.hasOwn(NAMED_OPERATIONS, operation.method)) {
             return cloneSafe(await NAMED_OPERATIONS[operation.method](this, operation))
         }
         if (!Object.hasOwn(CALLS, operation.method)) throw new Error("unsupported_dast_browser_operation")
         const call = CALLS[operation.method]
         const args = Array.isArray(operation.args) ? cloneSafe(operation.args) : []
-        return cloneSafe(await call(this.browserApi, args))
+        const result = await call(this.browserApi, args)
+        if (result === false && ["tabs.remove", "windows.remove", "scripting.unregisterContentScripts"].includes(operation.method)) throw new Error("browser_cleanup_unproved")
+        return cloneSafe(result)
     }
     subscribe(operation = {}) {
         const { subscriptionId, event, ownerId } = operation
         if (!subscriptionId || !ownerId) throw new Error("unsupported_dast_browser_subscription")
-        if (this.subscriptions.has(subscriptionId)) return { subscribed: true, duplicate: true }
+        if (this.subscriptions.has(subscriptionId)) {
+            if (this.subscriptions.get(subscriptionId).ownerId !== ownerId) throw new Error("foreign_browser_owner")
+            return { subscribed: true, duplicate: true }
+        }
         if (event === "dast.oast") return this.subscribeOast(operation)
         if (!Object.hasOwn(EVENTS, event)) throw new Error("unsupported_dast_browser_subscription")
         const target = EVENTS[event](this.browserApi)
@@ -342,7 +344,10 @@ export class DastPrivilegedBrowserAdapter {
         const [tabId, timeoutMs, watchIdArg] = operation.args || []
         const watchId = String(watchIdArg || operation.operationId || "")
         if (!watchId) throw new Error("missing_navigation_watch_id")
-        if (this.navigationWatches.has(watchId)) return { watchId, duplicate: true }
+        if (this.navigationWatches.has(watchId)) {
+            if (this.navigationWatches.get(watchId).ownerId !== operation.ownerId) throw new Error("foreign_browser_owner")
+            return { watchId, duplicate: true }
+        }
         let finish
         const promise = new Promise(resolve => { finish = resolve })
         const normalizedTabId = Number(tabId)
@@ -350,9 +355,9 @@ export class DastPrivilegedBrowserAdapter {
         let settled = false
         const complete = (ready, reason, tab = null) => {
             if (settled) return
+            this.browserApi.tabs.onUpdated.removeListener(entry.listener)
             settled = true
             clearTimeout(entry.timer)
-            try { this.browserApi.tabs.onUpdated.removeListener(entry.listener) } catch (_) { }
             entry.result = { ready, reason, status: tab?.status || null, url: tab?.url || tab?.pendingUrl || null }
             finish(entry.result)
         }
@@ -392,60 +397,105 @@ export class DastPrivilegedBrowserAdapter {
 
     async attachDialogAutoDismiss(tabId, ownerId = null) {
         const normalized = Number(tabId)
-        if (!Number.isInteger(normalized) || normalized < 0) return false
-        const target = { tabId: normalized }
-        try { await this.browserApi.debugger.attach(target, "1.3") } catch (_) { return false }
-        try {
-            await this.browserApi.debugger.sendCommand(target, "Page.enable")
-            await this.browserApi.debugger.sendCommand(target, "Runtime.enable")
-        } catch (_) { }
-        this.dialogTabs.set(normalized, ownerId)
-        if (!this.dialogListener) {
-            this.dialogListener = (source, method) => {
-                if (!this.dialogTabs.has(Number(source?.tabId))) return
-                if (method !== "Page.javascriptDialogOpening" && method !== "Runtime.javascriptDialogOpening") return
-                Promise.resolve(this.browserApi.debugger.sendCommand(source, "Page.handleJavaScriptDialog", { accept: true })).catch(() => {})
+        if (!Number.isInteger(normalized) || normalized < 0 || !ownerId || !this.browserCaptureManager) return false
+        const previous = this.dialogTabs.get(normalized)
+        if (previous) return previous.ownerId === ownerId ? previous.promise : false
+        const entry = { ownerId, tabId: normalized, active: true, lease: null }
+        this.dialogTabs.set(normalized, entry)
+        entry.promise = (async () => {
+            try {
+                const tab = await this.browserApi.tabs.get(normalized)
+                if (!entry.active) return false
+                entry.lease = await this.browserCaptureManager.acquire({
+                    ownerId, tabId: normalized, scope: { targetUrl: tab.url }, capabilities: ['dialogs']
+                })
+                if (!entry.active || this.dialogTabs.get(normalized) !== entry) return false
+                entry.lease.subscribe(event => {
+                    if (event.type === 'protocol' && event.method === 'Page.javascriptDialogOpening') {
+                        return entry.lease.sendCommand('Page.handleJavaScriptDialog', { accept: true }, event.record?.sessionId)
+                    }
+                })
+                return true
+            } catch (error) {
+                if (!entry.lease && this.dialogTabs.get(normalized) === entry) this.dialogTabs.delete(normalized)
+                if (entry.lease) throw error
+                return false
             }
-            this.browserApi.debugger.onEvent.addListener(this.dialogListener)
-        }
-        return true
+        })()
+        return entry.promise
     }
     async detachDialogAutoDismiss(tabId) {
         const normalized = Number(tabId)
-        this.dialogTabs.delete(normalized)
-        try { await this.browserApi.debugger.detach({ tabId: normalized }) } catch (_) { }
-        if (!this.dialogTabs.size && this.dialogListener) {
-            try { this.browserApi.debugger.onEvent.removeListener(this.dialogListener) } catch (_) { }
-            this.dialogListener = null
+        const entry = this.dialogTabs.get(normalized)
+        if (!entry) return true
+        entry.active = false
+        // Join the already admitted attachment before testing its lease handle.
+        await Promise.allSettled([entry.promise])
+        if (entry.lease) {
+            const result = await entry.lease.release('dialog_complete')
+            if (result === false) throw new Error("dialog_cleanup_unproved")
+            entry.lease = null
         }
+        if (this.dialogTabs.get(normalized) === entry) this.dialogTabs.delete(normalized)
         return true
     }
-    unsubscribe(subscriptionId) {
+
+    unsubscribe(subscriptionId, ownerId) {
         const entry = this.subscriptions.get(subscriptionId)
         if (!entry) return { unsubscribed: false }
+        if (entry.ownerId !== ownerId) throw new Error("foreign_browser_owner")
+        const result = entry.target.removeListener(entry.listener)
+        if (result === false) throw new Error("subscription_cleanup_unproved")
         this.subscriptions.delete(subscriptionId)
-        entry.target.removeListener(entry.listener)
         return { unsubscribed: true }
     }
+    async cleanupCaptureOperation(entry, reason) {
+        entry.active = false
+        const failures = []
+        if (entry.lease) {
+            try {
+                const result = await entry.lease.release(reason)
+                if (result === false) throw new Error("capture_cleanup_unproved")
+                entry.lease = null
+            } catch (error) { failures.push(error) }
+        }
+        if (entry.tabId != null) {
+            try {
+                const result = await this.browserApi.tabs.remove(entry.tabId)
+                if (result === false) throw new Error("capture_tab_cleanup_unproved")
+                entry.tabId = null
+            } catch (error) { failures.push(error) }
+        }
+        if (!failures.length) this.captureOperations.delete(entry)
+        else throw new AggregateError(failures, "dast_browser_cleanup_failed")
+    }
+
     async cleanup(ownerId = null) {
         let count = 0
+        const failures = []
+        const attempt = async action => {
+            try { await action(); count++ } catch (error) { failures.push(error) }
+        }
+        for (const entry of [...this.captureOperations]) {
+            if (ownerId != null && entry.ownerId !== ownerId) continue
+            await attempt(() => this.cleanupCaptureOperation(entry, 'owner_cleanup'))
+        }
         for (const [subscriptionId, entry] of [...this.subscriptions]) {
             if (ownerId != null && entry.ownerId !== ownerId) continue
-            this.unsubscribe(subscriptionId)
-            count++
+            await attempt(() => this.unsubscribe(subscriptionId, entry.ownerId))
         }
         for (const [watchId, entry] of [...this.navigationWatches]) {
             if (ownerId != null && entry.ownerId !== ownerId) continue
-            this.cancelNavigationWatch(watchId, "owner_cleanup")
-            count++
+            await attempt(() => this.cancelNavigationWatch(watchId, "owner_cleanup"))
         }
-        for (const [tabId, owner] of [...this.dialogTabs]) {
-            if (ownerId != null && owner !== ownerId) continue
-            await this.detachDialogAutoDismiss(tabId).catch(() => {})
-            count++
+        for (const [tabId, entry] of [...this.dialogTabs]) {
+            if (ownerId != null && entry.ownerId !== ownerId) continue
+            await attempt(() => this.detachDialogAutoDismiss(tabId))
         }
+        if (failures.length) throw new AggregateError(failures, "dast_browser_cleanup_failed")
         return { cleaned: count }
     }
+
     static allowedMethods() { return [...Object.keys(CALLS), ...Object.keys(NAMED_OPERATIONS)] }
     static allowedEvents() { return [...Object.keys(EVENTS), "dast.oast"] }
 }

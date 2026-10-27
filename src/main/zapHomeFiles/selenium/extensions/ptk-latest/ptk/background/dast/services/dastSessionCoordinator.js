@@ -125,8 +125,10 @@ export class DastSessionCoordinator {
     }
 
     _isDrainSnapshotIdle(snapshot = null) {
-        if (!snapshot || typeof snapshot !== 'object') return true
-        return toPositiveNumber(snapshot.pendingWork, 0) <= 0
+        if (!snapshot || typeof snapshot !== 'object') return false
+        // Zero/defaulted counters do not prove executor or publication idle.
+        return snapshot.idle === true
+            && toPositiveNumber(snapshot.pendingWork, 0) <= 0
             && toPositiveNumber(snapshot.remaining, 0) <= 0
     }
 
@@ -142,7 +144,8 @@ export class DastSessionCoordinator {
         return Math.max(500, Math.min(20000, Math.floor(budget * 0.72)))
     }
 
-    async _drainBeforeZapClose(timeoutMs, options = {}) {
+    async _drainBeforeZapClose(timeoutMs, options = {}, stopOwner = null) {
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         const before = this._collectDrainSnapshot()
         if (this._isDrainSnapshotIdle(before)) {
             return {
@@ -156,15 +159,22 @@ export class DastSessionCoordinator {
         }
 
         const drainTimeoutMs = this._resolveZapCloseDrainTimeout(timeoutMs, options)
+        // Zero must not dispatch an untimed engine idle waiter.
+        if (drainTimeoutMs <= 0) {
+            const after = this._collectDrainSnapshot()
+            const drained = this._isDrainSnapshotIdle(after)
+            return { mode: 'zap_close', drainTimeoutMs: 0, drained, timedOut: !drained, error: null, before, after }
+        }
         const waitResult = await withTimeout(
             this.engine?.waitForIdle?.(drainTimeoutMs),
             drainTimeoutMs
         )
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         const after = this._collectDrainSnapshot()
         return {
             mode: 'zap_close',
             drainTimeoutMs,
-            drained: this._isDrainSnapshotIdle(after),
+            drained: !('error' in waitResult) && !waitResult.timedOut && this._isDrainSnapshotIdle(after),
             timedOut: waitResult.timedOut === true,
             error: waitResult.error?.message || waitResult.error || null,
             before,
@@ -261,10 +271,11 @@ export class DastSessionCoordinator {
         }
     }
 
-    async stopBackgroundScan(options = {}) {
+    // Optional internal owner guard; interactive callers retain their existing behavior.
+    async stopBackgroundScan(options = {}, stopOwner = null) {
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         const waitForIdleBeforeStop = options?.waitForIdleBeforeStop !== false
         const idleTimeoutMs = Number.isFinite(options?.idleTimeoutMs) ? Number(options.idleTimeoutMs) : 120000
-        const skipPostStopAnalysis = shouldSkipPostStopAnalysis(options)
 
         this.state.acceptIncomingRequests = false
         this.state.userInteractionUnlocked = false
@@ -285,16 +296,13 @@ export class DastSessionCoordinator {
             } catch (_) { }
         }
 
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         await this.engine?.stop?.()
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         this.setScanResult?.(this.engine?.scanResult)
         const scanResult = this.getScanResult?.() || this.engine?.scanResult || null
         if (scanResult) {
             scanResult.finished = new Date().toISOString()
-            if (!skipPostStopAnalysis) {
-                try {
-                    this.applyAnalysis?.(scanResult, true)
-                } catch (_) { }
-            }
         }
 
         if (!this.state.sentAllAttacksCompleted) {
@@ -304,8 +312,11 @@ export class DastSessionCoordinator {
             } catch (_) { }
         }
 
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         await this.flushPersistScanResult?.()
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         await this.unregisterScript?.()
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         this.captureAdapter?.removeListeners?.()
         return scanResult
     }
@@ -313,6 +324,9 @@ export class DastSessionCoordinator {
     async startAutomationSession({ sessionId, tabId, host, domains, settings, policyCode, hooks }) {
         if (!sessionId || !tabId || !host) {
             throw new Error("missing_session_parameters")
+        }
+        if (this.state.automationSession?.stopFlight || this.state.automationSession?.stopQualification) {
+            throw new Error("automation_session_already_running")
         }
         if (this.state.automationSession && this.state.automationSession.id !== sessionId) {
             // If the engine is no longer running, treat the retained session id
@@ -414,42 +428,84 @@ export class DastSessionCoordinator {
         return seedPromise
     }
 
-    async stopAutomationSession(sessionId, timeoutMs = 180000, options = {}) {
-        if (!this.state.automationSession || this.state.automationSession.id !== sessionId) {
+    _assertAutomationStopOwner(stopOwner) {
+        if (!stopOwner?.owner || this.state.automationSession !== stopOwner.owner
+            || stopOwner.owner.id !== stopOwner.sessionId) {
             throw new Error("automation_session_mismatch")
         }
-        const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
-        const skipPostStopAnalysis = shouldSkipPostStopAnalysis(options)
-        const normalizedTimeoutMs = toPositiveNumber(timeoutMs, 180000)
-        const seedWaitMs = this._resolveAutomationSeedStopWaitMs(normalizedTimeoutMs, { zapCloseRequest })
-        let drainResult = {
-            mode: zapCloseRequest ? 'zap_close' : 'normal',
-            drained: true,
-            timedOut: false,
-            before: this._collectDrainSnapshot(),
-            after: null
-        }
+    }
 
-        await this._waitForAutomationSeedBeforeStop(seedWaitMs, {
-            clearPendingOnTimeout: !zapCloseRequest
+    _resolveAutomationStopPolicy(timeoutMs = 180000, options = {}) {
+        const normalizedTimeoutMs = toPositiveNumber(timeoutMs, 180000)
+        const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
+        return Object.freeze({
+            timeoutMs: normalizedTimeoutMs,
+            zapCloseRequest,
+            skipPostStopAnalysis: shouldSkipPostStopAnalysis(options),
+            seedWaitMs: Math.max(0, Math.min(this._resolveAutomationSeedStopWaitMs(normalizedTimeoutMs, { zapCloseRequest }), 10000)),
+            drainTimeoutMs: zapCloseRequest ? this._resolveZapCloseDrainTimeout(normalizedTimeoutMs, options) : null
         })
-        this.state.acceptIncomingRequests = false
-        if (zapCloseRequest) {
-            drainResult = await this._drainBeforeZapClose(normalizedTimeoutMs, options)
-        } else {
-            await this.engine?.waitForIdle?.(normalizedTimeoutMs)
-            drainResult.after = this._collectDrainSnapshot()
-            drainResult.drained = this._isDrainSnapshotIdle(drainResult.after)
+    }
+
+    _sameAutomationStopPolicy(left, right) {
+        return !!left && !!right && ['timeoutMs', 'zapCloseRequest', 'skipPostStopAnalysis', 'seedWaitMs', 'drainTimeoutMs']
+            .every(key => left[key] === right[key])
+    }
+
+    async stopAutomationSession(sessionId, timeoutMs = 180000, options = {}) {
+        const stopOwner = { owner: this.state.automationSession, sessionId }
+        this._assertAutomationStopOwner(stopOwner)
+        const automationSession = stopOwner.owner
+        const policy = this._resolveAutomationStopPolicy(timeoutMs, options)
+        this._assertAutomationStopOwner(stopOwner)
+        if (automationSession.stopQualification
+            && !this._sameAutomationStopPolicy(automationSession.stopQualification.policy, policy)) {
+            throw new Error("automation_stop_policy_conflict")
         }
+        const { zapCloseRequest, skipPostStopAnalysis } = policy
+        let drainResult = automationSession.stopQualification?.drain
+        if (!drainResult) {
+            drainResult = {
+                mode: zapCloseRequest ? 'zap_close' : 'normal',
+                drained: true,
+                timedOut: false,
+                before: this._collectDrainSnapshot(),
+                after: null
+            }
+            const preCleanupStartedAt = zapCloseRequest ? Date.now() : null
+            await this._waitForAutomationSeedBeforeStop(policy.seedWaitMs, {
+                clearPendingOnTimeout: !zapCloseRequest
+            }, stopOwner)
+            this._assertAutomationStopOwner(stopOwner)
+            this.state.acceptIncomingRequests = false
+            if (zapCloseRequest) {
+                drainResult = await this._drainBeforeZapClose(policy.timeoutMs, {
+                    // Constrain seed + drainage to the existing pre-cleanup
+                    // allocation, even when the caller explicitly requests the
+                    // whole outer deadline. Keep requested policy identity intact.
+                    drainTimeoutMs: Math.min(policy.drainTimeoutMs, Math.max(0,
+                        this._resolveZapCloseDrainTimeout(policy.timeoutMs, {})
+                        - Math.max(0, Date.now() - preCleanupStartedAt)))
+                }, stopOwner)
+            } else {
+                await this.engine?.waitForIdle?.(policy.timeoutMs)
+                this._assertAutomationStopOwner(stopOwner)
+                drainResult.after = this._collectDrainSnapshot()
+                drainResult.drained = this._isDrainSnapshotIdle(drainResult.after)
+            }
+            this._assertAutomationStopOwner(stopOwner)
+            automationSession.stopQualification = { policy, drain: drainResult }
+        }
+        this._assertAutomationStopOwner(stopOwner)
         if (this.engine?.setAutomationHooks) {
             this.engine.setAutomationHooks(null)
         }
         const scanResult = await this.stopBackgroundScan({
             waitForIdleBeforeStop: false,
             skipPostStopAnalysis
-        })
+        }, stopOwner)
+        this._assertAutomationStopOwner(stopOwner)
         const stats = this.collectSeverityStats?.(scanResult) || { counts: {}, findingsCount: 0 }
-        this.state.automationSession = null
         const completionStatus = drainResult.drained ? 'completed' : 'engine_incomplete'
         this.state.lastAutomationStopResult = {
             completionStatus,
@@ -457,6 +513,7 @@ export class DastSessionCoordinator {
             drain: drainResult,
             finishedAt: new Date().toISOString()
         }
+        // The owning Rattacker flow clears this exact owner only after capture cleanup.
         return {
             findingsCount: stats.findingsCount,
             bySeverity: Object.assign({
@@ -489,7 +546,8 @@ export class DastSessionCoordinator {
         return budget
     }
 
-    async _waitForAutomationSeedBeforeStop(timeoutMs = 180000, options = {}) {
+    async _waitForAutomationSeedBeforeStop(timeoutMs = 180000, options = {}, stopOwner = null) {
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         const seedPromise = this.state.lastAutomationSeedPromise
         if (!seedPromise || typeof seedPromise.then !== "function") {
             return
@@ -511,6 +569,7 @@ export class DastSessionCoordinator {
             })
         ])
 
+        if (stopOwner) this._assertAutomationStopOwner(stopOwner)
         if (timedOut) {
             if (options?.clearPendingOnTimeout !== false) {
                 this.state.pendingAutomationSeeds = 0

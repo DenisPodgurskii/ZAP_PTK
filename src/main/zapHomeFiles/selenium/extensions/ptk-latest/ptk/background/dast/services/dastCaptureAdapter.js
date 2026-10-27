@@ -709,13 +709,14 @@ export class DastCaptureAdapter {
             const rawRequest = String(entry?.raw || "")
             const firstLine = rawRequest.split(/\r?\n/)[0] || ""
             if (!/^[A-Z]+\s+https?:\/\//.test(firstLine)) continue
+            const uiUrl = this._extractUiUrlFromRaw(rawRequest, entry?.ui_url || entry?.url)
             if (this._isPtkGeneratedRequest(rawRequest, entry?.url || "")) continue
             const response = {
                 tabId,
                 frameId: Number.isInteger(entry?.frameId) ? entry.frameId : 0,
                 requestId: entry?.requestId || `zap-seed-${proxySeeded}`,
                 url: entry?.url,
-                ui_url: entry?.ui_url || entry?.url,
+                ui_url: uiUrl,
                 method: entry?.method || "GET",
                 type: entry?.type || "xmlhttprequest",
                 statusCode: entry?.statusCode || 200
@@ -725,11 +726,11 @@ export class DastCaptureAdapter {
                     raw: rawRequest,
                     url: entry?.url,
                     method: entry?.method || "GET",
-                    ui_url: entry?.ui_url || entry?.url,
+                    ui_url: uiUrl,
                     responseType: response.type,
                     capturedRequest: cloneCapturedRequest({
                         url: entry?.url,
-                        ui_url: entry?.ui_url || entry?.url,
+                        ui_url: uiUrl,
                         method: entry?.method || "GET",
                         requestHeaders: entry?.requestHeaders || [],
                         requestBody: entry?.requestBody || null

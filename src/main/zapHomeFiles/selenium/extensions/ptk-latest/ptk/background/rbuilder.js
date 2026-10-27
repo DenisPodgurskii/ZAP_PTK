@@ -47,9 +47,9 @@ export class ptk_request_manager {
         })
     }
 
-    _storeScanResult(formId, scanResult, epoch) {
+    _storeScanResult(formId, scanResult, epoch, isCurrent = () => true) {
         return this._mutateStorageIfCurrent(epoch, async () => {
-            if (!this.storage?.[formId]) return
+            if (!isCurrent() || !this.storage?.[formId]) return
             this.storage[formId].scanResult = scanResult
             await ptk_storage.setItem(this.storageKey, this.storage)
         })
@@ -190,16 +190,37 @@ export class ptk_request_manager {
     }
 
     async msg_scan_request(message) {
+        const requestManager = worker.ptk_app?.request_manager || this
+        const identity = {
+            formId: message.formId,
+            operationId: message.operationId || ptk_utils.UUID(),
+            uiGeneration: message.uiGeneration ?? null
+        }
+        const admittedEpoch = typeof requestManager?._captureStorageEpoch === 'function'
+            ? await requestManager._captureStorageEpoch() : null
+        identity.storageEpoch = admittedEpoch
+        const entry = requestManager?.storage?.[identity.formId]
+        const request = entry?.request
+        const raw = request?.raw
+        const operations = requestManager._oneTimeOperations ||= new Map()
+        const token = {}
+        const key = identity.formId || identity.operationId
+        operations.set(key, token)
+        const isCurrent = () => operations.get(key) === token
+            && (admittedEpoch === null || requestManager.storageEpoch === admittedEpoch)
+            && requestManager?.storage?.[identity.formId] === entry
+            && entry?.request === request && request?.raw === raw
+        const publish = async payload => {
+            if (!isCurrent()) return false
+            return browser.runtime.sendMessage({ ...payload, ...identity, channel: "ptk_background2popup_rbuilder" })
+                .catch(e => ptk_logger.log(e, "Could not send a message", "info"))
+        }
         try {
             let rawRequest = message?.schema?.request?.raw || message?.raw || null
             const dastApp = worker.ptk_app?.rattacker || worker.ptk_app?.dast || null
             const scanFn = dastApp?.engine?.onetimeScanRequest
             if (typeof scanFn !== 'function') throw new Error('dast_engine_not_available')
             if (!rawRequest) throw new Error('scan_request_raw_missing')
-            const requestManager = worker.ptk_app?.request_manager || null
-            const admittedEpoch = typeof requestManager?._captureStorageEpoch === 'function'
-                ? await requestManager._captureStorageEpoch()
-                : null
             const requestUrl = String(message?.schema?.request?.url || '').trim()
             if (requestUrl && !/^[a-z][a-z0-9+.-]*:\/\//iu.test(requestUrl)) {
                 const requestHeaders = Array.isArray(message?.schema?.request?.headers)
@@ -216,28 +237,33 @@ export class ptk_request_manager {
                 scanSchema.request.url = new URL(requestUrl, `${scheme}://${host}`).toString()
                 rawRequest = ptk_request.updateRawRequest(scanSchema, null, scanSchema.opts).request.raw
             }
-            const scanResult = await scanFn.call(dastApp.engine, rawRequest, true)
+            const scanResult = await scanFn.call(dastApp.engine, rawRequest, true, {
+                ...identity,
+                onProgress: progress => publish({ ...progress, type: "scan progress" })
+            })
             const cloned = JSON.parse(JSON.stringify(scanResult))
+            if (!isCurrent()) return { success: false, ignored: true, ...identity }
             if (typeof requestManager?._storeScanResult === 'function') {
-                await requestManager._storeScanResult(message.formId, cloned, admittedEpoch)
+                await requestManager._storeScanResult(message.formId, cloned, admittedEpoch, isCurrent)
             } else if (requestManager?.storage?.[message.formId]) {
                 requestManager.storage[message.formId].scanResult = cloned
                 await ptk_storage.setItem(requestManager.storageKey, requestManager.storage)
             }
-            await browser.runtime.sendMessage({
-                channel: "ptk_background2popup_rbuilder",
+            await publish({
                 type: "scan completed",
                 scanResult: cloned
-            }).catch(e => ptk_logger.log(e, "Could not send a message", "info"))
-            return Promise.resolve({ success: true, scanResult: cloned })
+            })
+            return Promise.resolve({ success: true, scanResult: cloned,
+                ...(message.operationId ? identity : {}) })
         } catch (error) {
             const detail = error?.message || String(error)
-            await browser.runtime.sendMessage({
-                channel: "ptk_background2popup_rbuilder",
+            await publish({
                 type: "scan_failed",
                 error: detail
-            }).catch(e => ptk_logger.log(e, "Could not send a failure message", "info"))
+            })
             throw error
+        } finally {
+            if (operations.get(key) === token) operations.delete(key)
         }
     }
 

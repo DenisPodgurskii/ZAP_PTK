@@ -57,7 +57,7 @@ export function sanitizeOneTimeDastProgressMessage(message = {}) {
     }
 }
 
-export function toRequestBuilderProgressMessage(operationId, message = {}) {
+export function toRequestBuilderProgressMessage(operationId, message = {}, identity = {}) {
     const sanitized = sanitizeOneTimeDastProgressMessage(message)
     const id = String(operationId || "")
     if (!sanitized || !id) return null
@@ -65,6 +65,9 @@ export function toRequestBuilderProgressMessage(operationId, message = {}) {
         channel: "ptk_background2popup_rbuilder",
         type: "scan progress",
         operationId: id,
+        ...(identity.formId != null ? { formId: identity.formId } : {}),
+        ...(identity.uiGeneration != null ? { uiGeneration: identity.uiGeneration } : {}),
+        ...(identity.storageEpoch != null ? { storageEpoch: identity.storageEpoch } : {}),
         info: sanitized.info
     }
 }

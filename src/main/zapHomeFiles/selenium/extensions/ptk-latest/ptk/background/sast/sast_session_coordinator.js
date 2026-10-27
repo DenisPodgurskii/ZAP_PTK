@@ -8,6 +8,8 @@ export class SastSessionCoordinator {
     schedulePersist = () => {},
     updateScanResult = () => {},
     scanCode = async () => [],
+    collectPayload = null,
+    collectPayloadOwnsReadiness = false,
     stopBackgroundScan = () => {},
     getProgressSnapshot = () => ({}),
     getProgressStatus = () => "Scanning",
@@ -19,6 +21,8 @@ export class SastSessionCoordinator {
     this.schedulePersist = schedulePersist;
     this.updateScanResult = updateScanResult;
     this.scanCode = scanCode;
+    this.collectPayload = typeof collectPayload === "function" ? collectPayload : null;
+    this.collectPayloadOwnsReadiness = collectPayloadOwnsReadiness === true;
     this.stopBackgroundScan = stopBackgroundScan;
     this.getProgressSnapshot = getProgressSnapshot;
     this.getProgressStatus = getProgressStatus;
@@ -29,6 +33,8 @@ export class SastSessionCoordinator {
   }
 
   reset() {
+    this.sessionToken = {};
+    this.admissionFrozen = false;
     this.isScanRunning = false;
     this.sessionState = "idle";
     this.collectionState = "idle";
@@ -45,9 +51,11 @@ export class SastSessionCoordinator {
     this.firstCollectionStarted = false;
     this.firstCollectionSettled = false;
     this.firstCollectionError = null;
+    this.sourceGapSummaryGeneration = null;
     this.activeCollectionCount = 0;
     this.pendingCollectionCount = 0;
     this.collectionQueue = Promise.resolve([]);
+    this.collectionTasks = new Set();
     this.lastCollectionState = "idle";
     this.currentGeneration = 0;
     this.lastCompletedGeneration = 0;
@@ -70,6 +78,8 @@ export class SastSessionCoordinator {
   }
 
   beginSession(tabId) {
+    this.sessionToken = {};
+    this.admissionFrozen = false;
     this.isScanRunning = true;
     this.sessionState = "running";
     this.collectionState = "collection_pending";
@@ -173,6 +183,8 @@ export class SastSessionCoordinator {
   }
 
   markStopped(status = "stopped") {
+    this.sessionToken = {};
+    this.admissionFrozen = true;
     this.isScanRunning = false;
     this.sessionState = status || "stopped";
     this.collectionState = "stopped";
@@ -237,19 +249,67 @@ export class SastSessionCoordinator {
     return true;
   }
 
-  enqueueCollectionTask(task) {
-    if (typeof task !== "function") return Promise.resolve([]);
+  enqueueCollectionTask(task, { acceptedSource = false, onDiscard = () => {} } = {}) {
+    if (typeof task !== "function" || this.admissionFrozen && !acceptedSource) {
+      onDiscard();
+      return Promise.resolve([]);
+    }
+    const token = this.sessionToken;
+    const item = { started: false, discarded: false, discard: () => {
+      if (item.discarded) return;
+      item.discarded = true;
+      onDiscard();
+    } };
+    this.collectionTasks.add(item);
     this.pendingCollectionCount += 1;
     const run = this.collectionQueue
       .catch(() => [])
       .then(async () => {
-        if (!this.isScanRunning) return [];
+        if (item.discarded || !this.isScanRunning || this.sessionToken !== token) { item.discard(); return []; }
+        item.started = true;
         return task();
       });
-    this.collectionQueue = run.finally(() => {
-      this.pendingCollectionCount = Math.max(0, this.pendingCollectionCount - 1);
+    // The caller owns the rejection; the retained drain tail must always settle
+    // to avoid an unhandled rejection after an explicit partial collection.
+    this.collectionQueue = run.catch(() => []).finally(() => {
+      this.collectionTasks.delete(item);
+      if (this.sessionToken === token) this.pendingCollectionCount = Math.max(0, this.pendingCollectionCount - 1);
     });
     return run;
+  }
+
+  freezeAdmission() { this.admissionFrozen = true; }
+
+  cancelCollections() {
+    const unfinished = this.pendingCollectionCount > 0 || this.activeCollectionCount > 0 || this.scanningRequest;
+    this.admissionFrozen = true;
+    this.sessionToken = {};
+    this.isScanRunning = false;
+    this.stopHeartbeat();
+    for (const item of this.collectionTasks) if (!item.started) item.discard();
+    this.pendingCollectionCount = 0;
+    this.activeCollectionCount = 0;
+    this.scanningRequest = false;
+    if (unfinished) {
+      this.analysisState = 'error';
+      this.collectionState = 'collection_failed';
+      this.firstCollectionError = 'sast_scan_cancelled';
+    }
+    return unfinished;
+  }
+
+  // Only the native source-batch handoff (and stop-owned final collection)
+  // uses this seam. External collection admission remains frozen.
+  enqueueSourceBatch(task, onDiscard = () => {}) {
+    return this.enqueueCollectionTask(task, { acceptedSource: true, onDiscard });
+  }
+
+  async drainCollections() {
+    let tail;
+    do {
+      tail = this.collectionQueue;
+      await tail.catch(() => []);
+    } while (tail !== this.collectionQueue);
   }
 
   markCollectionAnalysis(generation) {
@@ -319,7 +379,7 @@ export class SastSessionCoordinator {
         expectedUrl: url
       });
     } catch (err) {
-      console.error("[SAST] Auto-collect after tab update failed", err);
+      if (err?.sastPartialSummaryEmitted !== true) console.error("[SAST] Auto-collect after tab update failed", err);
     }
   }
 
@@ -427,7 +487,11 @@ export class SastSessionCoordinator {
   }
 
   async _collectAndScanTabNow(tabId, opts = {}) {
-    if (!this.isScanRunning) return [];
+    if (!this.isScanRunning || !this.isTrackedScanTab(tabId)) return [];
+    const token = this.sessionToken;
+    const assertOwner = () => {
+      if (!this.isScanRunning || this.sessionToken !== token || !this.isTrackedScanTab(tabId)) throw new Error('sast_source_owner_changed');
+    };
     this.scanningRequest = true;
     let collectionLockHeld = true;
     this.activeCollectionCount += 1;
@@ -440,6 +504,7 @@ export class SastSessionCoordinator {
       collectionLockHeld = false;
       this.scanningRequest = false;
     };
+    let deferredNativeAcquisition = false;
     try {
       const delayMs = Number.isFinite(Number(opts?.delayMs))
         ? Math.max(0, Number(opts.delayMs))
@@ -454,12 +519,20 @@ export class SastSessionCoordinator {
         ? Math.max(100, Number(opts.retryDelayMs))
         : 600;
 
-      await this.transport.waitForSpaIdle(tabId, delayMs);
-      const payload = await this.transport.requestScriptsWithRetry(tabId, {
+      if (!this.collectPayloadOwnsReadiness && !opts.browserBatch) await this.transport.waitForSpaIdle(tabId, delayMs);
+      assertOwner();
+      const payload = opts.browserBatch ? {
+        ...opts.browserBatch.payload, nativeDocument: opts.browserBatch.identity,
+        sourceGaps: 0, originalOnly: false
+      } : await (this.collectPayload ? this.collectPayload(tabId, {
+        attempts, timeoutMs, delayMs, retryDelayMs, generation: collection.generation, collectionId: collection.collectionId,
+        domBatch: opts.domBatch
+      }) : this.transport.requestScriptsWithRetry(tabId, {
         attempts,
         timeoutMs,
         retryDelayMs
-      });
+      }));
+      assertOwner();
       if (opts?.expectedUrl && payload?.file && !sameDocumentUrl(payload.file, opts.expectedUrl)) {
         this.recordStalePayload(opts.expectedUrl, payload.file);
         return [];
@@ -480,10 +553,31 @@ export class SastSessionCoordinator {
       }, null, "sast.payload.received");
       if (!payload?.scripts) return [];
       this.markCollectionAnalysis(collection.generation);
-      const findings = await this.scanCode(payload.scripts, payload.html, payload.file, {
-        generation: collection.generation,
-        collectionId: collection.collectionId
-      });
+      const findings = [];
+      let sourceGaps = 0;
+      for (const document of payload.payloads || [payload]) {
+        sourceGaps += Number(document.sourceGaps || 0);
+        const result = await this.scanCode(document.scripts, document.html, document.file, {
+          tabId, generation: collection.generation, collectionId: collection.collectionId,
+          nativeDocument: document.nativeDocument, originalHtml: document.originalHtml,
+          originalScripts: document.originalScripts, sourceGaps: 0,
+          originalOnly: document.originalOnly === true, browserBatch: opts.browserBatch
+        });
+        assertOwner();
+        if (Array.isArray(result)) findings.push(...result);
+      }
+      if (sourceGaps) {
+        const error = new Error(`sast_captured_source_partial:${sourceGaps}`);
+        if (this.sourceGapSummaryGeneration === collection.generation) error.sastPartialSummaryEmitted = true;
+        throw error;
+      }
+      if (payload.pendingNativeAcquisition === true) {
+        opts.pendingNativeAcquisition = true;
+        deferredNativeAcquisition = true;
+        this.collectionState = this.lastCollectionState = 'waiting_for_page_activity';
+        this.analysisState = 'waiting';
+        return findings;
+      }
       const findingsCount = Array.isArray(findings) ? findings.length : 0;
       this.completeCollection(collection.generation, {
         file: payload.file || null,
@@ -493,15 +587,23 @@ export class SastSessionCoordinator {
       });
       return findings;
     } catch (err) {
-      this.failCollection(collection.generation, err?.message || String(err));
+      if (this.sessionToken === token && err?.sastNativeCollectionSuperseded === true) {
+        deferredNativeAcquisition = true;
+        this.collectionState = this.lastCollectionState = 'waiting_for_page_activity';
+        this.analysisState = 'waiting';
+        return [];
+      }
+      if (this.sessionToken === token) this.failCollection(collection.generation, err?.message || String(err));
       throw err;
     } finally {
-      releaseCollectionLock();
-      this.activeCollectionCount = Math.max(0, this.activeCollectionCount - 1);
-      if (this.firstCollectionStarted && this.activeCollectionCount === 0) {
-        this.firstCollectionSettled = true;
-        if (this.lastCollectionState !== "collection_failed" && this.collectionState !== "waiting_for_page_activity") {
-          this.completeCollection(collection.generation);
+      if (this.sessionToken === token) {
+        releaseCollectionLock();
+        this.activeCollectionCount = Math.max(0, this.activeCollectionCount - 1);
+        if (!deferredNativeAcquisition && this.firstCollectionStarted && this.activeCollectionCount === 0) {
+          this.firstCollectionSettled = true;
+          if (this.lastCollectionState !== "collection_failed" && this.collectionState !== "waiting_for_page_activity") {
+            this.completeCollection(collection.generation);
+          }
         }
       }
     }
@@ -522,6 +624,8 @@ export class SastSessionCoordinator {
   }
 
   async _scanCollectedPayloadNow(tabId, payload, opts = {}) {
+    // Browser payloads are observations, not a native source-ownership grant.
+    if (this.collectPayload) return this._collectAndScanTabNow(tabId, opts);
     if (!this.isScanRunning) return [];
     if (!this.isTrackedScanTab(tabId)) return [];
     if (!this.isCollectedPayloadUsable(payload)) return [];
@@ -556,7 +660,8 @@ export class SastSessionCoordinator {
       const findings = await this.scanCode(payload.scripts, payload.html, payload.file, {
         generation: collection.generation,
         collectionId: collection.collectionId,
-        source: opts?.source || "content_payload"
+        source: opts?.source || "content_payload",
+        tabId
       });
       const findingsCount = Array.isArray(findings) ? findings.length : 0;
       this.completeCollection(collection.generation, {

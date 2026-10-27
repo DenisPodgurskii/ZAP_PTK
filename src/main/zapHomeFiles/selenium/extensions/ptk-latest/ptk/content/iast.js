@@ -5617,7 +5617,9 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
     }];
     const isSmart = isSmartScanStrategy();
     const transportCarrierIsPrimary = Boolean(transportCarrierKey) && sinkId !== 'http.image.src';
-    const sinkPageKey = sinkId && location
+    // Mutation findings need the rule/source-qualified dedup below: a prior
+    // observation at another node must not consume every source on this page.
+    const sinkPageKey = sinkId && sinkId !== 'dom.mutation' && location
         ? `${sinkId}|${location}|${transportCarrierKey || ''}`
         : null;
     if (isSmart && sinkPageKey && isCacheHit(IAST_SINK_SEEN, sinkPageKey)) {

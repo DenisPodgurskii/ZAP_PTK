@@ -43,6 +43,68 @@ export class ptk_sca {
         this.addMessageListeners()
     }
 
+
+    setBrowserCaptureManager(manager) {
+        this.browserCaptureManager = manager
+        this.captureLeases ||= new Map()
+
+        return this
+    }
+
+    isBrowserCaptureOwnerActive({ ownerId, tabId }) {
+        return this.captureLeases?.get(tabId)?.ownerId === ownerId
+    }
+
+    async _acquireBrowserCapture(tabId, settings = {}) {
+        if (!this.browserCaptureManager) throw new Error('capture_manager_unavailable')
+        this.captureLeases ||= new Map()
+        if (this.captureLeases.has(tabId)) return this.captureLeases.get(tabId).promise
+        const scanId = this.scanResult?.scanId
+        const ownerId = 'SCA:' + scanId
+        let targetUrl = settings.targetUrl || settings.zapTiming?.targetUrl
+        if (!targetUrl) targetUrl = (await browser.tabs.get(tabId))?.url
+        const entry = { ownerId, lease: null }
+        this.captureLeases.set(tabId, entry)
+        entry.promise = this.browserCaptureManager.acquire({
+            ownerId, tabId, capabilities: ['network'],
+            scope: { targetUrl, mode: settings.zapManaged === true ? 'path' : 'origin' }
+        }).then(async lease => {
+            if (this.captureLeases.get(tabId) !== entry) {
+                await lease.release('replaced')
+                throw new Error('capture_owner_unavailable')
+            }
+            entry.lease = lease
+            return lease
+        }).catch(error => {
+            if (this.captureLeases.get(tabId) === entry) this.captureLeases.delete(tabId)
+            throw error
+        })
+        return entry.promise
+    }
+
+    async _releaseBrowserCapture(tabId, reason = 'stopped') {
+        const entry = this.captureLeases?.get(tabId)
+        if (!entry) return
+        if (reason === 'reset' || reason === 'tab_released') this.captureLeases.delete(tabId)
+        try {
+            await entry.promise.catch(() => {})
+            if (entry.lease) {
+                if (reason === 'reset' || reason === 'tab_released') return await entry.lease.release(reason)
+                entry.lease.freeze()
+                try {
+                    const result = await entry.lease.drain()
+                    if (!result.complete) throw new Error('capture_drain_incomplete')
+                } finally { await entry.lease.release(reason) }
+            }
+        } finally {
+            if (this.captureLeases.get(tabId) === entry) this.captureLeases.delete(tabId)
+        }
+    }
+
+    async _releaseAllBrowserCapture(reason = 'stopped') {
+        await Promise.all([...this.captureLeases?.keys() || []].map(tabId => this._releaseBrowserCapture(tabId, reason)))
+    }
+
     setScopedTabCoordinator(coordinator) {
         this.scopedTabCoordinator = coordinator || null
         return this
@@ -236,6 +298,7 @@ export class ptk_sca {
     }
 
     async reset() {
+        await this._releaseAllBrowserCapture('reset')
         await ptk_storage.setItem(this.storageKey, {})
         this.resetScanResult()
     }
@@ -435,6 +498,7 @@ export class ptk_sca {
 
     async msg_init(message) {
         await this.init()
+        if (!this.isScanRunning && this.scanResult?.finishedAt) applyScanAnalysis(this.scanResult, { force: true })
         const scanResult = this._cloneScanResultForUi({ ensureAnalysis: false })
         const hasRenderableData = Array.isArray(scanResult?.findings) && scanResult.findings.length > 0
         return Promise.resolve({
@@ -795,33 +859,46 @@ export class ptk_sca {
         this.scanResult.tabId = tabId
         this.scanResult.startedAt = new Date().toISOString()
         this.scanResult.finishedAt = null
-        this.addListeners()
-        await this.scopedTabCoordinator?.registerSession?.('SCA', {
-            primaryTabId: tabId,
-            scopeMode: 'origin',
-            onEnroll: (meta) => this.collectCurrentTabResources(meta.tabId)
+        try {
+            this._captureTargetUrl = (await browser.tabs.get(tabId))?.url
+            await this._acquireBrowserCapture(tabId, { targetUrl: this._captureTargetUrl })
+        } catch (error) {
+            this.isScanRunning = false
+            this.activeTabId = null
+            throw error
+        }
+        try {
+            this.addListeners()
+            await this.scopedTabCoordinator?.registerSession?.('SCA', {
+                primaryTabId: tabId,
+                scopeMode: 'origin',
+                onEnroll: async (meta) => {
+                    await this._acquireBrowserCapture(meta.tabId, { targetUrl: this._captureTargetUrl })
+                    return this.collectCurrentTabResources(meta.tabId).then(resources => this.scanResourceList(resources))
+                },
+                onRelease: meta => this._releaseBrowserCapture(meta.tabId, 'tab_released')
+            })
+            this.collectCurrentTabResources(tabId)
                 .then((resources) => this.scanResourceList(resources))
                 .catch(() => { })
-        })
-        this.collectCurrentTabResources(tabId)
-            .then((resources) => this.scanResourceList(resources))
-            .catch(() => { })
+        } catch (error) {
+            await this.stopBackgroundScan({ skipPostStopAnalysis: true }).catch(() => {})
+            throw error
+        }
     }
 
     async stopBackgroundScan(options = {}) {
+        let captureError = null
+        try { await this._releaseAllBrowserCapture() } catch (error) { captureError = error }
         this.scopedTabCoordinator?.unregisterSession?.('SCA')
         this.isScanRunning = false
         this.activeTabId = null
         if (this.scanResult) {
             this.scanResult.finishedAt = new Date().toISOString()
-            if (options?.skipPostStopAnalysis !== true) {
-                try {
-                    applyScanAnalysis(this.scanResult, { force: true })
-                } catch (_) { }
-            }
         }
         await this._flushPersistScanResult()
         this.removeListeners()
+        if (captureError) throw captureError
     }
 
 }
