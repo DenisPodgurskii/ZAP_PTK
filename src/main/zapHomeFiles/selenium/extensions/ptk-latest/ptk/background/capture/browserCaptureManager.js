@@ -1421,7 +1421,8 @@ export class BrowserCaptureManager {
                 && this._documents(owner).some(item => ['frameId', 'documentId', 'sessionGeneration', 'navigationGeneration'].every(key => item[key] === identity[key]) && (item.sessionId || '') === (identity.sessionId || ''))
         let released = false
         const batch = Object.freeze({ identity, payload, browserDocument: acceptedCandidate,
-            get active() { return !released && owner.revision === revision && current() && nativeCurrent() },
+            isActive: () => !released && owner.revision === revision && current() && nativeCurrent(),
+            get active() { return batch.isActive() },
             release: () => { if (released) return; released = true; owner.sastBatches.delete(batch); this.store.unstage(charge, 'chunks') } })
         owner.sastBatches ||= new Set(); owner.sastBatches.add(batch)
         try { owner.sastPayloadListener(batch) } catch (_) { batch.release(); this._gap([owner], 'sast_dom_push_failed', identity); return false }

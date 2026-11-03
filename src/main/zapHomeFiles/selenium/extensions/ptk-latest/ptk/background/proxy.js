@@ -346,9 +346,12 @@ export class ptk_proxy {
         if (!resolved.tab) return Promise.resolve({})
         const frame = resolved.tab.frames?.get(message.frameId)
         if (!frame || !frame.has(message.requestId)) return Promise.resolve({})
-        let r = this.getRequestDetails(resolved.tab, message.frameId, message.requestId)
+        // Proxy renders the first stored hop for this request ID. Later native
+        // events may update that object, so its event type is not a hop key.
+        const options = { entryIndex: 0 }
+        let r = this.getRequestDetails(resolved.tab, message.frameId, message.requestId, options)
         try {
-            const rawBundle = this.getRawRequestWithMeta(resolved.tab, message.frameId, message.requestId)
+            const rawBundle = this.getRawRequestWithMeta(resolved.tab, message.frameId, message.requestId, options)
             if (typeof rawBundle?.raw === 'string' && rawBundle.raw.length) {
                 r.raw = rawBundle.raw
             }

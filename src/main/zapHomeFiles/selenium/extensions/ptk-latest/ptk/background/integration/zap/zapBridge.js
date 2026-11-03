@@ -1524,14 +1524,14 @@ class ZapBridge {
         }
     }
 
-    async postTerminalProgressForClose({ sessionId = null, zapid = null, allowRetry = true } = {}) {
+    async postTerminalProgressForClose({ sessionId = null, zapid = null, allowRetry = true, terminalContext = null } = {}) {
         const effectiveZapId = zapid || this.transport.getZapId?.() || null
         if (!sessionId || !effectiveZapId || !this.transport.isReady?.({ zapid: effectiveZapId })) {
             return { ok: false, posted: false, reason: 'zap_progress_not_ready' }
         }
 
         const automation = this.app?.automation
-        const runtimeSnapshot = automation?.getZapSessionProgressState?.(sessionId)
+        let runtimeSnapshot = automation?.getZapSessionProgressState?.(sessionId)
         if (!runtimeSnapshot?.ok) {
             return {
                 ok: false,
@@ -1542,7 +1542,38 @@ class ZapBridge {
 
         const existingMonitor = Array.from(this._progressMonitorsByKey.values())
             .find(candidate => candidate?.sessionId === sessionId && (!effectiveZapId || candidate?.zapid === effectiveZapId))
-        const monitor = existingMonitor
+        const contextIsCurrent = () => {
+            const contextMonitor = terminalContext?.monitor
+            const session = automation?.sessions?.get(sessionId)
+            const registered = contextMonitor
+                ? this._progressMonitorsByKey.get(this._progressMonitorKey(contextMonitor)) : null
+            return !!contextMonitor && session === terminalContext.session
+                && automation?._lateZapDastCleanup?.get(session)?.terminalContext === terminalContext
+                && terminalContext.sessionId === sessionId && terminalContext.zapid === effectiveZapId
+                && session?.source === 'zap' && session.tabId === terminalContext.tabId
+                && runtimeSnapshot?.sessionId === sessionId && runtimeSnapshot.tabId === terminalContext.tabId
+                && session.zapSessionKey === terminalContext.sessionKey && contextMonitor.sessionKey === terminalContext.sessionKey
+                && contextMonitor.sessionId === sessionId && contextMonitor.zapid === effectiveZapId
+                && contextMonitor.lastRuntimeSnapshot?.tabId === terminalContext.tabId
+                && session.closeRequestId === terminalContext.closeRequestId && session.closeRequestAck === true
+                && runtimeSnapshot.closeRequestId === terminalContext.closeRequestId && runtimeSnapshot.closeRequestAck === true
+                && contextMonitor.closeRequest?.id === terminalContext.closeRequestId && contextMonitor.closeRequest.acked === true
+                && this.isActive() === true && automation?.getZapSessionControlSnapshot?.(sessionId, effectiveZapId)?.ok === true
+                && (!registered || registered === contextMonitor)
+                && !Array.from(this._progressMonitorsByKey.values()).some(candidate => candidate !== contextMonitor
+                    && candidate?.sessionId === sessionId && candidate?.zapid === effectiveZapId)
+        }
+        if (terminalContext && !contextIsCurrent()) {
+            return { ok: false, posted: false, reason: 'zap_close_context_changed' }
+        }
+        // A previous terminal POST retires its monitor. A later physical cleanup
+        // may still finish for this exact acknowledged close; rehydrate only
+        // context already owned by the requested automation session.
+        const retainedCloseRequestId = !existingMonitor && runtimeSnapshot.sessionId === sessionId
+            && runtimeSnapshot.closeRequestAck === true
+            && automation?.getZapSessionControlSnapshot?.(sessionId, effectiveZapId)?.ok === true
+            ? toNonEmptyString(runtimeSnapshot.closeRequestId) : null
+        const monitor = terminalContext?.monitor || (existingMonitor
             ? existingMonitor
             : {
                 sessionKey: this._buildZapSessionKey(this.transport.getBaseUrl?.(), effectiveZapId),
@@ -1558,14 +1589,18 @@ class ZapBridge {
                 enginePassiveSince: Object.create(null),
                 activitySeq: 0,
                 activityFingerprint: null,
-                closeRequest: null,
+                closeRequest: retainedCloseRequestId ? {
+                    id: retainedCloseRequestId,
+                    acked: true,
+                    mode: toNonEmptyString(runtimeSnapshot.closeRequestMode) || 'graceful_stop_and_drain'
+                } : null,
                 closeRequestedSent: false,
                 closeStopRequested: false,
                 controlPollInFlight: false,
                 lastControlPollAt: 0
-            }
+            })
 
-        const derivedState = this._deriveZapProgressState(monitor, runtimeSnapshot)
+        let derivedState = this._deriveZapProgressState(monitor, runtimeSnapshot)
         if (!derivedState?.terminal) {
             if (allowRetry) {
                 this._scheduleCloseTerminalProgressRetry({
@@ -1584,6 +1619,9 @@ class ZapBridge {
         }
 
         const flushed = await this._flushPublisherWithTimeout()
+        if (terminalContext && !contextIsCurrent()) {
+            return { ok: false, posted: false, reason: 'zap_close_context_changed' }
+        }
         if (!flushed) {
             if (allowRetry) {
                 this._scheduleCloseTerminalProgressRetry({
@@ -1597,6 +1635,18 @@ class ZapBridge {
             }
         }
 
+        let contextPublisherState = null
+        if (terminalContext) {
+            contextPublisherState = await this._getPublisherStateForProgress()
+            if (!contextIsCurrent()) return { ok: false, posted: false, reason: 'zap_close_context_changed' }
+            // A concurrent original terminal POST can await publisher drainage
+            // while physical cleanup finishes. Allocate its next sequence from
+            // the shared original monitor only after reading the current state.
+            runtimeSnapshot = automation.getZapSessionProgressState(sessionId)
+            if (!contextIsCurrent()) return { ok: false, posted: false, reason: 'zap_close_context_changed' }
+            derivedState = this._deriveZapProgressState(monitor, runtimeSnapshot)
+            if (!derivedState?.terminal) return { ok: false, posted: false, reason: 'not_terminal' }
+        }
         let payload = this._buildZapProgressPayloadFromDerivedState(derivedState)
         if (!flushed) {
             payload = Object.assign({}, payload, {
@@ -1613,8 +1663,10 @@ class ZapBridge {
         monitor.lastRuntimeSnapshot = runtimeSnapshot
         monitor.lastDerivedEngineStates = derivedState.engines
         payload = this._attachProgressSessionContext(payload, monitor)
-        payload = this._attachV2ProgressContract(payload, monitor, await this._getPublisherStateForProgress())
+        payload = this._attachV2ProgressContract(payload, monitor, contextPublisherState || await this._getPublisherStateForProgress())
+        if (terminalContext && !contextIsCurrent()) return { ok: false, posted: false, reason: 'zap_close_context_changed' }
         await this.transport.postProgressJson(payload)
+        if (terminalContext && !contextIsCurrent()) return { ok: false, posted: true, reason: 'zap_close_context_changed' }
         this.transport.markSessionTerminal?.({
             zapid: effectiveZapId,
             sessionId,
@@ -1622,7 +1674,9 @@ class ZapBridge {
             status: payload.status
         })
         this._clearCloseTerminalProgressRetry({ sessionId, zapid: effectiveZapId })
-        this._clearProgressMonitorIfCurrent(monitor)
+        const monitorKey = this._progressMonitorKey(monitor)
+        const registeredMonitor = monitorKey ? this._progressMonitorsByKey.get(monitorKey) : null
+        if (!registeredMonitor || registeredMonitor === monitor) this._clearProgressMonitorIfCurrent(monitor)
         return {
             ok: true,
             posted: true,

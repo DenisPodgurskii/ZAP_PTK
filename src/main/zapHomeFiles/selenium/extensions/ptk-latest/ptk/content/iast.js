@@ -804,6 +804,19 @@ const IAST_TAINT_STORE = {
     stringMap: new Map(),
     objectMap: typeof WeakMap !== 'undefined' ? new WeakMap() : null
 };
+// Shadow-only evidence accounting. No source values or finding fields are retained.
+const IAST_SHADOW_EVIDENCE_COUNTS = {
+    total: 0,
+    object_identity: 0,
+    instrumented_propagation: 0,
+    primitive_fingerprint_equality: 0,
+    complete_value_equality: 0,
+    canonical_url_equality: 0,
+    lexical_word_boundary: 0,
+    substring: 0,
+    inconsistent_published_flow: 0,
+    truncated_candidates: 0
+};
 let IAST_LAST_RUNTIME_HEALTH_KEY = '';
 const IAST_MUTATION_QUEUE = [];
 const IAST_MUTATION_BUDGET = {
@@ -1868,7 +1881,13 @@ function createSource(value, sourceKind, meta = {}) {
         createdAt: Date.now(),
         origin: { url: window.location.href },
         meta: Object.assign({}, meta),
-        lineage: [{ op: 'source', at: Date.now(), meta: Object.assign({}, meta) }]
+        lineage: [{ op: 'source', at: Date.now(), meta: Object.assign({}, meta) }],
+        shadowEvidence: {
+            mechanism: 'source_observation',
+            inheritedGrade: typeof value === 'object' && value !== null
+                ? 'object_identity'
+                : 'primitive_fingerprint_equality'
+        }
     };
     if (typeof value === 'object' && value !== null && IAST_TAINT_STORE.objectMap) {
         IAST_TAINT_STORE.objectMap.set(value, { taint, time: Date.now() });
@@ -1897,6 +1916,155 @@ function getTaintEntry(value) {
     return entry?.taint ? { taint: entry.taint, matchType: 'fingerprint' } : null;
 }
 
+const IAST_SHADOW_MAX_CANDIDATES = 8;
+const IAST_SHADOW_MAX_EQUALITY_LENGTH = 4096;
+const IAST_SHADOW_GRADE_ORDER = {
+    substring: 0,
+    lexical_word_boundary: 1,
+    canonical_url_equality: 2,
+    primitive_fingerprint_equality: 3,
+    complete_value_equality: 4,
+    instrumented_propagation: 5,
+    object_identity: 6
+};
+
+function weakerIastShadowGrade(first, second) {
+    const a = Object.prototype.hasOwnProperty.call(IAST_SHADOW_GRADE_ORDER, first) ? first : 'substring';
+    const b = Object.prototype.hasOwnProperty.call(IAST_SHADOW_GRADE_ORDER, second) ? second : 'substring';
+    return IAST_SHADOW_GRADE_ORDER[a] <= IAST_SHADOW_GRADE_ORDER[b] ? a : b;
+}
+
+function classifyIastShadowSource(value, source, taintEntry, sharedValueString = null) {
+    const sourceId = source?.sourceId || null;
+    const matchedTaint = sourceId && taintEntry?.taint?.sourceId === sourceId ? taintEntry : null;
+    const raw = source && Object.prototype.hasOwnProperty.call(source, 'raw') ? source.raw : source?.value;
+    const valueType = typeof value;
+    const rawType = typeof raw;
+    const primitiveValue = valueType === 'string' || valueType === 'number' || valueType === 'boolean' || valueType === 'bigint';
+    const primitiveRaw = rawType === 'string' || rawType === 'number' || rawType === 'boolean' || rawType === 'bigint';
+    let valueRelation = source?.matchType === 'exact' ? 'lexical_word_boundary' : 'substring';
+    if (source?.matchType === 'url-eq') valueRelation = 'canonical_url_equality';
+    if (primitiveValue && primitiveRaw) {
+        const valueString = sharedValueString === null ? String(value) : sharedValueString;
+        const rawString = String(raw);
+        if (valueString.length <= IAST_SHADOW_MAX_EQUALITY_LENGTH
+            && rawString.length === valueString.length && rawString === valueString) {
+            valueRelation = 'complete_value_equality';
+        }
+    }
+    const lookupGrade = matchedTaint?.matchType === 'id'
+        ? 'object_identity'
+        : matchedTaint?.matchType === 'fingerprint'
+            ? 'primitive_fingerprint_equality'
+            : null;
+    const inheritedGrade = matchedTaint?.taint?.shadowEvidence?.inheritedGrade || lookupGrade;
+    const propagated = matchedTaint?.taint?.shadowEvidence?.mechanism === 'instrumented_propagation';
+    const mechanism = propagated
+        ? 'instrumented_propagation'
+        : (lookupGrade || valueRelation);
+    const effectiveGrade = propagated && inheritedGrade === 'object_identity' && lookupGrade === 'object_identity'
+        ? 'instrumented_propagation'
+        : (lookupGrade ? weakerIastShadowGrade(inheritedGrade, lookupGrade) : valueRelation);
+    return {
+        sourceKey: source?.key || source?.source || null,
+        mechanism,
+        valueRelation,
+        inheritedGrade: inheritedGrade || null,
+        effectiveGrade,
+        // Source-category policy is not proof that the observed value was attacker-controlled.
+        attackerControl: source?.taintKind === 'user_input' ? 'category_only_unverified' : 'unestablished'
+    };
+}
+
+function classifyIastShadowFinding(value, eligibleSources, match, taintEntry, publishedFlow = null) {
+    const eligible = Array.isArray(eligibleSources) ? eligibleSources : [];
+    const count = Math.min(eligible.length, IAST_SHADOW_MAX_CANDIDATES);
+    const valueType = typeof value;
+    const valueString = valueType === 'string' || valueType === 'number' || valueType === 'boolean' || valueType === 'bigint'
+        ? String(value)
+        : null;
+    let strongest = null;
+    for (let i = 0; i < count; i += 1) {
+        const candidate = classifyIastShadowSource(value, eligible[i], taintEntry, valueString);
+        if (!strongest || IAST_SHADOW_GRADE_ORDER[candidate.effectiveGrade] > IAST_SHADOW_GRADE_ORDER[strongest.effectiveGrade]) {
+            strongest = candidate;
+        }
+    }
+    const publishedPrimaryKey = eligible[0]?.key || eligible[0]?.source || null;
+    const flowNodes = Array.isArray(publishedFlow) ? publishedFlow : [];
+    const publishedFlowSourceKey = flowNodes.find(node => node?.stage === 'source')?.key || match?.source || null;
+    const publishedFlowConsistent = flowNodes.length
+        ? flowNodes.some(node => node?.stage !== 'sink' && node?.key === publishedPrimaryKey)
+        : publishedPrimaryKey === publishedFlowSourceKey;
+    return {
+        candidateCount: eligible.length,
+        truncated: eligible.length > count,
+        shadowPrimary: strongest,
+        publishedPrimaryKey,
+        publishedFlowSourceKey,
+        publishedFlowConsistent,
+        shadowFlowSourceKey: strongest?.sourceKey || null
+    };
+}
+
+function recordIastShadowEvidence(shadow) {
+    if (!shadow?.shadowPrimary) return;
+    const counts = IAST_SHADOW_EVIDENCE_COUNTS;
+    if (counts.total < 1000000) counts.total += 1;
+    const grade = shadow.shadowPrimary.effectiveGrade;
+    if (Object.prototype.hasOwnProperty.call(counts, grade) && counts[grade] < 1000000) counts[grade] += 1;
+    if (!shadow.publishedFlowConsistent && counts.inconsistent_published_flow < 1000000) {
+        counts.inconsistent_published_flow += 1;
+    }
+    if (shadow.truncated && counts.truncated_candidates < 1000000) counts.truncated_candidates += 1;
+}
+
+function isIastPrecisionWeakRelation(candidate) {
+    return candidate?.valueRelation === 'lexical_word_boundary'
+        || candidate?.valueRelation === 'substring';
+}
+
+function getIastPrecisionSeverityOverride(sinkId, context, eligibleSources, shadow, taintEntry) {
+    // Only these observed sinks can receive a Phase 2B severity decision.
+    // Shadow accounting still runs independently for every reported finding.
+    if (sinkId !== 'code.eval'
+        && !isFunctionCodeExecutionSink(sinkId)
+        && !(sinkId === 'dom.mutation' && isModulesLoadedBootstrapDomMutation(context))) return null;
+    const sources = Array.isArray(eligibleSources) ? eligibleSources.slice(0, IAST_SHADOW_MAX_CANDIDATES) : [];
+    if (!sources.length || !shadow?.shadowPrimary || shadow.truncated) return null;
+    const grades = sources.map(source => classifyIastShadowSource(context.value, source, taintEntry));
+    if (sinkId === 'dom.mutation' && isModulesLoadedBootstrapDomMutation(context)) {
+        // The sweep discovers an existing executable-looking node; it did not
+        // observe a mutation. Preserve High when an eligible, non-Boolean
+        // browser-controlled value covers the executable candidate itself.
+        const hasStrongCandidate = grades.some((grade, index) => {
+            const source = sources[index];
+            const observedType = getTaintMetaEntry(source?.key)?.observedValueType;
+            return observedType !== 'boolean'
+                && (source?.taintKind === 'user_input' || isUserControlledSource(source))
+                && (grade.valueRelation === 'complete_value_equality'
+                    || (grade.mechanism === 'instrumented_propagation'
+                        && IAST_SHADOW_GRADE_ORDER[grade.inheritedGrade] >= IAST_SHADOW_GRADE_ORDER.complete_value_equality));
+        });
+        return hasStrongCandidate ? null : 'info';
+    }
+    if (sinkId === 'code.eval') {
+        return grades.every(isIastPrecisionWeakRelation) ? 'low' : null;
+    }
+    if (isFunctionCodeExecutionSink(sinkId)) {
+        const onlyBooleanOrConfigCoincidence = grades.every((grade, index) => {
+            const source = sources[index];
+            const observedType = getTaintMetaEntry(source?.key)?.observedValueType;
+            const raw = String(source?.raw ?? source?.value ?? '').trim();
+            return isIastPrecisionWeakRelation(grade)
+                && (observedType === 'boolean'
+                    || (isLowSignalPlainSourceValue(raw) && observedType !== 'string'));
+        });
+        return onlyBooleanOrConfigCoincidence ? 'low' : null;
+    }
+    return null;
+}
+
 function propagateTaint(outputValue, op, inputs = [], meta = {}) {
     if (!window.__PTK_IAST_PROPAGATION_ENABLED__ || !window.__PTK_IAST_HAS_TAINT__) return;
     const maxLineage = Number.isFinite(window.__PTK_IAST_PROPAGATION_MAX_LINEAGE__)
@@ -1906,9 +2074,10 @@ function propagateTaint(outputValue, op, inputs = [], meta = {}) {
         ? window.__PTK_IAST_PROPAGATION_MAX_STRING_LENGTH__
         : getIastPropagationSettings().maxStringLength;
     if (typeof outputValue === 'string' && outputValue.length > maxStringLength) return;
-    const inputTaints = inputs.map(getTaintEntry).filter(Boolean).map(entry => entry.taint);
+    const inputTaints = inputs.map(getTaintEntry).filter(Boolean);
     if (!inputTaints.length) return;
-    const primary = inputTaints[0];
+    const primaryEntry = inputTaints[0];
+    const primary = primaryEntry.taint;
     const primaryLineage = Array.isArray(primary?.lineage) ? primary.lineage : [];
     if (Number.isFinite(maxLineage) && maxLineage > 0 && primaryLineage.length >= maxLineage) return;
     const taint = {
@@ -1922,7 +2091,15 @@ function propagateTaint(outputValue, op, inputs = [], meta = {}) {
         meta: Object.assign({}, primary.meta, meta, {
             propagationMode: window.__PTK_IAST_PROPAGATION_MODE__ || getIastPropagationSettings().mode
         }),
-        lineage: primaryLineage.concat([{ op, at: Date.now(), meta }]).slice(-Math.max(maxLineage, 1))
+        lineage: primaryLineage.concat([{ op, at: Date.now(), meta }]).slice(-Math.max(maxLineage, 1)),
+        shadowEvidence: {
+            mechanism: 'instrumented_propagation',
+            inheritedGrade: weakerIastShadowGrade(
+                primary?.shadowEvidence?.inheritedGrade || (primaryEntry.matchType === 'id'
+                    ? 'object_identity' : 'primitive_fingerprint_equality'),
+                primaryEntry.matchType === 'id' ? 'object_identity' : 'primitive_fingerprint_equality'
+            )
+        }
     };
     if (typeof outputValue === 'object' && outputValue !== null && IAST_TAINT_STORE.objectMap) {
         IAST_TAINT_STORE.objectMap.set(outputValue, { taint, time: Date.now() });
@@ -4425,7 +4602,8 @@ function registerDynamicTaintSource(key, rawValue, meta = {}) {
     window.__IAST_TAINTED__[key] = value;
     updateTaintMetaEntry(key, {
         taintKind: sourceMeta.taintKind,
-        sourceKind: sourceMeta.sourceKind
+        sourceKind: sourceMeta.sourceKind,
+        observedValueType: typeof rawValue
     });
     const existing = getTaintEntry(value);
     let sourceId = sourceMeta.sourceId || existing?.taint?.sourceId || null;
@@ -5824,6 +6002,14 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
         if (suppressionMatch) {
             nextContext.suppression = suppressionMatch;
         }
+        // Evaluate the selected rule's eligible sources before publication;
+        // leave the existing published source, flow and confidence untouched.
+        let shadow = null;
+        let precisionSeverity = null;
+        try {
+            shadow = classifyIastShadowFinding(value, filteredSources, match, taintEntry, flow);
+            precisionSeverity = getIastPrecisionSeverityOverride(sinkId, nextContext, filteredSources, shadow, taintEntry);
+        } catch (_) { }
         reportFinding({
             type: info.type || ruleEntry.ruleId || info.sinkId || 'iast_sink',
             sink: info.sink || sinkId || 'iast_sink',
@@ -5832,9 +6018,10 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
             matched: match.raw,
             source: primarySource || match.source,
             sources: filteredSources,
-            severity: nextContext.severityOverride || info.severity || null,
+            severity: nextContext.severityOverride || precisionSeverity || info.severity || null,
             context: nextContext
         });
+        try { recordIastShadowEvidence(shadow); } catch (_) { }
         window.__PTK_IAST_LAST_REPORT_DEBUG__ = Object.assign({}, window.__PTK_IAST_LAST_REPORT_DEBUG__ || {}, {
             ruleId: ruleEntry.ruleId,
             reason: 'reported',

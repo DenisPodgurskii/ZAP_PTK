@@ -393,7 +393,12 @@ export class DastRequestCaptureStore {
             throw new Error("request_not_found")
         }
         const requestEntries = tab.frames.get(frameId).get(requestId)
-        let request = this._pickBestRequestEntry(requestEntries, options)
+        const exactEntry = Object.prototype.hasOwnProperty.call(options, "entryIndex")
+        const request = exactEntry
+            ? (Number.isInteger(options.entryIndex) && options.entryIndex >= 0
+                ? requestEntries[options.entryIndex]
+                : null)
+            : this._pickBestRequestEntry(requestEntries, options)
         if (!request) {
             throw new Error("request_not_found")
         }
@@ -405,7 +410,7 @@ export class DastRequestCaptureStore {
             }
         }
         const hasPerRequestHeaders = Array.isArray(request.requestHeaders) && request.requestHeaders.length > 0
-        if (!hasPerRequestHeaders && tab?.tabInfo?.requestHeaders) {
+        if (!exactEntry && !hasPerRequestHeaders && tab?.tabInfo?.requestHeaders) {
             let rH = tab.tabInfo.requestHeaders
             r.requestHeaders = Object.keys(rH).map(key => ({ name: key, value: rH[key] }))
         }

@@ -56,6 +56,8 @@ export class RemoteDastEngineFacade {
         this._remoteCleanup = null
         this._cleanupAttempt = null
         this._cleanupSessionBinding = null
+        this._progressFlight = null
+        this._progressOwnerEpoch = {}
         controller?.onEngineMessage?.((message, cursor) => this._queueEngineMessage(message, cursor))
     }
 
@@ -98,6 +100,7 @@ export class RemoteDastEngineFacade {
     }
 
     async adopt(response = {}) {
+        this._resetProgressFlight()
         this._invalidateRemoteCleanup()
         this._cleanupSessionBinding = null
         if (!response?.ok) throw new Error(response?.error || "dast_runtime_adopt_failed")
@@ -119,6 +122,7 @@ export class RemoteDastEngineFacade {
     }
 
     async start(tabId, host, domains, settings = {}) {
+        this._resetProgressFlight()
         this._invalidateRemoteCleanup()
         this._cleanupSessionBinding = null
         const sessionId = this.sessionIdFactory()
@@ -226,9 +230,49 @@ export class RemoteDastEngineFacade {
     getProgressSnapshot() {
         return { ...this.progress, ...(this.progressDrains > 0 ? { isIdle: false } : {}) }
     }
+    _resetProgressFlight() {
+        this._progressOwnerEpoch = {}
+        this._progressFlight = null
+        this.progressDrains = 0
+    }
+    _progressOwner() {
+        return { epoch: this._progressOwnerEpoch, client: this.client, port: this.client?.port,
+            nonce: this.client?.controllerNonce, sessionId: this.sessionId,
+            generation: this.executorGeneration, scanId: this.scanResult?.scanId }
+    }
+    _isProgressOwnerCurrent(owner) {
+        return !!owner && this._progressOwnerEpoch === owner.epoch && this.client === owner.client
+            && this.client?.port === owner.port && this.client?.controllerNonce === owner.nonce
+            && this.sessionId === owner.sessionId && this.executorGeneration === owner.generation
+            && this.scanResult?.scanId === owner.scanId
+    }
+    _assertProgressOwner(owner) {
+        if (owner && !this._isProgressOwnerCurrent(owner)) throw new Error("dast_runtime_progress_owner_changed")
+    }
+    _assertProgressResponseOwner(response, owner) {
+        this._assertProgressOwner(owner)
+        if (owner && ((response?.sessionId !== undefined && response.sessionId !== owner.sessionId)
+            || (response?.executorGeneration !== undefined && response.executorGeneration !== owner.generation)
+            || (response?.executorState?.scanResult?.scanId !== undefined
+                && response.executorState.scanResult.scanId !== owner.scanId))) {
+            throw new Error("dast_runtime_progress_owner_changed")
+        }
+    }
     async refreshProgress() {
-        if (this.sessionId && this.executorGeneration) {
+        // Stop owns the terminal observation. A caller arriving after this
+        // boundary must not create another native read behind its RELEASE.
+        if (!this.sessionId || !this.executorGeneration
+            || ["stopping", "stopped", "released"].includes(this.terminalState)) return this.getProgressSnapshot()
+        if (this._progressFlight && this._isProgressOwnerCurrent(this._progressFlight.owner)) {
+            return this._progressFlight.promise
+        }
+        const flight = { owner: this._progressOwner(), promise: null }
+        this._progressFlight = flight
+        this.progressDrains = 0
+        flight.promise = Promise.resolve().then(async () => {
+            this._assertProgressOwner(flight.owner)
             const response = await this._callResponse("getProgressSnapshot")
+            this._assertProgressResponseOwner(response, flight.owner)
             const progress = response?.result
             if (!progress || typeof progress !== "object") {
                 throw new Error("dast_runtime_progress_unavailable")
@@ -242,21 +286,25 @@ export class RemoteDastEngineFacade {
                 // the exact event watermark returned with the progress call.
                 this.progressDrains++
                 try {
-                    await this.drainEvents({ throughCursor: response?.eventCursor })
+                    await this.drainEvents({ throughCursor: response?.eventCursor, expectedOwner: flight.owner })
+                    this._assertProgressOwner(flight.owner)
                 } catch (error) {
                     // Snapshot/live progress replay can contain executor idle,
                     // but a failed publication is not controller settlement.
-                    this.progress = { ...this._clone(progress), isIdle: false }
+                    if (this._isProgressOwnerCurrent(flight.owner)) this.progress = { ...this._clone(progress), isIdle: false }
                     throw error
                 } finally {
-                    this.progressDrains--
+                    if (this._progressFlight === flight) this.progressDrains--
                 }
             }
             // Older queued progress events must not overwrite this newer
             // authoritative observation while its watermark is being drained.
             this.progress = this._clone(progress)
-        }
-        return this.getProgressSnapshot()
+            return this.getProgressSnapshot()
+        }).finally(() => {
+            if (this._progressFlight === flight) this._progressFlight = null
+        })
+        return flight.promise
     }
     async getPerformanceTelemetry({ refresh = true } = {}) {
         if (refresh && this.sessionId && this.executorGeneration) {
@@ -290,6 +338,8 @@ export class RemoteDastEngineFacade {
         let stoppedClean = false
         try {
         this.terminalState = "stopping"
+        const progressFlight = this._progressFlight
+            && this._isProgressOwnerCurrent(this._progressFlight.owner) ? this._progressFlight : null
         const response = await this.client.request(DAST_RUNTIME_MESSAGE.STOP, {
             sessionId: owner.sessionId, executorGeneration: owner.generation
         })
@@ -301,7 +351,11 @@ export class RemoteDastEngineFacade {
             && !!owner.automationSessionId && !!owner.scanId
             && response.sessionId === owner.sessionId && response.executorGeneration === owner.generation
             && response.status === "stopped" && response.duplicate !== true
-        await this.drainEvents()
+        // A progress reply may already have been processed by the worker while
+        // still pending in the controller. Join its complete watermark drain,
+        // not just its RPC, before publishing stopped state or releasing.
+        if (progressFlight) await progressFlight.promise
+        await this.drainEvents(progressFlight ? { expectedOwner: progressFlight.owner } : {})
         stoppedClean = stoppedClean && current()
         this.scanResult = response?.result?.scanResult ? this._clone(response.result.scanResult) : this.scanResult
         if (this.scanResult?.performance?.dast) {
@@ -345,6 +399,7 @@ export class RemoteDastEngineFacade {
         return receipt
     }
     async reset() {
+        this._resetProgressFlight()
         this._invalidateRemoteCleanup()
         this._cleanupSessionBinding = null
         if (this.sessionId && this.isRunning) await this._call("reset")
@@ -415,15 +470,18 @@ export class RemoteDastEngineFacade {
         return !!key && this.strongRecordedKeys.has(key)
     }
     isAllowed(response = {}) { return isDastResponseAllowed(response, this) }
-    _queueEngineMessage(message = {}, cursor = null) {
+    _queueEngineMessage(message = {}, cursor = null, { expectedOwner = null } = {}) {
+        this._assertProgressOwner(expectedOwner)
         const normalizedCursor = Number(cursor)
         this.eventApplyChain = this.eventApplyChain.then(async () => {
+            this._assertProgressOwner(expectedOwner)
             if (Number.isFinite(normalizedCursor) && normalizedCursor > 0 && normalizedCursor <= this.publicationCursor) return
             if (Number.isFinite(normalizedCursor) && normalizedCursor > this.publicationCursor + 1) {
                 throw new Error("dast_runtime_event_cursor_gap")
             }
             if (!(Number.isFinite(normalizedCursor) && normalizedCursor > 0 && normalizedCursor <= this.appliedEventCursor)) {
-                await this.applyEngineMessage(message)
+                await this.applyEngineMessage(message, { expectedOwner })
+                this._assertProgressOwner(expectedOwner)
                 if (Number.isFinite(normalizedCursor) && normalizedCursor > 0) this.appliedEventCursor = normalizedCursor
             }
             if (Number.isFinite(normalizedCursor) && normalizedCursor > 0 && this.sessionId && this.executorGeneration) {
@@ -432,6 +490,7 @@ export class RemoteDastEngineFacade {
                     executorGeneration: this.executorGeneration,
                     cursor: normalizedCursor
                 })
+                this._assertProgressResponseOwner(ack, expectedOwner)
                 if (!ack?.ok) throw new Error(ack?.error || "dast_runtime_event_ack_failed")
                 this.publicationCursor = normalizedCursor
             }
@@ -440,6 +499,7 @@ export class RemoteDastEngineFacade {
         // without converting the ordered chain back to success: later events
         // must not cumulatively acknowledge an unapplied/failed receipt.
         void this.eventApplyChain.catch(error => {
+            if (expectedOwner && !this._isProgressOwnerCurrent(expectedOwner)) return
             this.progress = { ...this.progress, isIdle: false }
             this._reportLateCallFailure("apply_engine_event", error)
         })
@@ -449,11 +509,14 @@ export class RemoteDastEngineFacade {
         try {
             return await this._drainEvents(options)
         } catch (error) {
-            this.progress = { ...this.progress, isIdle: false }
+            if (!options.expectedOwner || this._isProgressOwnerCurrent(options.expectedOwner)) {
+                this.progress = { ...this.progress, isIdle: false }
+            }
             throw error
         }
     }
-    async _drainEvents({ throughCursor = null } = {}) {
+    async _drainEvents({ throughCursor = null, expectedOwner = null } = {}) {
+        this._assertProgressOwner(expectedOwner)
         if (!this.sessionId || !this.executorGeneration) return
         const requiredCursor = throughCursor !== null
             && throughCursor !== undefined
@@ -466,19 +529,23 @@ export class RemoteDastEngineFacade {
         try {
             await this.eventApplyChain
         } catch (_) {
+            this._assertProgressOwner(expectedOwner)
             // The worker retains unacknowledged events. Reuse its existing
             // replay path from the last successful receipt; a repeated failure
             // below rejects drainage rather than silently skipping the event.
             this.eventApplyChain = Promise.resolve()
         }
+        this._assertProgressOwner(expectedOwner)
         if (requiredCursor !== null && this.publicationCursor >= requiredCursor) return
         while (true) {
+            this._assertProgressOwner(expectedOwner)
             const response = await this.client.request(DAST_RUNTIME_MESSAGE.EVENTS_PAGE, {
                 sessionId: this.sessionId,
                 executorGeneration: this.executorGeneration,
                 afterCursor: this.publicationCursor,
                 limit: 200
             })
+            this._assertProgressResponseOwner(response, expectedOwner)
             if (!response?.ok) throw new Error(response?.error || "dast_runtime_event_replay_failed")
             // An ACK can commit at the worker even if its response is lost.
             // Reconcile only receipts this controller actually applied; never
@@ -488,7 +555,9 @@ export class RemoteDastEngineFacade {
             ))
             if (response.page?.resetRequired === true) {
                 this._applyRuntimeState(response)
+                this._assertProgressOwner(expectedOwner)
                 await this._notifyResultMutation({ type: "runtime_replay_snapshot" })
+                this._assertProgressOwner(expectedOwner)
                 const resetCursor = Number(response.page?.resetCursor) || 0
                 if (resetCursor > this.publicationCursor) {
                     this.appliedEventCursor = Math.max(this.appliedEventCursor, resetCursor)
@@ -497,17 +566,20 @@ export class RemoteDastEngineFacade {
                         executorGeneration: this.executorGeneration,
                         cursor: resetCursor
                     })
+                    this._assertProgressResponseOwner(resetAck, expectedOwner)
                     if (!resetAck?.ok) throw new Error(resetAck?.error || "dast_runtime_snapshot_ack_failed")
                     this.publicationCursor = resetCursor
                 }
             }
             const items = Array.isArray(response.page?.items) ? response.page.items : []
-            for (const item of items) await this._queueEngineMessage(item.event, item.cursor)
+            for (const item of items) await this._queueEngineMessage(item.event, item.cursor, { expectedOwner })
             await this.eventApplyChain
+            this._assertProgressOwner(expectedOwner)
             if (requiredCursor !== null && this.publicationCursor >= requiredCursor) break
             if (!response.page?.hasMore || !items.length) break
         }
         await this.eventApplyChain
+        this._assertProgressOwner(expectedOwner)
         if (requiredCursor !== null && this.publicationCursor < requiredCursor) {
             throw new Error("dast_runtime_event_watermark_unavailable")
         }
@@ -516,7 +588,8 @@ export class RemoteDastEngineFacade {
         if (typeof this.resultMutationListener !== "function") return
         await this.resultMutationListener(payload)
     }
-    async applyEngineMessage(message = {}) {
+    async applyEngineMessage(message = {}, { expectedOwner = null } = {}) {
+        this._assertProgressOwner(expectedOwner)
         if (message.type === "dast_dedupe_delta") {
             message.strong ? this.strongRecordedKeys.add(message.key) : this.strongRecordedKeys.delete(message.key)
         }

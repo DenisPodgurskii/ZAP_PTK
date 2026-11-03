@@ -3589,7 +3589,7 @@ export class ptk_automation {
         return stats
     }
 
-    async _stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options = {}) {
+    async _stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options = {}, lateCleanup = null) {
         const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
         const boundedTimeoutMs = zapCloseRequest
             ? Math.min(this._normalizeStopTimeoutMs(timeoutMs), ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS)
@@ -3607,14 +3607,138 @@ export class ptk_automation {
             }, boundedTimeoutMs)
         })
         try {
+            const originalStop = Promise.resolve(adapter.stop(session.id, boundedTimeoutMs, options))
+            if (lateCleanup) this._observeOriginalZapDastCleanup(lateCleanup, originalStop)
             const result = await Promise.race([
-                Promise.resolve(adapter.stop(session.id, boundedTimeoutMs, options)),
+                originalStop,
                 timeoutResult
             ])
             return result
         } finally {
             if (timer) clearTimeout(timer)
         }
+    }
+
+    _retainZapDastCleanup(session, { dast, coordinator, state, owner, runtime, facade, scanId, closeRequestId }) {
+        const bridge = this.zap
+        const transport = bridge?.transport
+        const client = facade?.client
+        const zapid = transport?.getZapId?.()
+        const browserid = transport?.getBrowserId?.()
+        // Retain one original flight, never another Stop or a late retry. Missing
+        // native/host/capture identity cannot establish a late physical receipt.
+        if (!Number.isInteger(session.tabId) || !zapid || !browserid || !client?.port
+            || !toNonEmptyString(session.zapSessionKey)?.endsWith(`|${zapid}`)
+            || bridge.isActive?.() !== true || bridge.publisher?.disabled === true
+            || !client.controllerNonce || !facade.sessionId || !facade.executorGeneration
+            || !(dast.captureLeases instanceof Map)
+            || typeof bridge?._flushPublisherWithTimeout !== 'function'
+            || typeof bridge?.publisher?.getDrainState !== 'function'
+            || typeof browser?.tabs?.get !== 'function') return null
+        this._lateZapDastCleanup ||= new WeakMap()
+        if (this._lateZapDastCleanup.has(session)) return null
+        const retained = { session, dast, coordinator, state, owner, runtime, facade, scanId, closeRequestId,
+            tabId: session.tabId, zapSessionKey: session.zapSessionKey,
+            bridge, publisher: bridge.publisher, transport, zapid, browserid, client,
+            port: client.port, nonce: client.controllerNonce, nativeSessionId: facade.sessionId,
+            generation: facade.executorGeneration, captureLeases: dast.captureLeases,
+            originalSucceeded: false, timedOut: false, settling: false, qualified: false }
+        const monitor = Array.from(bridge._progressMonitorsByKey?.values?.() || [])
+            .find(candidate => candidate?.sessionId === session.id && candidate?.zapid === zapid)
+        if (monitor?.sessionKey === session.zapSessionKey && monitor.closeRequest?.id === closeRequestId
+            && monitor.closeRequest.acked === true && monitor.lastRuntimeSnapshot?.tabId === session.tabId) {
+            // Retain the object, not a sequence snapshot: the original terminal
+            // POST may still advance it while this cleanup flight is pending.
+            retained.terminalContext = Object.freeze({ monitor, session, sessionId: session.id, zapid,
+                tabId: session.tabId, sessionKey: session.zapSessionKey, closeRequestId })
+        }
+        this._lateZapDastCleanup.set(session, retained)
+        return retained
+    }
+
+    _observeOriginalZapDastCleanup(retained, originalStop) {
+        const flight = retained.owner.stopFlight
+        if (!flight?.promise || flight.captureReason !== 'stopped' || flight.policy?.zapCloseRequest !== true) return
+        retained.flight = flight
+        // Both resolutions must be the same original Rattacker outcome. Its
+        // promise settles only after capture release and exact-owner clearing.
+        retained.observation = Promise.all([originalStop, flight.promise]).then(([adapterResult, flightResult]) => {
+            retained.originalSucceeded = adapterResult === flightResult && !!adapterResult
+                && !adapterResult.error && adapterResult.__ptkStopTimedOut !== true
+            if (retained.originalSucceeded && retained.timedOut) return this._settleLateZapDastCleanup(retained)
+            return false
+        }, () => false).catch(err => {
+            // The original adapter rejection still reaches its original caller.
+            // A late observer failure never changes that historical outcome.
+            debugAutomationLog('[PTK Automation] Late ZAP cleanup settlement failed', {
+                sessionId: retained.session.id, error: err?.message || String(err)
+            })
+            return false
+        })
+    }
+
+    _isLateZapDastCleanupCurrent(retained, engineState) {
+        const { session, dast, coordinator, state, owner, runtime, facade, client, transport } = retained
+        if (this._lateZapDastCleanup?.get(session) !== retained || !retained.originalSucceeded
+            || !retained.timedOut || retained.timeoutState !== engineState
+            || this.sessions.get(session.id) !== session || session.source !== 'zap'
+            || session.tabId !== retained.tabId || session.scanIds?.DAST !== retained.scanId
+            || session.closeRequestId !== retained.closeRequestId || session.zapSessionKey !== retained.zapSessionKey
+            || engineState?.status !== 'cancelled' || engineState.completionStatus !== 'engine_incomplete'
+            || engineState.stopTimedOut !== true || engineState.error
+            || (this.app?.dast || this.app?.rattacker) !== dast || dast.engine !== facade
+            || dast.runtimeController !== runtime || runtime.remote !== true
+            || dast.sessionCoordinator !== coordinator || coordinator.getState() !== state
+            || state.automationSession !== null || owner.id !== session.id || owner.stopFlight
+            || dast.captureLeases !== retained.captureLeases || retained.captureLeases.size !== 0
+            || this.zap !== retained.bridge || this.zap.transport !== transport || this.zap.publisher !== retained.publisher
+            || this.zap.isActive?.() !== true || retained.publisher.disabled === true
+            || transport.getZapId?.() !== retained.zapid || transport.getBrowserId?.() !== retained.browserid
+            || transport.isReady?.({ zapid: retained.zapid }) !== true
+            || facade.client !== client || client.port !== retained.port || client.controllerNonce !== retained.nonce
+            || client.pending?.size !== 0) return false
+        const receipt = facade.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: retained.scanId })
+        return !!receipt && receipt.client === client && receipt.port === retained.port
+            && receipt.nonce === retained.nonce && receipt.sessionId === retained.nativeSessionId
+            && receipt.generation === retained.generation && receipt.automationSessionId === session.id
+            && receipt.scanId === retained.scanId
+            && (!retained.receipt || retained.receipt === receipt)
+    }
+
+    async _settleLateZapDastCleanup(retained) {
+        if (retained.settling) return false
+        retained.settling = true
+        const { session } = retained
+        const current = () => this._isLateZapDastCleanupCurrent(retained, session.engineStates?.DAST)
+        if (!current()) return false
+        const host = await browser.tabs.get(retained.tabId).catch(() => null)
+        if (host?.id !== retained.tabId || !current()) return false
+        // Reuse the bridge's bounded terminal publisher drain; do not mint a
+        // physical receipt from queued findings or terminal POST alone.
+        if (await retained.bridge._flushPublisherWithTimeout() !== true || !current()) return false
+        const publisher = await retained.publisher.getDrainState()
+        if (publisher?.drained !== true || publisher.pendingFindings !== 0
+            || publisher.inFlightBatches !== 0 || !current()) return false
+        const stillOpen = await browser.tabs.get(retained.tabId).catch(() => null)
+        if (stillOpen?.id !== retained.tabId || !current()) return false
+        retained.receipt = retained.facade.getRemoteCleanupReceipt({ sessionId: session.id, scanId: retained.scanId })
+        retained.qualified = true
+        session.engineStates.DAST.remoteCleanup = {
+            sessionId: session.id, scanId: retained.scanId, closeRequestId: retained.closeRequestId
+        }
+        this._remoteCleanupOwners ||= new WeakMap()
+        this._remoteCleanupOwners.set(session, { facade: retained.facade, runtime: retained.runtime,
+            coordinator: retained.coordinator, state: retained.state })
+        // Only physical proof changes. Timeout, Partial status, summary, findings
+        // and drain history remain untouched; the existing publisher posts them.
+        if (retained.terminalContext && session.finishedAt && ['completed', 'cancelled', 'error'].includes(session.status)) {
+            const posted = await retained.bridge.postTerminalProgressForClose({
+                sessionId: session.id, zapid: retained.zapid, allowRetry: false,
+                terminalContext: retained.terminalContext
+            })
+            return posted?.ok === true && posted.posted === true
+        }
+        return false // The original finalizer still owns terminal publication.
     }
 
     /**
@@ -3680,9 +3804,13 @@ export class ptk_automation {
                     && !!localScanId && localScanResult?.scanId === localScanId
                     && !!localCloseRequestId && options.closeRequestId === localCloseRequestId
                     && !session.engineStates[engineName]?.error && !session.engineStates[engineName]?.stopTimedOut
+                const lateCleanup = qualifyRemoteCleanup ? this._retainZapDastCleanup(session, {
+                    dast: localDast, coordinator: localCoordinator, state: localState, owner: localOwner,
+                    runtime: localRuntime, facade: localEngine, scanId: localScanId, closeRequestId: localCloseRequestId
+                }) : null
                 const engineStats = engineName === 'DAST' && retainedDast
                     ? retainedDast
-                    : await this._stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options)
+                    : await this._stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options, lateCleanup)
                 const resolvedStats = engineName === 'DAST' && retainedDast
                     ? engineStats
                     : this._resolveStoppedEngineStats(engineName, session, engineStats)
@@ -3733,6 +3861,13 @@ export class ptk_automation {
                     stopTimedOut: timedOut || undefined,
                     ...(engineName === 'DAST' && !retainedDast ? { localCleanup, remoteCleanup } : {})
                 })
+                if (lateCleanup && timedOut) {
+                    lateCleanup.timeoutState = session.engineStates[engineName]
+                    lateCleanup.timedOut = true
+                    // Also handles an original resolution between the timeout
+                    // winner and recording its historical incomplete state.
+                    if (lateCleanup.originalSucceeded) void this._settleLateZapDastCleanup(lateCleanup).catch(() => false)
+                }
                 if (incomplete) {
                     stats.completionStatus = 'engine_incomplete'
                     stats.incompleteEngines.push(engineName)
@@ -3992,9 +4127,12 @@ export class ptk_automation {
         session.stopInProgress = false
         this._finalizeSession(session, stats)
 
+        const retainedCleanup = this._lateZapDastCleanup?.get(session)
         await this.zap?.postTerminalProgressForClose?.({
             sessionId: session.id,
-            zapid
+            zapid,
+            ...(retainedCleanup?.timedOut && retainedCleanup.terminalContext
+                ? { terminalContext: retainedCleanup.terminalContext } : {})
         })
         return true
     }
@@ -5560,7 +5698,9 @@ export class ptk_automation {
         ].some(value => Number.isFinite(value) && value > 0) || Boolean(toNonEmptyString(lastActivityAt))
         return {
             status: engineProgress?.status || engineState?.status || 'unknown',
-            remoteCleanup: engineState?.remoteCleanup && !engineState.error && !engineState.stopTimedOut
+            remoteCleanup: engineState?.remoteCleanup && !engineState.error
+                && (!engineState.stopTimedOut || (this._lateZapDastCleanup?.get(session)?.qualified === true
+                    && this._isLateZapDastCleanupCurrent(this._lateZapDastCleanup.get(session), engineState)))
                 && engineState.remoteCleanup.sessionId === session?.id
                 && engineState.remoteCleanup.scanId === session?.scanIds?.DAST
                 && engineState.remoteCleanup.closeRequestId === session?.closeRequestId
