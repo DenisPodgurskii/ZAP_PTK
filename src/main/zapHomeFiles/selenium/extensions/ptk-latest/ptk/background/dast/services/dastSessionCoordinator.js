@@ -342,6 +342,7 @@ export class DastSessionCoordinator {
         if (policyCode) {
             resolvedSettings.policyCode = policyCode
         }
+        const previousScanId = this.engine?.scanResult?.scanId || null
         const started = await this.runBackgroundScan(tabId, host, domains || host, resolvedSettings)
         if (!started) {
             if (this.state.automationSession?.id === sessionId) this.state.automationSession = null
@@ -357,9 +358,19 @@ export class DastSessionCoordinator {
             })
         }
         this._seedZapAutomationRequests(tabId, resolvedSettings)
+        // The automation owner must receive the scan created by this exact
+        // start. The controller's published scanResult can lag the executor,
+        // particularly when DAST runs alone in a ZAP-managed visit.
+        const startedScanId = this.engine?.scanResult?.scanId
+        const scanId = this.engine?.isRunning === true
+            && this.engine?.tabId === tabId && this.engine?.host === host
+            && typeof startedScanId === "string" && startedScanId.trim()
+            && startedScanId !== previousScanId
+            ? startedScanId : null
         return {
             success: true,
-            seed: null
+            seed: null,
+            scanId
         }
     }
 

@@ -11,6 +11,10 @@ final class PtkBrowserTaskState {
     private String closeDecision;
     private String closeReason;
     private long closedAtMs;
+    private boolean startupDecisionSeen;
+    private boolean startupNonParticipant;
+    private boolean participationSeen;
+    private boolean nonParticipantCloseClaimed;
 
     private PtkBrowserTaskState(String zapid, String browserId, String loadedUrl, long loadedAtMs) {
         this.zapid = zapid;
@@ -28,10 +32,44 @@ final class PtkBrowserTaskState {
         return new PtkBrowserTaskState(zapid, browserId, loadedUrl, loadedAtMs);
     }
 
+    String zapid() {
+        return zapid;
+    }
+
     synchronized void close(String decision, String reason, long closedAtMs) {
         this.closeDecision = decision;
         this.closeReason = reason;
         this.closedAtMs = closedAtMs;
+    }
+
+    synchronized void rememberStartupDecision(
+            boolean automationDisabled, boolean extensionDisabled, boolean effectiveEnginesEmpty) {
+        if (startupDecisionSeen) return;
+        startupDecisionSeen = true;
+        startupNonParticipant = automationDisabled && extensionDisabled && effectiveEnginesEmpty;
+    }
+
+    synchronized boolean rememberParticipation() {
+        if (nonParticipantCloseClaimed) return false;
+        participationSeen = true;
+        return true;
+    }
+
+    synchronized boolean isStartupNonParticipant() {
+        return startupDecisionSeen
+                && startupNonParticipant
+                && !participationSeen
+                && !nonParticipantCloseClaimed;
+    }
+
+    synchronized boolean claimNonParticipantClose() {
+        if (!isStartupNonParticipant()) return false;
+        nonParticipantCloseClaimed = true;
+        return true;
+    }
+
+    synchronized boolean isNonParticipantCloseClaimed() {
+        return nonParticipantCloseClaimed;
     }
 
     synchronized Map<String, Object> toLogFields(long nowMs) {

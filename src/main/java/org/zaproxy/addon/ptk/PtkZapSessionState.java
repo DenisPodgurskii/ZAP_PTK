@@ -24,6 +24,10 @@ final class PtkZapSessionState {
     private Long closeDecisionAttemptedAtMs;
     private PtkCloseRequestState closeRequest;
     private long lastActivitySeq = Long.MIN_VALUE;
+    private String nativeBrowserFamily;
+    private boolean requestedPartialCleanupQualified;
+    private String configBrowserId;
+    private Boolean dastAssigned;
 
     PtkZapSessionState(String zapid) {
         this.zapid = zapid;
@@ -31,6 +35,48 @@ final class PtkZapSessionState {
 
     synchronized String zapid() {
         return zapid;
+    }
+
+    synchronized void rememberNativeBrowserFamily(String family) {
+        if (nativeBrowserFamily == null && family != null && !family.isBlank()) {
+            nativeBrowserFamily = family;
+        }
+    }
+
+    synchronized String nativeBrowserFamily() {
+        return nativeBrowserFamily;
+    }
+
+    synchronized boolean acceptsProgressSequence(Integer activitySeq) {
+        return activitySeq == null || activitySeq.longValue() >= lastActivitySeq;
+    }
+
+    synchronized void rememberRequestedPartialCleanup(boolean qualified) {
+        // Only an accepted callback can set this. Never combine an old drained
+        // snapshot with a marker from a different progress observation.
+        requestedPartialCleanupQualified = qualified;
+    }
+
+    synchronized boolean acceptsConfigOwner(String requestedBrowserId) {
+        return (configBrowserId == null || configBrowserId.equals(requestedBrowserId))
+                && (closeRequest == null
+                        || closeRequest.browserId() == null
+                        || closeRequest.browserId().equals(requestedBrowserId));
+    }
+
+    synchronized void rememberResolvedDastAssignment(String requestedBrowserId, Boolean assigned) {
+        if (assigned == null
+                || requestedBrowserId == null
+                || requestedBrowserId.isBlank()
+                || !requestedBrowserId.equals(browserId)
+                || !acceptsConfigOwner(requestedBrowserId)) {
+            return;
+        }
+        configBrowserId = requestedBrowserId;
+        // A later config response cannot silently revoke an existing DAST owner.
+        if (dastAssigned == null || assigned.booleanValue()) {
+            dastAssigned = assigned;
+        }
     }
 
     synchronized void rememberBrowserId(String browserId) {
@@ -71,10 +117,10 @@ final class PtkZapSessionState {
             Boolean publisherDrained,
             Integer activitySeq,
             long nowMs) {
-        rememberBrowserId(browserId);
-        if (activitySeq != null && activitySeq.longValue() < lastActivitySeq) {
+        if (!acceptsProgressSequence(activitySeq)) {
             return new ProgressActivity(false, false, false, true, false);
         }
+        rememberBrowserId(browserId);
         if (activitySeq != null) {
             lastActivitySeq = activitySeq.longValue();
         }
@@ -87,12 +133,11 @@ final class PtkZapSessionState {
         if (contractVersion != null && contractVersion.intValue() > this.contractVersion) {
             this.contractVersion = contractVersion;
         }
-        if (publisherDrained != null
-                && (!terminalProgressSeen || terminalProgress || publisherDrained.booleanValue())) {
-            this.publisherDrained = publisherDrained;
-        }
         if (terminalProgressSeen && !terminalProgress) {
             return new ProgressActivity(firstProgress, sessionEstablished, false, false, true);
+        }
+        if (publisherDrained != null) {
+            this.publisherDrained = publisherDrained;
         }
         if (progress != null) {
             this.progress = progress;
@@ -294,7 +339,9 @@ final class PtkZapSessionState {
                 completionStatus,
                 releaseStatus,
                 closeDecisionAttemptedAtMs,
-                closeRequest);
+                closeRequest,
+                requestedPartialCleanupQualified,
+                configBrowserId != null && configBrowserId.equals(browserId) ? dastAssigned : null);
     }
 
     private static String nonBlankOrNull(String value) {

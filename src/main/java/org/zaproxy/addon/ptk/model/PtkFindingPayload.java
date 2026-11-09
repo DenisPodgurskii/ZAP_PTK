@@ -1,5 +1,6 @@
 package org.zaproxy.addon.ptk.model;
 
+import com.google.gson.JsonObject;
 import java.util.List;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -18,4 +19,19 @@ public class PtkFindingPayload {
     private String sessionId;
     private Boolean truncated;
     private List<PtkFinding> findings;
+
+    private JsonObject scanCompleteness;
+
+    public PtkFindingPayload(
+            String engine,
+            String scanId,
+            String sessionId,
+            Boolean truncated,
+            List<PtkFinding> findings) {
+        this.engine = engine;
+        this.scanId = scanId;
+        this.sessionId = sessionId;
+        this.truncated = truncated;
+        this.findings = findings;
+    }
 }

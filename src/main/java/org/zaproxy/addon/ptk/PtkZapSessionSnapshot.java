@@ -16,7 +16,9 @@ record PtkZapSessionSnapshot(
         String completionStatus,
         String releaseStatus,
         Long closeDecisionAttemptedAtMs,
-        PtkCloseRequestState closeRequest) {
+        PtkCloseRequestState closeRequest,
+        boolean requestedPartialCleanupQualified,
+        Boolean dastAssigned) {
 
     Long newestActivityAt() {
         if (lastProgressChangedAtMs == null) {
@@ -29,7 +31,25 @@ record PtkZapSessionSnapshot(
     }
 
     boolean isV2PhysicallySafeToClose() {
-        return contractVersion >= 2 && safeToClose && terminalProgressSeen;
+        return contractVersion >= 2
+                && safeToClose
+                && terminalProgressSeen
+                && (!requiresRequestedPartialCleanup()
+                        || (requestedPartialCleanupQualified
+                                && publisherDrained
+                                && closeRequest.acknowledged()));
+    }
+
+    boolean isOwnerRequestedClose() {
+        return closeRequest != null
+                && "owner_browser_close_requested".equals(closeRequest.reason());
+    }
+
+    boolean requiresRequestedPartialCleanup() {
+        return contractVersion >= 2
+                && isOwnerRequestedClose()
+                && terminalProgressSeen
+                && !hasV2CleanTerminalEvidence();
     }
 
     boolean hasV2CleanTerminalEvidence() {

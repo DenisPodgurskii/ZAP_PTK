@@ -1,5 +1,8 @@
 /* Author: Denis Podgurskii */
-;(() => {
+;((IAST_OBSERVER_ENTRY) => {
+// Only the generated native MAIN/document-start entry supplies early authority.
+// This is lexical construction, never inferred from page state or a public flag.
+const IAST_OBSERVER_CAPABILITIES = captureIastObserverCapabilities();
 const PTK_IAST_PAGE_TO_CONTENT_EVENT = 'ptk:iast:page-to-content:v1';
 const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
 
@@ -27,9 +30,10 @@ function emitIastPageBridgeMessage(payload) {
     }
 }
 
-if (globalThis.__PTK_IAST_AGENT_LOADED__) {
+if (globalThis.__PTK_IAST_AGENT_LOADED__ && globalThis.__PTK_IAST_INSTALLATION_STATE__ === 'ready') {
     try {
-        emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready' });
+        globalThis.__PTK_IAST_REBIND_BRIDGE__?.();
+        emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready', installationState: 'ready' });
     } catch (_) { }
     return;
 }
@@ -53,7 +57,13 @@ if (!isIastAgentAuthorizedForPageHooks()) {
     return;
 }
 
-globalThis.__PTK_IAST_AGENT_LOADED__ = true;
+if (globalThis.__PTK_IAST_INSTALLATION_STATE__ === 'installing'
+    || globalThis.__PTK_IAST_INSTALLATION_STATE__ === 'failed') {
+    globalThis.__PTK_IAST_INSTALLATION_STATE__ = 'failed';
+    emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_failed', error: 'incomplete_agent_installation' });
+    return;
+}
+globalThis.__PTK_IAST_INSTALLATION_STATE__ = 'installing';
 
 const FREE_SAFE_HOOK_GROUPS = Object.freeze([
     'hook.angularjs',
@@ -590,6 +600,12 @@ const IAST_RULE_INDEX = {
 let __IAST_LAST_MODULES_REQUEST__ = 0;
 const IAST_PENDING_FINDING_REPORTS = [];
 const IAST_PENDING_FINDING_REPORTS_MAX = 100;
+const IAST_DEFERRED_WRITE_REPORTS = [];
+const IAST_DEFERRED_WRITE_REPORTS_MAX = 100;
+const IAST_DEFERRED_WRITE_TIMER = IAST_OBSERVER_ENTRY === 'native-main-document-start'
+    && typeof globalThis.setTimeout === 'function' ? globalThis.setTimeout : null;
+let IAST_DEFERRED_WRITE_TIMER_ARMED = false;
+let IAST_DEFERRED_WRITE_GENERATION = 0;
 let IAST_FLUSHED_PENDING_FINDING_REPORTS_COUNT = 0;
 const IAST_HOOK_FAILURE_THRESHOLD = 3;
 const IAST_RUNTIME_DEGRADED_GROUP_THRESHOLD = 3;
@@ -717,7 +733,7 @@ function buildIastRuntimeHealthPayload() {
         hookGroupFailures,
         modulesLoaded: Boolean(IAST_MODULES),
         modulesSignature: IAST_MODULES_SIGNATURE || null,
-        pendingFindingReports: IAST_PENDING_FINDING_REPORTS.length,
+        pendingFindingReports: IAST_PENDING_FINDING_REPORTS.length + IAST_DEFERRED_WRITE_REPORTS.length,
         flushedPendingFindingReports: IAST_FLUSHED_PENDING_FINDING_REPORTS_COUNT,
         url: (() => { try { return window.location.href || null; } catch (_) { return null; } })(),
         agentBootUrl: IAST_AGENT_BOOT_URL,
@@ -966,6 +982,7 @@ const IAST_DATA_KINDS = Object.freeze({
     UNKNOWN: 'unknown'
 });
 const IAST_REASON_CODES = Object.freeze({
+    STORAGE_VALUE_EQUALITY_OBSERVED: 'storage_value_equality_observed',
     JWT_HEURISTIC: 'jwt_heuristic',
     TOKEN_HEURISTIC: 'token_heuristic',
     AUTH_HEADER_SAME_ORIGIN: 'auth_header_same_origin',
@@ -985,6 +1002,282 @@ const IAST_REASON_CODES = Object.freeze({
     FLOW_MATCH: 'flow_match',
     UNKNOWN: 'unknown'
 });
+const IAST_STORAGE_OBSERVATION_SINKS = new Set([
+    'code.eval', 'code.function.constructor', 'code.function.apply',
+    'dom.innerHTML', 'dom.outerHTML', 'dom.insertAdjacentHTML', 'document.write'
+]);
+const IAST_OBSERVATION_LIMITS = Object.freeze({ keys: 64, bytes: 65536, valueChars: 4096, relationships: 8 });
+const IAST_OBSERVATION_DOCUMENT_ID = (() => {
+    try { return globalThis.crypto.randomUUID(); } catch (_) {
+        return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
+    }
+})();
+const IAST_OBSERVATION_STATE = { operationHighWater: 0, emittedRelationships: 0, lossCount: 0, reasons: new Set(), revision: 0, terminal: false };
+const IAST_BRIDGE_UNACKED = new Map();
+const IAST_BRIDGE_UNACKED_LIMIT = 1024;
+let IAST_OBSERVATION_STOPPED = false;
+let IAST_OBSERVATION_SETTLING = false;
+const IAST_OBSERVATION_NODE_IDS = typeof WeakMap === 'function' ? new WeakMap() : null;
+const IAST_OBSERVATION_ERROR = typeof Error === 'function' ? Error : null;
+let IAST_OBSERVATION_NEXT_NODE_ID = 1;
+const IAST_STORAGE_OBSERVATION_CAPABILITIES = captureIastStorageObservationCapabilities();
+
+function emitIastObservationState({ terminal = false } = {}) {
+    if (terminal) IAST_OBSERVATION_STATE.terminal = true;
+    IAST_OBSERVATION_STATE.revision += 1;
+    try {
+        emitIastPageBridgeMessage({ channel: 'ptk_iast_observation_state',
+            installationState: globalThis.__PTK_IAST_INSTALLATION_STATE__ || 'installing',
+            documentId: IAST_OBSERVATION_DOCUMENT_ID,
+            operationHighWater: IAST_OBSERVATION_STATE.operationHighWater,
+            emittedRelationships: IAST_OBSERVATION_STATE.emittedRelationships,
+            // At terminal handoff the replay cache is not producer work: the
+            // background verifies receivedRelationships against this document's
+            // emittedRelationships. A lost page-side ACK must not strand an
+            // otherwise accepted finding after the page is gone.
+            pendingObservations: IAST_PENDING_FINDING_REPORTS.length + IAST_DEFERRED_WRITE_REPORTS.length
+                + (IAST_OBSERVATION_STATE.terminal ? 0 : IAST_BRIDGE_UNACKED.size),
+            lossCount: IAST_OBSERVATION_STATE.lossCount,
+            reasons: Array.from(IAST_OBSERVATION_STATE.reasons).slice(0, 16),
+            revision: IAST_OBSERVATION_STATE.revision,
+            terminal: IAST_OBSERVATION_STATE.terminal });
+    } catch (_) { }
+}
+
+function recordIastObservationGap(reason, loss = false) {
+    if (IAST_OBSERVATION_STOPPED && !IAST_OBSERVATION_SETTLING) return;
+    IAST_OBSERVATION_STATE.terminal = false;
+    if (typeof reason === 'string' && reason.length <= 64 && IAST_OBSERVATION_STATE.reasons.size < 16) {
+        IAST_OBSERVATION_STATE.reasons.add(reason);
+    }
+    if (loss) IAST_OBSERVATION_STATE.lossCount = Math.min(1000000, IAST_OBSERVATION_STATE.lossCount + 1);
+    emitIastObservationState();
+}
+
+function captureIastStorageObservationCapabilities() {
+    const result = { areas: [], reason: null, invoke: IAST_OBSERVER_CAPABILITIES.invoke };
+    // Only a document-start acquisition may retain unpatched Storage capabilities.
+    // A late agent must not invoke arbitrary page replacements while enumerating.
+    if (IAST_OBSERVER_ENTRY !== 'native-main-document-start') {
+        result.reason = 'storage_capability_late';
+        return result;
+    }
+    try {
+        if (typeof Storage === 'undefined' || !Storage.prototype) {
+            result.reason = 'storage_capability_unavailable';
+            return result;
+        }
+        const proto = Storage.prototype;
+        const key = Object.getOwnPropertyDescriptor(proto, 'key')?.value;
+        const getItem = Object.getOwnPropertyDescriptor(proto, 'getItem')?.value;
+        const length = Object.getOwnPropertyDescriptor(proto, 'length')?.get;
+        if (typeof key !== 'function' || typeof getItem !== 'function' || typeof length !== 'function'
+            || getItem.__ptk_iast_wrapped__) {
+            result.reason = 'storage_capability_unavailable';
+            return result;
+        }
+        for (const name of ['localStorage', 'sessionStorage']) {
+            let owner = window;
+            let descriptor = null;
+            for (let depth = 0; owner && depth < 5; depth += 1) {
+                descriptor = Object.getOwnPropertyDescriptor(owner, name);
+                if (descriptor) break;
+                owner = Object.getPrototypeOf(owner);
+            }
+            // Data/accessor replacements are not a native window storage getter.
+            // Early native window getters are invoked once and their receiver is retained.
+            if (!descriptor || typeof descriptor.get !== 'function' || descriptor.set) {
+                result.areas.push({ name, unavailable: true });
+                continue;
+            }
+            try {
+                const store = IAST_OBSERVER_CAPABILITIES.invoke(descriptor.get, window, []);
+                IAST_OBSERVER_CAPABILITIES.invoke(length, store, []);
+                result.areas.push({ name, store, key, getItem, length });
+            } catch (_) { result.areas.push({ name, unavailable: true }); }
+        }
+    } catch (_) { result.reason = 'storage_capability_unavailable'; }
+    return result;
+}
+
+function parseIastApplicationSite(trace, operationId, sinkId, context = {}) {
+    if (!String(sinkId || '').startsWith('code.')) {
+        if (/^(http\.|realtime\.)/.test(String(sinkId || '')) && sinkId !== 'http.image.src') {
+            return { kind: 'dom', operation: sinkId };
+        }
+        const element = context.element;
+        let observationId = null;
+        if (element && typeof element === 'object' && IAST_OBSERVATION_NODE_IDS) {
+            observationId = IAST_OBSERVATION_NODE_IDS.get(element);
+            if (!observationId) {
+                observationId = `n_${IAST_OBSERVATION_DOCUMENT_ID}_${IAST_OBSERVATION_NEXT_NODE_ID++}`;
+                IAST_OBSERVATION_NODE_IDS.set(element, observationId);
+            }
+        }
+        return { kind: 'dom', domPath: context.domPath || (element ? getDomPath(element) : null),
+            attribute: context.attribute || null, operation: sinkId || null, observationId };
+    }
+    if (typeof trace === 'string') {
+        const frames = trace.split('\n').slice(1, 17);
+        for (const frame of frames) {
+            if (/chrome-extension:\/\/|moz-extension:\/\/|\/ptk\/content\/iast\.js/.test(frame)) continue;
+            const match = frame.match(/(?:\(|@|\s)((?:https?):\/\/[^\s)]+):(\d+):(\d+)\)?\s*$/);
+            if (match && match[1].length <= 2048 && !/\beval at\b|(?:^|\s)eval code(?:\s|$)|blob:/.test(frame)) {
+                return { kind: 'code', scriptUrl: match[1], line: Number(match[2]), column: Number(match[3]), operation: sinkId };
+            }
+        }
+    }
+    return { kind: 'unresolved', observationId: operationId, operation: sinkId || null };
+}
+
+function captureIastOperation(sinkId, context = {}) {
+    if (IAST_OBSERVATION_STOPPED && !IAST_OBSERVATION_SETTLING) return null;
+    IAST_OBSERVATION_STATE.terminal = false;
+    const operationId = `o_${IAST_OBSERVATION_DOCUMENT_ID}_${++IAST_OBSERVATION_STATE.operationHighWater}`.slice(0, 128);
+    let trace = typeof context.observationTrace === 'string' ? context.observationTrace : null;
+    try {
+        const formatter = IAST_OBSERVATION_ERROR && Object.getOwnPropertyDescriptor(IAST_OBSERVATION_ERROR, 'prepareStackTrace');
+        if (!trace && IAST_OBSERVATION_ERROR && !formatter) {
+            const stack = new IAST_OBSERVATION_ERROR('IAST observed operation').stack;
+            if (typeof stack === 'string') trace = stack;
+        }
+    } catch (_) { }
+    const operation = { operationId, site: parseIastApplicationSite(trace, operationId, sinkId, context),
+        trace, completeness: { status: 'complete', reasons: [] } };
+    return operation;
+}
+
+function collectIastOperationStorageCandidates(value, sinkId, operation) {
+    const sources = [];
+    if (!IAST_STORAGE_OBSERVATION_SINKS.has(sinkId) || typeof value !== 'string' || __IAST_DISABLE_HOOKS__) return sources;
+    const limited = reason => {
+        operation.completeness.status = 'limited';
+        if (!operation.completeness.reasons.includes(reason)) operation.completeness.reasons.push(reason);
+        recordIastObservationGap(reason);
+    };
+    if (!value) return sources;
+    const oversizedSinkValue = value.length > IAST_OBSERVATION_LIMITS.valueChars;
+    const rules = IAST_MODULES ? getIastRulesBySinkId(sinkId) : null;
+    // An omitted/empty source list has always meant unrestricted eligibility.
+    // Match that contract for custom rules instead of silently skipping stores.
+    const allowed = rules && !rules.some(rule => !Array.isArray(rule.sources) || !rule.sources.length)
+        ? new Set(rules.flatMap(rule => rule.sources)) : null;
+    const capabilities = IAST_STORAGE_OBSERVATION_CAPABILITIES;
+    if (capabilities.reason) { limited(capabilities.reason); return sources; }
+    let reads = 0;
+    let bytes = 0;
+    for (const area of capabilities.areas) {
+        if (allowed && !allowed.has(area.name)) continue;
+        if (area.unavailable) { limited('storage_area_unavailable'); continue; }
+        try {
+            const count = capabilities.invoke(area.length, area.store, []);
+            for (let index = 0; index < count; index += 1) {
+                if (reads >= IAST_OBSERVATION_LIMITS.keys) { limited('storage_key_limit'); break; }
+                reads += 1;
+                const key = capabilities.invoke(area.key, area.store, [index]);
+                if (typeof key !== 'string' || isInternalStorageKey(key)) continue;
+                if (`${area.name}:${key}`.length > 512) { limited('storage_key_size_limit'); continue; }
+                const stored = capabilities.invoke(area.getItem, area.store, [key]);
+                if (typeof stored !== 'string') continue;
+                const examined = (key.length + stored.length) * 2;
+                if (bytes + examined > IAST_OBSERVATION_LIMITS.bytes) { limited('storage_byte_limit'); break; }
+                bytes += examined;
+                if (stored.length > IAST_OBSERVATION_LIMITS.valueChars) {
+                    // The fresh-storage inference only admits complete value equality.
+                    // A long unrelated Function/HTML argument cannot be a skipped
+                    // storage match merely because it exceeds the observation bound.
+                    if (!oversizedSinkValue || stored.length === value.length) limited('storage_value_limit');
+                    continue;
+                }
+                if (oversizedSinkValue) continue;
+                if (stored !== value) continue;
+                sources.push({ __normalizedSource: true, __ptkOperationLocalSource: true,
+                    key: `${area.name}:${key}`, source: `${area.name}:${key}`, sourceId: null, taintId: null,
+                    raw: value, value, label: `${area.name}["${key}"]`, detail: key,
+                    location: window.location.href, sourceKind: area.name, type: area.name, taintKind: 'unknown',
+                    acquisition: 'sink_storage_snapshot', matchType: 'complete_value_equality' });
+            }
+            if (capabilities.invoke(area.length, area.store, []) !== count) limited('storage_changed_during_snapshot');
+        } catch (_) { limited('storage_area_unavailable'); }
+    }
+    return sources;
+}
+
+function matchesIastSinkTaint(value, sinkId, context = {}) {
+    // New acquisition never coerces target objects/TrustedHTML. Existing hook
+    // branches retain their old handling and native argument/coercion order.
+    if (typeof value !== 'string' || IAST_OBSERVATION_STOPPED) return null;
+    try {
+        const match = matchesTaint(value);
+        if (!IAST_STORAGE_OBSERVATION_SINKS.has(sinkId)) return match;
+        const operation = captureIastOperation(sinkId, context);
+        const inferred = collectIastOperationStorageCandidates(value, sinkId, operation);
+        const observed = match ? normalizeTaintedSources(match.allSources, match.raw) : [];
+        // A stale same-key lexical match is not an observation of this stored
+        // value. Preserve its weaker relationship separately from the fresh
+        // equality; only an observed complete value replaces local inference.
+        const completeKeys = new Set(observed.filter(source => source.raw === value).map(source => source.key));
+        const allSources = observed.concat(inferred.filter(source => !completeKeys.has(source.key)));
+        emitIastObservationState();
+        if (!allSources.length) return null;
+        const primary = observed[0] || allSources[0];
+        return { source: primary.key, raw: primary.raw, allSources, observationOperation: operation };
+    } catch (_) {
+        // HTML entry points call this before their existing analysis guard.
+        // Observer failure must never change the target operation's result.
+        recordIastObservationGap('sink_observation_failed', true);
+        return null;
+    }
+}
+
+function buildIastRelationshipObservation(source, value, taintEntry, operation, sinkId) {
+    const inferred = source?.acquisition === 'sink_storage_snapshot';
+    const relatedTaint = source?.sourceId && source.sourceId === taintEntry?.taint?.sourceId ? taintEntry : null;
+    const grade = classifyIastShadowSource(value, source, inferred ? null : relatedTaint);
+    const propagation = relatedTaint?.taint?.shadowEvidence?.mechanism === 'instrumented_propagation'
+        ? { operation: relatedTaint.taint.lineage?.slice(-1)[0]?.op || 'propagation', inheritedGrade: grade.inheritedGrade || grade.effectiveGrade }
+        : null;
+    return {
+        schemaVersion: 2, identityVersion: 2, kind: 'source_relationship',
+        operationId: operation.operationId, gradeAuthority: 'page_observed_untrusted',
+        acquisition: source?.acquisition || 'existing_other',
+        evidenceGrade: inferred ? 'complete_value_equality' : grade.effectiveGrade,
+        inheritedGrade: inferred ? null : (grade.inheritedGrade || null),
+        valueRelation: grade.valueRelation || 'unavailable', propagation,
+        attackerControl: 'unknown', controlReason: inferred ? 'Application storage read not observed; equal stored value only.' : 'Source category and primitive equality do not establish attacker control.',
+        site: Object.assign({}, operation.site),
+        sourceBinding: { sourceId: inferred ? null : (source?.sourceId || null), key: source.key, kind: source.sourceKind || source.kind || 'unknown' },
+        completeness: { status: operation.completeness.status, reasons: operation.completeness.reasons.slice(0, 16) }
+    };
+}
+
+function buildIastSourceFlow(source, sinkMeta) {
+    if (source?.acquisition !== 'sink_storage_snapshot') {
+        const entry = window.__IAST_TAINT_GRAPH__?.[source.key];
+        if (entry?.node?.value === source.raw) {
+            return buildTaintFlow({ source: source.key, raw: source.raw, allSources: [source] }, sinkMeta);
+        }
+    }
+    return [{ stage: 'source', key: source.key, label: source.label || source.key,
+        op: source.acquisition === 'sink_storage_snapshot' ? 'storage_value_equality_observed' : (source.acquisition || 'source'),
+        location: source.location || sinkMeta.location, value: source.raw },
+    { stage: 'sink', key: sinkMeta.sinkId, label: sinkMeta.sink || sinkMeta.sinkId, op: 'sink',
+        location: sinkMeta.location, domPath: sinkMeta.domPath || null, value: sinkMeta.value }];
+}
+
+function buildIastSourceBindingKey(source) {
+    return JSON.stringify([source?.key || null, source?.sourceId || null, source?.acquisition || 'existing_other']);
+}
+
+function buildIastRelationshipDedupKey(ruleEntry, source, sinkId, location, context, severity, observation) {
+    return JSON.stringify([2, location, ruleEntry.moduleId, ruleEntry.ruleId, source.key,
+        source.sourceKind || source.kind || null, sinkId, context.transportCarrierKey || null,
+        observation.site, observation.acquisition, observation.valueRelation, observation.evidenceGrade,
+        observation.inheritedGrade, observation.attackerControl, context.primaryClass || 'taint_flow',
+        severity || ruleEntry.ruleMeta?.severity || ruleEntry.moduleMeta?.severity || null,
+        context.detection?.confidence ?? context.match?.confidence ?? null,
+        context.confidencePenalty || 0, context.detection?.reason || null]);
+}
 const IAST_TRUST_LEVELS = Object.freeze({
     SAME_ORIGIN: 'same_origin',
     FIRST_PARTY: 'first_party',
@@ -1062,18 +1355,101 @@ function initIastRuleIndex(modulesJson, options = {}) {
 function queuePendingIastFindingReport(args) {
     if (!args || typeof args !== 'object') return;
     if (IAST_PENDING_FINDING_REPORTS.length >= IAST_PENDING_FINDING_REPORTS_MAX) {
-        IAST_PENDING_FINDING_REPORTS.shift();
+        recordIastObservationGap('pending_observation_limit', true);
+        return false;
     }
     IAST_PENDING_FINDING_REPORTS.push(args);
+    emitIastObservationState();
+    return true;
+}
+
+function publishDeferredIastWriteReports(entry) {
+    if (entry.document !== document || __IAST_DISABLE_HOOKS__) {
+        recordIastObservationGap('deferred_write_owner_unavailable', true);
+        return;
+    }
+    for (const snapshot of entry.snapshots) {
+        try {
+            if (IAST_MODULES) qualifyIastSinkObservation(snapshot);
+            else if (queuePendingIastFindingReport({ sinkObservation: snapshot, document })) {
+                requestModulesFromBackground();
+            }
+        } catch (_) {
+            recordIastObservationGap('deferred_write_qualification_failed', true);
+        }
+    }
+}
+
+function flushDeferredIastWriteReports() {
+    if (IAST_OBSERVATION_STOPPED && !IAST_OBSERVATION_SETTLING) return;
+    while (IAST_DEFERRED_WRITE_REPORTS[0]?.ready) {
+        const entry = IAST_DEFERRED_WRITE_REPORTS.shift();
+        publishDeferredIastWriteReports(entry);
+    }
+    emitIastObservationState();
+}
+
+function reserveDeferredIastWriteReports(snapshots) {
+    if (!snapshots.length) return null;
+    const entry = { document, snapshots, ready: false };
+    if (IAST_DEFERRED_WRITE_REPORTS.length >= IAST_DEFERRED_WRITE_REPORTS_MAX) {
+        // Never trade a finding for queue capacity. This one write qualifies
+        // after native forwarding in its current task instead of yielding.
+        recordIastObservationGap('deferred_write_capacity_fallback');
+        entry.direct = true;
+        return entry;
+    }
+    IAST_DEFERRED_WRITE_REPORTS.push(entry);
+    emitIastObservationState();
+    return entry;
+}
+
+function discardDeferredIastWriteReports(entry) {
+    if (!entry || entry.direct) return;
+    const index = IAST_DEFERRED_WRITE_REPORTS.indexOf(entry);
+    if (index !== -1) IAST_DEFERRED_WRITE_REPORTS.splice(index, 1);
+    emitIastObservationState();
+}
+
+function completeDeferredIastWriteReports(entry) {
+    if (!entry) return;
+    entry.ready = true;
+    if (entry.direct || !IAST_DEFERRED_WRITE_TIMER) {
+        if (entry.direct) publishDeferredIastWriteReports(entry);
+        else flushDeferredIastWriteReports();
+        return;
+    }
+    if (IAST_DEFERRED_WRITE_TIMER_ARMED) return;
+    IAST_DEFERRED_WRITE_TIMER_ARMED = true;
+    const generation = IAST_DEFERRED_WRITE_GENERATION;
+    try {
+        IAST_OBSERVER_CAPABILITIES.invoke(IAST_DEFERRED_WRITE_TIMER, window, [() => {
+            if (generation !== IAST_DEFERRED_WRITE_GENERATION) return;
+            IAST_DEFERRED_WRITE_TIMER_ARMED = false;
+            flushDeferredIastWriteReports();
+        }, 0]);
+    } catch (_) {
+        IAST_DEFERRED_WRITE_TIMER_ARMED = false;
+        recordIastObservationGap('deferred_write_timer_unavailable');
+        flushDeferredIastWriteReports();
+    }
 }
 
 function flushPendingIastFindingReports() {
+    if (IAST_OBSERVATION_STOPPED && !IAST_OBSERVATION_SETTLING) return;
     if (!IAST_MODULES || !IAST_PENDING_FINDING_REPORTS.length) return;
     const pending = IAST_PENDING_FINDING_REPORTS.splice(0, IAST_PENDING_FINDING_REPORTS.length);
     IAST_FLUSHED_PENDING_FINDING_REPORTS_COUNT += pending.length;
     pending.forEach((args) => {
         try {
-            reportFinding(args);
+            if (__IAST_DISABLE_HOOKS__) return;
+            if (args.sinkObservation) {
+                if (args.document !== document) return;
+                qualifyIastSinkObservation(args.sinkObservation);
+            } else {
+                // Source-less policy observations keep their existing path.
+                reportFinding(args);
+            }
         } catch (_) { }
     });
     emitIastRuntimeHealthUpdate({ force: true });
@@ -1131,8 +1507,54 @@ function getIastRuleByRuleId(ruleId) {
 
 function handleBackgroundIastBridgeMessage(data) {
     data = data || {}
+    if (data.channel === 'ptk_iast_observation_stop') {
+        IAST_OBSERVATION_STOPPED = true;
+        IAST_OBSERVATION_SETTLING = true;
+        try {
+            flushDeferredIastWriteReports();
+            if (IAST_DEFERRED_WRITE_REPORTS.length) recordIastObservationGap('pending_write_at_stop', true);
+            flushPendingIastFindingReports();
+            if (IAST_PENDING_FINDING_REPORTS.length) recordIastObservationGap('pending_rules_at_stop');
+        } finally {
+            IAST_OBSERVATION_SETTLING = false;
+            emitIastObservationState({ terminal: true });
+        }
+        return;
+    }
+    if (data.channel === 'ptk_iast_observation_reset') {
+        IAST_OBSERVATION_STOPPED = false;
+        IAST_OBSERVATION_SETTLING = false;
+        IAST_DEFERRED_WRITE_GENERATION += 1;
+        IAST_DEFERRED_WRITE_TIMER_ARMED = false;
+        IAST_DEFERRED_WRITE_REPORTS.length = 0;
+        IAST_PENDING_FINDING_REPORTS.length = 0;
+        IAST_BRIDGE_UNACKED.clear();
+        IAST_OBSERVATION_STATE.operationHighWater = 0;
+        IAST_OBSERVATION_STATE.emittedRelationships = 0;
+        IAST_OBSERVATION_STATE.lossCount = 0;
+        IAST_OBSERVATION_STATE.reasons.clear();
+        IAST_OBSERVATION_STATE.terminal = false;
+        IAST_FINDING_DEDUP.clear();
+        emitIastObservationState();
+        return;
+    }
+    if (data.channel === 'ptk_iast_observation_snapshot') {
+        emitIastObservationState({ terminal: true });
+        return;
+    }
+    if (data.channel === 'ptk_iast_finding_accepted') {
+        if (typeof data.bufferId === 'string' && IAST_BRIDGE_UNACKED.delete(data.bufferId)) {
+            emitIastObservationState();
+        }
+        return;
+    }
     if (data.channel === 'ptk_content_iast_bridge_ready') {
-        emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready' });
+        if (globalThis.__PTK_IAST_INSTALLATION_STATE__ === 'ready') {
+            // The isolated bridge may attach after the initial receipt was emitted.
+            // Replay the current bounded state before announcing agent readiness.
+            emitIastObservationState();
+            emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready', installationState: 'ready' });
+        }
         requestModulesFromBackground(true);
         return;
     }
@@ -1151,13 +1573,43 @@ function handleBackgroundIastBridgeMessage(data) {
     }
 }
 
-window.addEventListener(PTK_IAST_CONTENT_TO_PAGE_EVENT, (event) => {
+function onIastContentBridgeEvent(event) {
     handleBackgroundIastBridgeMessage(parseIastBridgeEventDetail(event?.detail));
-}, false);
+}
 
-window.addEventListener('message', (event) => {
+function onIastContentWindowMessage(event) {
     handleBackgroundIastBridgeMessage(event.data || {});
-}, false);
+}
+
+function rebindIastBridgeListeners() {
+    // document.open() removes Window listeners while preserving this agent's
+    // lexical state. Reinstall the same handlers, then replay only unaccepted
+    // finding envelopes with their original buffer IDs.
+    try {
+        window.removeEventListener?.(PTK_IAST_CONTENT_TO_PAGE_EVENT, onIastContentBridgeEvent, false);
+        window.removeEventListener?.('message', onIastContentWindowMessage, false);
+        window.addEventListener(PTK_IAST_CONTENT_TO_PAGE_EVENT, onIastContentBridgeEvent, false);
+        window.addEventListener('message', onIastContentWindowMessage, false);
+        for (const [bufferId, message] of IAST_BRIDGE_UNACKED) {
+            emitIastPageBridgeMessage({ channel: 'ptk_iast_buffer_append', bufferId, message });
+            emitIastPageBridgeMessage(message);
+        }
+        emitIastObservationState();
+        return true;
+    } catch (_) {
+        recordIastObservationGap('bridge_rebind_failed', true);
+        return false;
+    }
+}
+
+try {
+    Object.defineProperty(globalThis, '__PTK_IAST_REBIND_BRIDGE__', {
+        value: rebindIastBridgeListeners, configurable: false, writable: false
+    });
+} catch (_) {
+    recordIastObservationGap('bridge_rebind_unavailable', true);
+}
+rebindIastBridgeListeners();
 
 // On load, request the current IAST modules from background (helps after reloads)
 try {
@@ -1314,14 +1766,14 @@ function allowHeavyHook() {
     return true;
 }
 
-function getExecutableMutationCandidate(node) {
+function getExecutableMutationCandidate(node, matchValue = matchesTaint) {
     if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
     const tag = node.tagName ? String(node.tagName).toLowerCase() : null;
 
     if (tag === 'script') {
         const src = typeof node.getAttribute === 'function' ? node.getAttribute('src') : null;
         if (src && getDangerousUrlScheme(src)) {
-            const match = matchesTaint(src);
+            const match = matchValue(src);
             if (match) {
                 return {
                     match,
@@ -1334,7 +1786,7 @@ function getExecutableMutationCandidate(node) {
         }
         const inlineScript = String(node.textContent || '').trim();
         if (inlineScript) {
-            const match = matchesTaint(inlineScript);
+            const match = matchValue(inlineScript);
             if (match) {
                 return {
                     match,
@@ -1357,7 +1809,7 @@ function getExecutableMutationCandidate(node) {
             || attrName === 'srcdoc'
             || (dangerousUrlAttr && !!getDangerousUrlScheme(attrValue));
         if (!risky) continue;
-        const match = matchesTaint(attrValue);
+        const match = matchValue(attrValue);
         if (!match) continue;
         return {
             match,
@@ -1508,6 +1960,11 @@ function markTrustedTypesHtmlRestricted(error) {
 }
 
 function disableIastRuntimeHooks(reason = 'inactive') {
+    // An observation from a revoked admission must not survive reactivation.
+    IAST_PENDING_FINDING_REPORTS.length = 0;
+    IAST_DEFERRED_WRITE_GENERATION += 1;
+    IAST_DEFERRED_WRITE_TIMER_ARMED = false;
+    IAST_DEFERRED_WRITE_REPORTS.length = 0;
     IAST_HOOK_GROUPS.enabled = new Set();
     IAST_HOOK_GROUPS.globallyDisabled = new Set();
     IAST_HOOK_GROUPS.runtimeState = reason || 'inactive';
@@ -1653,12 +2110,14 @@ function htmlDecode(input) {
     if (input == null) return input;
     const str = String(input);
     if (!str.includes('&')) return str;
+    const c = IAST_OBSERVER_CAPABILITIES;
+    if (c.reason) return str;
     if (isTrustedTypesHtmlRestricted()) return str;
     try {
         return withoutHooks(() => {
-            const ta = document.createElement('textarea');
-            ta.innerHTML = str;
-            return ta.value;
+            const ta = c.invoke(c.create, document, ['textarea']);
+            c.invoke(c.set, ta, [str]);
+            return c.invoke(c.textareaValue, ta, []);
         });
     } catch (error) {
         markTrustedTypesHtmlRestricted(error);
@@ -2024,22 +2483,201 @@ function isIastPrecisionWeakRelation(candidate) {
         || candidate?.valueRelation === 'substring';
 }
 
-function getIastPrecisionSeverityOverride(sinkId, context, eligibleSources, shadow, taintEntry) {
+function isIastDirectHtmlSink(sinkId) {
+    return sinkId === 'dom.innerHTML' || sinkId === 'dom.outerHTML'
+        || sinkId === 'dom.insertAdjacentHTML' || sinkId === 'document.write';
+}
+
+function isIastDirectHtmlExecutableCandidate(candidate, sinkId, node = null) {
+    if (!candidate) return false;
+    const attribute = String(candidate.attribute || '').toLowerCase();
+    const tag = String(candidate.tag || '').toLowerCase();
+    // HTML setters do not execute parsed script elements. Event handlers and
+    // javascript navigation are executable candidates, not observed execution.
+    return (tag === 'script' && sinkId === 'document.write')
+        || (attribute.startsWith('on') && node && attribute in node && String(candidate.value).trim().length > 0)
+        || ((attribute === 'href' || attribute === 'action' || attribute === 'formaction')
+            && getDangerousUrlScheme(candidate.value) === 'javascript')
+        || (attribute === 'src' && (tag === 'iframe' || tag === 'frame')
+            && getDangerousUrlScheme(candidate.value) === 'javascript');
+}
+
+let IAST_DIRECT_HTML_PARSER = null;
+
+function captureIastObserverCapabilities() {
+    if (IAST_OBSERVER_ENTRY !== 'native-main-document-start') return { reason: 'observer_capability_unverified' };
+    // Retain invocation and the complete observer-only WebIDL dependency chain.
+    // Shared mutation/bootstrap traversal intentionally remains separate.
+    const invoke = Reflect.apply;
+    const result = { invoke, reason: 'html_capability_unavailable' };
+    try {
+        const getter = (proto, name) => {
+            const fn = Object.getOwnPropertyDescriptor(proto, name)?.get;
+            if (typeof fn !== 'function') throw new Error('missing observer getter');
+            return fn;
+        };
+        result.create = Document.prototype.createElement;
+        result.walker = Document.prototype.createTreeWalker;
+        result.next = TreeWalker.prototype.nextNode;
+        result.set = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML')?.set;
+        result.content = getter(HTMLTemplateElement.prototype, 'content');
+        result.textareaValue = getter(HTMLTextAreaElement.prototype, 'value');
+        result.nodeType = getter(Node.prototype, 'nodeType');
+        result.text = getter(Node.prototype, 'textContent');
+        result.parent = getter(Node.prototype, 'parentElement');
+        result.tag = getter(Element.prototype, 'tagName');
+        result.namespace = getter(Element.prototype, 'namespaceURI');
+        result.attributes = getter(Element.prototype, 'attributes');
+        result.attrName = getter(Attr.prototype, 'name');
+        result.attrValue = getter(Attr.prototype, 'value');
+        result.attrLength = getter(NamedNodeMap.prototype, 'length');
+        result.attrItem = NamedNodeMap.prototype.item;
+        result.getAttribute = Element.prototype.getAttribute;
+        result.eventAttributes = Object.getOwnPropertyNames(HTMLElement.prototype).filter(name => name.startsWith('on'));
+        result.lower = String.prototype.toLowerCase;
+        result.trim = String.prototype.trim;
+        result.starts = String.prototype.startsWith;
+        result.includes = String.prototype.includes;
+        result.url = URL;
+        result.protocol = getter(URL.prototype, 'protocol');
+        result.clockReceiver = performance;
+        result.clock = performance.now;
+        for (const name of ['create', 'walker', 'next', 'set', 'attrItem', 'getAttribute', 'clock', 'lower', 'trim', 'starts', 'includes', 'url']) {
+            if (typeof result[name] !== 'function') throw new Error('missing observer method');
+        }
+        result.reason = null;
+    } catch (_) { }
+    return result;
+}
+
+function createIastDirectHtmlParser() {
+    const c = IAST_OBSERVER_CAPABILITIES;
+    if (c.reason) return null;
+    return value => {
+        const template = c.invoke(c.create, document, ['template']);
+        if (c.invoke(c.tag, template, []) !== 'TEMPLATE') return null;
+        c.invoke(c.set, template, [value]);
+        return c.invoke(c.content, template, []);
+    };
+}
+
+function inspectIastDirectHtmlImpact(value, sinkId, context = {}, parseHtml = null) {
+    // Only primitive strings enter this observer. Native coercion and DOM
+    // argument/return behavior remain owned by the original wrapper operation.
+    if (typeof value !== 'string') return { status: 'unknown', reason: 'non_string_html' };
+    if (sinkId === 'document.write') return { status: 'unknown', reason: 'document_write_stream_context_unknown' };
+    const c = IAST_OBSERVER_CAPABILITIES;
+    if (c.reason) {
+        recordIastObservationGap(c.reason);
+        return { status: 'unknown', reason: c.reason };
+    }
+    if (value.length > IAST_SHADOW_MAX_EQUALITY_LENGTH) {
+        recordIastObservationGap('html_impact_value_limit');
+        return { status: 'unknown', reason: 'html_impact_value_limit' };
+    }
+    try {
+        if (sinkId === 'dom.insertAdjacentHTML' && typeof context.position !== 'string') {
+            return { status: 'unknown', reason: 'html_target_context_unavailable' };
+        }
+        const position = sinkId === 'dom.insertAdjacentHTML' ? c.invoke(c.lower, context.position, []) : null;
+        const outside = sinkId === 'dom.outerHTML' || position === 'beforebegin' || position === 'afterend';
+        const target = outside && context.element ? c.invoke(c.parent, context.element, []) : context.element;
+        if (!target) return { status: 'unknown', reason: 'html_target_context_unavailable' };
+        const targetTag = c.invoke(c.lower, c.invoke(c.tag, target, []), []);
+        if (c.invoke(c.namespace, target, []) !== 'http://www.w3.org/1999/xhtml') {
+            return { status: 'unknown', reason: 'html_target_namespace_unresolved' };
+        }
+        if (targetTag === 'template' || targetTag === 'textarea' || targetTag === 'title' || targetTag === 'style'
+            || targetTag === 'script' || targetTag === 'xmp' || targetTag === 'plaintext' || targetTag === 'noscript') {
+            return { status: 'nonexecutable', reason: 'inert_html_target' };
+        }
+        if (!c.invoke(c.includes, value, ['<'])) return { status: 'nonexecutable', reason: 'plaintext_html_assignment' };
+        if (typeof parseHtml !== 'function') return { status: 'unknown', reason: 'html_impact_parser_unavailable' };
+        const root = withInternalHtmlParser(() => parseHtml(value));
+        // Native parsed roots provide a walker. Do not use an unbounded
+        // selector fallback or infer safety from a missing traversal capability.
+        if (!root || c.invoke(c.nodeType, root, []) !== 11) {
+            return { status: 'unknown', reason: 'html_impact_walker_unavailable' };
+        }
+        const now = () => c.invoke(c.clock, c.clockReceiver, []);
+        const startedAt = now();
+        let visited = 0, executable = false, unknownCandidate = false, limited = false;
+        const reports = [];
+        const walker = c.invoke(c.walker, document, [root, 1]);
+        let node = c.invoke(c.next, walker, []);
+        while (node) {
+            if (visited >= 24 || now() - startedAt >= 2) { limited = true; break; }
+            visited += 1;
+            if (c.invoke(c.nodeType, node, []) !== 1) throw new Error('invalid walker result');
+            const tag = c.invoke(c.lower, c.invoke(c.tag, node, []), []);
+            const attrs = c.invoke(c.attributes, node, []);
+            const count = c.invoke(c.attrLength, attrs, []);
+            // Attribute iteration shares the bounded observer clock; never Array.from
+            // or a page-replaceable iterator over an unbounded collection.
+            for (let i = 0; i < count; i += 1) {
+                if (now() - startedAt >= 2) { limited = true; break; }
+                const attr = c.invoke(c.attrItem, attrs, [i]);
+                const attribute = c.invoke(c.lower, c.invoke(c.attrName, attr, []), []);
+                const raw = c.invoke(c.attrValue, attr, []);
+                let scheme = null;
+                try { scheme = c.invoke(c.protocol, new c.url(raw, 'https://ptk.invalid/'), []); } catch (_) { }
+                let supportedEvent = false;
+                for (let j = 0; j < c.eventAttributes.length; j += 1) {
+                    if (c.eventAttributes[j] === attribute) { supportedEvent = true; break; }
+                }
+                const event = c.invoke(c.starts, attribute, ['on']) && c.invoke(c.trim, raw, []).length > 0;
+                const navigation = attribute === 'href' || attribute === 'action' || attribute === 'formaction';
+                const frameSrc = attribute === 'src' && (tag === 'iframe' || tag === 'frame');
+                if (event && supportedEvent || (navigation || frameSrc) && scheme === 'javascript:') executable = true;
+                else if (event || attribute === 'srcdoc' || (navigation || attribute === 'src')
+                    && (scheme === 'javascript:' || scheme === 'data:')) unknownCandidate = true;
+            }
+            if (limited) break;
+            node = c.invoke(c.next, walker, []);
+        }
+        if (executable) return { status: 'executable_candidate', reason: 'parsed_active_html_candidate', root, reports };
+        if (limited || now() - startedAt >= 2) {
+            recordIastObservationGap('html_impact_traversal_limit');
+            return { status: 'unknown', reason: 'html_impact_traversal_limit' };
+        }
+        if (unknownCandidate) return { status: 'unknown', reason: 'nested_html_impact_unresolved', root, reports };
+        return { status: 'nonexecutable', reason: 'parsed_inert_html', root, reports };
+    } catch (_) {
+        recordIastObservationGap('html_impact_parser_unavailable');
+        return { status: 'unknown', reason: 'html_impact_parser_unavailable' };
+    }
+}
+
+function getIastPrecisionSeverityOverride(sinkId, context, eligibleSources, shadow, taintEntry, sourceMetadata = null) {
     // Only these observed sinks can receive a Phase 2B severity decision.
     // Shadow accounting still runs independently for every reported finding.
-    if (sinkId !== 'code.eval'
+    if (!isIastDirectHtmlSink(sinkId) && sinkId !== 'code.eval'
         && !isFunctionCodeExecutionSink(sinkId)
         && !(sinkId === 'dom.mutation' && isModulesLoadedBootstrapDomMutation(context))) return null;
     const sources = Array.isArray(eligibleSources) ? eligibleSources.slice(0, IAST_SHADOW_MAX_CANDIDATES) : [];
     if (!sources.length || !shadow?.shadowPrimary || shadow.truncated) return null;
     const grades = sources.map(source => classifyIastShadowSource(context.value, source, taintEntry));
+    if (isIastDirectHtmlSink(sinkId)) {
+        if (context.htmlImpact?.status === 'nonexecutable') return 'info';
+        if (context.htmlImpact?.status !== 'executable_candidate') return 'low';
+        // This function receives only the selected rule/source relationship.
+        // Neither a stronger neighbour nor a category name upgrades lexical
+        // coincidence to a causal High claim.
+        const hasQualifiedSource = grades.some((grade, index) => !isIastPrecisionWeakRelation(grade)
+            && (sources[index]?.taintKind === 'user_input'
+                || sources[index]?.acquisition === 'instrumented_read'
+                || IAST_RESPONSE_SOURCE_KINDS.has(sources[index]?.sourceKind)));
+        return hasQualifiedSource ? null : 'low';
+    }
     if (sinkId === 'dom.mutation' && isModulesLoadedBootstrapDomMutation(context)) {
         // The sweep discovers an existing executable-looking node; it did not
         // observe a mutation. Preserve High when an eligible, non-Boolean
         // browser-controlled value covers the executable candidate itself.
         const hasStrongCandidate = grades.some((grade, index) => {
             const source = sources[index];
-            const observedType = getTaintMetaEntry(source?.key)?.observedValueType;
+            const observedType = sourceMetadata
+                ? sourceMetadata[source?.key]?.observedValueType
+                : getTaintMetaEntry(source?.key)?.observedValueType;
             return observedType !== 'boolean'
                 && (source?.taintKind === 'user_input' || isUserControlledSource(source))
                 && (grade.valueRelation === 'complete_value_equality'
@@ -2054,7 +2692,9 @@ function getIastPrecisionSeverityOverride(sinkId, context, eligibleSources, shad
     if (isFunctionCodeExecutionSink(sinkId)) {
         const onlyBooleanOrConfigCoincidence = grades.every((grade, index) => {
             const source = sources[index];
-            const observedType = getTaintMetaEntry(source?.key)?.observedValueType;
+            const observedType = sourceMetadata
+                ? sourceMetadata[source?.key]?.observedValueType
+                : getTaintMetaEntry(source?.key)?.observedValueType;
             const raw = String(source?.raw ?? source?.value ?? '').trim();
             return isIastPrecisionWeakRelation(grade)
                 && (observedType === 'boolean'
@@ -2313,15 +2953,34 @@ function collectTaintedSources() {
         const decodedVal = decodeURIComponent(v || '');
         add(`cookie:${k}`, decodedVal, createCookieSourceMeta(k, decodedVal));
     });
-    ['localStorage', 'sessionStorage'].forEach(store => {
-        try {
-            for (let i = 0; i < window[store].length; i++) {
-                const key = window[store].key(i), val = window[store].getItem(key);
-                if (isInternalStorageKey(key)) continue;
-                add(`${store}:${key}`, val);
-            }
-        } catch { };
-    });
+    // Initial/reseed enumeration has the same private authority and total
+    // budgets as the sink snapshot; a loading document alone grants nothing.
+    const storageCapabilities = IAST_STORAGE_OBSERVATION_CAPABILITIES;
+    if (storageCapabilities.reason) recordIastObservationGap(storageCapabilities.reason);
+    else {
+        let reads = 0, bytes = 0;
+        for (const area of storageCapabilities.areas) {
+            if (area.unavailable) { recordIastObservationGap('storage_area_unavailable'); continue; }
+            try {
+                const count = storageCapabilities.invoke(area.length, area.store, []);
+                for (let i = 0; i < count; i += 1) {
+                    if (reads >= IAST_OBSERVATION_LIMITS.keys) { recordIastObservationGap('storage_key_limit', true); break; }
+                    reads += 1;
+                    const key = storageCapabilities.invoke(area.key, area.store, [i]);
+                    if (typeof key !== 'string' || isInternalStorageKey(key)) continue;
+                    if (`${area.name}:${key}`.length > 512) { recordIastObservationGap('storage_key_size_limit'); continue; }
+                    const val = storageCapabilities.invoke(area.getItem, area.store, [key]);
+                    if (typeof val !== 'string') continue;
+                    bytes += (key.length + val.length) * 2;
+                    if (bytes > IAST_OBSERVATION_LIMITS.bytes) { recordIastObservationGap('storage_byte_limit', true); break; }
+                    if (val.length > IAST_OBSERVATION_LIMITS.valueChars) { recordIastObservationGap('storage_value_limit'); continue; }
+                    add(`${area.name}:${key}`, val);
+                }
+                if (storageCapabilities.invoke(area.length, area.store, []) !== count) recordIastObservationGap('storage_changed_during_snapshot');
+            } catch (_) { recordIastObservationGap('storage_area_unavailable'); }
+            if (reads >= IAST_OBSERVATION_LIMITS.keys || bytes > IAST_OBSERVATION_LIMITS.bytes) break;
+        }
+    }
     if (window.name) add('window.name', window.name);
     //console.info('[IAST] Collected taints', raw);
     return raw;
@@ -2524,6 +3183,9 @@ function describeSourceKey(key, rawValue) {
 
 function normalizeSourceEntry(entry, fallbackKey = null, fallbackRaw = null) {
     const provided = entry || {};
+    // A sink-time storage equality is not an application read. In particular,
+    // null must not fall through to a stale same-key source ID or taint kind.
+    if (provided.__ptkOperationLocalSource === true) return Object.assign({}, provided);
     const key = provided.key || provided.source || fallbackKey;
     if (!key) return null;
     const providedRaw = Object.prototype.hasOwnProperty.call(provided, 'raw')
@@ -2543,6 +3205,12 @@ function normalizeSourceEntry(entry, fallbackKey = null, fallbackRaw = null) {
         taintKind: provided.taintKind || storedMeta.taintKind || descriptor.taintKind || null,
         sourceKind: provided.sourceKind || storedMeta.sourceKind || descriptor.sourceKind || descriptor.type || null,
         sourceId: provided.sourceId || storedMeta.sourceId || null,
+        acquisition: provided.acquisition || (() => {
+            const op = window.__IAST_TAINT_GRAPH__?.[key]?.node?.op || '';
+            if (/\.getItem$/.test(op)) return 'instrumented_read';
+            if (/\.setItem$/.test(op)) return 'instrumented_write';
+            return /^localStorage:|^sessionStorage:|^cookie:|^window\.name$/.test(key) ? 'initial_snapshot' : 'existing_other';
+        })(),
         origin: provided.origin || storedMeta.origin || null,
         isCrossOriginMessage: typeof provided.isCrossOriginMessage === 'boolean'
             ? provided.isCrossOriginMessage
@@ -3117,8 +3785,13 @@ function isSuspiciousExfilUrl(url) {
 function evaluateSinkHeuristics(value, info = {}, context = {}, taintedSources = []) {
     const sinkId = info?.sinkId || info?.sink || null;
     if (!sinkId) return { skip: false, downgrade: null };
+    // Direct HTML is qualified per eligible relationship, with the operation's
+    // bounded parsed impact. The attribute heuristic cannot supply that proof
+    // and must not lend a source-category High to another weak relationship.
+    if (isIastDirectHtmlSink(sinkId)) return { skip: false, downgrade: null };
     if (DOM_XSS_SINK_IDS.has(sinkId)) {
-        const attrName = context.attribute || context.attr || context.attrName || context.eventType || null;
+        const attrName = context.attribute || context.attr || context.attrName || context.eventType
+            || ({ 'dom.innerHTML': 'innerHTML', 'dom.outerHTML': 'outerHTML', 'dom.insertAdjacentHTML': 'innerHTML', 'document.write': 'innerHTML' })[sinkId] || null;
         const sources = Array.isArray(taintedSources) && taintedSources.length ? taintedSources : (context.taintedSources || []);
         if (!shouldReportDomXss(attrName, value, sources)) {
             const attr = String(attrName || '').toLowerCase();
@@ -4121,11 +4794,18 @@ function createIastBufferId() {
 }
 
 function postBufferedIastMessage(msg) {
+    let delivered = false;
     withoutHooks(() => {
         const bufferId = createIastBufferId();
         const bufferedMsg = msg && typeof msg === 'object'
             ? Object.assign({}, msg, { __ptkIastBufferId: bufferId })
             : { value: msg, __ptkIastBufferId: bufferId };
+        if (IAST_BRIDGE_UNACKED.size >= IAST_BRIDGE_UNACKED_LIMIT) {
+            recordIastObservationGap('bridge_unacked_limit', true);
+        } else {
+            IAST_BRIDGE_UNACKED.set(bufferId, bufferedMsg);
+            emitIastObservationState();
+        }
         try {
             emitIastPageBridgeMessage({
                 channel: 'ptk_iast_buffer_append',
@@ -4133,8 +4813,10 @@ function postBufferedIastMessage(msg) {
                 message: bufferedMsg
             });
         } catch (_) {/*ignore*/ }
-        emitIastPageBridgeMessage(bufferedMsg);
+        delivered = emitIastPageBridgeMessage(bufferedMsg);
     });
+    if (!delivered) recordIastObservationGap('bridge_delivery_failed', true);
+    return delivered;
 }
 
 function postDirectIastMessage(msg) {
@@ -4320,7 +5002,19 @@ function reportRuntimeSignal({
 }
 
 
-function reportFinding({ type, sink, sinkId = null, ruleId = null, category = null, severity: severityOverride = null, matched, source, sources = null, context = {} }) {
+function reportFinding({ type, sink, sinkId = null, ruleId = null, category = null, severity: severityOverride = null, matched, source, sources = null, context = {} }, publication = null) {
+    if (IAST_OBSERVATION_STOPPED && !IAST_OBSERVATION_SETTLING) return;
+    if (!context.observation) {
+        const operation = captureIastOperation(sinkId || sink, context);
+        context = Object.assign({}, context, { observation: {
+            schemaVersion: 2, identityVersion: 2, kind: 'policy_signal',
+            operationId: operation.operationId, gradeAuthority: 'page_observed_untrusted',
+            acquisition: 'existing_other', evidenceGrade: null, inheritedGrade: null,
+            valueRelation: 'unavailable', propagation: null, attackerControl: 'not_applicable',
+            controlReason: 'Source-less policy observation.', site: operation.site,
+            sourceBinding: null, completeness: operation.completeness
+        } });
+    }
     // Require rule catalog
     if (!IAST_MODULES) {
         //__PTK_IAST_DBG__ && __PTK_IAST_DBG__('IAST: skip finding, modules not loaded yet', { sinkId, ruleId });
@@ -4341,13 +5035,15 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
         return;
     }
 
-    const loc = window.location.href;
-    let trace = '';
-    try {
-        trace = (new Error(`Sink: ${type}`)).stack;
-    } catch (e) { }
+    const loc = publication ? publication.location : window.location.href;
+    let trace = publication ? publication.trace : '';
+    if (!publication) {
+        try {
+            trace = (new Error(`Sink: ${type}`)).stack;
+        } catch (e) { }
+    }
     const cleanedTrace = cleanTraceFrames(trace);
-    const attackId = window.__PTK_CURRENT_ATTACK_ID__ || null;
+    const attackId = publication ? publication.attackId : (window.__PTK_CURRENT_ATTACK_ID__ || null);
     const moduleMeta = ruleEntry.moduleMeta || {};
     const ruleMeta = ruleEntry.ruleMeta || {};
     const resolvedSeverity = resolveIastEffectiveSeverity({
@@ -4372,7 +5068,11 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
         recommendation,
         links: mergedLinks
     };
-    let normalizedSources = Array.isArray(sources) && sources.length ? normalizeTaintedSources(sources, matched) : [];
+    // Replayed observations already contain their sink-time normalized fields;
+    // do not fill original nulls from a newer same-key source registration.
+    let normalizedSources = Array.isArray(sources) && sources.length
+        ? (publication ? sources : normalizeTaintedSources(sources, matched))
+        : [];
     const normalizedPrimarySource = (() => {
         if (!source) return null;
         if (typeof source === 'string') {
@@ -4411,7 +5111,7 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
         destHost: context.destHost || resolvedNetworkTarget?.host || null,
         destOrigin: context.destOrigin || resolvedNetworkTarget?.origin || null,
         isCrossOrigin: typeof context.isCrossOrigin === 'boolean' ? context.isCrossOrigin : (resolvedNetworkTarget?.isCrossOrigin ?? null),
-        tagName: context.tagName || context.element?.tagName || null,
+        tagName: context.tagName || (publication ? publication.elementTagName : context.element?.tagName) || null,
         domPath: context.domPath || null,
         attribute: context.attribute || null,
         elementId: context.elementId || null,
@@ -4465,7 +5165,8 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
         sources: decoratedSources,
         primarySource,
         secondarySources,
-        schemaVersion: IAST_EVIDENCE_SCHEMA_VERSION,
+        schemaVersion: 2,
+        observation: context.observation,
         primaryClass,
         sourceRole,
         origin: context?.origin || null,
@@ -4475,18 +5176,18 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
         trust: normalizedTrust,
         suppression,
         networkTarget: resolvedNetworkTarget || null,
-        routing: buildRoutingMeta(),
+        routing: publication ? publication.routing : buildRoutingMeta(),
         category: resolvedCategory,
         severity: resolvedSeverity,
         meta: findingMeta,
-        context: enrichContext(context),
+        context: enrichContext(publication ? Object.assign({}, context, publication.elementContext) : context),
         sinkContext,
         flowSummary,
         location: loc,
         trace: cleanedTrace.trace,
         traceSummary: cleanedTrace.traceSummary,
         attackId: attackId,
-        timestamp: Date.now(),
+        timestamp: publication ? publication.timestamp : Date.now(),
         description,
         recommendation,
         links: mergedLinks
@@ -4517,6 +5218,12 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
 
     // 2) PostMessage to background (sanitize non-cloneable payloads)
     const sanitized = sanitizeIastPayloadObject(details);
+    // Count one admitted relationship at its common publication boundary,
+    // including source-less policy reports. Buffered redelivery does not enter
+    // this function and cannot inflate this document high-water receipt.
+    IAST_OBSERVATION_STATE.terminal = false;
+    IAST_OBSERVATION_STATE.emittedRelationships += 1;
+    emitIastObservationState();
     try {
         const navigationCorrelation = sanitized?.context?.navigationCorrelation;
         if (navigationCorrelation?.deferUntilObserved === true) {
@@ -4540,6 +5247,7 @@ function reportFinding({ type, sink, sinkId = null, ruleId = null, category = nu
             finding: sanitized
         })
     } catch (e) {
+        recordIastObservationGap('finding_publication_failed', true);
         console.warn('IAST reportFinding.postMessage failed:', e);
     }
 }
@@ -5081,13 +5789,13 @@ function shouldSuppressLowSignalFunctionCodeMatch(sinkId, sources) {
     return sources.every((source) => isLowSignalFunctionCodeSource(source));
 }
 
-function shouldSuppressForSanitizer(ruleEntry, value) {
+function shouldSuppressForSanitizer(ruleEntry, value, observedSanitizers = null) {
     const ruleMeta = ruleEntry?.ruleMeta || {};
     const allowed = Array.isArray(ruleEntry.sanitizersAllowed)
         ? ruleEntry.sanitizersAllowed
         : (Array.isArray(ruleMeta.sanitizersAllowed) ? ruleMeta.sanitizersAllowed : []);
     if (!allowed.length) return { suppress: false, observed: [] };
-    const observed = getSanitizersForValue(value).filter(id => allowed.includes(id));
+    const observed = (observedSanitizers || getSanitizersForValue(value)).filter(id => allowed.includes(id));
     if (!observed.length) return { suppress: false, observed: [] };
     const onSanitized = ruleEntry.onSanitized || ruleMeta.onSanitized || 'lower_confidence';
     return { suppress: onSanitized === 'suppress', observed };
@@ -5703,13 +6411,15 @@ function resolveIastSinkElement(sinkId, contextElement, activeElement = null) {
     return shouldUseActiveElementForIastSink(sinkId) ? (activeElement || null) : null;
 }
 
-function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOverride = null) {
+function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOverride = null, options = {}) {
+    if (IAST_OBSERVATION_STOPPED && !IAST_OBSERVATION_SETTLING) return;
     if (__IAST_DISABLE_HOOKS__) return false;
     const context = Object.assign({ value }, contextExtras);
     const sinkId = info.sinkId || info.sink || null;
     const match = matchOverride || matchesTaint(value);
     const taintEntry = getTaintEntry(value);
     const taintedSources = match ? normalizeTaintedSources(match.allSources, match.raw) : [];
+    const operation = match?.observationOperation || captureIastOperation(sinkId, context);
     const heuristicDecision = evaluateSinkHeuristics(value, info, context, taintedSources);
     if (heuristicDecision.skip) return false;
     if (!match && !taintEntry) return false;
@@ -5735,9 +6445,89 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
         value
     };
     const flow = buildTaintFlow(match, sinkMeta);
+    const sourceFlows = Object.create(null);
+    taintedSources.forEach(source => { sourceFlows[buildIastSourceBindingKey(source)] = buildIastSourceFlow(source, sinkMeta); });
     if (flow.length) {
         context.flow = flow;
     }
+    const observation = {
+        value, info, context, sinkId, match, taintEntry, taintedSources,
+        heuristicDecision, flow, sourceFlows, operation, location, transportCarrierKey
+    };
+    if (!IAST_MODULES || options.deferPublication === true) {
+        // Freeze the original observation, not a partially classified report.
+        // The same rule/source/precision path runs once rules become available.
+        // No target code or source collector is replayed at flush time.
+        try {
+            const sourceMetadata = Object.create(null);
+            taintedSources.forEach((source) => {
+                if (source?.key) sourceMetadata[source.key] = {
+                    observedValueType: getTaintMetaEntry(source.key)?.observedValueType
+                };
+            });
+            const snapshot = withoutHooks(() => {
+                // Enrichment belongs to publication, not qualification: adding
+                // a node ID here must not change the existing SMART dedup key.
+                const enriched = enrichContext(context);
+                const elementContext = {};
+                ['tagName', 'elementId', 'elementClasses', 'domPath', 'elementOuterHTML'].forEach((key) => {
+                    if (Object.prototype.hasOwnProperty.call(enriched, key)) elementContext[key] = enriched[key];
+                });
+                const qualificationContext = Object.assign({}, context);
+                delete qualificationContext.element;
+                delete qualificationContext.target;
+                const immutableOperation = Object.assign({}, operation);
+                delete immutableOperation.htmlRelationshipAdmission;
+                return structuredClone(Object.assign({}, observation, {
+                    operation: immutableOperation,
+                    context: qualificationContext,
+                    sinkArgs: buildSinkArgs(context),
+                    observedSanitizers: getSanitizersForValue(value),
+                    sourceMetadata,
+                    publication: {
+                        location,
+                        routing: buildRoutingMeta(),
+                        attackId: window.__PTK_CURRENT_ATTACK_ID__ || null,
+                        timestamp: Date.now(),
+                        trace: captureStackTrace(`Sink: ${info.type || sinkId || 'iast_sink'}`),
+                        elementTagName: context.element?.tagName || null,
+                        elementContext
+                    }
+                }));
+            });
+            // Only admission accounting is shared between snapshots from one
+            // native write. Source/value/site evidence remains detached.
+            if (operation.htmlRelationshipAdmission) {
+                snapshot.operation.htmlRelationshipAdmission = operation.htmlRelationshipAdmission;
+            }
+            if (options.deferPublication === true) return snapshot;
+            if (!queuePendingIastFindingReport({ sinkObservation: snapshot, document })) {
+                window.__PTK_IAST_LAST_REPORT_DEBUG__ = { sinkId, reason: 'pending_observation_limit' };
+                return false;
+            }
+            window.__PTK_IAST_LAST_REPORT_DEBUG__ = {
+                sinkId,
+                requestedRuleId: info.ruleId || null,
+                reason: 'queued_before_modules'
+            };
+            requestModulesFromBackground();
+            return true;
+        } catch (_) {
+            recordIastObservationGap('pending_snapshot_unavailable', true);
+            window.__PTK_IAST_LAST_REPORT_DEBUG__ = { sinkId, reason: 'pending_snapshot_unavailable' };
+            return false;
+        }
+    }
+    return qualifyIastSinkObservation(observation);
+}
+
+function qualifyIastSinkObservation(observation) {
+    if (__IAST_DISABLE_HOOKS__ || !IAST_MODULES) return false;
+    const {
+        value, info, context, sinkId, match, taintEntry, taintedSources,
+        heuristicDecision, flow, sourceFlows = null, operation = captureIastOperation(sinkId, context), location, transportCarrierKey, publication = null,
+        sourceMetadata = null
+    } = observation;
     const explicitRule = info.ruleId ? getIastRuleByRuleId(info.ruleId) : null;
     const sinkCandidates = sinkId ? getIastRulesBySinkId(sinkId) : [];
     // A browser-observed navigation has already been classified to one concrete
@@ -5756,25 +6546,8 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
         candidateRuleIds: candidates.map((entry) => entry?.ruleId || null),
         taintedSourceKinds: taintedSources.map((src) => src?.sourceKind || src?.kind || null)
     };
-    if (!IAST_MODULES) {
-        reportFinding({
-            type: info.type || info.sinkId || 'iast_sink',
-            sink: info.sink || sinkId || 'iast_sink',
-            sinkId,
-            ruleId: info.ruleId || null,
-            matched: match.raw,
-            source: taintedSources[0] || match.source,
-            sources: taintedSources,
-            severity: info.severity || null,
-            context
-        });
-        window.__PTK_IAST_LAST_REPORT_DEBUG__ = Object.assign({}, window.__PTK_IAST_LAST_REPORT_DEBUG__ || {}, {
-            reason: 'queued_before_modules'
-        });
-        return true;
-    }
     if (!candidates.length) return false;
-    const sinkArgs = buildSinkArgs(context);
+    const sinkArgs = observation.sinkArgs || buildSinkArgs(context);
     const sourceRefsFromSubstring = (sources) => sources.map(src => ({
         sourceId: src?.sourceId || null,
         taintId: src?.taintId || null,
@@ -5795,23 +6568,29 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
     }];
     const isSmart = isSmartScanStrategy();
     const transportCarrierIsPrimary = Boolean(transportCarrierKey) && sinkId !== 'http.image.src';
-    // Mutation findings need the rule/source-qualified dedup below: a prior
-    // observation at another node must not consume every source on this page.
-    const sinkPageKey = sinkId && sinkId !== 'dom.mutation' && location
-        ? `${sinkId}|${location}|${transportCarrierKey || ''}`
-        : null;
-    if (isSmart && sinkPageKey && isCacheHit(IAST_SINK_SEEN, sinkPageKey)) {
-        return false;
-    }
-    const networkDedupKey = buildNetworkDedupKey({
-        transportCarrierKey,
-        location
-    });
-    if (isSmart && networkDedupKey && isCacheHit(IAST_FINDING_DEDUP, networkDedupKey)) {
-        return false;
-    }
-    let reported = false;
+    // Enumerate independently eligible relationships before SMART deduplication.
+    // A weak generic path match must not consume a stronger secondary rule.
+    const pairs = [];
     for (const ruleEntry of candidates) {
+        for (const source of sanitizeSourcesForRule(ruleEntry, taintedSources)) {
+            const relationTaint = source.sourceId && source.sourceId === taintEntry?.taint?.sourceId ? taintEntry : null;
+            const grade = classifyIastShadowSource(value, source, relationTaint);
+            pairs.push({ ruleEntry, source, strength: IAST_SHADOW_GRADE_ORDER[grade.effectiveGrade] || 0,
+                relationStrength: IAST_SHADOW_GRADE_ORDER[grade.valueRelation] || 0 });
+        }
+    }
+    pairs.sort((a, b) => b.strength - a.strength || b.relationStrength - a.relationStrength
+        || String(a.ruleEntry.ruleId).localeCompare(String(b.ruleEntry.ruleId)) || String(a.source.key).localeCompare(String(b.source.key)));
+    let reported = false;
+    let admitted = 0;
+    for (const pair of pairs) {
+        const ruleEntry = pair.ruleEntry;
+        const primarySource = pair.source;
+        const filteredSources = [primarySource];
+        if (typeof primarySource.key !== 'string' || primarySource.key.length > 512) {
+            recordIastObservationGap('source_key_size_limit', true);
+            continue;
+        }
         const conditions = ruleEntry.conditions || {};
         if (conditions.requiresFramework && context.framework !== conditions.requiresFramework) {
             continue;
@@ -5829,7 +6608,6 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
                 continue;
             }
         }
-        const filteredSources = sanitizeSourcesForRule(ruleEntry, taintedSources);
         if (!filteredSources.length) {
             window.__PTK_IAST_LAST_REPORT_DEBUG__ = Object.assign({}, window.__PTK_IAST_LAST_REPORT_DEBUG__ || {}, {
                 ruleId: ruleEntry.ruleId,
@@ -5863,44 +6641,33 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
             });
             continue;
         }
-        const sanitizerCheck = shouldSuppressForSanitizer(ruleEntry, value);
+        const sanitizerCheck = shouldSuppressForSanitizer(ruleEntry, value, observation.observedSanitizers);
         if (sanitizerCheck.suppress) continue;
-        const primarySource = filteredSources.length
-            ? filteredSources[0]
-            : (match.source ? normalizeSourceEntry({ source: match.source, raw: match.raw }) : null);
         const sourceKey = primarySource?.key || null;
-        if (isSmart) {
-            const dedupKey = buildFindingDedupKey({
-                ruleId: ruleEntry.ruleId,
-                sinkId,
-                sourceKey,
-                location,
-                elementId: transportCarrierIsPrimary ? null : (context.elementId || null),
-                attribute: transportCarrierIsPrimary ? null : (context.attribute || null),
-                transportCarrierKey
-            });
-            if (isCacheHit(IAST_FINDING_DEDUP, dedupKey)) {
-                continue;
-            }
-        }
+        const relationTaint = primarySource.sourceId && primarySource.sourceId === taintEntry?.taint?.sourceId ? taintEntry : null;
+        const pairMatch = { source: sourceKey, raw: primarySource.raw, allSources: filteredSources };
+        const pairFlow = sourceFlows?.[buildIastSourceBindingKey(primarySource)] || (publication ? [] : buildIastSourceFlow(primarySource, { sinkId, sink: info.sink || sinkId, location, value }));
         const nextContext = Object.assign({}, context, {
             taintedSources: filteredSources,
-            sinkArgs
+            sinkArgs,
+            flow: pairFlow
         });
-        const matchInfo = taintEntry
-            ? { matchType: taintEntry.matchType || 'id', confidence: taintEntry.matchType === 'id' ? 95 : 80 }
+        const matchInfo = relationTaint
+            ? { matchType: relationTaint.matchType || 'id', confidence: relationTaint.matchType === 'id' ? 95 : 80 }
             : { matchType: 'substring', confidence: 60 };
         nextContext.match = matchInfo;
-        nextContext.sourceRefs = taintEntry
-            ? sourceRefsFromTaint(taintEntry.taint)
+        nextContext.sourceRefs = relationTaint
+            ? sourceRefsFromTaint(relationTaint.taint)
             : sourceRefsFromSubstring(filteredSources);
         applySourceSpecificSignals(nextContext, primarySource, sinkId);
         if (sanitizerCheck.observed.length) {
             nextContext.sanitizerObserved = sanitizerCheck.observed;
             nextContext.confidencePenalty = 25;
         }
-        if (heuristicDecision.downgrade) {
-            applyHeuristicDowngrade(nextContext, heuristicDecision.downgrade);
+        const pairHeuristic = evaluateSinkHeuristics(value, info, nextContext, filteredSources);
+        if (pairHeuristic.skip) continue;
+        if (pairHeuristic.downgrade) {
+            applyHeuristicDowngrade(nextContext, pairHeuristic.downgrade);
         }
         if (sinkId && (sinkId === 'http.xhr.setRequestHeader' || sinkId === 'http.fetch.headers')) {
             const target = nextContext?.networkTarget
@@ -6007,20 +6774,62 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
         let shadow = null;
         let precisionSeverity = null;
         try {
-            shadow = classifyIastShadowFinding(value, filteredSources, match, taintEntry, flow);
-            precisionSeverity = getIastPrecisionSeverityOverride(sinkId, nextContext, filteredSources, shadow, taintEntry);
+            shadow = classifyIastShadowFinding(value, filteredSources, pairMatch, relationTaint, pairFlow);
+            precisionSeverity = getIastPrecisionSeverityOverride(sinkId, nextContext, filteredSources, shadow, relationTaint, sourceMetadata);
         } catch (_) { }
+        const relationshipObservation = buildIastRelationshipObservation(primarySource, value, relationTaint, operation, sinkId);
+        if (isIastDirectHtmlSink(sinkId) && precisionSeverity) {
+            const existingSeverity = resolveIastEffectiveSeverity({
+                override: nextContext.severityOverride || info.severity,
+                moduleMeta: ruleEntry.moduleMeta || {}, ruleMeta: ruleEntry.ruleMeta || {}
+            });
+            const severityOrder = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
+            nextContext.severityOverride = severityOrder[existingSeverity] < severityOrder[precisionSeverity]
+                ? existingSeverity : precisionSeverity;
+            nextContext.primaryClass = IAST_PRIMARY_CLASSES.OBSERVATION;
+            nextContext.sourceRole = IAST_SOURCE_ROLES.OBSERVED;
+            nextContext.detection = Object.assign({}, nextContext.detection || {}, {
+                reason: IAST_REASON_CODES.FLOW_MATCH,
+                confidence: Math.min(nextContext.detection?.confidence || 55, 55),
+                details: Object.assign({}, nextContext.detection?.details || {}, {
+                    heuristic: 'direct_html_relationship_precision',
+                    htmlImpact: nextContext.htmlImpact?.status || 'unknown',
+                    impactReason: nextContext.htmlImpact?.reason || 'html_impact_unavailable',
+                    sourceReadObserved: primarySource.acquisition === 'instrumented_read',
+                    evidenceGrade: relationshipObservation.evidenceGrade
+                })
+            });
+        }
+        if (primarySource.acquisition === 'sink_storage_snapshot') {
+            nextContext.primaryClass = IAST_PRIMARY_CLASSES.OBSERVATION;
+            nextContext.sourceRole = IAST_SOURCE_ROLES.OBSERVED;
+            nextContext.severityOverride = precisionSeverity === 'info' || nextContext.severityOverride === 'info' ? 'info' : 'low';
+            nextContext.detection = { reason: IAST_REASON_CODES.STORAGE_VALUE_EQUALITY_OBSERVED,
+                dataKind: IAST_DATA_KINDS.UNKNOWN, confidence: 55,
+                details: { acquisition: 'sink_storage_snapshot', sourceReadObserved: false, attackerControlEstablished: false } };
+        }
+        nextContext.observation = relationshipObservation;
+        const finalSeverity = nextContext.severityOverride || precisionSeverity || info.severity || null;
+        const dedupKey = buildIastRelationshipDedupKey(ruleEntry, primarySource, sinkId, location, nextContext, finalSeverity, relationshipObservation);
+        if (isSmart && isCacheHit(IAST_FINDING_DEDUP, dedupKey)) continue;
+        if (admitted >= IAST_OBSERVATION_LIMITS.relationships
+            || operation.htmlRelationshipAdmission?.admitted >= IAST_OBSERVATION_LIMITS.relationships) {
+            recordIastObservationGap('qualified_relationship_limit', true);
+            break;
+        }
         reportFinding({
             type: info.type || ruleEntry.ruleId || info.sinkId || 'iast_sink',
             sink: info.sink || sinkId || 'iast_sink',
             sinkId,
             ruleId: ruleEntry.ruleId,
-            matched: match.raw,
-            source: primarySource || match.source,
+            matched: primarySource.raw,
+            source: primarySource,
             sources: filteredSources,
-            severity: nextContext.severityOverride || precisionSeverity || info.severity || null,
+            severity: finalSeverity,
             context: nextContext
-        });
+        }, publication);
+        admitted += 1;
+        if (operation.htmlRelationshipAdmission) operation.htmlRelationshipAdmission.admitted += 1;
         try { recordIastShadowEvidence(shadow); } catch (_) { }
         window.__PTK_IAST_LAST_REPORT_DEBUG__ = Object.assign({}, window.__PTK_IAST_LAST_REPORT_DEBUG__ || {}, {
             ruleId: ruleEntry.ruleId,
@@ -6029,25 +6838,10 @@ function maybeReportTaintedValue(value, info = {}, contextExtras = {}, matchOver
         });
         reported = true;
         if (isSmart && nextContext?.navigationCorrelation?.deferUntilObserved !== true) {
-            if (sinkPageKey) {
-                markCache(IAST_SINK_SEEN, sinkPageKey);
-            }
-            const dedupKey = buildFindingDedupKey({
-                ruleId: ruleEntry.ruleId,
-                sinkId,
-                sourceKey,
-                location,
-                elementId: transportCarrierIsPrimary ? null : (context.elementId || null),
-                attribute: transportCarrierIsPrimary ? null : (context.attribute || null),
-                transportCarrierKey
-            });
             markCache(IAST_FINDING_DEDUP, dedupKey);
-            if (networkDedupKey) {
-                markCache(IAST_FINDING_DEDUP, networkDedupKey);
-            }
-            break;
         }
     }
+    emitIastObservationState();
     return reported;
 }
 
@@ -6101,7 +6895,7 @@ function scanInlineEvents(htmlFragment) {
             return originalEval.call(this, code);
         }
         runIastHookGuard('hook.code.exec', 'window.eval.pre', () => {
-            const m = matchesTaint(code);
+            const m = matchesIastSinkTaint(code, 'code.eval', { element: document?.activeElement || null });
             if (m) {
                 maybeReportTaintedValue(code, {
                     type: 'xss-via-eval',
@@ -6126,7 +6920,7 @@ function scanInlineEvents(htmlFragment) {
             }
             runIastHookGuard('hook.code.exec', 'Function.construct.pre', () => {
                 const body = args.slice(-1)[0] + '';
-                const m = matchesTaint(body);
+                const m = matchesIastSinkTaint(body, 'code.function.constructor', { element: document?.activeElement || null });
                 if (m) {
                     const angularContext = getActiveAngularExecutionContext();
                     maybeReportTaintedValue(body, {
@@ -6147,7 +6941,7 @@ function scanInlineEvents(htmlFragment) {
             }
             runIastHookGuard('hook.code.exec', 'Function.apply.pre', () => {
                 const body = args.slice(-1)[0] + '';
-                const m = matchesTaint(body);
+                const m = matchesIastSinkTaint(body, 'code.function.apply', { element: document?.activeElement || null });
                 if (m) {
                     const angularContext = getActiveAngularExecutionContext();
                     maybeReportTaintedValue(body, {
@@ -6461,65 +7255,91 @@ function scanInlineEvents(htmlFragment) {
 // document.write
 ; (function () {
     const origWrite = document.write;
+    const parseHtml = createIastDirectHtmlParser();
+    IAST_DIRECT_HTML_PARSER = parseHtml;
 
     document.write = function (...args) {
-        if (!isHookGroupEnabled('hook.dom.documentWrite')) {
-            return origWrite.apply(document, args);
+        if (!isHookGroupEnabled('hook.dom.documentWrite') || args.some(value => typeof value !== 'string')) {
+            return origWrite.apply(this, args);
         }
         const html = args.join('');
+        const operationMatch = matchesIastSinkTaint(html, 'document.write', { element: document?.activeElement || null });
+        const snapshots = [];
+        const captureReport = (value, info, context, match) => {
+            // A late/unverified entry has no private document-start timer.
+            // Keep its original synchronous publication path unchanged.
+            if (!IAST_DEFERRED_WRITE_TIMER) return maybeReportTaintedValue(value, info, context, match);
+            const snapshot = maybeReportTaintedValue(value, info, context, match, { deferPublication: true });
+            if (snapshot) snapshots.push(snapshot);
+        };
         runIastHookGuard('hook.dom.documentWrite', 'document.write.analysis', () => {
+            if (!operationMatch && !matchesTaint(html)) return;
+            const operation = operationMatch?.observationOperation || captureIastOperation('document.write', {});
+            operation.htmlRelationshipAdmission = { admitted: 0 };
+            const analysis = inspectIastDirectHtmlImpact(html, 'document.write', {}, parseHtml);
+            const htmlImpact = { status: analysis.status, reason: analysis.reason };
             if (!allowHeavyHook()) {
-                const m = matchesTaint(html);
+                const m = operationMatch || matchesTaint(html);
                 if (m) {
-                    maybeReportTaintedValue(html, {
+                    captureReport(html, {
                         type: 'xss-via-document.write',
                         sink: 'document.write',
                         sinkId: 'document.write'
-                    }, { value: html, element: document?.activeElement || null }, m);
+                    }, { value: html, element: document?.activeElement || null, htmlImpact }, m);
                 }
                 return;
             }
             try {
-                const doc = withInternalHtmlParser(() => {
-                    const parser = new DOMParser();
-                    return parser.parseFromString(coerceDomParserMarkup(html), 'text/html');
-                });
-                const reported = traverseAndReport(doc.body, 'document.write');
-                if (!reported) {
-                    const m = matchesTaint(html);
+                const reported = traverseAndReport(analysis, 'document.write', operation, captureReport);
+                const directMatch = operationMatch || matchesTaint(html);
+                const reportedBindings = new Set((analysis.reports || []).flatMap(({ candidate }) =>
+                    normalizeTaintedSources((candidate.match?.allSources || []).slice(0, IAST_OBSERVATION_LIMITS.relationships),
+                        candidate.match?.raw).map(buildIastSourceBindingKey)));
+                const remainingSources = reported ? (directMatch?.allSources || []).filter(source =>
+                    !reportedBindings.has(buildIastSourceBindingKey(source))) : directMatch?.allSources;
+                if (!reported || remainingSources?.length) {
+                    const firstRemaining = remainingSources?.[0];
+                    const m = reported && firstRemaining ? Object.assign({}, directMatch, {
+                        source: firstRemaining.key || firstRemaining.source,
+                        raw: firstRemaining.raw, allSources: remainingSources
+                    }) : directMatch;
+                    if (m) m.observationOperation = operation;
                     if (m) {
-                        maybeReportTaintedValue(html, {
+                        captureReport(html, {
                             type: 'xss-via-document.write',
                             sink: 'document.write',
                             sinkId: 'document.write'
-                        }, { value: html, element: document?.activeElement || null, fallbackReason: 'direct_tainted_html_sink' }, m);
+                        }, { value: html, element: document?.activeElement || null, htmlImpact, fallbackReason: 'direct_tainted_html_sink' }, m);
                     }
                 }
             } catch (_) {
-                const m = matchesTaint(html);
+                const m = operationMatch || matchesTaint(html);
                 if (m) {
-                    maybeReportTaintedValue(html, {
+                    captureReport(html, {
                         type: 'xss-via-document.write',
                         sink: 'document.write',
                         sinkId: 'document.write'
-                    }, { value: html, element: document?.activeElement || null }, m);
-                    scanInlineEvents(html);
+                    }, { value: html, element: document?.activeElement || null, htmlImpact }, m);
                 }
             }
         });
-        return origWrite.apply(document, args);
+        const entry = reserveDeferredIastWriteReports(snapshots);
+        try {
+            const result = origWrite.apply(this, args);
+            completeDeferredIastWriteReports(entry);
+            return result;
+        } catch (error) {
+            discardDeferredIastWriteReports(entry);
+            throw error;
+        }
     };
 
     // Helper: walk a DOM subtree and report the first taint per node
-    function traverseAndReport(root, sink) {
+    function traverseAndReport(analysis, sink, operation, captureReport) {
         const seen = new Set();  // avoid duplicates
-        walkElementSubtree(root, {
-            maxElements: IAST_SCAN_STRATEGY === 'SMART' ? 24 : 72,
-            maxMs: IAST_SCAN_STRATEGY === 'SMART' ? 2 : 4
-        }, (node) => {
-            const candidate = getExecutableMutationCandidate(node);
+        for (const { node, candidate, htmlImpact } of analysis.reports || []) {
             if (candidate && !seen.has(node)) {
-                maybeReportTaintedValue(candidate.value, {
+                captureReport(candidate.value, {
                     type: 'xss-via-document.write',
                     sink: sink,
                     sinkId: 'document.write'
@@ -6529,62 +7349,66 @@ function scanInlineEvents(htmlFragment) {
                     domPath: getDomPath(node),
                     tag: candidate.tag,
                     attribute: candidate.attribute,
-                    candidateType: candidate.candidateType
-                }, candidate.match);
+                    candidateType: candidate.candidateType,
+                    htmlImpact
+                }, Object.assign({}, candidate.match, { observationOperation: operation }));
                 seen.add(node);
             }
-            return seen.size < 3;
-        });
+        }
         return seen.size;
     }
 })();
 
 // innerHTML/outerHTML
 if (!isTrustedTypesHtmlRestricted()) {
+    const parseHtml = IAST_DIRECT_HTML_PARSER;
     ['innerHTML', 'outerHTML'].forEach(prop => {
         const desc = Object.getOwnPropertyDescriptor(Element.prototype, prop);
         Object.defineProperty(Element.prototype, prop, {
             get: desc.get,
             set(htmlString) {
-                if (__IAST_DISABLE_HOOKS__ || !isHookGroupEnabled('hook.dom.htmlAssignments')) {
+                if (__IAST_DISABLE_HOOKS__ || !isHookGroupEnabled('hook.dom.htmlAssignments') || typeof htmlString !== 'string') {
                     return desc.set.call(this, htmlString);
                 }
+                const operationMatch = matchesIastSinkTaint(htmlString, prop === 'innerHTML' ? 'dom.innerHTML' : 'dom.outerHTML', { element: this, domPath: getDomPath(this) });
                 runIastHookGuard('hook.dom.htmlAssignments', `Element.${prop}.analysis`, () => {
+                    if (typeof htmlString === 'string' && !operationMatch && !matchesTaint(htmlString)) return;
+                    const analysis = inspectIastDirectHtmlImpact(htmlString, prop === 'innerHTML' ? 'dom.innerHTML' : 'dom.outerHTML', { element: this }, parseHtml);
+                    const htmlImpact = { status: analysis.status, reason: analysis.reason };
                     if (!allowHeavyHook()) {
-                        const m = matchesTaint(htmlString);
+                        const m = operationMatch || matchesTaint(htmlString);
                         if (m) {
                             maybeReportTaintedValue(htmlString, {
                                 type: `xss-via-${prop}`,
                                 sink: prop,
                                 sinkId: prop === 'innerHTML' ? 'dom.innerHTML' : 'dom.outerHTML'
-                            }, { value: htmlString, element: this, domPath: getDomPath(this) }, m);
+                            }, { value: htmlString, element: this, domPath: getDomPath(this), htmlImpact }, m);
                         }
                         return;
                     }
                     try {
-                        const frag = withInternalHtmlParser(() => document.createRange().createContextualFragment(htmlString));
+                        const frag = analysis.root;
                         const reported = typeof traverseAndReport === 'function'
                             ? traverseAndReport(frag, `xss-via-${prop}`)
                             : 0;
                         if (!reported) {
-                            const m = matchesTaint(htmlString);
+                            const m = operationMatch || matchesTaint(htmlString);
                             if (m) {
                                 maybeReportTaintedValue(htmlString, {
                                     type: `xss-via-${prop}`,
                                     sink: prop,
                                     sinkId: prop === 'innerHTML' ? 'dom.innerHTML' : 'dom.outerHTML'
-                                }, { value: htmlString, element: this, domPath: getDomPath(this), fallbackReason: 'direct_tainted_html_sink' }, m);
+                                }, { value: htmlString, element: this, domPath: getDomPath(this), htmlImpact, fallbackReason: 'direct_tainted_html_sink' }, m);
                             }
                         }
                     } catch (_) {
-                        const m = matchesTaint(htmlString);
+                        const m = operationMatch || matchesTaint(htmlString);
                         if (m) {
                             maybeReportTaintedValue(htmlString, {
                                 type: `xss-via-${prop}`,
                                 sink: prop,
                                 sinkId: prop === 'innerHTML' ? 'dom.innerHTML' : 'dom.outerHTML'
-                            }, { value: htmlString, element: this, domPath: getDomPath(this) }, m);
-                            scanInlineEvents(htmlString);
+                            }, { value: htmlString, element: this, domPath: getDomPath(this), htmlImpact }, m);
                         }
                     }
                 });
@@ -6601,46 +7425,51 @@ if (!isTrustedTypesHtmlRestricted()) {
 ; (function () {
     if (isTrustedTypesHtmlRestricted()) return;
     const origInsert = Element.prototype.insertAdjacentHTML;
+    const parseHtml = IAST_DIRECT_HTML_PARSER;
     Element.prototype.insertAdjacentHTML = function (pos, htmlString) {
-        if (__IAST_DISABLE_HOOKS__ || !isHookGroupEnabled('hook.dom.htmlAssignments')) {
+        if (__IAST_DISABLE_HOOKS__ || !isHookGroupEnabled('hook.dom.htmlAssignments')
+            || typeof htmlString !== 'string' || typeof pos !== 'string') {
             return origInsert.call(this, pos, htmlString);
         }
+        const operationMatch = matchesIastSinkTaint(htmlString, 'dom.insertAdjacentHTML', { element: this, position: pos });
         runIastHookGuard('hook.dom.htmlAssignments', 'Element.insertAdjacentHTML.analysis', () => {
+            if (typeof htmlString === 'string' && !operationMatch && !matchesTaint(htmlString)) return;
+            const analysis = inspectIastDirectHtmlImpact(htmlString, 'dom.insertAdjacentHTML', { element: this, position: pos }, parseHtml);
+            const htmlImpact = { status: analysis.status, reason: analysis.reason };
             if (!allowHeavyHook()) {
-                const m = matchesTaint(htmlString);
+                const m = operationMatch || matchesTaint(htmlString);
                 if (m) {
                     maybeReportTaintedValue(htmlString, {
                         type: 'xss-via-insertAdjacentHTML',
                         sink: 'insertAdjacentHTML',
                         sinkId: 'dom.insertAdjacentHTML'
-                    }, { value: htmlString, element: this, position: pos }, m);
+                    }, { value: htmlString, element: this, position: pos, htmlImpact }, m);
                 }
                 return;
             }
             try {
-                const frag = withInternalHtmlParser(() => document.createRange().createContextualFragment(htmlString));
+                const frag = analysis.root;
                 const reported = typeof traverseAndReport === 'function'
                     ? traverseAndReport(frag, `insertAdjacentHTML(${pos})`)
                     : 0;
                 if (!reported) {
-                    const m = matchesTaint(htmlString);
+                    const m = operationMatch || matchesTaint(htmlString);
                     if (m) {
                         maybeReportTaintedValue(htmlString, {
                             type: 'xss-via-insertAdjacentHTML',
                             sink: 'insertAdjacentHTML',
                             sinkId: 'dom.insertAdjacentHTML'
-                        }, { value: htmlString, element: this, position: pos, fallbackReason: 'direct_tainted_html_sink' }, m);
+                        }, { value: htmlString, element: this, position: pos, htmlImpact, fallbackReason: 'direct_tainted_html_sink' }, m);
                     }
                 }
             } catch (_) {
-                const m = matchesTaint(htmlString);
+                const m = operationMatch || matchesTaint(htmlString);
                 if (m) {
                     maybeReportTaintedValue(htmlString, {
                         type: 'xss-via-insertAdjacentHTML',
                         sink: 'insertAdjacentHTML',
                         sinkId: 'dom.insertAdjacentHTML'
-                    }, { value: htmlString, element: this, position: pos }, m);
-                    scanInlineEvents(htmlString);
+                    }, { value: htmlString, element: this, position: pos, htmlImpact }, m);
                 }
             }
         });
@@ -9124,6 +9953,20 @@ if (!isTrustedTypesHtmlRestricted()) {
 })();
 
 try {
-    emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready' });
+    globalThis.__PTK_IAST_INSTALLATION_STATE__ = 'ready';
+    globalThis.__PTK_IAST_AGENT_LOADED__ = true;
+    emitIastObservationState();
+    emitIastPageBridgeMessage({ channel: 'ptk_iast_agent_ready', installationState: 'ready' });
+    window.addEventListener('pagehide', () => {
+        // A write completed in the current task may still be waiting for its
+        // deferred timer. Admit that already-ready work before this realm is
+        // discarded; the timer cannot be relied on after navigation.
+        flushDeferredIastWriteReports();
+        flushPendingIastFindingReports();
+        if (IAST_DEFERRED_WRITE_REPORTS.length || IAST_PENDING_FINDING_REPORTS.length) {
+            recordIastObservationGap('pending_observation_at_pagehide', true);
+        }
+        emitIastObservationState({ terminal: true });
+    }, { once: true });
 } catch (_) { }
-})();
+})('unverified');

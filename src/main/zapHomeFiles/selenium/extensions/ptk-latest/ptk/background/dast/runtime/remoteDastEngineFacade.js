@@ -56,6 +56,8 @@ export class RemoteDastEngineFacade {
         this._remoteCleanup = null
         this._cleanupAttempt = null
         this._cleanupSessionBinding = null
+        this._cleanupObservation = null
+        this._cleanupObservationCancelled = false
         this._progressFlight = null
         this._progressOwnerEpoch = {}
         controller?.onEngineMessage?.((message, cursor) => this._queueEngineMessage(message, cursor))
@@ -102,6 +104,7 @@ export class RemoteDastEngineFacade {
     async adopt(response = {}) {
         this._resetProgressFlight()
         this._invalidateRemoteCleanup()
+        this._cleanupObservationCancelled = false
         this._cleanupSessionBinding = null
         if (!response?.ok) throw new Error(response?.error || "dast_runtime_adopt_failed")
         if (!response.sessionId || !response.executorGeneration || response.status === "idle") return false
@@ -124,6 +127,7 @@ export class RemoteDastEngineFacade {
     async start(tabId, host, domains, settings = {}) {
         this._resetProgressFlight()
         this._invalidateRemoteCleanup()
+        this._cleanupObservationCancelled = false
         this._cleanupSessionBinding = null
         const sessionId = this.sessionIdFactory()
         const controllerState = {
@@ -315,9 +319,48 @@ export class RemoteDastEngineFacade {
     async getRequestSnapshot(requestId, attackId = null) {
         return this._clone(await this._call("__getRequestSnapshot", [requestId, attackId]))
     }
+    setCleanupObservation({ deadlineAt, isCurrent } = {}) {
+        this._cleanupObservation?.cancel()
+        // Reuse the existing automation general Stop ceiling as a retention
+        // bound, once for the whole cleanup transaction, never per RPC.
+        if (!Number.isFinite(deadlineAt) || deadlineAt <= Date.now()
+            || deadlineAt > Date.now() + 180000 || typeof isCurrent !== "function" || !isCurrent()) {
+            throw new Error("dast_runtime_cleanup_observation_invalid")
+        }
+        let reject
+        const expired = new Promise((_resolve, no) => { reject = no })
+        void expired.catch(() => {})
+        const observation = { deadlineAt, isCurrent, expired, requests: new Set(), cancelled: false, timer: null }
+        observation.cancel = (error = new Error("dast_runtime_cleanup_observation_cancelled")) => {
+            if (observation.cancelled) return
+            observation.cancelled = true
+            clearTimeout(observation.timer)
+            observation.unsubscribeDisconnect?.()
+            for (const request of observation.requests) request.cancel()
+            observation.requests.clear()
+            if (this._cleanupObservation === observation) {
+                this._cleanupObservation = null
+                this._cleanupObservationCancelled = this.terminalState !== "released"
+            }
+            // Prevent an already-admitted replay/read from continuing after its
+            // bounded owner observation has ended.
+            if (["stopping", "stopped"].includes(this.terminalState)) this._progressOwnerEpoch = {}
+            reject(error)
+        }
+        observation.timer = setTimeout(() => observation.cancel(new Error("dast_runtime_cleanup_observation_expired")),
+            Math.max(0, deadlineAt - Date.now()))
+        this._cleanupObservation = observation
+        this._cleanupObservationCancelled = false
+        observation.unsubscribeDisconnect = this.client?.onCleanupDisconnect?.(() =>
+            observation.cancel(new Error("dast_runtime_disconnected")))
+        return Object.freeze({ cancel: () => observation.cancel() })
+    }
+
     async stop() {
+        if (this._cleanupObservationCancelled) throw new Error("dast_runtime_cleanup_observation_cancelled")
         const overlapping = this.terminalState === "stopping" || this.terminalState === "stopped"
-        this._invalidateRemoteCleanup()
+        const observation = this._cleanupObservation
+        this._invalidateRemoteCleanup({ preserveObservation: !overlapping })
         const owner = { client: this.client, port: this.client?.port,
             nonce: this.client?.controllerNonce, sessionId: this.sessionId,
             generation: this.executorGeneration, hooksSessionId: this.automationSessionId,
@@ -335,14 +378,40 @@ export class RemoteDastEngineFacade {
                 && owner.binding.nonce === owner.nonce && owner.binding.sessionId === owner.sessionId
                 && owner.binding.generation === owner.generation && owner.binding.scanId === owner.scanId))
             && this.scanResult?.scanId === owner.scanId
+        const assertCurrent = () => {
+            if (observation && (this._cleanupObservation !== observation || observation.cancelled
+                || Date.now() >= observation.deadlineAt || !observation.isCurrent() || !current())) {
+                throw new Error("dast_runtime_cleanup_owner_changed")
+            }
+        }
+        const awaitStage = async promise => {
+            assertCurrent()
+            const result = await (observation ? Promise.race([promise, observation.expired]) : promise)
+            assertCurrent()
+            return result
+        }
+        const requestCleanup = async type => {
+            assertCurrent()
+            const payload = { sessionId: owner.sessionId, executorGeneration: owner.generation }
+            if (!observation) return owner.client.request(type, payload)
+            if (typeof owner.client.observeCleanupRequest !== "function") {
+                throw new Error("dast_runtime_cleanup_observation_unavailable")
+            }
+            const request = owner.client.observeCleanupRequest(type, payload, {
+                deadlineAt: observation.deadlineAt,
+                isCurrent: () => this._cleanupObservation === observation && !observation.cancelled
+                    && observation.isCurrent() && current()
+            })
+            observation.requests.add(request)
+            try { return await awaitStage(request.completion) }
+            finally { observation.requests.delete(request) }
+        }
         let stoppedClean = false
         try {
         this.terminalState = "stopping"
         const progressFlight = this._progressFlight
             && this._isProgressOwnerCurrent(this._progressFlight.owner) ? this._progressFlight : null
-        const response = await this.client.request(DAST_RUNTIME_MESSAGE.STOP, {
-            sessionId: owner.sessionId, executorGeneration: owner.generation
-        })
+        const response = await requestCleanup(DAST_RUNTIME_MESSAGE.STOP)
         if (!response?.ok) {
             this.terminalState = null
             throw new Error(response?.error || "scan_stop_failed")
@@ -354,8 +423,9 @@ export class RemoteDastEngineFacade {
         // A progress reply may already have been processed by the worker while
         // still pending in the controller. Join its complete watermark drain,
         // not just its RPC, before publishing stopped state or releasing.
-        if (progressFlight) await progressFlight.promise
-        await this.drainEvents(progressFlight ? { expectedOwner: progressFlight.owner } : {})
+        if (progressFlight) await awaitStage(progressFlight.promise)
+        await awaitStage(this.drainEvents(progressFlight ? { expectedOwner: progressFlight.owner }
+            : (observation ? { expectedOwner: this._progressOwner() } : {})))
         stoppedClean = stoppedClean && current()
         this.scanResult = response?.result?.scanResult ? this._clone(response.result.scanResult) : this.scanResult
         if (this.scanResult?.performance?.dast) {
@@ -364,9 +434,7 @@ export class RemoteDastEngineFacade {
         this.isRunning = false
         this.terminalState = "stopped"
         this.progress = { ...this.progress, isIdle: true }
-        const released = await owner.client.request(DAST_RUNTIME_MESSAGE.RELEASE, {
-            sessionId: owner.sessionId, executorGeneration: owner.generation
-        })
+        const released = await requestCleanup(DAST_RUNTIME_MESSAGE.RELEASE)
         if (!released?.ok) throw new Error(released?.error || "scan_release_failed")
         const clean = stoppedClean && current() && released.released === true
             && released.status === "idle" && released.sessionId === null && released.executorGeneration === null
@@ -377,11 +445,14 @@ export class RemoteDastEngineFacade {
         if (clean) this._remoteCleanup = owner
         return this.scanResult
         } catch (error) {
-            this._invalidateRemoteCleanup()
+            if (this._cleanupAttempt === attempt) this._invalidateRemoteCleanup()
             throw error
+        } finally {
+            observation?.cancel()
         }
     }
-    _invalidateRemoteCleanup() {
+    _invalidateRemoteCleanup({ preserveObservation = false } = {}) {
+        if (!preserveObservation) this._cleanupObservation?.cancel()
         this._remoteCleanup = null
         this._cleanupAttempt = null
     }
@@ -401,6 +472,7 @@ export class RemoteDastEngineFacade {
     async reset() {
         this._resetProgressFlight()
         this._invalidateRemoteCleanup()
+        this._cleanupObservationCancelled = false
         this._cleanupSessionBinding = null
         if (this.sessionId && this.isRunning) await this._call("reset")
         this.scanResult = {}
@@ -419,7 +491,20 @@ export class RemoteDastEngineFacade {
     }
     async updateScanResult(result, data) { return this._call("updateScanResult", [result, data]) }
     setAutomationHooks(hooks) {
-        if (this.automationSessionId !== (hooks?.sessionId || null)) this._invalidateRemoteCleanup()
+        if (this.automationSessionId !== (hooks?.sessionId || null)) {
+            const binding = this._cleanupSessionBinding
+            // The original coordinator removes its callbacks before native
+            // Stop. That exact-owner transition is part of the observed flight,
+            // not replacement by a new automation owner.
+            const removingOwnedHooks = !hooks && this._cleanupObservation
+                && this._cleanupObservation.isCurrent() && binding
+                && binding.automationSessionId === this.automationSessionId
+                && binding.client === this.client && binding.port === this.client?.port
+                && binding.nonce === this.client?.controllerNonce
+                && binding.sessionId === this.sessionId && binding.generation === this.executorGeneration
+                && binding.scanId === this.scanResult?.scanId
+            this._invalidateRemoteCleanup({ preserveObservation: !!removingOwnedHooks })
+        }
         // The coordinator deliberately removes callbacks before native Stop.
         // Retain only that exact native-owner binding, not callbacks or results.
         if (hooks?.sessionId) this._cleanupSessionBinding = {

@@ -1,4 +1,5 @@
 import CryptoES from "../../packages/crypto-es/index.js"
+import { sanitizeIastObservation, validateIastEvidenceVersion } from '../iast/observation.js'
 
 const VALID_ENGINES = new Set(["DAST", "SAST", "IAST", "SCA"])
 const ENGINE_LOCATION_KIND = {
@@ -327,6 +328,18 @@ function sanitizeIastContext(context) {
     copyField("elementId")
     copyField("tagName")
     copyField("method")
+    copyField("scriptUrl")
+    copyField("attribute")
+    copyField("operation")
+    for (const field of ['line', 'column']) {
+        const value = context[field]
+        if (Number.isSafeInteger(value) && value >= (field === 'line' ? 1 : 0) && value <= 2147483647) sanitized[field] = value
+    }
+    if (Array.isArray(context.flow)) sanitized.flow = context.flow.slice(0, 22).filter(entry => entry && typeof entry === 'object').map(entry => compactEvidenceObject(entry,
+        ['stage', 'key', 'label', 'detail', 'domPath', 'elementId', 'attribute', 'location', 'value', 'op', 'stack', 'timestamp']))
+    if (context.match && typeof context.match === 'object') sanitized.match = compactEvidenceObject(context.match, ['matchType', 'confidence'])
+    if (Array.isArray(context.sourceRefs)) sanitized.sourceRefs = context.sourceRefs.slice(0, 8).map(entry => compactEvidenceObject(entry,
+        ['sourceId', 'taintId', 'sourceKind', 'taintKind', 'label', 'matchType', 'confidence']))
     const valuePreview = truncateString(context.value ?? context.text ?? context.innerHTML ?? context.matched, 200)
     if (valuePreview) sanitized.valuePreview = valuePreview
     return Object.keys(sanitized).length ? sanitized : null
@@ -395,6 +408,7 @@ function normalizeIastEvidence(evidence = {}, finding = {}) {
         payload = evidence.find(entry => entry && typeof entry === "object") || {}
     }
     if (!payload || typeof payload !== "object") payload = {}
+    const evidenceVersion = validateIastEvidenceVersion(payload)
     const context = (payload.context && typeof payload.context === "object")
         ? payload.context
         : (payload.raw && typeof payload.raw.context === "object" ? payload.raw.context : null)
@@ -403,6 +417,8 @@ function normalizeIastEvidence(evidence = {}, finding = {}) {
     const aggregate = payload.aggregate && typeof payload.aggregate === "object" && !Array.isArray(payload.aggregate)
         ? payload.aggregate
         : null
+    if (evidenceVersion === 2 && aggregate && (aggregate.identityVersion !== 2 || aggregate.mode !== 'url-site-stratum'
+        || aggregate.key !== finding.fingerprint || !/^iast-v2-[a-f0-9]{32}$/.test(aggregate.key))) throw new Error('invalid_iast_public_identity')
     const samples = Array.isArray(payload.samples)
         ? payload.samples.filter(entry => entry && typeof entry === "object")
         : null
@@ -434,7 +450,9 @@ function normalizeIastEvidence(evidence = {}, finding = {}) {
         sinkSummary: payload.sinkSummary || null,
         taintSummary: payload.taintSummary || null,
         allowedSources: Array.isArray(payload.allowedSources) ? payload.allowedSources : null,
-        schemaVersion: payload.schemaVersion || null,
+        schemaVersion: evidenceVersion === 2 ? 2 : (payload.schemaVersion || null),
+        observation: sanitizeIastObservation(payload.observation),
+        flowSummary: payload.flowSummary || null,
         primaryClass: payload.primaryClass || null,
         sourceRole: payload.sourceRole || null,
         origin: payload.origin || null,
@@ -453,7 +471,7 @@ function normalizeIastEvidence(evidence = {}, finding = {}) {
         truncated,
         samples,
         message: truncateString(payload.message || finding.message || null, 400)
-    }, ["requestId", "sinkId", "sourceId", "sourceKey", "sourceKind", "sourceValuePreview", "taintSource", "source", "primarySource", "secondarySources", "sources", "sink", "sinkContext", "matched", "trace", "traceSummary", "context", "sinkSummary", "taintSummary", "allowedSources", "schemaVersion", "primaryClass", "sourceRole", "origin", "observedAt", "operation", "navigationCorrelation", "urlValidation", "detection", "trust", "suppression", "networkTarget", "routing", "aggregate", "occurrenceCount", "sampleLimit", "truncated", "samples", "message"])
+    }, ["requestId", "sinkId", "sourceId", "sourceKey", "sourceKind", "sourceValuePreview", "taintSource", "source", "primarySource", "secondarySources", "sources", "sink", "sinkContext", "matched", "trace", "traceSummary", "context", "sinkSummary", "taintSummary", "allowedSources", "schemaVersion", "observation", "flowSummary", "primaryClass", "sourceRole", "origin", "observedAt", "operation", "navigationCorrelation", "urlValidation", "detection", "trust", "suppression", "networkTarget", "routing", "aggregate", "occurrenceCount", "sampleLimit", "truncated", "samples", "message"])
     const extras = {}
     if (Array.isArray(finding.affectedUrls)) {
         const filtered = finding.affectedUrls.map(ensureString).filter(Boolean)

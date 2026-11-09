@@ -8,6 +8,7 @@ import zapTransport, {
 import ZapPublisher from './zapPublisher.js'
 import ZapAutomationController from './zapAutomationController.js'
 import { ZapBrowserCapture } from './zapBrowserCapture.js'
+import { documentUrlWithoutFragment, sameDocumentUrl } from '../../capture/sameDocumentUrl.js'
 
 const SOURCE = 'ptk'
 const TYPE_ALERTS_BATCH = 'alerts_batch'
@@ -16,6 +17,8 @@ const TYPE_IAST_FINDINGS_BATCH = 'iast_findings_batch'
 const TYPE_SAST_FINDINGS_BATCH = 'sast_findings_batch'
 const DAST_SCHEMA = 'ptk-zap-dast-finding-v1'
 const IAST_SCHEMA = 'ptk-zap-iast-finding-v1'
+const IAST_SCHEMA_V2 = 'ptk-zap-iast-finding-v2'
+const IAST_SCHEMA_V3 = 'ptk-zap-iast-finding-v3'
 const SAST_SCHEMA = 'ptk-zap-sast-finding-v1'
 const ZAP_PROGRESS_CONTRACT_VERSION = 2
 const DEFAULT_ZAP_ENGINES = ['DAST', 'IAST', 'SAST']
@@ -233,6 +236,7 @@ class ZapBridge {
         this.bootstrapped = false
         this.currentBaseUrl = null
         this.currentSessionKey = null
+        this._iastCapabilityReceipt = null
         this._unsubscribeDetected = null
         this._unsubscribeUrlObserved = null
         this._startInFlight = null
@@ -251,6 +255,10 @@ class ZapBridge {
         this._startInFlightByKey = new Map()
         this._lastStartsByKey = new Map()
         this._timingStateByKey = new Map()
+        this._visitObservations = new Map()
+        this._visitObservationBusy = new Set()
+        this._visitRebindReceipts = new Map()
+        this._visitClock = () => performance.now()
         this._pendingTargetRecoveryTimer = null
         this._pendingTargetRecoveryUntil = 0
         this.zapAutomationRewriteEnabled = true
@@ -293,7 +301,7 @@ class ZapBridge {
         this._syncDebugFlagFromApp()
 
         if (this.app?.browserCaptureManager && !this.browserCapture) {
-            this.browserCapture = new ZapBrowserCapture({ transport: this.transport, manager: this.app.browserCaptureManager, sast: this.app.sast })
+            this.browserCapture = new ZapBrowserCapture({ transport: this.transport, manager: this.app.browserCaptureManager, sast: this.app.sast, iast: this.app.iast })
         }
 
         if (this.app && this.resultsRegistry && !this.publisher) {
@@ -339,6 +347,377 @@ class ZapBridge {
 
     isActive() {
         return this.transport.isActive()
+    }
+
+    // A visit coordinator must supply the session identifier from its trusted
+    // start receipt. Never substitute the most recent progress monitor: it may
+    // belong to another browser or a session that is already closing.
+    getOwnedVisitScanIdentities({ zapid, browserid, tabId, sessionId } = {}) {
+        const unavailable = reason => ({ ok: false, reason })
+        if (typeof zapid !== 'string' || !zapid || typeof browserid !== 'string' || !browserid
+            || !Number.isInteger(tabId) || tabId < 0
+            || typeof sessionId !== 'string' || !sessionId
+            || this.transport?.isActive?.() !== true
+            || this.transport?.getZapId?.() !== zapid
+            || this.transport?.getBrowserId?.() !== browserid) {
+            return unavailable('visit_owner_unavailable')
+        }
+        const sessionKey = this._buildZapSessionKey(this.transport.getBaseUrl?.(), zapid)
+        if (!sessionKey || this.currentSessionKey !== sessionKey
+            || typeof this.app?.automation?.getZapOwnedScanIdentitySnapshot !== 'function') {
+            return unavailable('visit_session_unavailable')
+        }
+        const snapshot = this.app.automation.getZapOwnedScanIdentitySnapshot({
+            sessionId, tabId, zapSessionKey: sessionKey
+        })
+        if (this.transport?.isActive?.() !== true || this.transport?.getZapId?.() !== zapid
+            || this.transport?.getBrowserId?.() !== browserid
+            || this.currentSessionKey !== sessionKey) {
+            return unavailable('visit_owner_changed')
+        }
+        if (snapshot?.ok !== true || snapshot.sessionId !== sessionId || snapshot.tabId !== tabId) {
+            return unavailable(snapshot?.reason || 'visit_session_unavailable')
+        }
+        return snapshot
+    }
+
+    // A native document/scan-owner cut for the Client execution interval.
+    // Scanner progress is reported separately: it must not hold a healthy
+    // browser at a link while analysis or stored-alert ACKs continue.
+    async getOwnedVisitEvidenceCut(owner = {}) {
+        const unavailable = reason => ({ ok: false, reason })
+        const named = this.getOwnedVisitScanIdentities(owner)
+        if (named.ok !== true) return unavailable(named.reason || 'visit_session_unavailable')
+        if (named.requiredEngines.length === 1 && named.requiredEngines[0] === 'DAST') {
+            return this._getOwnedDastVisitEvidenceCut(owner, named)
+        }
+        if (!named.requiredEngines.includes('IAST')
+            || typeof this.browserCapture?.getVerifiedCurrentRootDocument !== 'function'
+            || typeof this.browserCapture?.getCurrentRootDocument !== 'function'
+            || typeof this.app?.iast?.getCurrentIastObservationSnapshot !== 'function'
+            || typeof globalThis.browser?.webNavigation?.getFrame !== 'function') {
+            return unavailable('visit_observer_unavailable')
+        }
+        const sameRoot = (left, right) => !!left && !!right
+            && ['captureId', 'zapid', 'browserid', 'tabId', 'frameId', 'documentId',
+                'sessionGeneration', 'streamGeneration'].every(key => left[key] === right[key])
+            && sameDocumentUrl(left.url, right.url)
+        const readRoot = () => this.browserCapture.getVerifiedCurrentRootDocument({
+            zapid: owner.zapid, browserid: owner.browserid
+        })
+        try {
+            const root = await readRoot()
+            if (!root || root.zapid !== owner.zapid || root.browserid !== owner.browserid
+                || root.tabId !== owner.tabId || typeof root.url !== 'string'
+                || !/^https?:\/\//u.test(root.url)) return unavailable('visit_root_unavailable')
+            const sastRequired = named.requiredEngines.includes('SAST')
+            const frame = await globalThis.browser.webNavigation.getFrame({
+                tabId: owner.tabId, frameId: 0
+            })
+            if (!frame || typeof frame.documentId !== 'string' || !frame.documentId
+                || !sameDocumentUrl(frame.url, root.url)) return unavailable('visit_document_unbound')
+            const iastRequest = { tabId: owner.tabId, frameId: 0, documentId: frame.documentId }
+            const iast = await this.app.iast.getCurrentIastObservationSnapshot(iastRequest)
+            if (iast && (iast.scanId !== named.scanIds.IAST
+                || iast.documentId !== frame.documentId)) return unavailable('visit_iast_owner_mismatch')
+            const frameAfter = await globalThis.browser.webNavigation.getFrame({
+                tabId: owner.tabId, frameId: 0
+            })
+            // The first read already proved the native root. Repeating CDP's
+            // frame-tree query can itself straddle a document replacement;
+            // compare that proof with the exact owned cache after the final
+            // asynchronous document read instead.
+            const lastRoot = this.browserCapture.getCurrentRootDocument({
+                zapid: owner.zapid, browserid: owner.browserid, nativeFrameId: root.frameId
+            })
+            const namedAfter = this.getOwnedVisitScanIdentities(owner)
+            if (!sameRoot(root, lastRoot) || frameAfter?.documentId !== frame.documentId
+                || !sameDocumentUrl(frameAfter?.url, root.url) || namedAfter.ok !== true
+                || named.requiredEngines.join(',') !== namedAfter.requiredEngines.join(',')
+                || named.requiredEngines.some(engine => named.scanIds[engine] !== namedAfter.scanIds[engine])) {
+                return unavailable('visit_cut_changed')
+            }
+            // Source admission and final close account for SAST/IAST work.
+            // Their progress must not be a prerequisite for page execution.
+            return { ok: true, kind: 'evidence_cut', root,
+                iast: { scanId: named.scanIds.IAST, documentId: frame.documentId,
+                    documentGeneration: iast?.documentGeneration || null,
+                    revision: iast?.revision ?? null },
+                sast: sastRequired ? { scanId: named.scanIds.SAST } : { required: false },
+                publisher: { drained: false } }
+        } catch (_) {
+            return unavailable('visit_cut_unavailable')
+        }
+    }
+
+    // DAST work is scan-wide, but its Client Spider browser still needs an
+    // exact native document/stream observation before departing. The final
+    // DAST engine settlement remains the existing session-close obligation.
+    async _getOwnedDastVisitEvidenceCut(owner, named) {
+        const unavailable = reason => ({ ok: false, reason })
+        if (typeof this.browserCapture?.getVerifiedCurrentRootAnalysis !== 'function'
+            || typeof this.browserCapture?.getCurrentRootDocument !== 'function'
+            || typeof globalThis.browser?.webNavigation?.getFrame !== 'function'
+            || typeof named.scanIds?.DAST !== 'string') {
+            return unavailable('visit_observer_unavailable')
+        }
+        const readRoot = () => this.browserCapture.getVerifiedCurrentRootAnalysis({
+            zapid: owner.zapid, browserid: owner.browserid
+        })
+        try {
+            const first = await readRoot()
+            const root = first?.root
+            if (!root || root.zapid !== owner.zapid || root.browserid !== owner.browserid
+                || root.tabId !== owner.tabId || !/^https?:\/\//u.test(root.url || '')
+                || first.sast?.required !== false || first.analysis?.required !== false) {
+                return unavailable('visit_root_unavailable')
+            }
+            const frame = await globalThis.browser.webNavigation.getFrame({
+                tabId: owner.tabId, frameId: 0
+            })
+            if (!frame?.documentId || !sameDocumentUrl(frame.url, root.url)) {
+                return unavailable('visit_document_unbound')
+            }
+            const frameAfter = await globalThis.browser.webNavigation.getFrame({
+                tabId: owner.tabId, frameId: 0
+            })
+            const lastRoot = this.browserCapture.getCurrentRootDocument({
+                zapid: owner.zapid, browserid: owner.browserid, nativeFrameId: root.frameId
+            })
+            const namedAfter = this.getOwnedVisitScanIdentities(owner)
+            const keys = ['captureId', 'zapid', 'browserid', 'tabId', 'frameId',
+                'documentId', 'sessionGeneration', 'streamGeneration']
+            if (!lastRoot || keys.some(key => root[key] !== lastRoot[key])
+                || !sameDocumentUrl(root.url, lastRoot.url)
+                || frameAfter?.documentId !== frame.documentId
+                || !sameDocumentUrl(frameAfter?.url, root.url) || namedAfter.ok !== true
+                || namedAfter.requiredEngines.length !== 1
+                || namedAfter.requiredEngines[0] !== 'DAST'
+                || namedAfter.scanIds.DAST !== named.scanIds.DAST) {
+                return unavailable('visit_cut_changed')
+            }
+            return { ok: true, kind: 'evidence_cut', root,
+                iast: { required: false }, sast: { required: false },
+                publisher: { drained: false },
+                evidence: { complete: true, iastReady: false,
+                    sastReady: false, streamRebindVerified: true } }
+        } catch (_) {
+            return unavailable('visit_cut_unavailable')
+        }
+    }
+
+    _ownedVisitObservationKey(owner = {}) {
+        if (typeof owner.zapid !== 'string' || !owner.zapid
+            || typeof owner.browserid !== 'string' || !owner.browserid
+            || typeof owner.sessionId !== 'string' || !owner.sessionId
+            || !Number.isInteger(owner.tabId) || owner.tabId < 0) return null
+        return JSON.stringify([owner.zapid, owner.browserid, owner.sessionId, owner.tabId])
+    }
+
+    _ownedVisitStreamKey(owner, root) {
+        return JSON.stringify([owner.zapid, owner.browserid, owner.sessionId, owner.tabId,
+            root?.captureId, root?.documentId, root?.sessionGeneration,
+            root?.streamGeneration, documentUrlWithoutFragment(root?.url)])
+    }
+
+    // Only the trusted extension-runner route may request this. The native
+    // stream marker is authoritative; a WebExtension document ID and live
+    // observation revision must be rechecked after both worlds rebind.
+    async rebindOwnedIastStream(owner = {}) {
+        const unavailable = reason => ({ ok: false, reason })
+        const named = this.getOwnedVisitScanIdentities(owner)
+        if (named.ok !== true || !named.requiredEngines.includes('IAST')) {
+            return unavailable('visit_session_unavailable')
+        }
+        if (typeof this.browserCapture?.getVerifiedCurrentRootDocument !== 'function'
+            || typeof this.app?.iast?.getCurrentIastObservationSnapshot !== 'function'
+            || typeof globalThis.browser?.webNavigation?.getFrame !== 'function'
+            || typeof globalThis.browser?.tabs?.sendMessage !== 'function'
+            || typeof globalThis.browser?.scripting?.executeScript !== 'function') {
+            return unavailable('visit_rebind_unavailable')
+        }
+        const readRoot = () => this.browserCapture.getVerifiedCurrentRootDocument({
+            zapid: owner.zapid, browserid: owner.browserid
+        })
+        const root = await readRoot()
+        if (!root || root.tabId !== owner.tabId || !Number.isSafeInteger(root.streamGeneration)) {
+            return unavailable('visit_root_unavailable')
+        }
+        if (root.streamGeneration === 0) return { ok: true, kind: 'stream_not_reopened' }
+        const key = this._ownedVisitStreamKey(owner, root)
+        const frame = await globalThis.browser.webNavigation.getFrame({ tabId: owner.tabId, frameId: 0 })
+        if (!frame?.documentId || !sameDocumentUrl(frame.url, root.url)) {
+            return unavailable('visit_document_unbound')
+        }
+        const request = { tabId: owner.tabId, frameId: 0, documentId: frame.documentId }
+        const before = await this.app.iast.getCurrentIastObservationSnapshot(request)
+        if (!before || before.scanId !== named.scanIds.IAST) return unavailable('visit_iast_unavailable')
+        const relay = await globalThis.browser.tabs.sendMessage(owner.tabId, {
+            channel: 'ptk_background_iast2content', type: 'rebind_iast_bridge'
+        }, { frameId: 0 })
+        if (relay?.ok !== true || relay.documentGeneration !== before.documentGeneration) {
+            return unavailable('visit_relay_rebind_failed')
+        }
+        const results = await globalThis.browser.scripting.executeScript({
+            target: { tabId: owner.tabId, documentIds: [frame.documentId] },
+            world: 'MAIN', injectImmediately: true,
+            func: () => {
+                const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__PTK_IAST_REBIND_BRIDGE__')
+                return descriptor?.configurable === false && descriptor?.writable === false
+                    && typeof descriptor.value === 'function' && descriptor.value() === true
+            }
+        })
+        if (!Array.isArray(results) || results.length !== 1 || results[0]?.frameId !== 0
+            || results[0]?.documentId !== frame.documentId || results[0]?.result !== true) {
+            return unavailable('visit_page_rebind_failed')
+        }
+        let after = null
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+            after = await this.app.iast.getCurrentIastObservationSnapshot(request)
+            if (after?.documentGeneration === before.documentGeneration
+                && after.revision > before.revision) break
+            await sleep(50)
+        }
+        const [rootAfter, frameAfter] = await Promise.all([
+            readRoot(), globalThis.browser.webNavigation.getFrame({ tabId: owner.tabId, frameId: 0 })
+        ])
+        const namedAfter = this.getOwnedVisitScanIdentities(owner)
+        if (this._ownedVisitStreamKey(owner, rootAfter) !== key
+            || frameAfter?.documentId !== frame.documentId
+            || !sameDocumentUrl(frameAfter?.url, root.url)
+            || after?.documentGeneration !== before.documentGeneration
+            || after?.revision <= before.revision
+            || namedAfter.ok !== true
+            || namedAfter.scanIds.IAST !== named.scanIds.IAST
+            || namedAfter.requiredEngines.join(',') !== named.requiredEngines.join(',')) {
+            return unavailable('visit_rebind_changed')
+        }
+        const ownerKey = this._ownedVisitObservationKey(owner)
+        for (const [oldKey, receipt] of this._visitRebindReceipts) {
+            if (receipt.ownerKey === ownerKey && oldKey !== key) this._visitRebindReceipts.delete(oldKey)
+        }
+        if (!this._visitRebindReceipts.has(key) && this._visitRebindReceipts.size >= 16) {
+            return unavailable('visit_rebind_capacity')
+        }
+        this._visitRebindReceipts.set(key, { documentId: frame.documentId,
+            documentGeneration: after.documentGeneration, revision: after.revision, ownerKey })
+        return { ok: true, kind: 'stream_rebound', streamGeneration: root.streamGeneration,
+            documentId: frame.documentId, observationRevision: after.revision }
+    }
+
+    _ownedVisitCutIdentity(cut) {
+        if (cut?.ok !== true || cut.kind !== 'evidence_cut' || !cut.root || !cut.iast) return null
+        const root = cut.root
+        return JSON.stringify({
+            root: [root.captureId, root.zapid, root.browserid, root.tabId, root.frameId,
+                root.documentId, root.sessionGeneration, root.streamGeneration,
+                documentUrlWithoutFragment(root.url)],
+            iast: cut.iast.required === false ? [false]
+                : [cut.iast.scanId, cut.iast.documentId],
+            sast: cut.sast?.required === false ? [false] : [cut.sast?.scanId]
+        })
+    }
+
+    // Give the bound browser an execution interval independent of navigation,
+    // scanner progress and publication. Verify the current document once at
+    // the end; a failed verification is an evidence gap, not another dwell.
+    async advanceOwnedVisitObservation(owner = {}, observationMs) {
+        const key = this._ownedVisitObservationKey(owner)
+        if (!key) return { ok: false, reason: 'visit_owner_unavailable' }
+        if (!Number.isSafeInteger(observationMs) || observationMs < 1 || observationMs > 300000) {
+            return { ok: false, reason: 'visit_observation_window_invalid' }
+        }
+        if (this._visitObservationBusy.has(key)) {
+            return { ok: false, reason: 'visit_observation_busy' }
+        }
+        this._visitObservationBusy.add(key)
+        try {
+            const named = this.getOwnedVisitScanIdentities(owner)
+            if (named.ok !== true) {
+                this._visitObservations.delete(key)
+                return { ok: false, reason: named.reason || 'visit_session_unavailable' }
+            }
+            const identity = JSON.stringify([named.requiredEngines,
+                named.requiredEngines.map(engine => named.scanIds[engine])])
+            const now = this._visitClock()
+            if (!Number.isFinite(now) || now < 0) {
+                this._visitObservations.delete(key)
+                return { ok: false, reason: 'visit_clock_unavailable' }
+            }
+            const previous = this._visitObservations.get(key)
+            if (!previous || previous.identity !== identity) {
+                if (!previous && this._visitObservations.size >= 16) {
+                    return { ok: false, reason: 'visit_observation_capacity' }
+                }
+                this._visitObservations.set(key, { identity, startedAt: now, ready: false })
+                return { ok: false, reason: 'visit_observation_started' }
+            }
+            const elapsedMs = now - previous.startedAt
+            if (elapsedMs < 0) {
+                this._visitObservations.delete(key)
+                return { ok: false, reason: 'visit_clock_changed' }
+            }
+            if (elapsedMs < observationMs) {
+                return { ok: false, reason: 'visit_observation_pending', elapsedMs }
+            }
+            const cut = await this.getOwnedVisitEvidenceCut(owner)
+            const cutIdentity = this._ownedVisitCutIdentity(cut)
+            if (!cutIdentity) {
+                this._visitObservations.delete(key)
+                return { ok: false, reason: cut?.reason || 'visit_cut_unavailable' }
+            }
+            previous.ready = true
+            previous.cutIdentity = cutIdentity
+            return { ok: true, kind: 'observed_interval', elapsedMs, cut }
+        } catch (_) {
+            this._visitObservations.delete(key)
+            return { ok: false, reason: 'visit_cut_unavailable' }
+        } finally {
+            this._visitObservationBusy.delete(key)
+        }
+    }
+
+    // Called under the Client browser-owner lock immediately before its next
+    // action. A fresh cut must still match; the interval cannot be reused.
+    async confirmOwnedVisitDeparture(owner = {}) {
+        const key = this._ownedVisitObservationKey(owner)
+        if (!key) return { ok: false, reason: 'visit_owner_unavailable' }
+        if (this._visitObservationBusy.has(key)) {
+            return { ok: false, reason: 'visit_observation_busy' }
+        }
+        const previous = this._visitObservations.get(key)
+        if (!previous?.ready) return { ok: false, reason: 'visit_observation_unavailable' }
+        this._visitObservationBusy.add(key)
+        this._visitObservations.delete(key)
+        try {
+            const cut = await this.getOwnedVisitEvidenceCut(owner)
+            const identity = this._ownedVisitCutIdentity(cut)
+            if (!identity) return { ok: false, reason: cut?.reason || 'visit_cut_unavailable' }
+            if (identity !== previous.cutIdentity) return { ok: false, reason: 'visit_cut_changed' }
+            if (cut.iast?.required === false && cut.sast?.required === false) {
+                const named = this.getOwnedVisitScanIdentities(owner)
+                if (named?.ok !== true || named.requiredEngines.length !== 1
+                    || named.requiredEngines[0] !== 'DAST') {
+                    return { ok: false, reason: named?.reason || 'visit_scan_unavailable' }
+                }
+                const armed = await this.browserCapture?.armNextPreparedMetadataDocument?.({
+                    zapid: owner.zapid, browserid: owner.browserid,
+                    tabId: owner.tabId, root: cut.root
+                })
+                if (armed !== true) return { ok: false, reason: 'visit_next_document_unavailable' }
+            }
+            return { ok: true, kind: 'departure_cut', cut }
+        } catch (_) {
+            return { ok: false, reason: 'visit_cut_unavailable' }
+        } finally {
+            this._visitObservationBusy.delete(key)
+        }
+    }
+
+    clearOwnedVisitObservation(owner = {}) {
+        const key = this._ownedVisitObservationKey(owner)
+        if (!key || this._visitObservationBusy.has(key)) return false
+        return this._visitObservations.delete(key)
     }
 
     _resolveDebugEnabled() {
@@ -540,6 +919,152 @@ class ZapBridge {
 
         return normalizedTargetUrl === scopedTargetUrl
             || isSameOriginAndPathScoped(scopedTargetUrl, normalizedTargetUrl)
+    }
+
+    // Admit the exact Client Spider target while the owned tab is still on its
+    // callback document. Navigation must wait for named scans and document-start
+    // IAST registration; a runner message alone never certifies readiness.
+    async prestartOwnedVisit({ zapid, browserid, targetUrl } = {}) {
+        const unavailable = reason => ({ ok: false, reason })
+        const normalizedTargetUrl = toHttpUrl(targetUrl)
+        if (!normalizedTargetUrl || normalizedTargetUrl !== targetUrl
+            || this.isActive() !== true || this.transport.getZapId?.() !== zapid
+            || this.transport.getBrowserId?.() !== browserid) {
+            return unavailable('visit_prestart_owner_unavailable')
+        }
+        const sessionKey = this._buildZapSessionKey(this.transport.getBaseUrl?.(), zapid)
+        if (!sessionKey || this.currentSessionKey !== sessionKey) {
+            return unavailable('visit_prestart_session_unavailable')
+        }
+        const deadline = Date.now() + 12000
+        let pending = null
+        let existing = null
+        while (Date.now() < deadline) {
+            pending = this._pendingStartsByKey.get(sessionKey) || null
+            // Auto-start may finish while Java is obtaining the callback tab.
+            // In that case the pending entry has already been retired. Reuse
+            // only an exact, still-owned start receipt, never the latest scan.
+            const matching = Array.from(this._lastStartsByKey.values()).filter(start =>
+                start?.sessionKey === sessionKey && start?.zapid === zapid
+                && start?.browserid === browserid
+                && start?.targetUrl === normalizedTargetUrl
+                && Array.isArray(start?.engines)
+                && (start.engines.includes('IAST') || start.engines.includes('DAST'))
+                && isValidTabId(start.tabId)
+                && typeof start.sessionId === 'string' && start.sessionId)
+            if (matching.length > 1) return unavailable('visit_prestart_started_ambiguous')
+            existing = matching[0] || null
+            if (existing) pending = null
+            if (pending || existing) break
+            if (this.isActive() !== true || this.transport.getZapId?.() !== zapid
+                || this.transport.getBrowserId?.() !== browserid
+                || this.currentSessionKey !== sessionKey) {
+                return unavailable('visit_prestart_owner_changed')
+            }
+            await sleep(50)
+        }
+        if (!pending && !existing) return unavailable('visit_prestart_pending_missing')
+        if (pending && (pending.sessionKey !== sessionKey || pending.zapid !== zapid)) {
+            return unavailable('visit_prestart_pending_owner_mismatch')
+        }
+        const tabId = pending?.tabId ?? existing?.tabId
+        if (!isValidTabId(tabId)) return unavailable('visit_prestart_pending_tab_missing')
+        const configuredScope = pending ? this._resolvePendingStartScopeTargetUrl(pending) : null
+        // A Client Spider task may be assigned any exact URL that ZAP supplied
+        // in its seed set; the preferred single auto-start seed is not an
+        // exclusive scope for that separate, trusted task assignment.
+        if (pending && configuredScope
+            && !this._isPendingStartTargetUrlAllowed(pending, normalizedTargetUrl)
+            && !this._collectConfigSeedUrls(pending.engineConfigs).includes(normalizedTargetUrl)) {
+            return unavailable('visit_prestart_target_out_of_scope')
+        }
+        const engines = pending?.engines || existing?.engines
+        if (!Array.isArray(engines) || !engines.length
+            || (!engines.includes('IAST') && !engines.includes('DAST'))) {
+            return unavailable('visit_prestart_iast_not_enabled')
+        }
+        let callbackTab
+        try { callbackTab = await browser.tabs.get(tabId) }
+        catch (_) { return unavailable('visit_prestart_callback_unavailable') }
+        if (!ZAP_CALLBACK_PREFIX.test(callbackTab?.url || '')) {
+            return unavailable('visit_prestart_callback_changed')
+        }
+        if (this.isActive() !== true || this.transport.getZapId?.() !== zapid
+            || this.transport.getBrowserId?.() !== browserid
+            || this.currentSessionKey !== sessionKey
+            || (pending ? this._pendingStartsByKey.get(sessionKey) !== pending
+                : !Array.from(this._lastStartsByKey.values()).includes(existing))) {
+            return unavailable('visit_prestart_owner_changed')
+        }
+        const started = existing
+            ? { status: 'already_running', sessionId: existing.sessionId }
+            : await this._startZapSession({
+                tabId, targetUrl: normalizedTargetUrl, engines: pending.engines,
+                engineConfigs: pending.engineConfigs, baseUrl: pending.baseUrl,
+                sessionKey, zapid
+            })
+        if (!['started', 'starting', 'already_running'].includes(started?.status)
+            || typeof started.sessionId !== 'string' || !started.sessionId) {
+            return unavailable('visit_prestart_scan_failed')
+        }
+        const session = this.app?.automation?.sessions?.get(started.sessionId)
+        if (session?.targetUrl !== normalizedTargetUrl
+            || (existing && (existing.sessionKey !== sessionKey || existing.zapid !== zapid
+                || existing.browserid !== browserid
+                || existing.tabId !== tabId || existing.targetUrl !== normalizedTargetUrl))) {
+            return unavailable('visit_prestart_target_changed')
+        }
+        if (engines.length === 1 && engines[0] === 'DAST') {
+            // The callback-time metadata lease can bind a different
+            // same-origin document before Client Spider assigns this visit.
+            // Replace only that DAST-only lease, before navigation, with an
+            // exact-URL owner. A failed rearm is an incomplete visit.
+            let rearmed = false
+            try {
+                rearmed = await this.browserCapture?.rearmPreparedMetadataVisit?.({
+                    zapid, browserid, tabId, targetUrl: normalizedTargetUrl,
+                    isCurrent: () => this.isActive() === true
+                        && this.transport.getZapId?.() === zapid
+                        && this.transport.getBrowserId?.() === browserid
+                        && this.currentSessionKey === sessionKey
+                        && this.app?.automation?.sessions?.get(started.sessionId) === session,
+                    isVisitCurrent: () => this.getOwnedVisitScanIdentities({ zapid, browserid, tabId,
+                            sessionId: started.sessionId })?.requiredEngines?.join(',') === 'DAST'
+                }) === true
+            } catch (_) { rearmed = false }
+            if (!rearmed) return unavailable('visit_prestart_capture_rearm_failed')
+        }
+        let named = null
+        let registration = null
+        let metadataReady = false
+        while (Date.now() < deadline) {
+            named = this.getOwnedVisitScanIdentities({
+                zapid, browserid, tabId, sessionId: started.sessionId
+            })
+            registration = engines.includes('IAST')
+                ? this.app?.iast?.getRegistrationReceipt?.(tabId) : null
+            metadataReady = !engines.includes('IAST')
+                && this.browserCapture?.hasPreparedMetadataOwner?.({ zapid, browserid, tabId }) === true
+            if (named?.ok === true && (engines.includes('IAST')
+                ? registration?.ready === true && registration?.documentStart === true
+                : metadataReady)) break
+            await sleep(50)
+        }
+        if (named?.ok !== true
+            || (engines.includes('IAST')
+                ? registration?.ready !== true || registration?.documentStart !== true
+                : !metadataReady)
+            || this.isActive() !== true || this.transport.getZapId?.() !== zapid
+            || this.transport.getBrowserId?.() !== browserid
+            || this.app?.automation?.sessions?.get(started.sessionId) !== session) {
+            return unavailable(named?.reason || 'visit_prestart_registration_unavailable')
+        }
+        return { ok: true, kind: 'visit_prestarted', sessionId: started.sessionId,
+            zapid, browserid, tabId, requiredEngines: named.requiredEngines,
+            scanIds: named.scanIds, iastDocumentStart: engines.includes('IAST'),
+            captureReady: metadataReady,
+            scopeSource: existing ? 'existing_exact_target'
+                : (configuredScope ? 'configured_scope' : 'client_launch_target') }
     }
 
     _ensureTimingState({ zapSessionKey = null, zapid = null, browserid = null, automationSessionId = null, tabId = null, targetUrl = null, anchorMs = null } = {}) {
@@ -932,18 +1457,12 @@ class ZapBridge {
     _buildCloseReadiness(payload = {}, publisherState = {}, monitor = null) {
         const terminal = isZapTerminalStatus(payload?.status) || payload?.safeToClose === true
         const publisherDrained = publisherState?.drained === true
-        const completionStatus = String(payload?.completionStatus || '').toLowerCase()
-        const releaseStatus = String(payload?.releaseStatus || '').toLowerCase()
-        const physicalIncompleteClose = payload?.safeToClose === true
-            && (releaseStatus === 'incomplete'
-                || completionStatus === 'engine_incomplete'
-                || completionStatus === 'publisher_incomplete')
-        const safeToClose = terminal && (publisherDrained || physicalIncompleteClose)
+        const safeToClose = terminal && publisherDrained
         let reason = 'running'
         if (!terminal) {
             reason = 'not_terminal'
         } else if (!publisherDrained) {
-            reason = physicalIncompleteClose ? 'publisher_not_drained_incomplete_close' : 'publisher_not_drained'
+            reason = 'publisher_not_drained'
         } else if (monitor?.closeRequest?.id) {
             reason = 'terminal_publisher_drained_after_close_request'
         } else {
@@ -959,6 +1478,11 @@ class ZapBridge {
 
     _attachV2ProgressContract(payload, monitor, publisherState = {}) {
         if (!payload || typeof payload !== 'object') return payload
+        // An empty publisher is only a snapshot while DAST can still admit or
+        // apply events. Never project that snapshot as final owner drainage.
+        if (!this._isZapDastProducerSettled(monitor)) {
+            publisherState = Object.assign({}, publisherState, { drained: false })
+        }
         const completionStatus = toNonEmptyString(payload.completionStatus)
         let releaseStatus = toNonEmptyString(payload.releaseStatus)
         const terminalCandidate = isZapTerminalStatus(payload?.status) || payload?.safeToClose === true
@@ -1435,11 +1959,20 @@ class ZapBridge {
                     monitor.lastRuntimeSnapshot = runtimeSnapshot
                     monitor.lastDerivedEngineStates = derivedState.engines
                     if (derivedState.terminal) {
-                        const flushed = await this._flushPublisherWithTimeout()
+                        const producerSettled = () => !runtimeRequiredEngines.includes('DAST')
+                            || this._isZapDastProducerSettled(monitor,
+                                automation?.getZapSessionProgressState?.(monitor.sessionId))
+                        const flushed = producerSettled() && await this._flushPublisherWithTimeout(
+                            ZAP_PROGRESS_FLUSH_TIMEOUT_MS, producerSettled)
                         if (flushed) {
                             payload = this._buildZapProgressPayloadFromDerivedState(derivedState)
                             monitor.terminalPayload = payload
                             monitor.pendingFlushSince = null
+                        } else if (!producerSettled()
+                            || [ZAP_PROGRESS_STATUS_CANCELLED, ZAP_PROGRESS_STATUS_ERROR].includes(derivedState.status)) {
+                            // Preserve the immediate outcome, but keep observing
+                            // this owner: terminal outcome is not final release.
+                            payload = this._buildZapProgressPayloadFromDerivedState(derivedState)
                         } else {
                             monitor.pendingFlushSince = monitor.pendingFlushSince || Date.now()
                             payload = this._buildProgressMonitorPayload({
@@ -1458,6 +1991,19 @@ class ZapBridge {
         }
 
         try {
+            if (this._getRequiredZapEngines(monitor).includes('DAST')) {
+                const current = this.app?.automation?.getZapSessionProgressState?.(monitor.sessionId)
+                if (current?.ok && current.sessionId === monitor.sessionId) {
+                    monitor.lastRuntimeSnapshot = current
+                    if ([ZAP_PROGRESS_STATUS_CANCELLED, ZAP_PROGRESS_STATUS_ERROR].includes(payload.status)) {
+                        // Cleanup may have settled while the original outcome
+                        // was being flushed. Publish its marker in the same
+                        // callback that first claims final drainage.
+                        const currentState = this._deriveZapProgressState(monitor, current)
+                        if (currentState.terminal) payload = this._buildZapProgressPayloadFromDerivedState(currentState)
+                    }
+                }
+            }
             payload = this._attachProgressSessionContext(payload, monitor)
             payload = this._attachV2ProgressContract(payload, monitor, await this._getPublisherStateForProgress())
             const progressResponse = await this.transport.postProgressJson(payload)
@@ -1489,7 +2035,7 @@ class ZapBridge {
                 monitor.readySent = true
                 return
             }
-            if (monitor.terminalPayload || payload.safeToClose === true) {
+            if (payload.safeToClose === true) {
                 this.recordTiming({
                     phase: 'progress.post.terminal',
                     zapid: monitor.zapid,
@@ -1618,7 +2164,11 @@ class ZapBridge {
             }
         }
 
-        const flushed = await this._flushPublisherWithTimeout()
+        const producerSettled = () => !this._getRequiredZapEngines(monitor, runtimeSnapshot).includes('DAST')
+            || this._isZapDastProducerSettled(monitor,
+                automation?.getZapSessionProgressState?.(sessionId))
+        const producerReady = producerSettled()
+        const flushed = producerReady && await this._flushPublisherWithTimeout(ZAP_PROGRESS_FLUSH_TIMEOUT_MS, producerSettled)
         if (terminalContext && !contextIsCurrent()) {
             return { ok: false, posted: false, reason: 'zap_close_context_changed' }
         }
@@ -1630,12 +2180,13 @@ class ZapBridge {
                     reason: 'publisher_not_drained'
                 })
             }
-            if (allowRetry) {
+            if (allowRetry && producerReady) {
                 return { ok: false, posted: false, reason: 'publisher_not_drained' }
             }
         }
 
         let contextPublisherState = null
+        runtimeSnapshot = automation.getZapSessionProgressState(sessionId)
         if (terminalContext) {
             contextPublisherState = await this._getPublisherStateForProgress()
             if (!contextIsCurrent()) return { ok: false, posted: false, reason: 'zap_close_context_changed' }
@@ -1644,19 +2195,18 @@ class ZapBridge {
             // the shared original monitor only after reading the current state.
             runtimeSnapshot = automation.getZapSessionProgressState(sessionId)
             if (!contextIsCurrent()) return { ok: false, posted: false, reason: 'zap_close_context_changed' }
-            derivedState = this._deriveZapProgressState(monitor, runtimeSnapshot)
-            if (!derivedState?.terminal) return { ok: false, posted: false, reason: 'not_terminal' }
         }
+        derivedState = this._deriveZapProgressState(monitor, runtimeSnapshot)
+        if (!derivedState?.terminal) return { ok: false, posted: false, reason: 'not_terminal' }
+        monitor.lastRuntimeSnapshot = runtimeSnapshot
         let payload = this._buildZapProgressPayloadFromDerivedState(derivedState)
-        if (!flushed) {
+        if (!flushed && producerReady) {
             payload = Object.assign({}, payload, {
                 progress: 100,
-                status: payload.status === ZAP_PROGRESS_STATUS_COMPLETED
-                    ? ZAP_PROGRESS_STATUS_COMPLETED
-                    : ZAP_PROGRESS_STATUS_CANCELLED,
-                completionStatus: 'publisher_incomplete',
+                status: payload.status,
+                completionStatus: payload.completionStatus || 'publisher_incomplete',
                 releaseStatus: 'incomplete',
-                safeToClose: true,
+                safeToClose: false,
                 message: payload.message || 'PTK scan terminal state reached but final finding publisher drain was incomplete'
             })
         }
@@ -1667,6 +2217,12 @@ class ZapBridge {
         if (terminalContext && !contextIsCurrent()) return { ok: false, posted: false, reason: 'zap_close_context_changed' }
         await this.transport.postProgressJson(payload)
         if (terminalContext && !contextIsCurrent()) return { ok: false, posted: true, reason: 'zap_close_context_changed' }
+        if (!producerSettled() || payload.publisher?.drained !== true) {
+            if (allowRetry) this._scheduleCloseTerminalProgressRetry({ sessionId,
+                zapid: effectiveZapId, reason: 'producer_not_settled' })
+            return { ok: true, posted: true, status: payload.status, progress: payload.progress,
+                reason: 'awaiting_final_release' }
+        }
         this.transport.markSessionTerminal?.({
             zapid: effectiveZapId,
             sessionId,
@@ -1731,7 +2287,7 @@ class ZapBridge {
                     allowRetry: false
                 })
                 retry.lastReason = result?.reason || null
-                if (result?.posted === true || this.transport.isSessionTerminal?.({ zapid, sessionId }) === true) {
+                if (result?.posted === true && result?.reason !== 'awaiting_final_release') {
                     this._clearCloseTerminalProgressRetry({ sessionId, zapid })
                 }
             } catch (err) {
@@ -2308,26 +2864,18 @@ class ZapBridge {
             delete passiveSince[normalizedEngineName]
         }
 
+        if (normalizedEngineName === 'DAST') {
+            clearPassive()
+            // A cached, nonadvancing executor is not an idle producer. Require
+            // authoritative event settlement as well as the idle projection.
+            return status === 'idle' && runtime?.producerSettled === true
+        }
+
         if (status === 'idle') {
             clearPassive()
             return true
         }
 
-        if (normalizedEngineName === 'DAST' && runtime?.isRunning === true) {
-            const quietCandidate = runtime?.idle === true
-                || status === 'idle'
-                || !this._didZapDastRuntimeAdvance(runtime, previousRuntime)
-            if (!quietCandidate) {
-                clearPassive()
-                return false
-            }
-            return this._isZapPassiveRuntimeQuiet({
-                normalizedEngineName,
-                runtime,
-                passiveSince,
-                clearPassive
-            })
-        }
         if (normalizedEngineName === 'IAST' && runtime?.isScanRunning === true) {
             const quietCandidate = !this._didZapIastRuntimeAdvance(runtime, previousRuntime)
             if (!quietCandidate) {
@@ -2639,27 +3187,50 @@ class ZapBridge {
         return false
     }
 
-    async _flushPublisherWithTimeout(timeoutMs = ZAP_PROGRESS_FLUSH_TIMEOUT_MS) {
+    _isZapDastProducerSettled(monitor, runtimeSnapshot = monitor?.lastRuntimeSnapshot) {
+        const requiredEngines = this._getRequiredZapEngines(monitor, runtimeSnapshot)
+        if (!requiredEngines.includes('DAST')) return true
+        if (monitor?.sessionId && runtimeSnapshot?.sessionId !== monitor.sessionId) return false
+        const runtime = runtimeSnapshot?.engines?.DAST?.telemetry
+        const closeRequestId = monitor?.closeRequest?.id
+        if (!closeRequestId) return runtime?.producerSettled === true && !runtimeSnapshot?.closeRequestId
+        if (monitor.closeRequest.acked !== true
+            || runtimeSnapshot?.sessionId !== monitor.sessionId
+            || runtimeSnapshot?.closeRequestId !== closeRequestId
+            || runtimeSnapshot?.closeRequestAck !== true) return false
+        // A completed original owned Stop already closed admission and drained
+        // native/capture work before this later host close. Reuse that validated
+        // internal proof without a second Stop or an invented close token.
+        // Requested Partial never enters this normal-completed exception.
+        if (runtimeSnapshot.sessionStatus === 'completed' && runtimeSnapshot.completionStatus === 'completed'
+            && ['stopped', 'completed'].includes(runtimeSnapshot.engines?.DAST?.state)
+            && runtime?.producerSettled === true) return true
+        return [runtime?.remoteCleanup, runtime?.localCleanup].some(receipt =>
+            receipt?.sessionId === monitor.sessionId && receipt?.closeRequestId === closeRequestId)
+    }
+
+    async _flushPublisherWithTimeout(timeoutMs = ZAP_PROGRESS_FLUSH_TIMEOUT_MS, isProducerSettled = () => true) {
         const drainForTerminal = this.publisher?.flushPendingForTerminal
         const flushOnce = this.publisher?.flushOnce
         const getDrainState = this.publisher?.getDrainState
         const isDrained = (state) => this._normalizePublisherState(state).drained === true
-        if (typeof drainForTerminal !== 'function' && typeof flushOnce !== 'function') {
-            return true
-        }
-
         try {
-            if (typeof getDrainState === 'function' && isDrained(await getDrainState.call(this.publisher))) {
+            if (!await isProducerSettled()) return false
+            if (typeof drainForTerminal !== 'function' && typeof flushOnce !== 'function') return true
+            if (typeof getDrainState === 'function' && isDrained(await getDrainState.call(this.publisher))
+                && await isProducerSettled()) {
                 return true
             }
             const result = await Promise.race([
                 typeof drainForTerminal === 'function'
                     ? Promise.resolve(drainForTerminal.call(this.publisher, {
-                        maxPasses: ZAP_PROGRESS_DRAIN_MAX_PASSES
+                        maxPasses: ZAP_PROGRESS_DRAIN_MAX_PASSES,
+                        isProducerSettled
                     }))
                     : Promise.resolve(flushOnce.call(this.publisher)),
                 new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs))
             ])
+            if (!await isProducerSettled()) return false
             if (typeof drainForTerminal === 'function') {
                 if (result !== false && isDrained(result)) {
                     return true
@@ -2789,25 +3360,86 @@ class ZapBridge {
         return result?.data || null
     }
 
-    async sendIastFindingsBatch({ scanId, findings, truncated, batchId = null, batchSeq = null }) {
+    supportsIastSchema(schema) {
+        return Array.isArray(this.supportedIastSchemas) && this.supportedIastSchemas.includes(schema)
+    }
+
+    getIastPublicationMode() {
+        const config = this._resolvedConfig
+        if (!config?.fetchedAt || !config.baseUrl || config.baseUrl !== this.currentBaseUrl
+            || this._iastCapabilityReceipt?.zapSessionKey !== this.currentSessionKey) return 'waiting'
+        return config.mode === ZAP_MODE_MANUAL ? 'manual' : 'managed'
+    }
+
+    getIastPublicationContext(scanId) {
+        if (this.getIastPublicationMode() !== 'managed'
+            || !hasEnabledRulepack(this._resolvedConfig?.engineConfigs?.IAST)) return null
+        const context = this._getManagedScanContext('IAST', scanId)
+        if (!context || context.zapSessionKey !== this.currentSessionKey) return null
+        const zapid = this._zapIdFromSessionKey(context.zapSessionKey)
+        const route = this.transport._getCallbackRoute?.({ zapid })
+        if (!this._isExactIastPublicationOwner(context, route)) return null
+        const browserid = toNonEmptyString(this._iastCapabilityReceipt?.browserid)
+        if (!browserid) return null
+        return Object.freeze({ ...context, zapid, browserid, baseUrl: route.baseUrl,
+            wireSchema: this._iastCapabilityReceipt.supportedIastSchemas.includes(IAST_SCHEMA_V3) ? IAST_SCHEMA_V3 : IAST_SCHEMA_V2,
+            supportedIastSchemas: Object.freeze(this._iastCapabilityReceipt.supportedIastSchemas.slice()),
+            supportsV2: this._iastCapabilityReceipt.supportedIastSchemas.includes(IAST_SCHEMA_V2) })
+    }
+
+    _isExactIastPublicationOwner(context, route) {
+        return !!(toNonEmptyString(context?.scanId) && toNonEmptyString(context?.sessionId)
+            && toNonEmptyString(context?.zapSessionKey) && route?.alertsUrl
+            && route.zapid === this._zapIdFromSessionKey(context.zapSessionKey)
+            && this._buildZapSessionKey(route.baseUrl, route.zapid) === context.zapSessionKey)
+    }
+
+    _validateIastPublicationContext(scanId, context) {
+        const native = this._getManagedScanContext('IAST', scanId)
+        const route = this.transport._getCallbackRoute?.({ zapid: context?.zapid })
+        if (!context || !native || context.scanId !== scanId || native.sessionId !== context.sessionId
+            || native.zapSessionKey !== context.zapSessionKey || !context.browserid
+            || !this._isExactIastPublicationOwner(context, route) || route.baseUrl !== context.baseUrl) {
+            throw new Error('iast_publication_owner_unavailable')
+        }
+        return context
+    }
+
+    async sendIastFindingsBatch({ scanId, findings, truncated, batchId = null, batchSeq = null,
+        schema = IAST_SCHEMA, scanCompleteness = null, publicationContext = null }) {
         if (!this.isActive()) return
-        if (!Array.isArray(findings) || findings.length === 0) return
+        const structured = [IAST_SCHEMA_V2, IAST_SCHEMA_V3].includes(schema)
+        if (!Array.isArray(findings) || (!findings.length && !(structured && scanCompleteness))) return
+        let context = null
+        if (structured && (publicationContext || this.getIastPublicationMode() !== 'manual')) {
+            context = this._validateIastPublicationContext(scanId, publicationContext || this.getIastPublicationContext(scanId))
+        }
+        if (![IAST_SCHEMA, IAST_SCHEMA_V2, IAST_SCHEMA_V3].includes(schema)
+            || (context?.wireSchema && context.wireSchema !== schema)
+            || (structured && !(context ? (schema === IAST_SCHEMA_V2 ? context.supportsV2 : context.wireSchema === schema && context.supportedIastSchemas?.includes(schema)) : this.supportsIastSchema(schema)))) {
+            const error = new Error('unsupported_iast_schema')
+            error.permanent = true
+            throw error
+        }
 
         this._debugLog('[PTK ZAP] Sending IAST findings batch:', { scanId, count: findings.length, truncated })
 
         const envelope = {
             source: SOURCE,
             type: TYPE_IAST_FINDINGS_BATCH,
-            schema: IAST_SCHEMA,
+            schema,
             ts: Date.now(),
             batchId: batchId || createBatchId(),
             batchSeq: Number.isFinite(Number(batchSeq)) ? Number(batchSeq) : undefined,
+            ...(context ? { zapid: context.zapid, zapSessionKey: context.zapSessionKey, browserid: context.browserid } : {}),
             payload: {
-                sessionId: this._progressMonitor?.sessionId || this._lastStartSessionId || null,
+                sessionId: context?.sessionId || this._progressMonitor?.sessionId || this._lastStartSessionId || null,
+                ...(context ? { zapSessionKey: context.zapSessionKey } : {}),
                 engine: 'IAST',
                 scanId: scanId || null,
                 findings,
-                truncated: truncated === true
+                truncated: truncated === true,
+                ...(structured ? { scanCompleteness } : {})
             }
         }
 
@@ -2843,7 +3475,16 @@ class ZapBridge {
 
     async confirmAndGetConfig(options = {}) {
         this._debugLog('[PTK ZAP] Fetching ZAP config...')
+        const baseUrl = options.baseUrl || this.transport.getBaseUrl?.()
+        const zapid = options.zapid || this.transport.getZapId?.()
+        const browserid = this.transport.getBrowserId?.() || null
         const config = await this.transport.fetchConfig(options)
+        this.supportedIastSchemas = Array.isArray(config?.supportedIastSchemas)
+            ? config.supportedIastSchemas.filter(value => [IAST_SCHEMA, IAST_SCHEMA_V2, IAST_SCHEMA_V3].includes(value)) : []
+        this._iastCapabilityReceipt = config?.ptkConfigFetchFailed === true ? null : Object.freeze({
+            zapSessionKey: this._buildZapSessionKey(baseUrl, zapid), browserid,
+            supportedIastSchemas: Object.freeze(this.supportedIastSchemas.slice())
+        })
         this._debugLog('[PTK ZAP] ZAP config resolved:', config)
         return config
     }
@@ -3282,6 +3923,15 @@ class ZapBridge {
             : DEFAULT_ZAP_ENGINES
         const effectiveSessionKey = sessionKey || this._buildZapSessionKey(baseUrl, zapid || this.transport.getZapId?.())
         const effectiveZapId = zapid || this.transport.getZapId?.() || null
+        if (safeEngines.includes('IAST')) {
+            const receipt = this._iastCapabilityReceipt
+            if (!effectiveSessionKey || receipt?.zapSessionKey !== effectiveSessionKey) {
+                return { status: 'error', error: 'zap_config_unavailable' }
+            }
+            if (!receipt.supportedIastSchemas.includes(IAST_SCHEMA_V3)) {
+                return { status: 'error', error: 'unsupported_iast_schema' }
+            }
+        }
         const detectedPayload = this.transport.getLastDetectedPayload?.() || {}
         const callbackDetectedAt = Number.isFinite(Number(detectedPayload?.detectedAt))
             ? Number(detectedPayload.detectedAt)
@@ -3401,11 +4051,19 @@ class ZapBridge {
 
         const status = startResult?.status
         if (status === 'starting' || status === 'started' || status === 'already_running') {
-            if (!safeEngines.includes('SAST')) await this.browserCapture?.stop()
+            if (!safeEngines.includes('SAST') && !safeEngines.includes('DAST')) {
+                await this.browserCapture?.stop()
+            }
             this._lastStartKey = startKey
             this._lastStartSessionId = startResult?.sessionId || this._lastStartSessionId
             this._lastStartsByKey.set(startKey, {
                 sessionId: startResult?.sessionId || this._lastStartSessionId || null,
+                sessionKey: effectiveSessionKey,
+                zapid: effectiveZapId,
+                browserid: this.transport.getBrowserId?.() || null,
+                tabId: safeTabId,
+                targetUrl,
+                engines: [...safeEngines],
                 startedAt: Date.now()
             })
             this._clearPendingStart(effectiveSessionKey)
@@ -3633,7 +4291,7 @@ class ZapBridge {
         if (!scanIdText) return null
         const contexts = automation.getZapManagedScanContexts({
             engine,
-            host: this.getActiveTargetHost()
+            ...(String(engine).toUpperCase() === 'IAST' ? {} : { host: this.getActiveTargetHost() })
         })
         return contexts.find(entry => String(entry?.scanId || '') === scanIdText) || null
     }

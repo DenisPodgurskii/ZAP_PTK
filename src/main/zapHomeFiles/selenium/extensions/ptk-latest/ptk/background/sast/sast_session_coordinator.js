@@ -519,10 +519,12 @@ export class SastSessionCoordinator {
         ? Math.max(100, Number(opts.retryDelayMs))
         : 600;
 
-      if (!this.collectPayloadOwnsReadiness && !opts.browserBatch) await this.transport.waitForSpaIdle(tabId, delayMs);
+      if (!this.collectPayloadOwnsReadiness && !opts.browserBatch && !opts.retainedDomBatch)
+        await this.transport.waitForSpaIdle(tabId, delayMs);
       assertOwner();
-      const payload = opts.browserBatch ? {
-        ...opts.browserBatch.payload, nativeDocument: opts.browserBatch.identity,
+      const admitted = opts.browserBatch || opts.retainedDomBatch;
+      const payload = admitted ? {
+        ...admitted.payload, nativeDocument: admitted.identity,
         sourceGaps: 0, originalOnly: false
       } : await (this.collectPayload ? this.collectPayload(tabId, {
         attempts, timeoutMs, delayMs, retryDelayMs, generation: collection.generation, collectionId: collection.collectionId,
@@ -561,7 +563,8 @@ export class SastSessionCoordinator {
           tabId, generation: collection.generation, collectionId: collection.collectionId,
           nativeDocument: document.nativeDocument, originalHtml: document.originalHtml,
           originalScripts: document.originalScripts, sourceGaps: 0,
-          originalOnly: document.originalOnly === true, browserBatch: opts.browserBatch
+          originalOnly: document.originalOnly === true, browserBatch: opts.browserBatch,
+          retainedDomBatch: opts.retainedDomBatch
         });
         assertOwner();
         if (Array.isArray(result)) findings.push(...result);

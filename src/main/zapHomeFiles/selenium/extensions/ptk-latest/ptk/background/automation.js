@@ -8,6 +8,7 @@ import { sastCollectionLooksComplete } from './sast/sast_progress.js'
 import { applyScanAnalysis } from './analysis/scanAnalysisEngine.js'
 import { scanResultStore } from './scanResultStore.js'
 import { stripPrivateDastAnalysisMetadata } from './dast/services/dastAnalysisService.js'
+import { installZapOwnedMainBootstrap } from './integration/zap/zapMainBootstrap.js'
 
 // Mirrors the add-on close-contract PTK stop budget. This is a drain budget
 // for current engine work, not permission to start new work during close.
@@ -1848,6 +1849,40 @@ export class ptk_automation {
 
     // === Session Lifecycle ===
 
+    // Extension-owned content entry only. The ordinary/manual loader remains
+    // unchanged; this admits the generated MAIN entry only for a live ZAP
+    // capture owner and the exact sender document.
+    async msg_zap_main_bootstrap(message, sender) {
+        const unavailable = reason => ({ ok: false, reason, requestId: message?.requestId })
+        const transport = this.zap?.transport
+        const capture = this.zap?.browserCapture
+        if (this.zap?.isActive?.() !== true
+            || typeof capture?.getVerifiedCurrentRootDocument !== 'function') {
+            return unavailable('main_bootstrap_owner_unavailable')
+        }
+        const zapid = transport?.getZapId?.()
+        const browserid = transport?.getBrowserId?.()
+        let manifest
+        let extensionOrigin
+        try {
+            manifest = browser.runtime.getManifest()
+            const bridgeUrl = browser.runtime.getURL('ptk/automationBridge.js')
+            extensionOrigin = /^(chrome-extension:\/\/[a-z]{32})\/ptk\/automationBridge\.js$/u.exec(bridgeUrl)?.[1]
+        } catch (_) {
+            return unavailable('main_bootstrap_runtime_unavailable')
+        }
+        const result = await installZapOwnedMainBootstrap({
+            sender, zapid, browserid, version: manifest?.version,
+            extensionOrigin, nonce: message?.nonce,
+            getOwnedRoot: identity => capture.getVerifiedCurrentRootDocument(identity)
+        })
+        if (this.zap?.isActive?.() !== true || transport?.getZapId?.() !== zapid
+            || transport?.getBrowserId?.() !== browserid) {
+            return unavailable('main_bootstrap_owner_changed')
+        }
+        return { ...result, requestId: message?.requestId }
+    }
+
     async msg_session_start(message, sender) {
         debugAutomationLog('[PTK Automation] msg_session_start called', { message, sender: sender?.tab?.id })
         const { options, pageUrl, requestId } = message
@@ -1872,6 +1907,7 @@ export class ptk_automation {
                 }
             }
             // Clean up stale session
+            this._lateZapDastCleanup?.get(existingSession)?.disposeObservation?.()
             this.sessions.delete(existingSessionId)
             this.activeSessionByTabId.delete(tabId)
         }
@@ -2015,6 +2051,7 @@ export class ptk_automation {
                     requiredEngines: Array.isArray(existingSession?.engines) ? existingSession.engines.slice() : engines
                 }
             }
+            this._lateZapDastCleanup?.get(existingSession)?.disposeObservation?.()
             this.sessions.delete(existingSessionId)
             this.activeSessionByTabId.delete(tabId)
         }
@@ -2194,6 +2231,16 @@ export class ptk_automation {
         const session = this.sessions.get(safeSessionId)
         if (!session || session.source !== 'zap') {
             return { ok: false, error: 'session_not_found', sessionId: safeSessionId }
+        }
+        if (session.status === 'completed' && options?.source === 'zap_browser_close'
+            && toNonEmptyString(options?.closeRequestId)
+            && this._hasCompletedZapDastStopProof(session, session.engineStates?.DAST)) {
+            // A later host close acknowledges an already proved original Stop;
+            // it must not dispatch a second Stop or manufacture a cleanup token.
+            session.closeRequestId = toNonEmptyString(options.closeRequestId)
+            session.closeRequestAck = true
+            session.closeRequestMode = toNonEmptyString(options.closeRequestMode) || 'graceful_stop_and_drain'
+            session.closeRequestReason = toNonEmptyString(options.closeRequestReason) || null
         }
         if (session.status === 'completed' || session.status === 'error') {
             return {
@@ -3628,6 +3675,8 @@ export class ptk_automation {
         // Retain one original flight, never another Stop or a late retry. Missing
         // native/host/capture identity cannot establish a late physical receipt.
         if (!Number.isInteger(session.tabId) || !zapid || !browserid || !client?.port
+            || session.scanIds?.DAST !== scanId
+            || this.sessions.get(session.id) !== session
             || !toNonEmptyString(session.zapSessionKey)?.endsWith(`|${zapid}`)
             || bridge.isActive?.() !== true || bridge.publisher?.disabled === true
             || !client.controllerNonce || !facade.sessionId || !facade.executorGeneration
@@ -3653,12 +3702,48 @@ export class ptk_automation {
                 tabId: session.tabId, sessionKey: session.zapSessionKey, closeRequestId })
         }
         this._lateZapDastCleanup.set(session, retained)
+        // Keep the original cleanup transaction observable, not the caller
+        // waiting. The 25s ZAP outcome deadline and ordinary RPC timeout remain
+        // unchanged. Retention is capped by the existing general Stop ceiling.
+        retained.deadlineAt = Date.now() + this._normalizeStopTimeoutMs()
+        const current = () => !retained.expired && !retained.hostRemoved
+            && this._lateZapDastCleanup?.get(session) === retained
+            && this.sessions.get(session.id) === session && session.source === 'zap'
+            && session.tabId === retained.tabId && session.scanIds?.DAST === scanId
+            && session.closeRequestId === closeRequestId && session.zapSessionKey === retained.zapSessionKey
+            && (this.app?.dast || this.app?.rattacker) === dast && dast.engine === facade
+            && dast.runtimeController === runtime && dast.sessionCoordinator === coordinator
+            && coordinator.getState() === state
+            && (state.automationSession === owner || state.automationSession === null)
+            && this.zap === bridge && bridge.transport === transport && bridge.publisher === retained.publisher
+            && bridge.isActive?.() === true && retained.publisher.disabled !== true
+            && transport.getZapId?.() === zapid && transport.getBrowserId?.() === browserid
+            && client.port === retained.port && client.controllerNonce === retained.nonce
+        retained.cleanupObservation = facade.setCleanupObservation?.({ deadlineAt: retained.deadlineAt, isCurrent: current })
+        const removed = tabId => {
+            if (tabId !== retained.tabId) return
+            retained.hostRemoved = true
+            retained.disposeObservation()
+        }
+        retained.disposeObservation = () => {
+            clearTimeout(retained.observationTimer)
+            browser.tabs?.onRemoved?.removeListener?.(removed)
+            retained.cleanupObservation?.cancel()
+        }
+        browser.tabs?.onRemoved?.addListener?.(removed)
+        retained.observationTimer = setTimeout(() => {
+            retained.expired = true
+            retained.disposeObservation()
+        }, Math.max(0, retained.deadlineAt - Date.now()))
         return retained
     }
 
     _observeOriginalZapDastCleanup(retained, originalStop) {
         const flight = retained.owner.stopFlight
-        if (!flight?.promise || flight.captureReason !== 'stopped' || flight.policy?.zapCloseRequest !== true) return
+        if (!flight?.promise || flight.captureReason !== 'stopped' || flight.policy?.zapCloseRequest !== true) {
+            retained.disposeObservation?.()
+            return
+        }
         retained.flight = flight
         // Both resolutions must be the same original Rattacker outcome. Its
         // promise settles only after capture release and exact-owner clearing.
@@ -3674,12 +3759,12 @@ export class ptk_automation {
                 sessionId: retained.session.id, error: err?.message || String(err)
             })
             return false
-        })
+        }).finally(() => retained.disposeObservation?.())
     }
 
     _isLateZapDastCleanupCurrent(retained, engineState) {
         const { session, dast, coordinator, state, owner, runtime, facade, client, transport } = retained
-        if (this._lateZapDastCleanup?.get(session) !== retained || !retained.originalSucceeded
+        if (this._lateZapDastCleanup?.get(session) !== retained || retained.expired || retained.hostRemoved || !retained.originalSucceeded
             || !retained.timedOut || retained.timeoutState !== engineState
             || this.sessions.get(session.id) !== session || session.source !== 'zap'
             || session.tabId !== retained.tabId || session.scanIds?.DAST !== retained.scanId
@@ -3713,14 +3798,11 @@ export class ptk_automation {
         if (!current()) return false
         const host = await browser.tabs.get(retained.tabId).catch(() => null)
         if (host?.id !== retained.tabId || !current()) return false
-        // Reuse the bridge's bounded terminal publisher drain; do not mint a
-        // physical receipt from queued findings or terminal POST alone.
-        if (await retained.bridge._flushPublisherWithTimeout() !== true || !current()) return false
-        const publisher = await retained.publisher.getDrainState()
-        if (publisher?.drained !== true || publisher.pendingFindings !== 0
-            || publisher.inFlightBatches !== 0 || !current()) return false
-        const stillOpen = await browser.tabs.get(retained.tabId).catch(() => null)
-        if (stillOpen?.id !== retained.tabId || !current()) return false
+        // Native/capture settlement is independent of publisher availability.
+        // Preserve its exact receipt before attempting final publication so an
+        // existing monitor can finish drainage after a transient flush failure.
+        // This proof alone never authorizes closure: the bridge and ZAP still
+        // require the same accepted callback's final publisher acknowledgement.
         retained.receipt = retained.facade.getRemoteCleanupReceipt({ sessionId: session.id, scanId: retained.scanId })
         retained.qualified = true
         session.engineStates.DAST.remoteCleanup = {
@@ -3729,6 +3811,17 @@ export class ptk_automation {
         this._remoteCleanupOwners ||= new WeakMap()
         this._remoteCleanupOwners.set(session, { facade: retained.facade, runtime: retained.runtime,
             coordinator: retained.coordinator, state: retained.state })
+        if (await retained.bridge._flushPublisherWithTimeout() !== true || !current()) return false
+        const publisher = await retained.publisher.getDrainState()
+        if (publisher?.drained !== true || publisher.pendingFindings !== 0
+            || publisher.inFlightBatches !== 0 || !current()) return false
+        const stillOpen = await browser.tabs.get(retained.tabId).catch(() => null)
+        if (stillOpen?.id !== retained.tabId) {
+            retained.hostRemoved = true
+            retained.disposeObservation?.()
+            return false
+        }
+        if (!current()) return false
         // Only physical proof changes. Timeout, Partial status, summary, findings
         // and drain history remain untouched; the existing publisher posts them.
         if (retained.terminalContext && session.finishedAt && ['completed', 'cancelled', 'error'].includes(session.status)) {
@@ -3785,11 +3878,18 @@ export class ptk_automation {
                 const localRuntime = localDast?.runtimeController
                 const localEngine = localDast?.engine
                 const localScanResult = localEngine?.scanResult
+                const localCaptureLeases = localDast?.captureLeases
                 // Local startup may leave the presentation-derived session ID
                 // empty. Pin the exact executor result before Stop instead;
                 // an already bound, conflicting session ID must still fail.
                 const localScanId = session.scanIds?.DAST || localScanResult?.scanId
                 const localCloseRequestId = session.closeRequestId
+                const qualifyCompletedStop = engineName === 'DAST' && !retainedDast
+                    && session.source === 'zap' && localOwner?.id === session.id
+                    && !!localScanId && localScanResult?.scanId === localScanId
+                    && localCaptureLeases instanceof Map
+                    && [true, false].includes(localRuntime?.remote)
+                    && !session.engineStates[engineName]?.error && !session.engineStates[engineName]?.stopTimedOut
                 const qualifyLocalCleanup = engineName === 'DAST' && !retainedDast
                     && session.source === 'zap' && options?.source === 'zap_browser_close'
                     && localRuntime?.remote === false
@@ -3828,13 +3928,6 @@ export class ptk_automation {
                     && localEngine.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: localScanId })
                     ? { sessionId: session.id, scanId: localScanId, closeRequestId: localCloseRequestId }
                     : null
-                if (engineName === 'DAST' && !retainedDast) {
-                    this._remoteCleanupOwners ||= new WeakMap()
-                    this._remoteCleanupOwners.delete(session)
-                    if (remoteCleanup) this._remoteCleanupOwners.set(session, {
-                        facade: localEngine, runtime: localRuntime, coordinator: localCoordinator, state: localState
-                    })
-                }
                 const localCleanup = qualifyLocalCleanup && !timedOut && engineStats && !engineStats.error
                     && this.sessions.get(session.id) === session
                     && (this.app?.dast || this.app?.rattacker) === localDast
@@ -3854,6 +3947,31 @@ export class ptk_automation {
                     && !session.engineStates[engineName]?.stopTimedOut
                     ? { sessionId: session.id, scanId: localScanId, closeRequestId: localCloseRequestId }
                     : null
+                const completedStop = qualifyCompletedStop && !timedOut && !engineStats?.error
+                    && engineStats?.completionStatus === 'completed' && engineStats.drained === true
+                    && this.sessions.get(session.id) === session
+                    && (this.app?.dast || this.app?.rattacker) === localDast
+                    && localDast.engine === localEngine && localEngine.isRunning === false
+                    && localDast.runtimeController === localRuntime && localDast.sessionCoordinator === localCoordinator
+                    && localCoordinator.getState() === localState && localState.automationSession === null
+                    && localOwner.id === session.id && session.scanIds?.DAST === localScanId
+                    && localDast.captureLeases === localCaptureLeases && localCaptureLeases.size === 0
+                    && !session.engineStates[engineName]?.error && !session.engineStates[engineName]?.stopTimedOut
+                    && (localRuntime.remote === true
+                        ? !!localEngine.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: localScanId })
+                        : localEngine.scanResult === localScanResult && localScanResult.scanId === localScanId)
+                if (engineName === 'DAST' && !retainedDast) {
+                    this._remoteCleanupOwners ||= new WeakMap()
+                    this._remoteCleanupOwners.delete(session)
+                    // Reuse this existing exact-owner record for a completed
+                    // original local/remote Stop too. It is internal settlement
+                    // proof, never a manufactured close-bound cleanup marker.
+                    if (remoteCleanup || completedStop) this._remoteCleanupOwners.set(session, {
+                        facade: localEngine, runtime: localRuntime, coordinator: localCoordinator, state: localState,
+                        completedStop: !!completedStop, scanId: localScanId, owner: localOwner,
+                        captureLeases: localCaptureLeases, scanResult: localScanResult
+                    })
+                }
                 session.engineStates[engineName] = Object.assign({}, session.engineStates[engineName], {
                     status: incomplete ? 'cancelled' : 'stopped',
                     completionStatus: incomplete ? 'engine_incomplete' : (engineStats?.completionStatus || 'completed'),
@@ -4615,6 +4733,7 @@ export class ptk_automation {
 
         debugAutomationLog('[PTK Automation] Evicting session', sessionId)
         this._recordEvictedSession(session, reason)
+        this._lateZapDastCleanup?.get(session)?.disposeObservation?.()
         this.sessions.delete(sessionId)
 
         if (this.lastCompletedSessionGlobal === sessionId) {
@@ -5577,6 +5696,83 @@ export class ptk_automation {
         }
     }
 
+    // This method is reached only through the trusted extension runner sender
+    // gate in app.js. Tab identity comes from the active background session,
+    // never from a page-supplied URL or a latest-scan lookup.
+    async getZapOwnedVisitCheckpoint({ sessionId, zapid, browserid, phase, observationMs } = {}) {
+        const unavailable = reason => ({ ok: false, reason })
+        if (typeof sessionId !== 'string' || !sessionId
+            || typeof zapid !== 'string' || !zapid
+            || typeof browserid !== 'string' || !browserid
+            || !['advance', 'departure', 'clear', 'rebind'].includes(phase)) {
+            return unavailable('visit_request_invalid')
+        }
+        const session = this.sessions.get(sessionId)
+        const tabId = session?.tabId
+        if (!Number.isInteger(tabId) || tabId < 0
+            || session.id !== sessionId || session.source !== 'zap'
+            || session.status !== ENGINE_STATUS_RUNNING || session.stopRequestedAt
+            || this.activeSessionByTabId.get(tabId) !== sessionId
+            || this.zap?.isActive?.() !== true
+            || this.zap?.transport?.getZapId?.() !== zapid
+            || this.zap?.transport?.getBrowserId?.() !== browserid) {
+            return unavailable('visit_owner_unavailable')
+        }
+        const owner = { zapid, browserid, tabId, sessionId }
+        const named = this.zap.getOwnedVisitScanIdentities?.(owner)
+        if (named?.ok !== true) return unavailable(named?.reason || 'visit_scan_unavailable')
+        if (phase === 'clear') {
+            return { ok: this.zap.clearOwnedVisitObservation?.(owner) === true,
+                kind: 'observation_cleared' }
+        }
+        if (phase === 'rebind') {
+            return this.zap.rebindOwnedIastStream?.(owner)
+                || unavailable('visit_rebind_unavailable')
+        }
+        if (phase === 'advance') {
+            return this.zap.advanceOwnedVisitObservation(owner, observationMs)
+        }
+        return this.zap.confirmOwnedVisitDeparture(owner)
+    }
+
+    // A visit checkpoint must use the scans owned by this exact running ZAP
+    // session. Unlike getSessionProgressSnapshot, this is read-only and never
+    // discovers a replacement "latest" scan or finalizes session state.
+    getZapOwnedScanIdentitySnapshot({ sessionId, tabId, zapSessionKey } = {}) {
+        const unavailable = reason => ({ ok: false, reason })
+        if (typeof sessionId !== 'string' || !sessionId
+            || !Number.isInteger(tabId) || tabId < 0
+            || typeof zapSessionKey !== 'string' || !zapSessionKey) {
+            return unavailable('owner_identity_invalid')
+        }
+        const session = this.sessions.get(sessionId)
+        if (!session || session.id !== sessionId || session.source !== 'zap'
+            || session.tabId !== tabId || session.zapSessionKey !== zapSessionKey
+            || session.status !== ENGINE_STATUS_RUNNING
+            || session.stopRequestedAt || this.activeSessionByTabId.get(tabId) !== sessionId) {
+            return unavailable('owner_not_running')
+        }
+        const engines = session.engines
+        if (!Array.isArray(engines) || !engines.length || engines.length > 4
+            || new Set(engines).size !== engines.length
+            || engines.some(engine => !['DAST', 'IAST', 'SAST', 'SCA'].includes(engine))) {
+            return unavailable('engine_identity_invalid')
+        }
+        const scanIds = {}
+        for (const engine of engines) {
+            const scanId = session.scanIds?.[engine]
+            if (typeof scanId !== 'string' || !scanId.trim() || scanId.length > 128) {
+                return unavailable('scan_identity_pending')
+            }
+            const status = session.engineStates?.[engine]?.status
+            if (status !== ENGINE_STATUS_RUNNING && status !== ENGINE_STATUS_COMPLETED) {
+                return unavailable('engine_not_ready')
+            }
+            scanIds[engine] = scanId
+        }
+        return { ok: true, sessionId, tabId, requiredEngines: engines.slice(), scanIds }
+    }
+
     getZapSessionProgressState(sessionId) {
         const snapshot = this.getSessionProgressSnapshot(sessionId)
         if (!snapshot?.ok) {
@@ -5696,7 +5892,7 @@ export class ptk_automation {
             pendingAutomationSeeds,
             toFiniteNumber(engineProgress?.findingsCount, 0)
         ].some(value => Number.isFinite(value) && value > 0) || Boolean(toNonEmptyString(lastActivityAt))
-        return {
+        const telemetry = {
             status: engineProgress?.status || engineState?.status || 'unknown',
             remoteCleanup: engineState?.remoteCleanup && !engineState.error
                 && (!engineState.stopTimedOut || (this._lateZapDastCleanup?.get(session)?.qualified === true
@@ -5757,6 +5953,32 @@ export class ptk_automation {
                 || toNonEmptyString(engineState?.error)
                 || null
         }
+        // Internal bridge readiness, never a finding field or an inference from
+        // unchanged counters. Receipt creation already joins native events and
+        // capture release for this exact owner; only then can a final publisher
+        // drain be authoritative. Requested Partial remains Partial.
+        telemetry.producerSettled = !!(telemetry.remoteCleanup || telemetry.localCleanup)
+            || this._hasCompletedZapDastStopProof(session, engineState)
+        return telemetry
+    }
+
+    _hasCompletedZapDastStopProof(session, engineState) {
+        const proof = this._remoteCleanupOwners?.get(session)
+        const dast = this.app?.dast || this.app?.rattacker
+        if (!proof?.completedStop || session?.source !== 'zap' || this.sessions.get(session.id) !== session
+            || session.status !== 'completed' || session.completionStatus !== 'completed' || !session.finishedAt
+            || !['stopped', 'completed'].includes(engineState?.status)
+            || engineState.completionStatus !== 'completed' || engineState.drained !== true
+            || engineState.error || engineState.stopTimedOut
+            || session.scanIds?.DAST !== proof.scanId || proof.owner?.id !== session.id
+            || dast?.engine !== proof.facade || dast.runtimeController !== proof.runtime
+            || dast.sessionCoordinator !== proof.coordinator || proof.coordinator.getState() !== proof.state
+            || proof.state.automationSession !== null || proof.facade.isRunning !== false
+            || dast.captureLeases !== proof.captureLeases || proof.captureLeases?.size !== 0) return false
+        return proof.runtime.remote === true
+            ? !!proof.facade.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: proof.scanId })
+            : proof.runtime.remote === false && proof.facade.scanResult === proof.scanResult
+                && proof.scanResult?.scanId === proof.scanId
     }
 
     _buildZapIastRuntime(engineState, engineProgress, session) {

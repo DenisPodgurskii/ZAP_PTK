@@ -22,6 +22,7 @@ import { ptk_iast } from "./ptk/background/iast.js"
 import { ptk_sast } from "./ptk/background/sast.js"
 import { ptk_automation } from "./ptk/background/automation.js"
 import { zapBridge } from "./ptk/background/integration/zap/index.js"
+import { handleZapRunnerVisitCapability, handleZapRunnerVisitObservation, handleZapRunnerVisitPrestart, handleZapRunnerVisitRequest } from "./ptk/background/integration/zap/zapRunnerVisit.js"
 import { ScopedTabSessionCoordinator } from "./ptk/background/common/scopedTabSessionCoordinator.js"
 import { OffscreenRuntimeManager } from "./ptk/background/offscreen/offscreenRuntimeManager.js"
 import { BrowserCaptureManager } from "./ptk/background/capture/browserCaptureManager.js"
@@ -282,6 +283,30 @@ export class ptk_app {
                     reason: 'untrusted_runner_sender',
                     requestId: message.requestId
                 })
+            }
+
+            if (message?.type === "visit_capability") {
+                return this.ready.then(() => handleZapRunnerVisitCapability(message))
+                    .catch(() => ({ ok: false, reason: 'visit_capability_unavailable',
+                        trustedRunner: 'ptk-zap-visit-v1', requestId: message.requestId }))
+            }
+
+            if (message?.type === "visit_prestart") {
+                return this.ready.then(() => handleZapRunnerVisitPrestart(this.automation?.zap, message))
+                    .catch(() => ({ ok: false, reason: 'visit_prestart_failed',
+                        trustedRunner: 'ptk-zap-visit-v1', requestId: message.requestId }))
+            }
+
+            if (message?.type === "visit_checkpoint") {
+                return this.ready.then(() => handleZapRunnerVisitRequest(this.automation, message))
+                    .catch(() => ({ ok: false, reason: 'visit_checkpoint_failed',
+                        trustedRunner: 'ptk-zap-visit-v1', requestId: message.requestId }))
+            }
+
+            if (message?.type === "visit_observe") {
+                return this.ready.then(() => handleZapRunnerVisitObservation(this.automation, message))
+                    .catch(() => ({ ok: false, reason: 'visit_observation_failed',
+                        trustedRunner: 'ptk-zap-visit-v1', requestId: message.requestId }))
             }
 
             if (message?.type === "close_session_status") {

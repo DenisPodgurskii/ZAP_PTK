@@ -1,5 +1,6 @@
 package org.zaproxy.addon.ptk.model;
 
+import com.google.gson.JsonObject;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -42,6 +43,12 @@ public class PtkFinding {
 
     /** IAST: context (domPath, elementId, tagName). */
     private PtkFindingContext context;
+
+    /** IAST v2: bounded, validated observation provenance (not authenticated page evidence). */
+    private JsonObject observation;
+
+    /** IAST v3: strictly validated ordered redacted projection, distinct from stack trace. */
+    private JsonObject flow;
 
     /** DAST: request/response. */
     private PtkFindingRequest request;

@@ -508,6 +508,24 @@ export class ChromiumCaptureAdapter {
 
     refreshSastState(tabId) { const state = this.tabs.get(tabId); if (state?.sastPush?.active) return this._scheduleSastPush(state) }
 
+    // document.open() advances the native stream without necessarily replacing
+    // its isolated execution context. A retained context may speak for the new
+    // stream only while the exact frame, loader, session and realm remain
+    // current; its old grant is separately revoked at Page.documentOpened.
+    _sastCurrentContextIdentity(state, context) {
+        if (!context || state.contexts.get(JSON.stringify([context.sessionId || '', context.contextId])) !== context) return null
+        const frame = state.frames.get(context.frameId)
+        if (!frame || frame.documentId !== context.documentId
+            || frame.loaderId !== context.documentId
+            || frame.sessionGeneration !== context.sessionGeneration
+            || (frame.sessionId || '') !== (context.sessionId || '')
+            || !Number.isSafeInteger(frame.streamGeneration)
+            || !Number.isSafeInteger(context.streamGeneration)
+            || frame.streamGeneration < context.streamGeneration) return null
+        return frame.streamGeneration === context.streamGeneration ? context
+            : { ...context, streamGeneration: frame.streamGeneration }
+    }
+
     _scheduleSastPush(state) {
         state.sastPushDirty = true
         if (state.sastPushWork) return state.sastPushWork
@@ -569,7 +587,9 @@ export class ChromiumCaptureAdapter {
             return true
         }
         if (!config.isActive()) return false
-        for (const [key, grant] of state.sastGrants) if (!current(grant.context) || !config.getIdentity(grant.context)) {
+        for (const [key, grant] of state.sastGrants) if (!current(grant.context)
+            || !this._sastCurrentContextIdentity(state, grant.context)
+            || !config.getIdentity(this._sastCurrentContextIdentity(state, grant.context))) {
             this._identityDelete(state, state.sastGrants, key)
             if (current(grant.context)) this.send(state.tabId, 'Runtime.callFunctionOn', { functionDeclaration: SAST_PUSH_STATE,
                 uniqueContextId: grant.context.uniqueId, arguments: [{ value: this.chrome.runtime.id }, { value: this.extensionOrigin },
@@ -580,7 +600,9 @@ export class ChromiumCaptureAdapter {
         // Decide the producer before setting up its namespace. A single valid
         // runtime with no shared receiver may be bootstrapped dormantly; an
         // ambiguous document never receives bootstrap or active state.
-        for (const context of contexts) if (current(context) && config.getIdentity(context)) {
+        for (const context of contexts) if (current(context)
+            && this._sastCurrentContextIdentity(state, context)
+            && config.getIdentity(this._sastCurrentContextIdentity(state, context))) {
             const result = await this.send(state.tabId, 'Runtime.callFunctionOn', { functionDeclaration: PROBE_SAST_COLLECTOR,
                 uniqueContextId: context.uniqueId, arguments: [{ value: this.chrome.runtime.id }, { value: this.extensionOrigin }], returnByValue: true }, context.sessionId)
             if (!current(context) || !config.isActive()) return false
@@ -677,7 +699,9 @@ export class ChromiumCaptureAdapter {
             try { await capture } finally { state.sastNativeSetups.delete(capture) }
             if (!safe) { unavailable(context); continue }
             for (const context of group) {
-            if (!selected.has(context) || !config.getIdentity(context)) continue
+            if (!selected.has(context)
+                || !this._sastCurrentContextIdentity(state, context)
+                || !config.getIdentity(this._sastCurrentContextIdentity(state, context))) continue
             if (!current(context) || !config.isActive()) return false
             // Shared may load before or after addBinding. This state-only call
             // announces the transport; producer_ready never grants authority.
@@ -689,9 +713,13 @@ export class ChromiumCaptureAdapter {
             if (capabilities.get(context)?.collector !== true) continue
             const key = JSON.stringify([context.sessionId || '', context.contextId])
             const prior = state.sastGrants.get(key)
-            if (prior?.context === context && prior.config === config) continue
+            const currentIdentity = this._sastCurrentContextIdentity(state, context)
+            if (!currentIdentity) continue
+            if (prior?.context === context && prior.config === config
+                && prior.streamGeneration === currentIdentity.streamGeneration) continue
             const revision = config.nextRevision()
-            if (!this._identitySet(state, state.sastGrants, key, { ...context, context, config, revision })) throw new Error('capture_sast_binding_unavailable')
+            if (!this._identitySet(state, state.sastGrants, key,
+                { ...currentIdentity, context, config, revision })) throw new Error('capture_sast_binding_unavailable')
             const result = await this.send(state.tabId, 'Runtime.callFunctionOn', { functionDeclaration: SAST_PUSH_STATE,
                 uniqueContextId: context.uniqueId, arguments: [{ value: this.chrome.runtime.id }, { value: this.extensionOrigin },
                     { value: { active: true, revision, transport: 'cdp' } }], returnByValue: true }, context.sessionId)
@@ -709,7 +737,9 @@ export class ChromiumCaptureAdapter {
     _sastBindingCalled(state, sessionId, params) {
         if (params.name !== SAST_PUSH_BINDING || typeof params.payload !== 'string' || params.payload.length * 2 > this.maxResourceBytes) return
         const key = JSON.stringify([sessionId || '', params.executionContextId]), context = state.contexts.get(key), config = state.sastPush
-        if (!context || !config?.active || !config.isActive() || !config.getIdentity(context)) return
+        const currentIdentity = this._sastCurrentContextIdentity(state, context)
+        if (!currentIdentity || !config?.active || !config.isActive()
+            || !config.getIdentity(currentIdentity)) return
         let packet
         try { packet = JSON.parse(params.payload) } catch (_) { return }
         if (packet?.type === 'producer_ready') {
@@ -720,7 +750,7 @@ export class ChromiumCaptureAdapter {
         const grant = state.sastGrants.get(key)
         if (!grant || grant.context !== context || grant.config !== config || packet?.revision !== grant.revision) return
         // Context/config are captured NOW, before any manager delivery queue.
-        if (packet.type === 'dom_snapshot') this._emit('sastPayload', { ...context, tabId: state.tabId }, {
+        if (packet.type === 'dom_snapshot') this._emit('sastPayload', { ...currentIdentity, tabId: state.tabId }, {
             payload: packet.payload, ownerId: config.ownerId, revision: config.revision,
             current: () => state.contexts.get(key) === context && state.sastPush === config && config.isActive(),
             nativeCurrent: () => this.tabs.get(state.tabId) === state && state.alive && state.contexts.get(key) === context })
@@ -931,7 +961,10 @@ export class ChromiumCaptureAdapter {
             this._clearFrame(state, frame.id, true)
             this._identityDelete(state, state.frames, frame.id)
         }
-        if (!this._identitySet(state, state.frames, frame.id, { frameId: frame.id, parentFrameId: frame.parentId, loaderId: frame.loaderId, documentId: frame.loaderId, url: frame.url, sessionId, sessionGeneration: state.sessionGenerations.get(sessionId || '') })) return
+        const streamGeneration = old?.documentId === frame.loaderId && (old.sessionId || '') === (sessionId || '')
+            && old.sessionGeneration === state.sessionGenerations.get(sessionId || '')
+            ? old.streamGeneration || 0 : 0
+        if (!this._identitySet(state, state.frames, frame.id, { frameId: frame.id, parentFrameId: frame.parentId, loaderId: frame.loaderId, documentId: frame.loaderId, url: frame.url, sessionId, sessionGeneration: state.sessionGenerations.get(sessionId || ''), streamGeneration })) return
         this._emit('protocol', { tabId: state.tabId, ...state.frames.get(frame.id) }, { method: 'Page.frameNavigated', source: { tabId: state.tabId, sessionId }, params: { frame } })
     }
     _identitySet(state, map, key, value, unavailableRecord) {
@@ -1008,6 +1041,38 @@ export class ChromiumCaptureAdapter {
             return
         }
         if (method === 'Page.frameNavigated') this._frame(state, params.frame, source.sessionId)
+        if (method === 'Page.documentOpened') {
+            const frame = params.frame
+            const current = frame?.id && state.frames.get(frame.id)
+            if (!current || !frame.loaderId || current.loaderId !== frame.loaderId
+                || (current.sessionId || '') !== sessionId
+                || current.sessionGeneration !== state.sessionGenerations.get(sessionId)) {
+                this._emit('gap', { tabId: source.tabId, sessionId: source.sessionId,
+                    reason: 'document_open_without_bound_frame', complete: false })
+                return
+            }
+            if (!Number.isSafeInteger(current.streamGeneration) || current.streamGeneration >= Number.MAX_SAFE_INTEGER) {
+                this._emit('gap', { tabId: source.tabId, sessionId: source.sessionId, frameId: frame.id,
+                    documentId: current.documentId, reason: 'stream_generation_exhausted', complete: false })
+                return
+            }
+            const opened = { ...current, streamGeneration: current.streamGeneration + 1 }
+            if (!this._identitySet(state, state.frames, frame.id, opened)) return
+            // A delayed packet from the old stream has no stream token. Drop
+            // its grant before any async reactivation can publish a new cut.
+            for (const [grantKey, grant] of state.sastGrants || []) {
+                const context = grant.context
+                if (context?.frameId === opened.frameId
+                    && context.documentId === opened.documentId
+                    && context.sessionGeneration === opened.sessionGeneration
+                    && (context.sessionId || '') === sessionId) {
+                    this._identityDelete(state, state.sastGrants, grantKey)
+                }
+            }
+            this._emit('protocol', { tabId: source.tabId, ...opened }, { method, source, params })
+            if (state.sastPush?.active) this._scheduleSastPush(state)
+            return
+        }
         if (method === 'Page.frameDetached') { this._clearFrame(state, params.frameId); this._identityDelete(state, state.frames, params.frameId) }
         if (method === 'Target.attachedToTarget') {
             if (params.targetInfo?.type !== 'iframe') { this._emit('gap', { tabId: source.tabId, reason: 'unsupported_child_target', complete: false }); return }

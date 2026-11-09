@@ -708,6 +708,9 @@ function sanitizeArrayStrings(arr, maxBytes, label, opts = {}) {
 
 function sanitizeIastEvidence(evidence = {}) {
     if (!evidence || typeof evidence !== "object") return
+    if (evidence.observation && typeof evidence.observation === "object") {
+        evidence.observation = sanitizeObjectStrings(evidence.observation, 5)
+    }
     const limits = DEFAULT_TRUNCATE_LIMITS.iast
     if (typeof evidence.trace === "string" || Array.isArray(evidence.trace)) {
         evidence.trace = sanitizeArrayStrings([evidence.trace].flat(), limits.trace, "iast.trace")

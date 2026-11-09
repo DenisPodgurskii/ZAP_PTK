@@ -4,6 +4,8 @@ import { toDastFinding } from './zapDastMapper.js'
 import { toIastFinding } from './zapIastMapper.js'
 import { toSastFindings } from './zapSastMapper.js'
 import { isZapExportableFinding } from './zapFindingFilter.js'
+import { IAST_WIRE_V2, IAST_WIRE_V3, iastContractError, sanitizeIastScanCompleteness } from './iastWireContract.js'
+import { validateIastV3Ack } from './iastFlowProjection.js'
 
 const ENGINES = ['DAST', 'IAST', 'SAST']
 const POLL_INTERVAL_MS = 2000
@@ -15,11 +17,7 @@ const ZAP_SESSION_SCAN_LOOKBACK_MS = 30 * 1000
 const TERMINAL_DRAIN_MIN_STABLE_PASSES = 2
 const ACK_RESOLVED_STATUSES = new Set([
     'accepted_raised',
-    'accepted_duplicate',
-    'rejected_missing_mapping',
-    'rejected_invalid_url',
-    'rejected_missing_site_tree_match',
-    'rejected_raise_failed'
+    'accepted_duplicate'
 ])
 
 function createPublisherBatchId() {
@@ -158,8 +156,14 @@ export default class ZapPublisher {
         this.publishedState = new Map()
         this.lastSeen = new Map()
         this.inFlightBatches = new Map()
+        this.iastCompletenessAcks = new Map()
+        this.immutableIastRecords = new Map()
+        this.permanentFailures = new Map()
+        this.iastPublicationContexts = new Map()
+        this.iastWireSchemas = new Map()
         this.batchSeq = 0
         this.lastAckedBatchSeq = 0
+        this.ackedBatchSeqByScan = new Map()
         this._pollIdleWaiters = new Set()
         this.flushRequested = false
     }
@@ -195,10 +199,10 @@ export default class ZapPublisher {
         await this._waitForPollIdle()
     }
 
-    async flushPendingForTerminal({ maxPasses = 4 } = {}) {
+    async flushPendingForTerminal({ maxPasses = 4, isProducerSettled = () => true } = {}) {
         if (this.disabled) {
             return {
-                drained: true,
+                drained: await isProducerSettled() === true,
                 pendingFindings: 0,
                 pendingByEngine: {},
                 inFlightBatches: 0,
@@ -222,11 +226,17 @@ export default class ZapPublisher {
         let stablePasses = 0
 
         for (let pass = 1; pass <= Math.max(1, Number(maxPasses) || 1); pass += 1) {
+            if (!await isProducerSettled()) {
+                return Object.assign({}, lastState, { drained: false, passes: pass - 1, stablePasses: 0 })
+            }
             await this._waitForPollIdle()
             await this._pollOnce()
             await this._waitForPollIdle()
 
             lastState = await this.getDrainState()
+            if (!await isProducerSettled()) {
+                return Object.assign({}, lastState, { drained: false, passes: pass, stablePasses: 0 })
+            }
             if (lastState.drained) {
                 stablePasses += 1
                 if (stablePasses >= TERMINAL_DRAIN_MIN_STABLE_PASSES) {
@@ -259,7 +269,7 @@ export default class ZapPublisher {
         }
 
         const active = this.zapBridge.isActive()
-        if (!active) {
+        if (!active && !this.iastPublicationContexts.size) {
             return {
                 drained: true,
                 pendingFindings: 0,
@@ -277,12 +287,16 @@ export default class ZapPublisher {
         let pendingFindings = 0
 
         for (const engine of ENGINES) {
+            if (!active && engine !== 'IAST') continue
             const scanIds = await this._resolveScanIdsForEngine(engine, host)
             let enginePending = 0
 
             for (const scanId of scanIds) {
                 const scanResult = await this.resultsRegistry.get(engine, scanId)
-                if (!scanResult) continue
+                if (!scanResult) {
+                    if (engine === 'IAST' && this.iastPublicationContexts.has(scanId)) enginePending += 1
+                    continue
+                }
                 enginePending += this._countPendingFindingsForScan(engine, scanId, scanResult)
             }
 
@@ -293,23 +307,103 @@ export default class ZapPublisher {
         }
 
         return {
-            drained: pendingFindings === 0 && !this.pollInFlight && this.inFlightBatches.size === 0,
+            drained: pendingFindings === 0 && this.permanentFailures.size === 0 && !this.pollInFlight && this.inFlightBatches.size === 0,
             pendingFindings,
             pendingByEngine,
             inFlightBatches: this.inFlightBatches.size,
             inFlightByEngine: this._countInFlightByEngine(),
-            lastAckedBatchSeq: this.lastAckedBatchSeq
+            lastAckedBatchSeq: this.lastAckedBatchSeq,
+            permanentFailures: Array.from(this.permanentFailures, ([key, reason]) => ({ key, reason }))
+        }
+    }
+
+    // A scan-wide idle state can be true when the publisher is inactive or its
+    // registry is unavailable, and can include unrelated DAST work. A visit
+    // coordinator must use only its exact named scans here. This is only the
+    // publication part of a visit checkpoint; source acquisition and analysis
+    // need independent cut proofs.
+    async getOwnedVisitDrainState({ zapid, browserid, scanIds } = {}) {
+        const incomplete = reason => ({ drained: false, reason })
+        if (this.disabled || typeof zapid !== 'string' || !zapid
+            || typeof browserid !== 'string' || !browserid
+            || !scanIds || typeof scanIds !== 'object' || Array.isArray(scanIds)) {
+            return incomplete('publisher_owner_unavailable')
+        }
+        if (!this.timerId) return incomplete('publisher_not_started')
+        const expected = Object.entries(scanIds)
+        if (!expected.length || expected.length > ENGINES.length
+            || expected.some(([engine, scanId]) => !ENGINES.includes(engine)
+                || typeof scanId !== 'string' || !scanId || scanId.length > 128)) {
+            return incomplete('publisher_scan_identity_invalid')
+        }
+        const sameOwner = () => this.zapBridge?.isActive?.() === true
+            && this.zapBridge?.transport?.getZapId?.() === zapid
+            && this.zapBridge?.transport?.getBrowserId?.() === browserid
+        if (!sameOwner() || !this._validateRegistryApi()) {
+            return incomplete('publisher_owner_unavailable')
+        }
+        try {
+            const pendingByEngine = {}
+            const inFlightByEngine = {}
+            let pendingFindings = 0
+            let inFlightBatches = 0
+            for (const [engine, scanId] of expected) {
+                const result = await this.resultsRegistry.get(engine, scanId)
+                if (!sameOwner()) return incomplete('publisher_owner_changed')
+                if (!result || result.scanId !== scanId) return incomplete('publisher_scan_unavailable')
+                const pending = this._countPendingFindingsForScan(engine, scanId, result)
+                if (!Number.isSafeInteger(pending) || pending < 0) return incomplete('publisher_snapshot_failed')
+                if (pending) {
+                    pendingByEngine[engine] = pending
+                    pendingFindings += pending
+                }
+            }
+            const expectedKeys = new Set(expected.map(([engine, scanId]) => `${engine}:${scanId}`))
+            for (const batch of this.inFlightBatches.values()) {
+                if (!expectedKeys.has(`${batch?.engine}:${batch?.scanId}`)) continue
+                inFlightBatches += 1
+                inFlightByEngine[batch.engine] = (inFlightByEngine[batch.engine] || 0) + 1
+            }
+            const permanentFailures = Array.from(this.permanentFailures, ([key, reason]) => ({ key, reason }))
+                .filter(item => expectedKeys.has(item.key))
+            if (!sameOwner() || this.disabled) return incomplete('publisher_owner_changed')
+            const drained = pendingFindings === 0 && inFlightBatches === 0 && permanentFailures.length === 0
+            const ownedLastAckedBatchSeq = Math.max(0, ...Array.from(expectedKeys,
+                key => this.ackedBatchSeqByScan.get(key) || 0))
+            return { drained, ...(drained ? {} : { reason: 'publisher_owned_scan_pending' }),
+                pendingFindings, pendingByEngine, inFlightBatches, inFlightByEngine,
+                permanentFailures, lastAckedBatchSeq: ownedLastAckedBatchSeq }
+        } catch {
+            return incomplete('publisher_snapshot_failed')
         }
     }
 
     resetState() {
-        this.publishedState.clear()
-        this.lastSeen.clear()
-        this.inFlightBatches.clear()
-        this.batchSeq = 0
-        this.lastAckedBatchSeq = 0
+        // A callback change resets discovery, not the receipts of an admitted
+        // closing IAST owner. Its immutable context still routes to that owner.
+        const retained = new Set(Array.from(this.iastPublicationContexts.keys(), scanId => `IAST:${scanId}`))
+        for (const map of [this.publishedState, this.lastSeen, this.iastCompletenessAcks,
+            this.immutableIastRecords, this.permanentFailures, this.iastWireSchemas,
+            this.ackedBatchSeqByScan]) {
+            for (const key of map.keys()) if (!retained.has(key)) map.delete(key)
+        }
+        for (const [id, batch] of this.inFlightBatches) {
+            if (!retained.has(`${batch.engine}:${batch.scanId}`)) this.inFlightBatches.delete(id)
+        }
+        if (!retained.size) {
+            this.batchSeq = 0
+            this.lastAckedBatchSeq = 0
+        }
         this.wasActive = false
         this.activeSinceMs = Date.now()
+    }
+
+    _recordStoredBatchAck(engine, scanId, batchSeq) {
+        if (!Number.isSafeInteger(batchSeq) || batchSeq < 1) return
+        this.lastAckedBatchSeq = Math.max(this.lastAckedBatchSeq, batchSeq)
+        const key = `${engine}:${scanId}`
+        this.ackedBatchSeqByScan.set(key, Math.max(this.ackedBatchSeqByScan.get(key) || 0, batchSeq))
+        this._pollControlAfterAck('publisher_ack')
     }
 
     _disablePublisher() {
@@ -448,6 +542,21 @@ export default class ZapPublisher {
     }
 
     async _resolveScanIdsForEngine(engine, host) {
+        if (engine === 'IAST' && typeof this.zapBridge?.getIastPublicationMode === 'function') {
+            await this._retireAcknowledgedIastOwners()
+            const mode = this.zapBridge.getIastPublicationMode()
+            if (mode !== 'manual') {
+                const managed = normalizeScanIds(await this.zapBridge.getManagedScanIdsForEngine?.(engine))
+                for (const scanId of managed) {
+                    if (this.iastPublicationContexts.has(scanId)) continue
+                    const context = this.zapBridge.getIastPublicationContext(scanId)
+                    if (!context) continue
+                    if (this.iastPublicationContexts.size >= MAX_KEYS) throw iastContractError('receipt_capacity')
+                    this.iastPublicationContexts.set(scanId, context)
+                }
+                return Array.from(this.iastPublicationContexts.keys())
+            }
+        }
         const managedScanIds = normalizeScanIds(
             typeof this.zapBridge?.getManagedScanIdsForEngine === 'function'
                 ? await this.zapBridge.getManagedScanIdsForEngine(engine)
@@ -463,7 +572,8 @@ export default class ZapPublisher {
             storedScanIds = normalizeScanIds(await this.resultsRegistry.findScanIdsForEngine(engine, hints))
         }
 
-        const scanIds = normalizeScanIds([...managedScanIds, ...storedScanIds])
+        const scanIds = normalizeScanIds([...managedScanIds, ...storedScanIds,
+            ...(engine === 'IAST' ? this.iastPublicationContexts.keys() : [])])
         if (scanIds.length) return scanIds
 
         if (typeof this.resultsRegistry?.findScanIdForEngine === 'function') {
@@ -473,6 +583,26 @@ export default class ZapPublisher {
             return normalizeScanIds(scanId)
         }
         return []
+    }
+
+    async _retireAcknowledgedIastOwners() {
+        for (const [scanId, context] of this.iastPublicationContexts) {
+            if (context.zapSessionKey === this.zapBridge.currentSessionKey) continue
+            const key = `IAST:${scanId}`
+            if (this.permanentFailures.has(key)
+                || Array.from(this.inFlightBatches.values()).some(batch => batch.engine === 'IAST' && batch.scanId === scanId)) continue
+            const ack = this.iastCompletenessAcks.get(key)
+            if (!ack || JSON.parse(ack).terminal !== true) continue
+            const scanResult = await this.resultsRegistry.get('IAST', scanId)
+            if (scanResult) {
+                if (this._countPendingFindingsForScan('IAST', scanId, scanResult) !== 0) continue
+            } else {
+                const published = this.publishedState.get(key)
+                if (Array.from(this.immutableIastRecords.get(key) || []).some(([id, signature]) => published?.get(id) !== signature)) continue
+            }
+            this.iastPublicationContexts.delete(scanId)
+            for (const map of [this.publishedState, this.lastSeen, this.iastCompletenessAcks, this.immutableIastRecords, this.iastWireSchemas]) map.delete(key)
+        }
     }
 
     _collectDastSourceFindings(scanResult) {
@@ -701,8 +831,7 @@ export default class ZapPublisher {
                 const resolvedEntries = this._resolveAckedEntries(ack, batch)
                 resolvedEntries.forEach((entry) => this._markFindingVersionPublished(key, entry.findingKey, entry.signature))
                 if (resolvedEntries.length > 0) {
-                    this.lastAckedBatchSeq = Math.max(this.lastAckedBatchSeq, batch.batchSeq)
-                    this._pollControlAfterAck('publisher_ack')
+                    this._recordStoredBatchAck('DAST', scanId, batch.batchSeq)
                 }
             } catch (err) {
                 console.warn('[PTK ZAP] Failed to send DAST findings chunk; dropping chunk', {
@@ -717,6 +846,7 @@ export default class ZapPublisher {
     }
 
     async _publishEngineFindingsBatch({ key, engine, scanId, findings: sourceFindings, scanResult, mapper, sender }) {
+        if (engine === 'IAST') return this._publishIastV2({ key, scanId, sourceFindings, scanResult, sender })
         const {
             entries: findings,
             skippedFilter,
@@ -758,8 +888,7 @@ export default class ZapPublisher {
                 const resolvedEntries = this._resolveAckedEntries(ack, batch)
                 resolvedEntries.forEach((entry) => this._markFindingVersionPublished(key, entry.findingKey, entry.signature))
                 if (resolvedEntries.length > 0) {
-                    this.lastAckedBatchSeq = Math.max(this.lastAckedBatchSeq, batch.batchSeq)
-                    this._pollControlAfterAck('publisher_ack')
+                    this._recordStoredBatchAck(engine, scanId, batch.batchSeq)
                 }
             } catch (err) {
                 console.warn('[PTK ZAP] Failed to send findings chunk; dropping chunk', {
@@ -770,6 +899,70 @@ export default class ZapPublisher {
             } finally {
                 this._finishBatch(batch)
             }
+        }
+    }
+
+    _requireIastV2(key) {
+        if (this.permanentFailures.has(key)) throw iastContractError(this.permanentFailures.get(key))
+        const context = this.iastPublicationContexts.get(key.slice('IAST:'.length))
+        // Only an already retained/explicit historical owner may select v2.
+        // A newly discovered scan requires flow, even in manual registry mode.
+        const wireSchema = context?.wireSchema || this.iastWireSchemas.get(key) || (context ? IAST_WIRE_V2 : IAST_WIRE_V3)
+        const supported = context ? (wireSchema === IAST_WIRE_V3 ? context.supportedIastSchemas?.includes(wireSchema) : context.supportsV2) : typeof this.zapBridge?.supportsIastSchema === 'function'
+            ? this.zapBridge.supportsIastSchema(wireSchema)
+            : Array.isArray(this.zapBridge?.supportedIastSchemas) && this.zapBridge.supportedIastSchemas.includes(wireSchema)
+        if (!supported) throw iastContractError('unsupported_schema', 'ZAP does not advertise the required IAST wire schema')
+        const prior = this.iastWireSchemas.get(key)
+        if (prior && prior !== wireSchema) throw iastContractError('immutable_identity_conflict')
+        this.iastWireSchemas.set(key, wireSchema)
+        return wireSchema
+    }
+
+    _iastPending({ key, scanId, sourceFindings, scanResult }) {
+        const wireSchema = this._requireIastV2(key)
+        const summary = sanitizeIastScanCompleteness(scanResult?.scanCompleteness)
+        const collected = this._collectPendingMappedFindings({
+            key, engine: 'IAST', scanId, sourceFindings, scanResult,
+            mapper: (finding, options) => toIastFinding(finding, { ...options, wireSchema })
+        })
+        const summaryPending = this.iastCompletenessAcks.get(key) !== stableStringify(wireSchema === IAST_WIRE_V3 ? { ...summary, wireSchema } : summary)
+        return { ...collected, summary, summaryPending, wireSchema }
+    }
+
+    async _publishIastV2({ key, scanId, sourceFindings, scanResult, sender }) {
+        if (this.permanentFailures.has(key)) return
+        try {
+            const { entries, summary, summaryPending, wireSchema } = this._iastPending({ key, scanId, sourceFindings, scanResult })
+            if (!entries.length && !summaryPending) return
+            const chunks = entries.length ? chunkArray(entries, ALERT_CHUNK_SIZE) : [[]]
+            for (const chunk of chunks) {
+                const batch = this._beginBatch({ engine: 'IAST', scanId, entries: chunk })
+                try {
+                    const ack = await sender({
+                        schema: wireSchema, scanId, findings: chunk.map(entry => entry.mapped),
+                        publicationContext: this.iastPublicationContexts.get(scanId) || null,
+                        scanCompleteness: summary, truncated: summary.status !== 'complete',
+                        batchId: batch.batchId, batchSeq: batch.batchSeq
+                    })
+                    if (wireSchema === IAST_WIRE_V3) validateIastV3Ack(ack, batch, summary.revision)
+                    if (wireSchema === IAST_WIRE_V3 && ack.result !== 'OK') throw iastContractError(ack.errorCode || 'invalid_ack')
+                    if (ack?.permanentFailure === true) throw iastContractError(ack.errorCode || 'invalid_payload')
+                    const resolved = this._resolveAckedEntries(ack, batch)
+                    const rejected = (ack?.findingResults || []).find(result => String(result?.status || '').startsWith('rejected_'))
+                    if (rejected) throw iastContractError(rejected.status)
+                    resolved.forEach(entry => this._markFindingVersionPublished(key, entry.findingKey, entry.signature))
+                    const summaryAccepted = ack?.scanCompletenessAccepted === true && ack.scanCompletenessRevision === summary.revision
+                    if (summaryAccepted) this.iastCompletenessAcks.set(key, stableStringify(wireSchema === IAST_WIRE_V3 ? { ...summary, wireSchema } : summary))
+                    if (resolved.length || summaryAccepted) {
+                        this._recordStoredBatchAck('IAST', scanId, batch.batchSeq)
+                    }
+                } finally {
+                    this._finishBatch(batch)
+                }
+            }
+        } catch (error) {
+            if (error?.permanent) this.permanentFailures.set(key, error.code || 'invalid_payload')
+            else this.zapBridge?._debugLog?.('[PTK ZAP] IAST batch remains unacknowledged', { scanId, reason: 'transport_failure' })
         }
     }
 
@@ -822,7 +1015,21 @@ export default class ZapPublisher {
 
             for (const mapped of mappedFindings) {
                 const findingKey = this._getMappedFindingKey(mapped)
-                const signature = stableStringify(mapped)
+                const signature = stableStringify(engine === 'IAST' && mapped.flow ? { wireSchema: IAST_WIRE_V3, finding: mapped } : mapped)
+                if (engine === 'IAST' && mapped.observation?.schemaVersion === 2) {
+                    let admitted = this.immutableIastRecords.get(key)
+                    if (!admitted) {
+                        if (this.immutableIastRecords.size >= MAX_KEYS) throw iastContractError('receipt_capacity')
+                        admitted = new Map()
+                        this.immutableIastRecords.set(key, admitted)
+                    }
+                    const previous = admitted.get(findingKey)
+                    if (previous !== undefined && previous !== signature) throw iastContractError('immutable_identity_conflict')
+                    if (previous === undefined) {
+                        if (admitted.size >= PUBLISHED_STATE_CAP_PER_KEY) throw iastContractError('receipt_capacity')
+                        admitted.set(findingKey, signature)
+                    }
+                }
                 if (!this._shouldPublishFindingVersion(key, findingKey, signature)) {
                     alreadyPublished += 1
                     continue
@@ -842,6 +1049,15 @@ export default class ZapPublisher {
 
     _countPendingFindingsForScan(engine, scanId, scanResult) {
         const key = `${engine}:${scanId}`
+        if (engine === 'IAST') {
+            try {
+                const pending = this._iastPending({ key, scanId, sourceFindings: scanResult?.findings || [], scanResult })
+                return pending.entries.length + (pending.summaryPending ? 1 : 0)
+            } catch (error) {
+                if (error?.permanent) this.permanentFailures.set(key, error.code || 'invalid_payload')
+                return 1
+            }
+        }
 
         if (engine === 'DAST') {
             const dastSource = this._collectDastSourceFindings(scanResult)
@@ -890,6 +1106,9 @@ export default class ZapPublisher {
     _markFindingVersionPublished(key, findingKey, signature) {
         if (!findingKey) return
         const state = this._getPublishedStateForKey(key)
+        if (key.startsWith('IAST:') && !state.has(findingKey) && state.size >= PUBLISHED_STATE_CAP_PER_KEY) {
+            throw iastContractError('receipt_capacity')
+        }
         if (state.has(findingKey)) {
             state.delete(findingKey)
         }
@@ -911,14 +1130,20 @@ export default class ZapPublisher {
         }
 
         while (this.publishedState.size > MAX_KEYS) {
-            const oldest = [...this.lastSeen.entries()].sort((a, b) => a[1] - b[1])[0]
+            const oldest = [...this.lastSeen.entries()]
+                .filter(([key]) => !key.startsWith('IAST:') || !this.iastPublicationContexts.has(key.slice('IAST:'.length)))
+                .sort((a, b) => a[1] - b[1])[0]
             if (!oldest) break
             this._dropKey(oldest[0])
         }
     }
 
     _dropKey(key) {
+        // Admitted owners retire only after the exact terminal receipt and all
+        // immutable findings are ACKed, never because their timer became old.
+        if (key.startsWith('IAST:') && this.iastPublicationContexts.has(key.slice('IAST:'.length))) return
         this.lastSeen.delete(key)
         this.publishedState.delete(key)
+        this.ackedBatchSeqByScan.delete(key)
     }
 }

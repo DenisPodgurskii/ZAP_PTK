@@ -1,6 +1,8 @@
 /* Author: Denis Podgurskii */
 
-if (!window.__PTK_CONTENT_SHARED_LOADED__) {
+if (window.__PTK_CONTENT_SHARED_LOADED__) {
+    window.PTK_CONTENT_SHARED?.rebindIastBridge?.();
+} else {
 window.__PTK_CONTENT_SHARED_LOADED__ = true;
 
 const runtime = (typeof browser !== 'undefined' && browser?.runtime)
@@ -35,6 +37,51 @@ const PTK_DAST_USER_INTERACTION_HOOKED_KEY = '__PTK_DAST_USER_INTERACTION_HOOKED
 const PTK_DAST_USER_INTERACTION_SENT_KEY = '__PTK_DAST_USER_INTERACTION_SENT__';
 const PTK_IAST_PAGE_TO_CONTENT_EVENT = 'ptk:iast:page-to-content:v1';
 const PTK_IAST_CONTENT_TO_PAGE_EVENT = 'ptk:iast:content-to-page:v1';
+// Correlation belongs to this isolated document. It is never a page grant or
+// authorization token; the receiver still validates the runtime sender owner.
+const iastDocumentGeneration = typeof globalThis.crypto?.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+let iastObservationState = null;
+let iastBridgeDeliveryState = { pending: 0, failed: false, stopped: false, settlement: null, resolve: null };
+
+function sendIastRuntimeMessage(payload, afterDelivery = null) {
+    // A counter/one waiter, not another finding queue or unbounded history.
+    const collection = iastBridgeDeliveryState;
+    const tracked = collection.pending < 1000000;
+    if (tracked) collection.pending += 1;
+    else collection.failed = true;
+    let delivery;
+    try {
+        if (!runtime?.sendMessage) throw new Error('iast_runtime_unavailable');
+        delivery = runtime.sendMessage(payload);
+    } catch (error) { delivery = Promise.reject(error); }
+    return Promise.resolve(delivery).then(async response => {
+        if (response?.ok === false) collection.failed = true;
+        if (afterDelivery) {
+            if (collection !== iastBridgeDeliveryState) collection.failed = true;
+            else await afterDelivery(response);
+        }
+        return response;
+    }).catch(error => {
+        collection.failed = true;
+        throw error;
+    }).finally(() => {
+        if (tracked) collection.pending -= 1;
+        if (collection.pending === 0 && collection.resolve) {
+            const resolve = collection.resolve;
+            collection.resolve = null;
+            collection.settlement = null;
+            resolve();
+        }
+    });
+}
+
+function settleIastBridgeDeliveries(collection) {
+    if (!collection.pending) return Promise.resolve();
+    if (!collection.settlement) collection.settlement = new Promise(resolve => { collection.resolve = resolve; });
+    return collection.settlement;
+}
 
 function runtimeGetURL(path) {
     if (!runtime?.getURL) return null;
@@ -73,7 +120,8 @@ function isTopFrame() {
 function buildIastBridgeContext() {
     return {
         url: getCurrentHref(),
-        topFrame: isTopFrame()
+        topFrame: isTopFrame(),
+        documentGeneration: iastDocumentGeneration
     };
 }
 
@@ -333,8 +381,10 @@ function collectSastPayload(extraHtml = []) {
 function createSastContentProducer({ collect, send, document: doc, window: win, MutationObserver: Observe, remember = () => [] }) {
     const resourceBytes = 8 * 1024 * 1024, pendingLimit = 32 * 1024 * 1024;
     let state = null, observer = null, pendingBytes = 0, lastSignature = null, disposed = false, collecting = false, dirty = false, transientBytes = 0;
+    let streamEpoch = 0, replayAfterInFlight = false;
     const transient = new Set();
     let sending = new Set();
+    let sendingEpoch = new Map();
     const failures = new Set();
     const listeners = [];
     const active = () => !disposed && state?.active === true;
@@ -347,6 +397,7 @@ function createSastContentProducer({ collect, send, document: doc, window: win, 
     const changed = (records = []) => {
         if (!active()) return;
         const admitted = state, admittedSending = sending;
+        const admittedEpoch = streamEpoch;
         // Preserve observed transient snippets before coalescing, while the
         // full DOM collector itself has only one in-flight invocation.
         for (const snippet of remember(records) || []) {
@@ -360,15 +411,20 @@ function createSastContentProducer({ collect, send, document: doc, window: win, 
         collecting = true; dirty = false;
         const extraHtml = [...transient]; transient.clear(); transientBytes = 0;
         const publish = payload => {
-            if (!active() || state !== admitted) return;
+            if (!active() || state !== admitted || streamEpoch !== admittedEpoch) return;
             const packet = { type: 'dom_snapshot', revision: admitted.revision, payload };
             let signature;
             try { signature = JSON.stringify(payload); } catch (_) { sendFailure(admitted.revision, 'collection_failed'); return; }
             const bytes = signature.length * 2;
             if (bytes > resourceBytes || pendingBytes + bytes > pendingLimit) { sendFailure(admitted.revision, 'payload_budget_exceeded'); return; }
-            if (lastSignature === signature || admittedSending.has(signature)) return;
+            if (lastSignature === signature) return;
+            if (admittedSending.has(signature)) {
+                if (sendingEpoch.get(signature) !== admittedEpoch) replayAfterInFlight = true;
+                return;
+            }
             pendingBytes += bytes;
             admittedSending.add(signature);
+            sendingEpoch.set(signature, admittedEpoch);
             let sent;
             try { sent = send(packet, admitted); } catch (_) { pendingBytes -= bytes; admittedSending.delete(signature); sendFailure(admitted.revision, 'delivery_failed'); return; }
             // No ACK is needed to initiate another snapshot. Commit only after
@@ -376,9 +432,16 @@ function createSastContentProducer({ collect, send, document: doc, window: win, 
             Promise.resolve(sent).then(reply => {
                 // Runtime transport success is not DOM admission. A native
                 // document can still be binding when this message arrives.
-                if (active() && state === admitted && (admitted.transport !== 'runtime' || reply?.accepted === true)) lastSignature = signature;
+                if (active() && state === admitted && streamEpoch === admittedEpoch
+                    && (admitted.transport !== 'runtime' || reply?.accepted === true)) lastSignature = signature;
             }, () => sendFailure(admitted.revision, 'delivery_failed'))
-                .finally(() => { pendingBytes -= bytes; admittedSending.delete(signature); });
+                .finally(() => {
+                    pendingBytes -= bytes; admittedSending.delete(signature); sendingEpoch.delete(signature);
+                    if (replayAfterInFlight && !sending.size && active()) {
+                        replayAfterInFlight = false;
+                        changed();
+                    }
+                });
         };
         const settle = () => {
             collecting = false;
@@ -406,7 +469,8 @@ function createSastContentProducer({ collect, send, document: doc, window: win, 
         if (state && value.revision < state.revision) return false;
         if (state?.revision === value.revision && state.active === false && value.active) return false;
         if (state?.revision === value.revision && state.active === value.active) return true;
-        disconnect(); state = Object.freeze({ ...value }); lastSignature = null; failures.clear(); sending = new Set();
+        disconnect(); state = Object.freeze({ ...value }); lastSignature = null; failures.clear();
+        sending = new Set(); sendingEpoch = new Map(); replayAfterInFlight = false; streamEpoch = 0;
         if (!active()) return true;
         if (typeof Observe === 'function') {
             observer = new Observe(records => changed(records));
@@ -421,7 +485,24 @@ function createSastContentProducer({ collect, send, document: doc, window: win, 
         changed();
         return true;
     };
-    return { setState, changed, get active() { return active(); }, dispose() { disposed = true; disconnect(); state = null; lastSignature = null; } };
+    const reopened = () => {
+        if (!active() || !Number.isSafeInteger(streamEpoch) || streamEpoch >= 1000000) {
+            if (active()) sendFailure(state.revision, 'stream_revision_limit');
+            return false;
+        }
+        streamEpoch += 1;
+        lastSignature = null;
+        // document.open() erases listeners on the same Window/Document. The
+        // observer object remains owned; reattach its lifecycle listeners and
+        // force a fresh DOM snapshot even when bytes match an earlier stream.
+        for (const [target, event, fn] of listeners) {
+            target.removeEventListener(event, fn);
+            target.addEventListener(event, fn);
+        }
+        changed();
+        return true;
+    };
+    return { setState, changed, reopened, get active() { return active(); }, dispose() { disposed = true; disconnect(); state = null; lastSignature = null; } };
 }
 
 function setSastContentState(state) {
@@ -628,11 +709,37 @@ function dispatchIastBridgeToPage(payload) {
     } catch (_) { }
 }
 
-function handleIastPageBridgePayload(data) {
+function handleIastPageBridgePayload(data, admittedReplay = false) {
     data = data || {};
+    if (iastBridgeDeliveryState.stopped && !admittedReplay
+        && (data?.ptk_iast || ['ptk_iast_buffer_append', 'ptk_iast_buffer_flush_request',
+            'ptk_iast_buffer_clear', 'ptk_iast_navigation_candidate'].includes(data?.channel))) return false;
+
+    if (data?.channel === 'ptk_iast_observation_state') {
+        const input = data.state && typeof data.state === 'object' ? data.state : data;
+        const count = (key) => Number.isSafeInteger(input[key]) && input[key] >= 0
+            ? Math.min(input[key], 1000000) : 0;
+        iastObservationState = {
+            installationState: ['installing', 'ready', 'failed'].includes(input.installationState)
+                ? input.installationState : 'failed',
+            operationHighWater: count('operationHighWater'),
+            emittedRelationships: count('emittedRelationships'),
+            pendingObservations: count('pendingObservations'),
+            lossCount: count('lossCount'),
+            revision: count('revision'),
+            reasons: Array.isArray(input.reasons)
+                ? input.reasons.filter(reason => typeof reason === 'string' && /^[a-z0-9_]{1,80}$/.test(reason)).slice(0, 16)
+                : [],
+            terminal: input.terminal === true
+        };
+        // Separate metadata delivery is not charged to the full finding FIFO.
+        sendIastRuntimeMessage({ channel: 'ptk_content_iast2background_iast', type: 'observation_state',
+            state: iastObservationState, context: buildIastBridgeContext() }).catch(() => { });
+        return true;
+    }
 
     if (data?.channel === 'ptk_iast_buffer_append') {
-        sendRuntimeMessage({
+        sendIastRuntimeMessage({
             channel: 'ptk_content_iast2background_iast',
             type: 'iast_buffer_append',
             message: data?.message || null,
@@ -642,15 +749,15 @@ function handleIastPageBridgePayload(data) {
     }
 
     if (data?.channel === 'ptk_iast_buffer_flush_request') {
-        sendRuntimeMessage({
+        sendIastRuntimeMessage({
             channel: 'ptk_content_iast2background_iast',
             type: 'iast_buffer_flush',
             context: buildIastBridgeContext()
-        }).then((resp) => {
+        }, (resp) => {
             const messages = Array.isArray(resp?.messages) ? resp.messages : [];
             messages.forEach((msg) => {
                 try {
-                    handleIastPageBridgePayload(msg);
+                    handleIastPageBridgePayload(msg, true);
                 } catch (_) { }
             });
         }).catch(() => { });
@@ -658,7 +765,7 @@ function handleIastPageBridgePayload(data) {
     }
 
     if (data?.channel === 'ptk_iast_buffer_clear') {
-        sendRuntimeMessage({
+        sendIastRuntimeMessage({
             channel: 'ptk_content_iast2background_iast',
             type: 'iast_buffer_clear',
             context: buildIastBridgeContext()
@@ -667,7 +774,7 @@ function handleIastPageBridgePayload(data) {
     }
 
     if (data?.channel === 'ptk_iast_navigation_candidate') {
-        sendRuntimeMessage({
+        sendIastRuntimeMessage({
             channel: 'ptk_content_iast2background_iast',
             type: 'navigation_candidate',
             candidate: data?.candidate && typeof data.candidate === 'object' ? data.candidate : null,
@@ -679,12 +786,19 @@ function handleIastPageBridgePayload(data) {
 
     if (data?.ptk_iast) {
         const type = data?.ptk_iast === 'runtime_signal' ? 'runtime_signal' : 'finding_report';
-        sendRuntimeMessage({
+        const bufferId = data?.__ptkIastBufferId || data?.bufferId || null;
+        sendIastRuntimeMessage({
             channel: 'ptk_content_iast2background_iast',
             type,
-            bufferId: data?.__ptkIastBufferId || data?.bufferId || null,
+            bufferId,
             finding: type === 'finding_report' ? data.finding : undefined,
-            signal: type === 'runtime_signal' ? data.signal : undefined
+            signal: type === 'runtime_signal' ? data.signal : undefined,
+            context: buildIastBridgeContext()
+        }).then(response => {
+            if (type === 'finding_report' && response?.ok === true && response?.accepted === true
+                && typeof bufferId === 'string') {
+                dispatchIastBridgeToPage({ channel: 'ptk_iast_finding_accepted', bufferId });
+            }
         }).catch(() => { });
         return true;
     }
@@ -692,7 +806,9 @@ function handleIastPageBridgePayload(data) {
     if (data?.channel === 'ptk_iast_agent_ready') {
         sendRuntimeMessage({
             channel: 'ptk_content_iast2background_iast',
-            type: 'agent_ready'
+            type: 'agent_ready',
+            installationState: data.installationState || null,
+            context: buildIastBridgeContext()
         }).catch(() => { });
         return true;
     }
@@ -701,7 +817,8 @@ function handleIastPageBridgePayload(data) {
         sendRuntimeMessage({
             channel: 'ptk_content_iast2background_iast',
             type: 'agent_failed',
-            error: data?.error || null
+            error: data?.error || null,
+            context: buildIastBridgeContext()
         }).catch(() => { });
         return true;
     }
@@ -710,7 +827,8 @@ function handleIastPageBridgePayload(data) {
         sendRuntimeMessage({
             channel: 'ptk_content_iast2background_iast',
             type: 'runtime_health',
-            health: data?.health && typeof data.health === 'object' ? data.health : null
+            health: data?.health && typeof data.health === 'object' ? data.health : null,
+            context: buildIastBridgeContext()
         }).catch(() => { });
         return true;
     }
@@ -740,6 +858,36 @@ function handleIastPageBridgePayload(data) {
     return false;
 }
 
+function onIastPageHide() {
+    sendRuntimeMessage({ channel: 'ptk_content_iast2background_iast', type: 'observation_state',
+        state: Object.assign({}, iastObservationState || { installationState: 'failed',
+            lossCount: 0, reasons: ['document_receipt_missing'], revision: 0 }, {
+            terminal: true, revision: Math.min(1000000, (iastObservationState?.revision || 0) + 1) }),
+        context: buildIastBridgeContext() }).catch(() => { });
+}
+
+function onIastPageToContent(event) {
+    handleIastPageBridgePayload(parseIastBridgeEventDetail(event?.detail));
+}
+
+function onIastWindowMessage(event) {
+    handleIastPageBridgePayload(event.data || {});
+}
+
+function rebindIastBridge({ reopened = false } = {}) {
+    try {
+        window.removeEventListener?.('pagehide', onIastPageHide, false);
+        window.removeEventListener?.(PTK_IAST_PAGE_TO_CONTENT_EVENT, onIastPageToContent, false);
+        window.removeEventListener?.('message', onIastWindowMessage, false);
+        window.addEventListener('pagehide', onIastPageHide, false);
+        window.addEventListener(PTK_IAST_PAGE_TO_CONTENT_EVENT, onIastPageToContent, false);
+        window.addEventListener('message', onIastWindowMessage, false);
+        if (reopened && sastContentProducer?.active && sastContentProducer.reopened() !== true) return false;
+        dispatchIastBridgeToPage({ channel: 'ptk_content_iast_bridge_ready' });
+        return true;
+    } catch (_) { return false; }
+}
+
 function installIastBridge() {
     if (window.__PTK_SHARED_IAST_CONTENT_BRIDGE__ === true) return false;
     window.__PTK_SHARED_IAST_CONTENT_BRIDGE__ = true;
@@ -747,12 +895,31 @@ function installIastBridge() {
     if (runtime?.onMessage) {
         runtime.onMessage.addListener((message) => {
             if (message?.channel === 'ptk_background_iast2content') {
+                if (message.type === 'rebind_iast_bridge') {
+                    return Promise.resolve({ ok: rebindIastBridge({ reopened: true }),
+                        documentGeneration: iastDocumentGeneration });
+                }
+                if (message.type === 'document_identity') {
+                    return Promise.resolve({ documentGeneration: iastDocumentGeneration })
+                }
                 if (message.type === 'clean iast result') {
-                    sendRuntimeMessage({
-                        channel: 'ptk_content_iast2background_iast',
-                        type: 'iast_buffer_clear',
+                    iastBridgeDeliveryState = { pending: 0, failed: false, stopped: false, settlement: null, resolve: null };
+                    iastObservationState = null;
+                    dispatchIastBridgeToPage({ channel: 'ptk_iast_observation_reset' });
+                    return sendIastRuntimeMessage({ channel: 'ptk_content_iast2background_iast',
+                        type: 'iast_buffer_clear', context: buildIastBridgeContext() });
+                }
+                if (message.type === 'stop iast result') {
+                    const collection = iastBridgeDeliveryState;
+                    dispatchIastBridgeToPage({ channel: 'ptk_iast_observation_stop' });
+                    collection.stopped = true;
+                    const receipt = {
+                        state: iastObservationState || { installationState: 'failed',
+                            operationHighWater: 0, emittedRelationships: 0, pendingObservations: 0,
+                            lossCount: 0, revision: 0, reasons: ['document_receipt_missing'], terminal: false },
                         context: buildIastBridgeContext()
-                    }).catch(() => { });
+                    };
+                    return settleIastBridgeDeliveries(collection).then(() => ({ ...receipt, deliveryFailed: collection.failed }));
                 }
                 if (message.type === 'ping') {
                     return Promise.resolve({ ok: true });
@@ -775,21 +942,11 @@ function installIastBridge() {
         });
     }
 
-    window.addEventListener(PTK_IAST_PAGE_TO_CONTENT_EVENT, (event) => {
-        handleIastPageBridgePayload(parseIastBridgeEventDetail(event?.detail));
-    }, false);
-
-    window.addEventListener('message', (event) => {
-        handleIastPageBridgePayload(event.data || {});
-    }, false);
-
     // The page-world agent may initialize at document_start before this
     // isolated content bridge is installed at document_idle. Ask an existing
     // authorized agent to repeat its genuine readiness and module request so
     // neither signal is lost to script-order timing.
-    dispatchIastBridgeToPage({
-        channel: 'ptk_content_iast_bridge_ready'
-    });
+    rebindIastBridge();
 
     return true;
 }
@@ -909,6 +1066,7 @@ const sharedApi = Object.freeze({
     installEarlySastScriptCapture,
     installSpaUrlNotifier,
     installIastBridge,
+    rebindIastBridge,
     installSastContentMessageListener,
     installScaContentMessageListener,
     installDastUserInteractionHook

@@ -1,4 +1,5 @@
 import { CaptureStore, captureIdentity, freezeCapture } from './captureStore.js'
+import { sameDocumentUrl } from './sameDocumentUrl.js'
 
 export const CAPTURE_CAPABILITIES = Object.freeze(['network', 'sources', 'authBodies', 'recording', 'input', 'dialogs'])
 const COMMANDS = Object.freeze({ 'Input.dispatchMouseEvent': 'input', 'Page.handleJavaScriptDialog': 'dialogs', 'Network.getRequestPostData': 'recording' })
@@ -18,7 +19,7 @@ function headerBytes(value, limit = 65536) {
 }
 function frameKey(record) { return JSON.stringify([record.sessionId || '', record.frameId ?? 'root']) }
 function sastDocumentKey(record) { return JSON.stringify([record.epoch, record.captureId, record.tabId, record.sessionId || '',
-    record.frameId, record.documentId, record.sessionGeneration, record.navigationGeneration]) }
+    record.frameId, record.documentId, record.sessionGeneration, record.navigationGeneration, record.streamGeneration ?? 0]) }
 function sastPayload(payload, maxBytes) {
     if (!payload || typeof payload.file !== 'string' || payload.file.length > 32768 || !Array.isArray(payload.scripts) || payload.scripts.length > 4096 || !Array.isArray(payload.html) || payload.html.length > 4096) throw new Error('capture_collection_unavailable')
     let bytes = payload.file.length * 2
@@ -45,7 +46,15 @@ function isRootFrame(record) {
     return record.resourceType === 'Document' || record.resourceType === undefined
 }
 function scopeValue(scope = {}) {
-    if (scope.prepared) return { prepared: true, targetUrl: scope.targetUrl || null, mode: scope.mode || 'origin' }
+    if (scope.prepared) {
+        const targetUrl = scope.targetUrl == null ? null : httpUrl(scope.targetUrl)
+        const mode = scope.mode || 'origin'
+        if ((scope.targetUrl != null && !targetUrl)
+            || !['origin', 'exact'].includes(mode)
+            || (mode === 'exact' && !targetUrl)) throw new Error('capture_scope_invalid')
+        return { prepared: true, targetUrl: targetUrl?.href || null, mode,
+            ...(scope.skipExistingDocument === true ? { skipExistingDocument: true } : {}) }
+    }
     const url = httpUrl(scope.targetUrl)
     if (!url || !['origin', 'path'].includes(scope.mode || 'origin')) throw new Error('capture_scope_invalid')
     return { prepared: false, targetUrl: url.href, mode: scope.mode || 'origin' }
@@ -53,6 +62,7 @@ function scopeValue(scope = {}) {
 function permitted(scope, value) {
     const url = httpUrl(value), target = httpUrl(scope.targetUrl)
     if (!url || !target || url.origin !== target.origin) return false
+    if (scope.mode === 'exact') return url.href === target.href
     return scope.mode !== 'path' || url.pathname === target.pathname || url.pathname.startsWith(target.pathname.replace(/\/$/, '') + '/')
 }
 
@@ -78,7 +88,7 @@ export class BrowserCaptureManager {
                 // Native frame/context metadata establishes identity and must be
                 // budgeted before it can establish a document's scope. Its exact
                 // live target owner is necessary, but is NOT body admission.
-                const allowed = target && !target.lost && ([...target.owners].some(owner => kind === 'metadata' ? this._valid(owner) : this._allowed(owner, normalized, true) && pending?.refs.has(owner.id))
+                const allowed = target && !target.lost && ([...target.owners].some(owner => kind === 'metadata' ? this._valid(owner) : pending?.refs.has(owner.id) && (this._allowed(owner, normalized, true) || this._allowedSource(owner, normalized)))
                     || kind === 'chunks' && this._retiredSources(normalized).length > 0)
                 return allowed ? this._captureBudget(() => this.store.stage(normalized, kind, additionalBytes), normalized.tabId) : { ok: false, reason: 'owner_unavailable' }
             },
@@ -131,7 +141,8 @@ export class BrowserCaptureManager {
         if (target.h2HelperUsed) throw new Error('capture_helper_exclusive')
         if (target.lost && target.owners.size) throw new Error('capture_lost')
         if (!target.owners.size) target.lost = false
-        const owner = { key, id: `${this.epoch}:${++this.serial}`, ownerId, tabId, scope: normalizedScope, capabilities: new Set(capabilities), target, active: true, ready: false, frozen: false, listeners: new Set(), deliveries: new Set(), collections: new Set(), revision: 0, preparedDocument: null, selectResource, gapCount: 0 }
+        const owner = { key, id: `${this.epoch}:${++this.serial}`, ownerId, tabId, scope: normalizedScope, capabilities: new Set(capabilities), target, active: true, ready: false, frozen: false, listeners: new Set(), deliveries: new Set(), collections: new Set(), revision: 0, preparedDocument: null, selectResource, gapCount: 0,
+            initialSnapshotPending: normalizedScope.prepared && normalizedScope.skipExistingDocument === true }
         this.owners.set(key, owner)
         target.owners.add(owner)
         if (owner.scope.prepared) this._armPrepared(owner)
@@ -144,7 +155,13 @@ export class BrowserCaptureManager {
                 if (!this._valid(owner)) throw new Error('capture_owner_unavailable')
                 await this.adapter.configure(tabId, this._capabilities(target))
                 if (!this._valid(owner)) throw new Error('capture_owner_unavailable')
-                for (const frame of this.adapter.getSnapshot?.(tabId)?.frames || []) this._document(target, { ...frame, tabId })
+                const snapshotFrames = this.adapter.getSnapshot?.(tabId)?.frames || []
+                if (owner.scope.prepared && owner.scope.skipExistingDocument) {
+                    owner.excludedPreparedDocuments = new Set(snapshotFrames
+                        .map(documentIdentity).filter(Boolean))
+                }
+                for (const frame of snapshotFrames) this._document(target, { ...frame, tabId })
+                owner.initialSnapshotPending = false
                 owner.ready = true
             })
         } catch (_) {
@@ -243,6 +260,7 @@ export class BrowserCaptureManager {
             setSastState: state => this._setSastState(owner, state),
             getSastState: sender => this._getSastState(owner, sender),
             getSastAcquisitionStatus: () => this._sastAcquisitionStatus(owner),
+            getSastDocumentAcquisitionStatus: identity => this._sastDocumentAcquisitionStatus(owner, identity),
             reconcileSastSourceReferences: (identity, refs) => this._reconcileSastSourceReferences(owner, identity, refs),
             getSastAnalysisFailure: () => {
                 if (!this._valid(owner)) return null
@@ -273,7 +291,10 @@ export class BrowserCaptureManager {
             },
             getResources: (query = {}) => {
                 if (!this._valid(owner) || owner.scope.prepared) return []
-                return this.store.find(owner.id, { ...query, epoch: this.epoch, tabId: owner.tabId }).filter(record => this._allowed(owner, record, true))
+                const { capability, ...identity } = query
+                if (capability !== undefined && (capability !== 'sources' || !owner.capabilities.has('sources'))) return []
+                return this.store.find(owner.id, { ...identity, epoch: this.epoch, tabId: owner.tabId })
+                    .filter(record => capability === 'sources' ? this._allowedSource(owner, record) : this._allowed(owner, record, true))
             },
             getResource: key => {
                 const record = this.store.get(key, owner.id)
@@ -291,6 +312,13 @@ export class BrowserCaptureManager {
             release: reason => this._release(owner, reason),
             sendCommand: (method, params = {}, sessionId) => this._command(owner, method, params, sessionId),
             getDocuments: () => this._documents(owner),
+            // Metadata only: unlike getDocuments(), a prepared network owner
+            // may inspect its one natively bound target document. This does
+            // not grant source-body access or promote the prepared lease.
+            getVisitDocuments: () => this._visitDocuments(owner),
+            getVerifiedVisitRoot: () => this._verifiedVisitRoot(owner),
+            armNextPreparedDocument: identity => this._armNextPreparedDocument(owner, identity),
+            renewPreparedMetadataVisit: () => this._renewPreparedMetadataVisit(owner),
             isSastDocumentPending: (identity, requiredScripts) => this._sastDocumentPending(owner, identity, requiredScripts),
             hasPendingSastSources: identity => this._sastDocumentPending(owner, identity, null),
             hasRetiredSastSources: identity => this._hasRetiredSastSources(owner, identity),
@@ -316,7 +344,7 @@ export class BrowserCaptureManager {
         }
         const changed = previous?.identity !== identity || previous?.sessionGeneration !== record.sessionGeneration
         if (changed && previous && !rebind) this._sealRetiringDocument(target, key, previous)
-        if (changed) target.frames.set(key, { identity, url: record.url || record.documentUrl, parentFrameId: record.parentFrameId ?? previous?.parentFrameId, sessionGeneration: record.sessionGeneration, navigationGeneration: record.navigationGeneration, nativeDocument: record.nativeDocument !== false })
+        if (changed) target.frames.set(key, { identity, url: record.url || record.documentUrl, parentFrameId: record.parentFrameId ?? previous?.parentFrameId, sessionGeneration: record.sessionGeneration, navigationGeneration: record.navigationGeneration, streamGeneration: Number.isSafeInteger(record.streamGeneration) ? record.streamGeneration : 0, nativeDocument: record.nativeDocument !== false })
         if (record.nativeDocument !== false && typeof record.documentId === 'string' && record.documentId) {
             // Reject delayed messages from any document already bound in this
             // tab. On saturation, fail closed for the unbound fast path.
@@ -338,7 +366,35 @@ export class BrowserCaptureManager {
                 owner.h2Helper.initialRoot ||= { key, identity, sessionGeneration: record.sessionGeneration }
             }
             if (changed) this.store.release(owner.id, resource => frameKey(resource) === key && documentIdentity(resource) !== identity)
+            // A verified departure arms the next root. The DAST-only Client
+            // lease must also follow a page-initiated native navigation: that
+            // navigation can occur after the last spider action, without a
+            // separate departure callback. Binding the new document does not
+            // declare the prior visit complete or admit source/body capture.
+            const dastVisitNavigation = owner.scope.skipExistingDocument === true
+                && owner.capabilities.size === 1 && owner.capabilities.has('network')
+            if (owner.scope.prepared && (owner.nextPreparedDocumentArmed || dastVisitNavigation)
+                && owner.preparedDocument && identity !== owner.preparedDocument
+                && !record.preexisting && record.nativeDocument !== false
+                && key === target.primaryFrame && isRootFrame(nativeRole)
+                && ['Document', 'main_frame'].includes(record.resourceType)
+                && target.frames.get(key)?.identity === identity
+                && !owner.excludedPreparedDocuments?.has(identity)
+                && permitted(owner.scope, record.url || record.documentUrl)) {
+                owner.excludedPreparedDocuments ||= new Set()
+                if (owner.excludedPreparedDocuments.size < SAST_EARLY_DOM_DOCUMENT_HISTORY_LIMIT) {
+                    owner.excludedPreparedDocuments.add(owner.preparedDocument)
+                    owner.preparedDocument = identity
+                    owner.nextPreparedDocumentArmed = false
+                    owner.scope.targetUrl = record.url || record.documentUrl
+                }
+            }
             if (owner.scope.prepared && !owner.preparedDocument && !record.preexisting && httpUrl(record.url || record.documentUrl)) {
+                if (owner.initialSnapshotPending) continue
+                if (owner.excludedPreparedDocuments?.has(identity)) continue
+                // A seeded ZAP DAST-only owner must not bind its capture to
+                // the HTTPS callback document before the target origin loads.
+                if (owner.scope.targetUrl && !permitted(owner.scope, record.url || record.documentUrl)) continue
                 // Prepared capture is only the owned primary document, not an arbitrary iframe.
                 if (key !== target.primaryFrame || !isRootFrame(nativeRole) || !['Document', 'main_frame'].includes(record.resourceType)) continue
                 owner.preparedDocument = identity
@@ -359,7 +415,8 @@ export class BrowserCaptureManager {
             const identity = {
             epoch: this.epoch, captureId: owner.id, tabId: owner.tabId, sessionId: sessionId || undefined,
             frameId, documentId: frame.identity, sessionGeneration: frame.sessionGeneration,
-            navigationGeneration: frame.navigationGeneration, url: frame.url, documentUrl: frame.url
+            navigationGeneration: frame.navigationGeneration, streamGeneration: frame.streamGeneration,
+            url: frame.url, documentUrl: frame.url
             }
             // Retained SAST originals no longer emit the adapter's global
             // replacement gap. Preserve that existing observation only for
@@ -381,7 +438,7 @@ export class BrowserCaptureManager {
         return [...this.store.records.entries()].filter(([, entry]) => entry.refs.has(owner.id)
             && frameKey(entry.record) === frameKey(identity) && documentIdentity(entry.record) === identity.documentId
             && entry.record.sessionGeneration === identity.sessionGeneration && entry.record.navigationGeneration === identity.navigationGeneration
-            && this._allowed(owner, entry.record, true) && this._selected(owner, entry.record, 'sources'))
+            && this._allowedSource(owner, entry.record) && this._selected(owner, entry.record, 'sources'))
     }
 
     _retainRetiringSources(owner, identity) {
@@ -444,7 +501,8 @@ export class BrowserCaptureManager {
             if (data?.keys.includes(key) && entry?.refs.has(grant.refId)
                 && (record.sessionId || '') === (entry.record.sessionId || '')
                 && fields.every(field => record[field] === entry.record[field])
-                && permitted(owner.scope, record.url) && (!record.documentUrl || permitted({ ...owner.scope, mode: 'origin' }, record.documentUrl))
+                && (permitted(owner.scope, record.url) && (!record.documentUrl || permitted({ ...owner.scope, mode: 'origin' }, record.documentUrl))
+                    || this._sourceSiblingScope(owner, record, data.documentUrl))
                 && this._selected(owner, record, 'sources')) result.push({ owner, grant })
         }
         return result
@@ -587,10 +645,33 @@ export class BrowserCaptureManager {
         return permitted(owner.scope, record.url || record.documentUrl) && (!record.documentUrl || permitted({ ...owner.scope, mode: 'origin' }, record.documentUrl))
     }
 
+    // Only the SAST source capability may retain a native Script served from a
+    // sibling path. The document, not the script URL, supplies scope authority.
+    _sourceSiblingScope(owner, record, documentUrl) {
+        const target = httpUrl(owner.scope.targetUrl), source = httpUrl(record.url)
+        const response = record.response?.url === undefined ? source : httpUrl(record.response.url)
+        return owner.capabilities.has('sources') && !owner.scope.prepared && !owner.h2Helper
+            && ['Script', 'script'].includes(record.resourceType) && typeof record.requestId === 'string' && !!record.requestId
+            && !!target && !!source && !!response && source.origin === target.origin && response.origin === target.origin
+            && typeof documentUrl === 'string' && record.documentUrl === documentUrl
+            && permitted(owner.scope, documentUrl) && record.nativeDocument !== false
+    }
+
+    _allowedSource(owner, record) {
+        if (this._allowed(owner, record, true)) return true
+        if (!this._valid(owner) || owner.target.lost || record.tabId !== owner.tabId) return false
+        const current = owner.target.frames.get(frameKey(record))
+        return !!(current && current.nativeDocument !== false && typeof record.documentId === 'string'
+            && record.documentId === current.identity && (record.loaderId === undefined || record.loaderId === current.identity)
+            && record.sessionGeneration === current.sessionGeneration
+            && record.navigationGeneration === current.navigationGeneration
+            && this._sourceSiblingScope(owner, record, current.url))
+    }
+
     _eligible(record, capability, pending = false) {
         const target = this.targets.get(record.tabId)
         if (!target || target.lost) return []
-        return [...target.owners].filter(owner => (!pending || !owner.frozen) && !(capability === 'recording' && owner.recordingInvalidated) && owner.capabilities.has(capability) && this._allowed(owner, record, BODY_CAPABILITIES.includes(capability)) && this._selected(owner, record, capability))
+        return [...target.owners].filter(owner => (!pending || !owner.frozen) && !(capability === 'recording' && owner.recordingInvalidated) && owner.capabilities.has(capability) && (capability === 'sources' ? this._allowedSource(owner, record) : this._allowed(owner, record, BODY_CAPABILITIES.includes(capability))) && this._selected(owner, record, capability))
     }
 
     _selected(owner, record, capability) {
@@ -630,7 +711,9 @@ export class BrowserCaptureManager {
         if (event.type === 'sastPayload') {
             const owner = [...target.owners].find(item => item.id === event.ownerId)
             if (!owner || owner.sastState?.revision !== event.revision || !owner.sastState.active || event.current?.() !== true) return
-            const identity = this._documents(owner).find(item => ['frameId', 'documentId', 'sessionGeneration', 'navigationGeneration'].every(key => item[key] === event.record[key]) && (item.sessionId || '') === (event.record.sessionId || ''))
+            const identity = this._documents(owner).find(item => ['frameId', 'documentId', 'sessionGeneration', 'navigationGeneration'].every(key => item[key] === event.record[key])
+                && (item.streamGeneration ?? 0) === (event.record.streamGeneration ?? 0)
+                && (item.sessionId || '') === (event.record.sessionId || ''))
             if (identity) this._publishSastPayload(owner, identity, event.payload, event.nativeCurrent)
             return
         }
@@ -718,6 +801,21 @@ export class BrowserCaptureManager {
             return
         }
         let record = { ...event.record, epoch: this.epoch }
+        if (event.type === 'protocol' && event.method === 'Page.documentOpened') {
+            const key = frameKey(record), current = target.frames.get(key)
+            if (!current || current.identity !== documentIdentity(record)
+                || current.sessionGeneration !== record.sessionGeneration
+                || !Number.isSafeInteger(record.streamGeneration)
+                || record.streamGeneration !== current.streamGeneration + 1) {
+                this._gap([...target.owners].filter(owner => this._valid(owner)), 'document_stream_identity_unavailable', record)
+                return
+            }
+            target.frames.set(key, { ...current, streamGeneration: record.streamGeneration })
+            for (const owner of target.owners) if (owner.sastState?.active) {
+                this._syncSastObligations(owner)
+                this.adapter.refreshSastState?.(owner.tabId)
+            }
+        }
         if (event.type === 'protocol' && event.method === 'Page.frameNavigated') this._document(target, record)
         if (event.type === 'request' && isDocument(record)) this._document(target, record)
         // Header identity has its own lifetime: body completion/consume cannot
@@ -780,7 +878,7 @@ export class BrowserCaptureManager {
             // not retained as an unnecessary scan-wide request history.
             const recordingOwners = owners.filter(owner => owner.capabilities.has('recording')
                 || this.adapter.supportsRetiredSources === true && !owner.frozen && owner.sourceBatchListener
-                    && owner.capabilities.has('sources') && this._allowed(owner, record, true) && this._selected(owner, record, 'sources'))
+                    && owner.capabilities.has('sources') && this._allowedSource(owner, record) && this._selected(owner, record, 'sources'))
             if (recordingOwners.length) {
                 const result = this._captureBudget(() => this.store.reserve(record, recordingOwners.map(owner => owner.id)), record.tabId)
                 if (!result.ok) this._gap(recordingOwners, result.reason)
@@ -912,7 +1010,7 @@ export class BrowserCaptureManager {
                 }
                 const headers = event.method?.endsWith('ExtraInfo')
                 const childScoped = event.record?.sessionId && event.record?.frameId !== undefined
-                if (this._valid(owner) && owner.revision === revision && (!(body || headers || childScoped || owner.h2Helper) || this._allowed(owner, event.record, true)) && (!(headers || childScoped) || owner.target.frames.get(frameKey(event.record))?.sessionGeneration === event.record.sessionGeneration)) return listener(event)
+                if (this._valid(owner) && owner.revision === revision && (!(body || headers || childScoped || owner.h2Helper) || (body && owner.capabilities.has('sources') ? this._allowedSource(owner, event.record) : this._allowed(owner, event.record, true))) && (!(headers || childScoped) || owner.target.frames.get(frameKey(event.record))?.sessionGeneration === event.record.sessionGeneration)) return listener(event)
             }).catch(() => { owner.deliveryFailed = true }).finally(() => { this.store.consume(reservation.key, deliveryId); owner.deliveries.delete(task) })
             owner.deliveries.add(task)
         }
@@ -942,7 +1040,7 @@ export class BrowserCaptureManager {
                 && nativeRecord.nativeDocument !== false && owner.target.frames.get(frameKey(nativeRecord))?.nativeDocument !== false
                 && nativeRecord.frameId !== undefined && documentIdentity(nativeRecord)
                 && fields.every(field => nativeRecord[field] === undefined || ['string', 'number'].includes(typeof nativeRecord[field]))
-                && this._allowed(owner, nativeRecord, true) && this._nativeGapCurrent(owner, nativeRecord)) {
+                && this._allowedSource(owner, nativeRecord) && this._nativeGapCurrent(owner, nativeRecord)) {
                 for (const field of fields) if (nativeRecord[field] !== undefined) identity[field] = nativeRecord[field]
                 // Preserve the network loss while excluding only proven
                 // non-source requests from SAST's missing-source accounting.
@@ -970,7 +1068,7 @@ export class BrowserCaptureManager {
         else if (!wasPrepared) this._armPrepared(owner)
         owner.revision++
         this._forgetHeaderOwner(owner)
-        this.store.release(owner.id, record => !this._allowed(owner, record, true))
+        this.store.release(owner.id, record => !this._allowed(owner, record, true) && !this._allowedSource(owner, record))
         if (owner.sastDomDocuments) this._syncSastObligations(owner)
         if (owner.sastState?.active) this.adapter.refreshSastState?.(owner.tabId)
         return { active: true, prepared: next.prepared }
@@ -1000,8 +1098,98 @@ export class BrowserCaptureManager {
         if (!this._valid(owner) || !owner.ready || owner.scope.prepared || !owner.capabilities.has('sources')) return []
         return [...owner.target.frames].filter(([, frame]) => frame.nativeDocument).map(([key, frame]) => {
             const [sessionId, frameId] = JSON.parse(key)
-            return freezeCapture({ epoch: this.epoch, captureId: owner.id, tabId: owner.tabId, sessionId: sessionId || undefined, frameId, parentFrameId: frame.parentFrameId, documentId: frame.identity, sessionGeneration: frame.sessionGeneration, navigationGeneration: frame.navigationGeneration, url: frame.url, documentUrl: frame.url })
+            return freezeCapture({ epoch: this.epoch, captureId: owner.id, tabId: owner.tabId, sessionId: sessionId || undefined, frameId, parentFrameId: frame.parentFrameId, documentId: frame.identity, sessionGeneration: frame.sessionGeneration, navigationGeneration: frame.navigationGeneration, streamGeneration: frame.streamGeneration, url: frame.url, documentUrl: frame.url })
         }).filter(identity => this._allowed(owner, identity, true))
+    }
+
+    _visitDocuments(owner) {
+        if (!this._valid(owner) || !owner.ready || owner.frozen || owner.target.lost
+            || !owner.capabilities.has('network')) return []
+        return [...owner.target.frames].filter(([, frame]) => frame.nativeDocument).map(([key, frame]) => {
+            const [sessionId, frameId] = JSON.parse(key)
+            return freezeCapture({ epoch: this.epoch, captureId: owner.id, tabId: owner.tabId,
+                sessionId: sessionId || undefined, frameId, parentFrameId: frame.parentFrameId,
+                documentId: frame.identity, sessionGeneration: frame.sessionGeneration,
+                navigationGeneration: frame.navigationGeneration, streamGeneration: frame.streamGeneration,
+                url: frame.url, documentUrl: frame.url })
+        }).filter(identity => this._allowed(owner, identity, true))
+    }
+
+    _armNextPreparedDocument(owner, identity) {
+        // Only an exact verified departure may permit a later native root
+        // transition. Do not clear the current root yet: the browser may be
+        // reused for another task, or may replace the document at the same URL.
+        if (!this._valid(owner) || !owner.ready || owner.frozen || owner.target.lost
+            || !owner.scope.prepared || owner.scope.skipExistingDocument !== true
+            || owner.scope.mode !== 'origin' || owner.capabilities.size !== 1
+            || !owner.capabilities.has('network') || !identity
+            || identity.captureId !== owner.id || identity.tabId !== owner.tabId
+            || identity.documentId !== owner.preparedDocument
+            || typeof identity.frameId !== 'string' || !identity.frameId) return false
+        const key = JSON.stringify(['', identity.frameId])
+        const frame = owner.target.frames.get(key)
+        if (owner.target.primaryFrame !== key || !frame || frame.nativeDocument !== true
+            || frame.identity !== identity.documentId || frame.url !== identity.url
+            || frame.sessionGeneration !== identity.sessionGeneration
+            || frame.streamGeneration !== identity.streamGeneration
+            || !permitted(owner.scope, frame.url)) return false
+        owner.excludedPreparedDocuments ||= new Set()
+        if (owner.excludedPreparedDocuments.size >= SAST_EARLY_DOM_DOCUMENT_HISTORY_LIMIT) return false
+        owner.nextPreparedDocumentArmed = true
+        return true
+    }
+
+    _renewPreparedMetadataVisit(owner) {
+        // A claimed DAST-only Client visit can outlive the ordinary unclaimed
+        // preparation TTL. Never extend source/body capture, an expired lease,
+        // or a different browser owner. The caller independently checks the
+        // exact named running session before each renewal.
+        if (!owner.active || this.owners.get(owner.key) !== owner || !owner.ready
+            || owner.frozen || owner.target.lost || !owner.scope.prepared
+            || owner.scope.mode !== 'origin' || owner.scope.skipExistingDocument !== true
+            || owner.capabilities.size !== 1 || !owner.capabilities.has('network')
+            || !Number.isFinite(owner.preparedDeadline)
+            || this.now() >= owner.preparedDeadline) return false
+        try {
+            if (this.isOwnerActive({ ownerId: owner.ownerId, tabId: owner.tabId,
+                epoch: this.epoch }) !== true) return false
+        } catch (_) { return false }
+        this._armPrepared(owner)
+        return true
+    }
+
+    async _verifiedVisitRoot(owner) {
+        // CDP's current frame tree is independent of our event cache. A URL
+        // match alone cannot prove that the cached root survived navigation.
+        // A child frame can arrive without parent metadata and look like a
+        // second root in the event cache. Select only the frame named by the
+        // authoritative native root ID, loader and URL instead.
+        const before = this._visitDocuments(owner).filter(frame => !frame.sessionId)
+        if (!before.length || typeof this.adapter.send !== 'function') return null
+        const revision = owner.revision
+        let tree
+        try { tree = await this.adapter.send(owner.tabId, 'Page.getFrameTree', {}) }
+        catch (_) { return null }
+        if (!this._valid(owner) || owner.revision !== revision || owner.frozen) return null
+        const frame = tree?.frameTree?.frame
+        if (typeof frame?.id !== 'string' || !frame.id
+            || typeof frame.loaderId !== 'string' || !frame.loaderId
+            || typeof frame.url !== 'string' || !frame.url) return null
+        const old = before.filter(candidate => candidate.frameId === frame.id)
+        const current = this._visitDocuments(owner).filter(candidate =>
+            !candidate.sessionId && candidate.frameId === frame.id)
+        if (old.length !== 1 || current.length !== 1
+            // A newly committed native document may replace the cached root
+            // while CDP answers. That is a new current root, not proof that
+            // the departed document completed. A reopened stream of the same
+            // document still invalidates this in-flight verification.
+            || (old[0].documentId === current[0].documentId
+                && ['captureId', 'tabId', 'frameId', 'sessionGeneration',
+                    'navigationGeneration', 'streamGeneration', 'url'].some(key =>
+                    old[0][key] !== current[0][key]))
+            || current[0].documentId !== frame.loaderId
+            || !sameDocumentUrl(current[0].url, frame.url)) return null
+        return current[0]
     }
     _collectionAllowed(owner, identity, accepted = false) {
         if (!identity || !owner.target.frames.get(frameKey(identity))?.nativeDocument) return false
@@ -1085,6 +1273,7 @@ export class BrowserCaptureManager {
             nextRevision: () => ++this.serial,
             getIdentity: record => this._documents(owner).find(identity => this._collectionAllowed(owner, identity)
                 && ['frameId', 'documentId', 'sessionGeneration', 'navigationGeneration'].every(key => identity[key] === record[key])
+                && (identity.streamGeneration ?? 0) === (record.streamGeneration ?? 0)
                 && (identity.sessionId || '') === (record.sessionId || '')) }
         owner.sastState = config
         if (config.active) this._syncSastObligations(owner)
@@ -1277,6 +1466,20 @@ export class BrowserCaptureManager {
         return { expected, unresolved, unresolvedSources }
     }
 
+    _sastDocumentAcquisitionStatus(owner, identity) {
+        // Acquisition only: an analysis reuse receipt is not proof that all
+        // source work or publication for this visit has committed.
+        if (!owner.sastState?.isActive() || owner.frozen) return null
+        const obligation = this._analysisObligation(owner, identity)
+        if (!obligation) return null
+        return Object.freeze({
+            domPayloadAdmitted: obligation.received === true,
+            pendingNativeSources: this._sastDocumentPending(owner, identity, null),
+            unresolvedSourceReferences: obligation.sourceAcquisition?.value?.refs?.length || 0,
+            analysisFailure: !!obligation.analysisFailure?.value
+        })
+    }
+
     _getSastState(owner, sender) {
         const config = owner.sastState
         if (!config?.isActive()) return { active: false, revision: config?.revision || 0, transport: 'runtime' }
@@ -1412,16 +1615,24 @@ export class BrowserCaptureManager {
         const charge = { ...identity, requestId: `sast-dom-pending:${++this.serial}` }, bytes = headerBytes(payload, this.store.limits.resourceBytes)
         if (!this.store.stage(charge, 'chunks', bytes).ok) { this._gap([owner], 'sast_dom_push_failed', identity); return false }
         const revision = owner.revision, config = owner.sastState
-        // Once the browser has authenticated an early candidate, navigation
-        // must not erase its already-copied DOM before the queued analysis runs.
-        // Ordinary live snapshots retain their stricter current-document gate.
+        // Admission copied and charged immutable DOM bytes under this native
+        // document. Normal navigation cannot revoke that copy; owner/scan
+        // revocation still does. Original response bodies use their separate
+        // source-batch path and are never inferred from a successor document.
         const current = acceptedCandidate
-            ? () => this._valid(owner) && !owner.target.lost && owner.sastState === config && config.isActive()
-            : () => this._valid(owner) && !owner.target.lost && this._collectionAllowed(owner, identity, true)
-                && this._documents(owner).some(item => ['frameId', 'documentId', 'sessionGeneration', 'navigationGeneration'].every(key => item[key] === identity[key]) && (item.sessionId || '') === (identity.sessionId || ''))
+            ? () => this._valid(owner) && !owner.target.lost
+                && owner.sastState === config && config.isActive()
+            : () => this._valid(owner) && !owner.target.lost && owner.ready
+                && !owner.scope.prepared && owner.capabilities.has('sources')
+                && identity.epoch === this.epoch && identity.captureId === owner.id
+                && identity.tabId === owner.tabId
+                && permitted(owner.scope, identity.url)
+                && permitted({ ...owner.scope, mode: 'origin' }, identity.documentUrl || identity.url)
         let released = false
         const batch = Object.freeze({ identity, payload, browserDocument: acceptedCandidate,
-            isActive: () => !released && owner.revision === revision && current() && nativeCurrent(),
+            retainedDom: !acceptedCandidate,
+            isActive: () => !released && owner.revision === revision && current()
+                && (acceptedCandidate ? nativeCurrent() : true),
             get active() { return batch.isActive() },
             release: () => { if (released) return; released = true; owner.sastBatches.delete(batch); this.store.unstage(charge, 'chunks') } })
         owner.sastBatches ||= new Set(); owner.sastBatches.add(batch)
@@ -1472,6 +1683,7 @@ export class BrowserCaptureManager {
     }
 
     _armPrepared(owner) {
+        clearTimeout(owner.preparedTimer)
         owner.preparedDeadline = this.now() + PREPARED_TTL_MS
         owner.preparedTimer = setTimeout(() => { this._release(owner, 'prepared_expired').catch(() => {}) }, PREPARED_TTL_MS)
         owner.preparedTimer.unref?.()

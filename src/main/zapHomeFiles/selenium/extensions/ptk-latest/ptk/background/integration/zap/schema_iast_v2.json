@@ -1,0 +1,797 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ptk.local/schemas/ptk-zap-iast-finding-v2.json",
+  "title": "PTK -> ZAP IAST v2 Findings and Scan Completeness",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source",
+    "type",
+    "schema",
+    "ts",
+    "batchId",
+    "payload",
+    "zapid"
+  ],
+  "properties": {
+    "source": {
+      "const": "ptk"
+    },
+    "type": {
+      "const": "iast_findings_batch"
+    },
+    "schema": {
+      "const": "ptk-zap-iast-finding-v2"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "batchId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "scanId",
+        "findings",
+        "sessionId",
+        "scanCompleteness"
+      ],
+      "properties": {
+        "engine": {
+          "const": "IAST"
+        },
+        "scanId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "findings": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/$defs/finding"
+          },
+          "maxItems": 200
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "zapSessionKey": {
+          "$ref": "#/$defs/zapSessionKey"
+        },
+        "scanCompleteness": {
+          "$ref": "#/$defs/scanCompleteness"
+        }
+      }
+    },
+    "batchSeq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "zapid": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "zapSessionKey": {
+      "$ref": "#/$defs/zapSessionKey"
+    },
+    "browserid": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    }
+  },
+  "$defs": {
+    "zapSessionKey": {
+      "description": "Existing managed callback routing identity. Its 632-character cap derives from the admitted 512-character browser-capture route, replacing its 20-character endpoint suffix with the 11-character trusted origin, then adding a delimiter and the 128-character owner. Copy and owner consistency are checked by the strict consumer.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 632
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "fingerprint",
+        "moduleId",
+        "ruleId",
+        "severity",
+        "confidence",
+        "summary",
+        "location",
+        "context",
+        "source",
+        "sink",
+        "proof",
+        "observation"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "moduleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ruleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "high",
+            "medium",
+            "low",
+            "info"
+          ]
+        },
+        "confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "location": {
+          "$ref": "#/$defs/runtimeLocation"
+        },
+        "proof": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "payload",
+            "proof",
+            "summary"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "taint",
+                "signal"
+              ]
+            },
+            "payload": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proof": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/sourceRef"
+        },
+        "sink": {
+          "$ref": "#/$defs/sinkRef"
+        },
+        "trace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context": {
+          "$ref": "#/$defs/runtimeContext"
+        },
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "url", "raw"],
+          "properties": {
+            "method": {"type": "string", "minLength": 1, "maxLength": 32},
+            "url": {"type": "string", "minLength": 1, "maxLength": 8192},
+            "raw": {"type": "string", "minLength": 1, "maxLength": 16384}
+          }
+        },
+        "response": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["statusCode", "raw"],
+          "properties": {
+            "statusCode": {"type": "integer", "minimum": 100, "maximum": 599},
+            "raw": {"type": "string", "minLength": 1, "maxLength": 4096}
+          }
+        },
+        "observation": {
+          "$ref": "#/$defs/observation"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "observation": {
+                "properties": {
+                  "acquisition": {
+                    "const": "sink_storage_snapshot"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "severity": {
+                "enum": [
+                  "info",
+                  "low"
+                ]
+              },
+              "proof": {
+                "properties": {
+                  "mode": {
+                    "const": "signal"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runtimeLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "route",
+        "method",
+        "param"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "route": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "param": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "runtimeContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "domPath",
+        "elementId",
+        "tagName"
+      ],
+      "properties": {
+        "domPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "elementId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tagName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "sinkRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "identityVersion",
+        "kind",
+        "operationId",
+        "acquisition",
+        "evidenceGrade",
+        "inheritedGrade",
+        "valueRelation",
+        "propagation",
+        "gradeAuthority",
+        "attackerControl",
+        "controlReason",
+        "site",
+        "completeness",
+        "sourceBinding"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 2
+        },
+        "identityVersion": {
+          "const": 2
+        },
+        "kind": {
+          "enum": [
+            "source_relationship",
+            "policy_signal"
+          ]
+        },
+        "operationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "acquisition": {
+          "enum": [
+            "instrumented_read",
+            "instrumented_write",
+            "initial_snapshot",
+            "sink_storage_snapshot",
+            "existing_other"
+          ]
+        },
+        "evidenceGrade": {
+          "enum": [
+            "substring",
+            "lexical_word_boundary",
+            "canonical_url_equality",
+            "primitive_fingerprint_equality",
+            "complete_value_equality",
+            "instrumented_propagation",
+            "object_identity",
+            null
+          ]
+        },
+        "inheritedGrade": {
+          "enum": [
+            "substring",
+            "lexical_word_boundary",
+            "canonical_url_equality",
+            "primitive_fingerprint_equality",
+            "complete_value_equality",
+            "instrumented_propagation",
+            "object_identity",
+            null
+          ]
+        },
+        "valueRelation": {
+          "enum": [
+            "substring",
+            "lexical_word_boundary",
+            "canonical_url_equality",
+            "primitive_fingerprint_equality",
+            "complete_value_equality",
+            "object_identity",
+            "unavailable"
+          ]
+        },
+        "propagation": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "inheritedGrade"
+              ],
+              "properties": {
+                "operation": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "inheritedGrade": {
+                  "enum": [
+                    "substring",
+                    "lexical_word_boundary",
+                    "canonical_url_equality",
+                    "primitive_fingerprint_equality",
+                    "complete_value_equality",
+                    "instrumented_propagation",
+                    "object_identity"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "gradeAuthority": {
+          "const": "page_observed_untrusted"
+        },
+        "attackerControl": {
+          "enum": [
+            "observed",
+            "inferred",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "controlReason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "site": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "code",
+                "dom",
+                "unresolved"
+              ]
+            },
+            "scriptUrl": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            "column": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "domPath": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "attribute": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "operation": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        "completeness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reasons"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "complete",
+                "limited"
+              ]
+            },
+            "reasons": {
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.:-]{0,63}$"
+              }
+            }
+          }
+        },
+        "sourceBinding": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "sourceId",
+                "key",
+                "kind"
+              ],
+              "properties": {
+                "sourceId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "key": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "kind": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                }
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "policy_signal"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sourceBinding": {
+                "type": "null"
+              },
+              "evidenceGrade": {
+                "type": "null"
+              },
+              "inheritedGrade": {
+                "type": "null"
+              },
+              "propagation": {
+                "type": "null"
+              },
+              "valueRelation": {
+                "const": "unavailable"
+              },
+              "attackerControl": {
+                "const": "not_applicable"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sourceBinding": {
+                "type": "object"
+              },
+              "evidenceGrade": {
+                "enum": [
+                  "substring",
+                  "lexical_word_boundary",
+                  "canonical_url_equality",
+                  "primitive_fingerprint_equality",
+                  "complete_value_equality",
+                  "instrumented_propagation",
+                  "object_identity"
+                ]
+              },
+              "valueRelation": {
+                "enum": [
+                  "substring",
+                  "lexical_word_boundary",
+                  "canonical_url_equality",
+                  "primitive_fingerprint_equality",
+                  "complete_value_equality",
+                  "object_identity"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "site": {
+                "properties": {
+                  "kind": {
+                    "const": "code"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "site": {
+                "required": [
+                  "scriptUrl",
+                  "line",
+                  "column"
+                ],
+                "properties": {
+                  "scriptUrl": {"type": "string", "minLength": 1, "maxLength": 2048},
+                  "line": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                  "column": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "scanCompleteness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "revision",
+        "status",
+        "reasons",
+        "counters",
+        "terminal"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 2
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "status": {
+          "enum": [
+            "unknown",
+            "partial",
+            "complete"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.:-]{0,63}$"
+          }
+        },
+        "counters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lossCount",
+            "recordsRejected"
+          ],
+          "properties": {
+            "lossCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "recordsRejected": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

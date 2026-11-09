@@ -1,6 +1,8 @@
 'use strict'
 
 import { stableHash } from './zapMapper.js'
+import { IAST_WIRE_V2, IAST_WIRE_V3, iastContractError, sanitizeIastObservation } from './iastWireContract.js'
+import { projectIastFlow } from './iastFlowProjection.js'
 
 const MAX_TEXT_LEN = 4096
 function toNonEmptyString(value) {
@@ -21,11 +23,11 @@ function truncate(value, maxLen = MAX_TEXT_LEN) {
     return text.length > maxLen ? text.slice(0, maxLen) : text
 }
 
-function toSeverity(value) {
+function toSeverity(value, v2 = false) {
     const text = String(value || 'low').toLowerCase()
     if (!['critical', 'high', 'medium', 'low', 'info'].includes(text)) return 'low'
     if (text === 'critical') return 'high'
-    if (text === 'info') return 'low'
+    if (text === 'info') return v2 ? 'info' : 'low'
     return text
 }
 
@@ -188,12 +190,12 @@ function buildSink(finding = {}) {
     }
 }
 
-function buildProof(finding = {}) {
+function buildProof(finding = {}, observation = null) {
     const proof = toObject(finding.proof) || {}
     const evidence = toObject(finding?.evidence?.iast) || {}
     const primaryClass = toNonEmptyString(evidence.primaryClass)
     let mode = 'signal'
-    if (primaryClass === 'taint_flow' || primaryClass === 'hybrid') {
+    if (observation?.kind !== 'policy_signal' && observation?.acquisition !== 'sink_storage_snapshot' && (primaryClass === 'taint_flow' || primaryClass === 'hybrid')) {
         mode = 'taint'
     }
     return {
@@ -201,7 +203,8 @@ function buildProof(finding = {}) {
         payload: truncate(evidence.matched, 1024),
         proof: null,
         summary: truncate(
-            proof.summary
+            (observation?.acquisition === 'sink_storage_snapshot' ? 'Inferred equality between current storage and sink input; application storage read was not observed.' : null)
+            || proof.summary
             || finding.message
             || evidence.message
             || finding.ruleName
@@ -233,21 +236,46 @@ function buildRootSummary({ finding = {}, proof, source, sink }) {
     return truncate(`${base} to sink ${sinkLabel}`, 1024)
 }
 
-export function toIastFinding(finding, { scanId, scanResult } = {}) {
+export function toIastFinding(finding, { scanId, scanResult, wireSchema = null } = {}) {
     if (!finding || typeof finding !== 'object') return null
+    const evidence = toObject(finding?.evidence?.iast) || {}
+    const v3 = wireSchema === IAST_WIRE_V3
+    const v2 = v3 || wireSchema === IAST_WIRE_V2 || evidence?.observation?.schemaVersion === 2
     const moduleId = toNonEmptyString(finding.moduleId)
     const ruleId = toNonEmptyString(finding.ruleId)
-    const location = buildLocation(finding, { scanResult })
-    if (!moduleId || !ruleId || !location) return null
+    // v2 canonical findings are immutable. A later request-store enrichment
+    // must not change an already admitted/published proof or its destination.
+    const location = buildLocation(finding, { scanResult: v2 ? null : scanResult })
+    if (!moduleId || !ruleId || !location) {
+        if (v2) throw iastContractError('invalid_payload', 'IAST v2 missing native rule/location')
+        return null
+    }
 
-    const requestEntry = findRequestEntry(scanResult, finding)
+    const requestEntry = v2 ? null : findRequestEntry(scanResult, finding)
     const source = buildSource(finding)
     const sink = buildSink(finding)
     const context = buildContext(finding)
     const fingerprint = toNonEmptyString(finding.fingerprint)
         || stableHash(`${location.url}|${moduleId}|${ruleId}|${sink.id || ''}|${source.id || ''}`)
-    const evidence = toObject(finding?.evidence?.iast) || {}
-    const proof = buildProof(finding)
+    const observation = v2 ? sanitizeIastObservation(evidence.observation) : null
+    if (v2) {
+        for (const value of [finding.id, finding.fingerprint, moduleId, ruleId]) {
+            if (typeof value !== 'string' || !value.length || value.length > 128) throw iastContractError('invalid_payload', 'IAST v2 requires a bounded opaque native identity')
+        }
+        source.label = truncate(source.label, 256)
+        sink.label = truncate(sink.label, 256)
+        context.domPath = truncate(context.domPath, 1024)
+        context.elementId = truncate(context.elementId, 1024)
+        context.tagName = truncate(context.tagName, 80)
+    }
+    const selectedKey = evidence.sourceKey || evidence.primarySource?.key || evidence.sources?.[0]?.key || null
+    if (observation?.kind === 'source_relationship' && (source.kind !== observation.sourceBinding.kind || selectedKey !== observation.sourceBinding.key)) {
+        throw iastContractError('invalid_payload', 'IAST selected source disagrees with its observation binding')
+    }
+    if (observation?.acquisition === 'sink_storage_snapshot' && !['info', 'low'].includes(String(finding.severity).toLowerCase())) {
+        throw iastContractError('invalid_payload', 'Inferred storage observation exceeds Low severity')
+    }
+    const proof = buildProof(finding, observation)
     const summary = buildRootSummary({ finding, proof, source, sink })
 
     const method = location.method || toNonEmptyString(requestEntry?.method) || 'GET'
@@ -258,7 +286,7 @@ export function toIastFinding(finding, { scanId, scanResult } = {}) {
         fingerprint,
         moduleId,
         ruleId,
-        severity: toSeverity(finding.severity),
+        severity: toSeverity(finding.severity, v2),
         confidence: clamp(finding.confidence, 0, 100),
         summary,
         location,
@@ -275,6 +303,8 @@ export function toIastFinding(finding, { scanId, scanResult } = {}) {
         source,
         sink,
         trace: truncate(evidence.trace, 2048),
-        context
+        context,
+        ...(v2 ? { observation } : {}),
+        ...(v3 ? { flow: projectIastFlow(evidence.context?.flow, observation, sink, evidence.sources || []) } : {})
     }
 }

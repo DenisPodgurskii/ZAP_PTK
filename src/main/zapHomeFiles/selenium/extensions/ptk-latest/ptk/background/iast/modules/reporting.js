@@ -1,6 +1,7 @@
 import CryptoES from "../../../packages/crypto-es/index.js"
 import { normalizeCwe, normalizeOwasp } from "../../common/normalizeMappings.js"
 import { resolveFindingTaxonomy } from "../../common/resolveFindingTaxonomy.js"
+import { createIastPublicId, sanitizeIastObservation, validateIastEvidenceVersion } from '../observation.js'
 
 const ENGINE_IAST = "IAST"
 const DEFAULT_CATEGORY = "runtime_issue"
@@ -21,6 +22,7 @@ const SEVERITY_RANK = {
 }
 
 export function createFindingFromIAST(details = {}, meta = {}) {
+    const evidenceVersion = validateIastEvidenceVersion(details)
     const now = new Date().toISOString()
     const severity = normalizeSeverity(details?.severity)
     const category = inferCategoryFromIAST(details)
@@ -38,7 +40,7 @@ export function createFindingFromIAST(details = {}, meta = {}) {
     const recommendation = details?.recommendation || details?.meta?.recommendation || null
     const links = details?.links || details?.meta?.links || null
     const contextKey = extractContextKey(details?.context, location.url, sinkId)
-    const fingerprint = buildFingerprint({
+    const fingerprint = evidenceVersion === 2 ? createIastPublicId() : buildFingerprint({
         url: location.url,
         sink: sinkId,
         category,
@@ -137,6 +139,10 @@ export function resolveIastFindingPresentationAggregate(...sources) {
 }
 
 export function buildIastFindingAggregateKey({ finding = {}, ruleMeta = {}, moduleMeta = {}, scanId = null, host = null } = {}) {
+    const payload = getIastEvidencePayload(finding) || {}
+    if (validateIastEvidenceVersion(payload) === 2) {
+        return /^iast-v2-[a-f0-9]{32}$/.test(finding.fingerprint || '') ? finding.fingerprint : null
+    }
     const mode = resolveIastFindingPresentationAggregate(ruleMeta, moduleMeta)
     if (!mode) return null
     const evidence = getIastEvidencePayload(finding) || {}
@@ -201,6 +207,19 @@ export function buildIastFindingAggregateSample(finding = {}) {
 
 export function applyIastFindingAggregateState(finding, { aggregateKey = null, mode = null, sample = null } = {}) {
     if (!finding || !aggregateKey) return finding
+    if (getIastEvidencePayload(finding)?.schemaVersion === 2) {
+        if (!/^iast-v2-[a-f0-9]{32}$/.test(aggregateKey)) throw new Error('invalid_iast_public_identity')
+        const evidence = finding.evidence.iast
+        finding.fingerprint = aggregateKey
+        finding.id = `${finding.scanId || 'scan'}::IAST::${aggregateKey}`
+        evidence.aggregate = { identityVersion: 2, mode: 'url-site-stratum', key: aggregateKey }
+        if (normalizeIastFindingAggregationMode(mode)) finding.presentationAggregate = mode
+        evidence.occurrenceCount = 1
+        evidence.sampleLimit = 0
+        evidence.truncated = false
+        evidence.samples = []
+        return finding
+    }
     const normalizedMode = normalizeIastFindingAggregationMode(mode)
     if (!normalizedMode) return finding
     finding.evidence = finding.evidence && typeof finding.evidence === "object" ? finding.evidence : {}
@@ -224,6 +243,13 @@ export function applyIastFindingAggregateState(finding, { aggregateKey = null, m
 
 export function mergeIastFindingAggregateOccurrence(existingFinding, incomingFinding, { sample = null } = {}) {
     if (!existingFinding || !incomingFinding) return existingFinding || incomingFinding
+    if (getIastEvidencePayload(existingFinding)?.schemaVersion === 2) {
+        if (existingFinding.fingerprint !== incomingFinding.fingerprint) throw new Error('iast_identity_merge_mismatch')
+        const evidence = existingFinding.evidence.iast
+        evidence.occurrenceCount = Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Number(evidence.occurrenceCount) || 1) + 1)
+        existingFinding.lastSeenAt = new Date().toISOString()
+        return existingFinding
+    }
     const existingEvidence = getIastEvidencePayload(existingFinding) || {}
     const incomingEvidence = getIastEvidencePayload(incomingFinding) || {}
     existingFinding.severity = pickHigherSeverity(existingFinding.severity, incomingFinding.severity)
@@ -493,7 +519,8 @@ function buildIASTEvidence(details = {}) {
         sink: details?.sink || null,
         sinkContext: details?.sinkContext || null,
         context,
-        schemaVersion: details?.schemaVersion || null,
+        schemaVersion: details?.observation ? 2 : (details?.schemaVersion || null),
+        observation: sanitizeIastObservation(details?.observation),
         primaryClass: details?.primaryClass || context?.primaryClass || null,
         sourceRole: details?.sourceRole || context?.sourceRole || null,
         origin: details?.origin || context?.origin || null,

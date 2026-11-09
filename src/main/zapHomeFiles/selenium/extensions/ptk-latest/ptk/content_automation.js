@@ -140,6 +140,22 @@ function injectPtkAgentAutomationLayer() {
     } catch (_) { }
 }
 
+function installZapOwnedMainOrLegacyBridge(version, nonce) {
+    // Only the background can authorize an exact ZAP capture owner. Other Full
+    // sessions retain the existing script-tag path after that decision.
+    sendRuntimeMessage({
+        channel: 'ptk_content2background_automation',
+        type: 'zap-main-bootstrap',
+        nonce,
+        requestId: `zap-main-${nonce}`
+    }).then((response) => {
+        if (response?.ok === true && response.nonce === nonce
+            && typeof response.documentId === 'string' && response.documentId
+            && Number.isSafeInteger(response.streamGeneration)) return;
+        installPtkAutomationBridge(version, nonce, true);
+    }).catch(() => installPtkAutomationBridge(version, nonce, true));
+}
+
 function notifyAutomationStatus(enabled, nonce) {
     try {
         const bridgeUrl = runtimeGetURL('ptk/automationBridge.js');
@@ -239,7 +255,12 @@ function enableAutomationBridge() {
     }
 
     if (preIastBridgeOwned) injectPtkAgentAutomationLayer();
-    else installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true);
+    else if (isPtkAutomationAgentManifest
+        || window.PTK_AUTOMATION?.bridgeId === 'ptk-automation-bridge') {
+        installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true);
+    } else {
+        installZapOwnedMainOrLegacyBridge(ptkAutomationVersion, automationNonce);
+    }
     notifyAutomationStatus(true, automationNonce);
     [50, 250, 1000].forEach((delayMs) => {
         try {

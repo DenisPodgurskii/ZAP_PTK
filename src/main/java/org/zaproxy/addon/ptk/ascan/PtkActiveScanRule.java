@@ -1,11 +1,10 @@
 package org.zaproxy.addon.ptk.ascan;
 
-import java.lang.reflect.Field;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.apache.commons.httpclient.URI;
+import java.util.function.Predicate;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.Constant;
@@ -15,6 +14,7 @@ import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.core.scanner.Category;
 import org.parosproxy.paros.core.scanner.HostProcess;
 import org.parosproxy.paros.model.HistoryReference;
+import org.parosproxy.paros.model.Model;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpSender;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
@@ -25,7 +25,6 @@ import org.zaproxy.addon.commonlib.PolicyTag;
 import org.zaproxy.addon.ptk.ExtensionPtk;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.model.Context;
-import org.zaproxy.zap.model.StructuralNode;
 import org.zaproxy.zap.users.User;
 
 /**
@@ -135,23 +134,26 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
             skipScan(hostProcess, "fail.badurl");
             return;
         }
-        String baseUrl =
-                baseMsg != null
-                                && baseMsg.getRequestHeader() != null
-                                && baseMsg.getRequestHeader().getURI() != null
-                        ? baseMsg.getRequestHeader().getURI().toString()
-                        : null;
-        if (baseUrl != null && !baseUrl.equals(url)) {
-            LOGGER.debug(
-                    "PTK active scan rule using HostProcess start node URL {} (base message URL {})",
-                    url,
-                    baseUrl);
-        }
         if (hostProcess.getHttpSender() == null) {
             skipScan(hostProcess, "fail.missingdependency");
             return;
         }
         Context context = hostProcess.getContext();
+        if (context == null) {
+            // The active rule can be launched without a named context even
+            // though the official plan has one. Use only an unambiguous ZAP
+            // context containing this seed; never infer a host-root scope.
+            List<Context> matching = Model.getSingleton().getSession().getContextsForUrl(url);
+            if (matching.size() > 1) {
+                skipScan(hostProcess, "fail.badurl");
+                return;
+            }
+            if (matching.size() == 1) context = matching.get(0);
+        }
+        if (!isClientSpiderSeedInScope(url, context == null ? null : context::isInContext)) {
+            skipScan(hostProcess, "fail.badurl");
+            return;
+        }
         User user = baseMsg != null ? hostProcess.getHttpSender().getUser(baseMsg) : null;
 
         if (extClient.getClientParam() == null) {
@@ -227,6 +229,20 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
                     url,
                     System.currentTimeMillis() - start);
         }
+        ClientSpider.CompletionOutcome outcome = spider.getCompletionOutcome();
+        if (outcome != ClientSpider.CompletionOutcome.COMPLETE) {
+            String reason = incompleteClientSpiderReason(outcome);
+            LOGGER.warn("PTK active scan rule client spider id={} {}", scanId, reason);
+            // This is called while the rule is still running. ZAP's public
+            // HostProcess API exposes a skipped reason, not a typed partial
+            // outcome; stored PTK alerts remain available for assessment.
+            hostProcess.pluginSkipped(this, reason);
+        }
+    }
+
+    static String incompleteClientSpiderReason(ClientSpider.CompletionOutcome outcome) {
+        return "PTK Client Spider did not complete: "
+                + (outcome == null ? "UNAVAILABLE" : outcome.name());
     }
 
     private void skipScan(HostProcess hostProcess, String messageKey) {
@@ -238,67 +254,18 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
         }
     }
 
-    /**
-     * Resolves the client spider seed URL from the host process's first {@code startNodes} entry,
-     * falling back to the active scan rule's base message when reflection is unavailable.
-     */
+    /** The active rule's public base message is the in-scope seed, not the host tree root. */
     static String resolveClientSpiderStartUrl(HostProcess hostProcess, HttpMessage baseMsg) {
-        String startNodeUrl = getFirstStartNodeUrl(hostProcess);
-        if (startNodeUrl != null && !startNodeUrl.isBlank()) {
-            return startNodeUrl;
-        }
-        if (baseMsg == null || baseMsg.getRequestHeader().getURI() == null) {
+        if (baseMsg == null
+                || baseMsg.getRequestHeader() == null
+                || baseMsg.getRequestHeader().getURI() == null) {
             return null;
         }
         return baseMsg.getRequestHeader().getURI().toString();
     }
 
-    private static String getFirstStartNodeUrl(HostProcess hostProcess) {
-        if (hostProcess == null) {
-            return null;
-        }
-        try {
-            // The startNodes will be publicly accessible from ZAP 2.18.0
-            Field startNodesField = HostProcess.class.getDeclaredField("startNodes");
-            startNodesField.setAccessible(true);
-            Object value = startNodesField.get(hostProcess);
-            if (!(value instanceof List<?> nodes)) {
-                return null;
-            }
-            return getFirstStartNodeUrl(nodes);
-        } catch (ReflectiveOperationException e) {
-            LOGGER.debug(
-                    "PTK active scan rule could not read HostProcess.startNodes; using base message URL",
-                    e);
-            return null;
-        }
-    }
-
-    // Package-private for testing; avoids constructing a HostProcess in unit tests.
-    static String getFirstStartNodeUrl(List<?> startNodes) {
-        if (startNodes == null || startNodes.isEmpty()) {
-            return null;
-        }
-        Object first = startNodes.get(0);
-        if (!(first instanceof StructuralNode startNode)) {
-            return null;
-        }
-        return urlFromStructuralNode(startNode);
-    }
-
-    static String urlFromStructuralNode(StructuralNode startNode) {
-        if (startNode == null) {
-            return null;
-        }
-        URI uri = startNode.getURI();
-        if (uri != null) {
-            return uri.toString();
-        }
-        if (startNode.getHistoryReference() != null
-                && startNode.getHistoryReference().getURI() != null) {
-            return startNode.getHistoryReference().getURI().toString();
-        }
-        return null;
+    static boolean isClientSpiderSeedInScope(String url, Predicate<String> inContext) {
+        return url != null && !url.isBlank() && (inContext == null || inContext.test(url));
     }
 
     private static <T extends org.parosproxy.paros.extension.Extension> T getExtension(

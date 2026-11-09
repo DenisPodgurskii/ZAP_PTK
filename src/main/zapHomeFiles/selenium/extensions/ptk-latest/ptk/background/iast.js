@@ -32,6 +32,8 @@ import {
 } from "../common/portalConfig.js"
 import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js"
 import { buildIastRuntimePlan } from "../content/iast_runtime_plan.js"
+import { admitIastObservationIdentity, createIastScanCompleteness, forgetIastIdentityState, resetIastIdentityState,
+    sanitizeIastObservation, sanitizeIastScanCompleteness, validateIastEvidenceVersion, validateIastImportedFindings } from './iast/observation.js'
 
 const activeIastTabs = new Set()
 let iastModulesCache = null
@@ -166,13 +168,14 @@ function normalizeIastRegistrationTarget(targetUrl = '') {
     }
 }
 
-function buildIastAgentScriptFiles(scanStrategy = 'SMART') {
+function buildIastAgentScriptFiles(scanStrategy = 'SMART', nativeDocumentStart = false) {
     const prefix = 'ptk/content/'
     const bootstrap = `${prefix}iast_agent_bootstrap.js`
     const strategy = normalizeIastBackgroundStrategy(scanStrategy)
+    const entry = `${prefix}${nativeDocumentStart === true ? 'iast_document_start.js' : 'iast.js'}`
     return strategy === 'COMPREHENSIVE'
-        ? [bootstrap, `${prefix}iast_comprehensive_bootstrap.js`, `${prefix}iast.js`]
-        : [bootstrap, `${prefix}iast.js`]
+        ? [bootstrap, `${prefix}iast_comprehensive_bootstrap.js`, entry]
+        : [bootstrap, entry]
 }
 
 function normalizeIastRegistrationHost({ host = '', targetUrl = '' } = {}) {
@@ -254,6 +257,18 @@ function isIastNavigationUrlInScope(rawUrl = '', { host = '', targetUrl = '' } =
         return candidate.host.toLowerCase() === normalizedHost.hostWithPort
     }
     return candidate.hostname.toLowerCase() === normalizedHost.hostname
+}
+
+function shouldSkipZapCallbackAgentInjection({ zapManaged = false, currentUrl = '', targetUrl = '' } = {}) {
+    if (zapManaged !== true || typeof currentUrl !== 'string') return false
+    const target = normalizeIastRegistrationTarget(targetUrl)
+    if (!target || target.hostname === 'zap') return false
+    try {
+        const current = new URL(currentUrl)
+        return (current.protocol === 'http:' || current.protocol === 'https:')
+            && current.hostname.toLowerCase() === 'zap'
+            && /^\/zapCallBackUrl\//iu.test(current.pathname)
+    } catch (_) { return false }
 }
 
 function shouldReinjectIastAgentForTabUpdate({
@@ -1129,6 +1144,8 @@ export class ptk_iast {
         this.devtoolsTarget = null
         this.onDevtoolsEvent = null
         this.agentReadyTabs = new Set()
+        this.agentReadyDocuments = new Map()
+        this.iastScriptRegistrationReceipt = null
         this.agentFailedTabs = new Map()
         this.firefoxIastContentScriptRegistration = null
         this.maxHttpEvents = MAX_HTTP_EVENTS
@@ -1317,6 +1334,18 @@ export class ptk_iast {
     }
 
     getScanResultSchema({ scanId = null, host = null, startedAt = null } = {}) {
+        this._iastFindingReportTasks = new Set()
+        this._iastSealedScan = null
+        this._iastObservationDeliveries = new Map()
+        this._iastObservationStates = new Map()
+        this._iastReceivedRelationships = new Map()
+        this._iastExpectedDocuments = new Map()
+        this._iastCurrentExpectedDocuments = new Map()
+        this._iastExpectedDocumentSequence = 0
+        let identityError = null
+        try { resetIastIdentityState(this) } catch (error) { identityError = error.code || error.message }
+        const scanCompleteness = createIastScanCompleteness()
+        if (identityError) { scanCompleteness.status = 'partial'; scanCompleteness.reasons.push('iast_identity_crypto_unavailable') }
         return scanResultStore.createScan({
             engine: "IAST",
             scanId: scanId || ptk_utils.UUID(),
@@ -1324,6 +1353,8 @@ export class ptk_iast {
             startedAt: startedAt || new Date().toISOString(),
             settings: {},
             extraFields: {
+                identityVersion: 2,
+                scanCompleteness,
                 httpEvents: [],
                 runtimeEvents: [],
                 requests: [],
@@ -1336,6 +1367,197 @@ export class ptk_iast {
                 }
             }
         })
+    }
+
+    recordIastCompletenessGap(reason, count = 1, { rejected = false } = {}) {
+        if (!this.scanResult || this.scanResult.identityVersion !== 2) return false
+        const current = this.scanResult.scanCompleteness || createIastScanCompleteness()
+        const code = typeof reason === 'string' && /^[a-z0-9_]{1,64}$/.test(reason) ? reason : 'iast_observation_limited'
+        const allReasons = Array.from(new Set([...(current.reasons || []).filter(entry => entry !== 'document_receipts_pending'), code]))
+        const reasons = allReasons.length > 16 ? [...allReasons.slice(0, 15), 'reason_capacity_exceeded'] : allReasons
+        const amount = Number.isSafeInteger(count) && count >= 0 ? count : 1
+        this.scanResult.scanCompleteness = { schemaVersion: 2, revision: Math.min(Number.MAX_SAFE_INTEGER, (current.revision || 0) + 1),
+            status: 'partial', reasons, counters: {
+                lossCount: Math.min(Number.MAX_SAFE_INTEGER, (current.counters?.lossCount || 0) + amount),
+                recordsRejected: Math.min(Number.MAX_SAFE_INTEGER, (current.counters?.recordsRejected || 0) + (rejected ? amount : 0))
+            }, terminal: current.terminal === true }
+        this.updateScanResult()
+        return true
+    }
+
+    finalizeIastCompleteness({ complete = false, reasons = [] } = {}) {
+        if (!this.scanResult || this.scanResult.identityVersion !== 2) return null
+        const previous = this.scanResult.scanCompleteness || createIastScanCompleteness()
+        const partial = previous.status === 'partial' || (previous.counters?.lossCount || 0) > 0 || (previous.counters?.recordsRejected || 0) > 0
+        const codes = Array.from(new Set([...(previous.reasons || []).filter(code => code !== 'document_receipts_pending'),
+            ...reasons.filter(code => typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code))])).slice(0, 16)
+        if (!complete && !codes.length) codes.push('document_receipt_missing')
+        this.scanResult.scanCompleteness = { ...previous, revision: Math.min(Number.MAX_SAFE_INTEGER, previous.revision + 1),
+            status: partial ? 'partial' : complete && !codes.length ? 'complete' : 'unknown', reasons: codes, terminal: true }
+        this.updateScanResult()
+        return this.scanResult.scanCompleteness
+    }
+
+    _expectIastDocument(tabId, frameId = 0) {
+        if (!this.isTrackedScanTab(tabId)) return null
+        const expected = this._iastExpectedDocuments || (this._iastExpectedDocuments = new Map())
+        if (expected.size >= 4096) { this.recordIastCompletenessGap('document_receipt_limit', 0); return null }
+        const key = this._iastExpectedDocumentSequence = (this._iastExpectedDocumentSequence || 0) + 1
+        expected.set(key, { tabId, frameId, receiptKey: null })
+        const current = this._iastCurrentExpectedDocuments || (this._iastCurrentExpectedDocuments = new Map())
+        current.set(JSON.stringify([tabId, frameId]), key)
+        return key
+    }
+
+    _bindIastExpectedDocument(sender = {}, message = {}) {
+        const tabId = sender?.tab?.id
+        const frameId = Number.isInteger(sender.frameId) ? sender.frameId : 0
+        const documentId = sender.documentId || message?.context?.documentGeneration
+        if (!this.isTrackedScanTab(tabId) || typeof documentId !== 'string' || !documentId || documentId.length > 160) return null
+        const receiptKey = JSON.stringify([tabId, frameId, documentId])
+        // A late pagehide receipt from an older document must never satisfy a
+        // newer loading expectation, even when it arrives after that loading.
+        for (const expected of this._iastExpectedDocuments?.values() || []) {
+            if (expected.receiptKey === receiptKey) return receiptKey
+        }
+        const frameKey = JSON.stringify([tabId, frameId])
+        let expectedKey = this._iastCurrentExpectedDocuments?.get(frameKey)
+        let expected = this._iastExpectedDocuments?.get(expectedKey)
+        if (!expected || expected.receiptKey) {
+            expectedKey = this._expectIastDocument(tabId, frameId)
+            expected = this._iastExpectedDocuments?.get(expectedKey)
+        }
+        if (!expected) return null
+        expected.receiptKey = receiptKey
+        expected.documentId = sender.documentId || null
+        expected.documentGeneration = typeof message?.context?.documentGeneration === 'string'
+            ? message.context.documentGeneration : null
+        return receiptKey
+    }
+
+    async _acceptIastObservationState(state, sender = {}, message = {}) {
+        const admittedScan = this.scanResult
+        const documentId = sender.documentId || message?.context?.documentGeneration
+        const key = JSON.stringify([sender?.tab?.id, sender.frameId || 0, documentId])
+        const known = Array.from(this._iastExpectedDocuments?.values() || []).some(entry => entry.receiptKey === key)
+        if (!known && !await this._isCurrentIastDocument(sender, message)) return false
+        if (this.scanResult !== admittedScan || !this.isTrackedScanTab(sender?.tab?.id)) return false
+        return this._recordIastObservationState(state, sender, message, { currentDocumentVerified: true })
+    }
+
+    _recordIastObservationState(state, sender = {}, message = {}, { currentDocumentVerified = false } = {}) {
+        if (!this.isTrackedScanTab(sender?.tab?.id) || !state || typeof state !== 'object') return false
+        const documentId = sender.documentId || message?.context?.documentGeneration
+        if (typeof documentId !== 'string' || !documentId || documentId.length > 160) return false
+        if (!this._iastObservationStates) this._iastObservationStates = new Map()
+        const key = JSON.stringify([sender.tab.id, sender.frameId || 0, documentId])
+        const previous = this._iastObservationStates.get(key)
+        if (!Number.isSafeInteger(state.revision) || state.revision < 0 || (previous && state.revision <= previous.revision)) return false
+        if (!previous && this._iastObservationStates.size >= 4096) { this.recordIastCompletenessGap('document_receipt_limit'); return false }
+        const fields = ['operationHighWater', 'emittedRelationships', 'pendingObservations', 'lossCount']
+        if (fields.some(key => !Number.isSafeInteger(state[key]) || state[key] < 0) || typeof state.terminal !== 'boolean') {
+            this.recordIastCompletenessGap('invalid_document_receipt', 0)
+            return false
+        }
+        if (previous && ['operationHighWater', 'emittedRelationships', 'lossCount'].some(key => state[key] < previous[key])) {
+            this.recordIastCompletenessGap('document_receipt_regressed', 0)
+            return false
+        }
+        const known = Array.from(this._iastExpectedDocuments?.values() || []).some(entry => entry.receiptKey === key)
+        if (!known && !currentDocumentVerified) return false
+        if (!this._bindIastExpectedDocument(sender, message)) return false
+        const integer = value => value
+        const next = { revision: state.revision, installationState: ['installing', 'ready', 'failed'].includes(state.installationState) ? state.installationState : 'failed',
+            operationHighWater: integer(state.operationHighWater), emittedRelationships: integer(state.emittedRelationships),
+            pendingObservations: integer(state.pendingObservations), lossCount: integer(state.lossCount), terminal: state.terminal === true,
+            receivedRelationships: this._iastReceivedRelationships?.get(key) || 0,
+            tabId: sender.tab.id, frameId: sender.frameId || 0, documentId: sender.documentId || null,
+            documentGeneration: message?.context?.documentGeneration || null }
+        this._iastObservationStates.set(key, next)
+        const newLoss = Math.max(0, next.lossCount - (previous?.lossCount || 0))
+        if (newLoss) this.recordIastCompletenessGap('content_observation_loss', newLoss)
+        for (const reason of Array.isArray(state.reasons) ? state.reasons.slice(0, 16) : []) this.recordIastCompletenessGap(reason, 0)
+        if (next.installationState === 'failed') this.recordIastCompletenessGap('document_installation_failed', 0)
+        return true
+    }
+
+    _hasCompleteIastDocumentReceipts() {
+        const expected = Array.from(this._iastExpectedDocuments?.values() || [])
+        return expected.length > 0 && expected.every(entry => {
+            const state = entry.receiptKey && this._iastObservationStates?.get(entry.receiptKey)
+            return state && state.installationState === 'ready' && state.terminal === true
+                && state.pendingObservations === 0 && state.lossCount === 0
+                && state.receivedRelationships >= state.emittedRelationships
+        })
+    }
+
+    _hasSettledIastDocumentReceipt(entry) {
+        const state = entry?.receiptKey && this._iastObservationStates?.get(entry.receiptKey)
+        return !!(state && state.installationState === 'ready' && state.terminal === true
+            && state.pendingObservations === 0 && state.lossCount === 0
+            && state.receivedRelationships >= state.emittedRelationships)
+    }
+
+    async _isRetiredSettledIastFrame(tabId, frameId) {
+        const expected = Array.from(this._iastExpectedDocuments?.values() || [])
+            .filter(entry => entry.tabId === tabId && entry.frameId === frameId)
+        if (!expected.length || !expected.every(entry => this._hasSettledIastDocumentReceipt(entry))) return false
+        if (typeof browser?.webNavigation?.getFrame !== 'function') return false
+        try {
+            const frame = await browser.webNavigation.getFrame({ tabId, frameId })
+            // Only a successful native absence result proves retirement. An API
+            // failure or unavailable document identity is never a completeness grant.
+            return frame === null
+        } catch (_) { return false }
+    }
+
+    _recordIastTerminalReply(tabId, reply, frameId = 0) {
+        const generation = reply?.context?.documentGeneration
+        if (typeof generation !== 'string' || !generation || generation.length > 160 || reply?.state?.terminal !== true) return false
+        const previous = Array.from(this._iastExpectedDocuments?.values() || []).find(entry =>
+            entry.tabId === tabId && entry.frameId === frameId && entry.documentGeneration === generation)
+        const sender = { tab: { id: tabId }, frameId, ...(previous?.documentId ? { documentId: previous.documentId } : {}) }
+        // The response is from the current isolated top frame selected by the
+        // extension, not a document ID or generation claimed by the page.
+        const accepted = this._recordIastObservationState(reply.state, sender, reply, { currentDocumentVerified: true })
+        if (reply.deliveryFailed === true) this.recordIastCompletenessGap('terminal_receipt_delivery_failed', 0)
+        const current = previous?.receiptKey && this._iastObservationStates?.get(previous.receiptKey)
+        // The synchronous page snapshot may also have reached us through the
+        // ordinary state channel before the clean response resolves.
+        return accepted || !!(current && current.revision === reply.state.revision
+            && current.terminal === true && current.installationState === reply.state.installationState
+            && ['operationHighWater', 'emittedRelationships', 'pendingObservations', 'lossCount']
+                .every(key => current[key] === reply.state[key]))
+    }
+
+    _countIastReceivedRelationship(sender = {}, message = {}) {
+        const documentIdentity = sender.documentId || message?.context?.documentGeneration
+        if (typeof documentIdentity !== 'string' || !documentIdentity || documentIdentity.length > 160) return
+        const key = JSON.stringify([sender.tab.id, sender.frameId || 0, documentIdentity])
+        const receipts = this._iastReceivedRelationships || (this._iastReceivedRelationships = new Map())
+        if (!receipts.has(key) && receipts.size >= 4096) { this.recordIastCompletenessGap('document_receipt_limit', 0); return }
+        const count = Math.min(Number.MAX_SAFE_INTEGER, (receipts.get(key) || 0) + 1)
+        receipts.set(key, count)
+        const state = this._iastObservationStates?.get(key)
+        if (state) state.receivedRelationships = count
+    }
+
+    _handleIastNavigationCandidate(message, sender) {
+        if (!this.isTrackedScanTab(sender?.tab?.id)) return false
+        const observation = message?.finding?.observation
+        const relationshipId = message.bufferId || (typeof observation?.operationId === 'string'
+            ? JSON.stringify(['navigation_candidate', observation.operationId, message.finding.moduleId,
+                message.finding.ruleId, observation.sourceBinding?.key, message.finding.sinkId]) : null)
+        if (!relationshipId) { this.recordIastCompletenessGap('navigation_delivery_identity_missing', 0); return false }
+        const identity = sender.documentId || message?.context?.documentGeneration
+        const key = JSON.stringify([sender.tab.id, sender.frameId || 0, identity, relationshipId])
+        const deliveries = this._iastObservationDeliveries || (this._iastObservationDeliveries = new Map())
+        if (deliveries.has(key)) return deliveries.get(key) === 'accepted'
+        if (deliveries.size >= 8192) { this.recordIastCompletenessGap('delivery_receipt_limit', 1, { rejected: true }); return false }
+        if (!this._registerNavigationCandidate(message, sender)) return false
+        deliveries.set(key, 'accepted')
+        this._countIastReceivedRelationship(sender, message)
+        return true
     }
 
     _refreshIastTelemetry() {
@@ -1597,8 +1819,10 @@ export class ptk_iast {
         const prefix = `ptk_iast_buffer:${normalizedTabId}:`
         try {
             const allItems = await browser.storage.local.get(null)
-            const keys = Object.keys(allItems || {}).filter(key => key.startsWith(prefix))
-            await this._removeIastBufferKeys(keys)
+            const keys = Array.from(new Set([...Object.keys(allItems || {}),
+                ...Array.from(this._iastBufferOperations?.keys() || [])])).filter(key => key.startsWith(prefix))
+            await Promise.all(keys.map(key => this._queueIastBufferOperation(key,
+                () => this._removeIastBufferKeys([key]))))
         } catch (_) {
             await this._writeIastBufferEntries(this._iastBufferStorageKeyForParts(normalizedTabId, 0), [])
         }
@@ -1611,7 +1835,37 @@ export class ptk_iast {
         return { ok: true }
     }
 
-    async _appendIastBufferMessage(message = {}, sender = {}) {
+    _queueIastBufferOperation(key, operation) {
+        if (!key) return Promise.resolve({ ok: false, reason: 'missing_tab' })
+        const operations = this._iastBufferOperations || (this._iastBufferOperations = new Map())
+        let state = operations.get(key)
+        if (!state) {
+            if (operations.size >= 4096) {
+                this.recordIastCompletenessGap('buffer_owner_limit', 0)
+                return Promise.resolve({ ok: false, reason: 'buffer_owner_limit' })
+            }
+            state = { pending: 0, tail: Promise.resolve() }
+            operations.set(key, state)
+        }
+        if (state.pending >= IAST_BUFFER_MAX_ENTRIES) {
+            this.recordIastCompletenessGap('buffer_operation_limit', 0)
+            return Promise.resolve({ ok: false, reason: 'buffer_operation_limit' })
+        }
+        state.pending += 1
+        const promise = state.tail.then(operation, operation)
+        state.tail = promise.catch(() => {}).finally(() => {
+            state.pending -= 1
+            if (!state.pending && operations.get(key) === state) operations.delete(key)
+        })
+        return promise
+    }
+
+    _appendIastBufferMessage(message = {}, sender = {}) {
+        return this._queueIastBufferOperation(this._iastBufferStorageKey(sender),
+            () => this._appendIastBufferMessageNow(message, sender))
+    }
+
+    async _appendIastBufferMessageNow(message = {}, sender = {}) {
         const tabId = this._normalizeTabId(sender?.tab?.id)
         if (!this.isTrackedScanTab(tabId)) {
             return {
@@ -1637,6 +1891,10 @@ export class ptk_iast {
         if (bufferId) {
             entries = entries.filter(entry => String(entry?.id || '') !== bufferId)
         }
+        if (entries.length >= IAST_BUFFER_MAX_ENTRIES) {
+            this.recordIastCompletenessGap('bridge_buffer_limit', 0)
+            return { ok: false, reason: 'bridge_buffer_limit', count: entries.length }
+        }
         entries.push({
             id: bufferId,
             message: payload,
@@ -1646,14 +1904,16 @@ export class ptk_iast {
             topFrame: message?.context?.topFrame === true,
             createdAt: Date.now()
         })
-        if (entries.length > IAST_BUFFER_MAX_ENTRIES) {
-            entries = entries.slice(entries.length - IAST_BUFFER_MAX_ENTRIES)
-        }
         await this._writeIastBufferEntries(key, entries)
         return { ok: true, count: entries.length }
     }
 
-    async _flushIastBufferMessages(message = {}, sender = {}) {
+    _flushIastBufferMessages(message = {}, sender = {}) {
+        return this._queueIastBufferOperation(this._iastBufferStorageKey(sender),
+            () => this._flushIastBufferMessagesNow(message, sender))
+    }
+
+    async _flushIastBufferMessagesNow(message = {}, sender = {}) {
         const key = this._iastBufferStorageKey(sender)
         if (!key) return { ok: false, reason: 'missing_tab', messages: [] }
 
@@ -1676,7 +1936,12 @@ export class ptk_iast {
         return { ok: true, count: messages.length, messages }
     }
 
-    async _ackIastBufferMessage(sender = {}, bufferId = null) {
+    _ackIastBufferMessage(sender = {}, bufferId = null) {
+        return this._queueIastBufferOperation(this._iastBufferStorageKey(sender),
+            () => this._ackIastBufferMessageNow(sender, bufferId))
+    }
+
+    async _ackIastBufferMessageNow(sender = {}, bufferId = null) {
         if (!bufferId) return
         this._rememberIastBufferAck(bufferId)
         const key = this._iastBufferStorageKey(sender)
@@ -2054,26 +2319,64 @@ export class ptk_iast {
         return true
     }
 
-    async _handleFindingReport(message, sender) {
+    _handleFindingReport(message, sender) {
+        if (this._iastSealedScan === this.scanResult) return Promise.resolve({ ok: false, reason: 'sealed_scan' })
+        const tasks = this._iastFindingReportTasks || (this._iastFindingReportTasks = new Set())
+        if (tasks.size >= 8192) {
+            this.recordIastCompletenessGap('finding_settlement_limit', 1, { rejected: true })
+            return Promise.resolve({ ok: false, reason: 'finding_settlement_limit' })
+        }
+        const task = this._handleFindingReportNow(message, sender)
+        tasks.add(task)
+        void task.finally(() => tasks.delete(task)).catch(() => {})
+        return task
+    }
+
+    async _handleFindingReportNow(message, sender) {
         const senderTabId = sender?.tab?.id
         if (this.isTrackedScanTab(senderTabId)) {
+            const admittedScan = this.scanResult
+            const deliveries = this._iastObservationDeliveries || (this._iastObservationDeliveries = new Map())
+            const deliveryId = typeof message.bufferId === 'string' && message.bufferId.length <= 160 ? message.bufferId : null
+            const documentIdentity = sender.documentId || message?.context?.documentGeneration || null
+            const deliveryKey = deliveryId ? JSON.stringify([senderTabId, sender.frameId || 0, documentIdentity, deliveryId]) : null
+            if (deliveryKey && deliveries.has(deliveryKey)) {
+                if (deliveries.get(deliveryKey) === 'accepted') await this._ackIastBufferMessage(sender, message.bufferId).catch(() => {})
+                return deliveries.get(deliveryKey) === 'accepted'
+                    ? { ok: true, accepted: true } : { ok: false, reason: 'delivery_pending' }
+            }
+            if (deliveryKey && deliveries.size >= 8192) {
+                this.recordIastCompletenessGap('delivery_receipt_limit', 1, { rejected: true })
+                await this._ackIastBufferMessage(sender, message.bufferId).catch(() => {})
+                return { ok: false, reason: 'delivery_receipt_limit' }
+            }
+            if (deliveryKey) deliveries.set(deliveryKey, 'pending')
             this._incrementIastAutomationTelemetry('findingReportsAccepted', {
                 lastSenderTabId: senderTabId
             })
             try {
                 const findingDetails = await this._enrichFindingWithTokenOrigin(message.finding, senderTabId)
+                if (this.scanResult !== admittedScan || !this.isTrackedScanTab(senderTabId)) {
+                    if (deliveryKey) deliveries.delete(deliveryKey)
+                    return
+                }
                 const finding = createFindingFromIAST(findingDetails, {
                     scanId: this.scanResult.scanId,
                     host: this.scanResult.host,
                     tabId: senderTabId
                 })
                 this._applyRelatedTabEvidence(finding, senderTabId)
-                this.addOrUpdateFinding(finding)
+                this.addOrUpdateFinding(finding, { documentIdentity })
+                this._countIastReceivedRelationship(sender, message)
+                if (deliveryKey) deliveries.set(deliveryKey, 'accepted')
                 await this._ackIastBufferMessage(sender, message?.bufferId).catch(() => { })
+                return { ok: true, accepted: true }
             } catch (e) {
+                if (deliveryKey) deliveries.delete(deliveryKey)
+                this.recordIastCompletenessGap(e?.code || 'invalid_iast_observation', 1, { rejected: true })
                 console.warn('[PTK IAST][background] createFindingFromIAST failed', e)
             }
-            return
+            return { ok: false, reason: 'invalid_iast_observation' }
         }
         const reason = this.isScanRunning ? 'tab_mismatch' : 'inactive_scan'
         this._incrementIastAutomationTelemetry(
@@ -2121,6 +2424,10 @@ export class ptk_iast {
         }
         if (info?.status === 'loading') {
             this._clearTokenOriginsForTab(tabId)
+            this.agentReadyTabs.delete(tabId)
+            for (const [key, receipt] of this.agentReadyDocuments || []) {
+                if (receipt.tabId === tabId) this.agentReadyDocuments.delete(key)
+            }
         }
         const normalizedTabId = this._normalizeTabId(tabId)
         const primaryTabId = this._primaryScanTabId()
@@ -2133,6 +2440,9 @@ export class ptk_iast {
                 host: this.scanResult?.host || '',
                 targetUrl: isRelatedTab ? '' : (this.scanResult?.targetUrl || '')
             })
+        if (info?.status === 'loading' && scopeAllowed && this.isTrackedScanTab(tabId)) {
+            this._expectIastDocument(tabId, 0)
+        }
         if (!shouldReinjectIastAgentForTabUpdate({
             isFirefox: worker?.isFirefox === true,
             isRelatedTab,
@@ -2247,6 +2557,9 @@ export class ptk_iast {
 
         if (message.channel == "ptk_content_iast2background_iast") {
             if (!ptk_utils.isTrustedContentSender(sender)) return
+            if (message.type === 'observation_state') {
+                return this._acceptIastObservationState(message.state, sender, message)
+            }
 
             if (message.type === 'iast_buffer_append') {
                 ;(async () => {
@@ -2285,7 +2598,7 @@ export class ptk_iast {
             }
 
             if (message.type === 'navigation_candidate') {
-                return Promise.resolve({ ok: this._registerNavigationCandidate(message, sender) })
+                return Promise.resolve({ ok: this._handleIastNavigationCandidate(message, sender) })
             }
 
             if (message.type == 'finding_report') {
@@ -2330,9 +2643,22 @@ export class ptk_iast {
             }
 
             if (message.type === 'agent_ready') {
+                return (async () => {
                 const tabId = sender?.tab?.id
-                if (tabId != null) {
-                    this.agentReadyTabs.add(tabId)
+                const readyScan = this.scanResult
+                const documentId = sender?.documentId || message?.context?.documentGeneration
+                const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
+                if (tabId != null && this.isScanRunning && this.isTrackedScanTab(tabId)
+                    && message?.installationState === 'ready'
+                    && typeof documentId === 'string' && documentId.length > 0 && documentId.length <= 160
+                    && await this._isCurrentIastDocument(sender, message)
+                    && this.scanResult === readyScan && this.isScanRunning && this.isTrackedScanTab(tabId)) {
+                    this._bindIastExpectedDocument(sender, message)
+                    const key = JSON.stringify([tabId, frameId])
+                    this.agentReadyDocuments.set(key, { tabId, frameId, documentId,
+                        documentGeneration: message?.context?.documentGeneration || null,
+                        scanId: this.scanResult.scanId, readyAt: Date.now() })
+                    if (frameId === 0) this.agentReadyTabs.add(tabId)
                     this.agentFailedTabs.delete(tabId)
                     this._incrementIastAutomationTelemetry('agentReadyCount', {
                         lastSenderTabId: tabId
@@ -2350,7 +2676,7 @@ export class ptk_iast {
                         .then(result => this._recordIastModuleSendResult(result))
                         .catch(err => this._recordIastModuleSendResult({ ok: false, error: err?.message || String(err) }))
                 }
-                return
+                })()
             }
 
             if (message.type === 'agent_failed') {
@@ -3068,16 +3394,32 @@ export class ptk_iast {
                 noise: computeIastNoiseTelemetry(this.scanResult)
             }
             this.broadcastScanUpdate()
-            await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
+            const registered = await this.registerScript(this.scanResult.settings.iastScanStrategy || 'SMART', {
                 host: this.scanResult.host,
                 targetUrl: this.scanResult.targetUrl || zapTiming?.targetUrl || null
             })
+            if (registered !== true) throw new Error('iast_document_start_registration_failed')
             this.addListeners()
+            // A ZAP-owned pre-navigation scan starts on ZAP's callback document.
+            // The registered document-start entry observes the intended target;
+            // late-injecting the callback would permanently mark this scan partial.
+            let skipCallbackAgent = false
+            if (effectiveOpts?.zapManaged === true && this.scanResult.targetUrl) {
+                try {
+                    const currentTab = await browser.tabs.get(tabId)
+                    skipCallbackAgent = shouldSkipZapCallbackAgentInjection({
+                        zapManaged: true,
+                        currentUrl: currentTab?.url,
+                        targetUrl: this.scanResult.targetUrl
+                    })
+                } catch (_) { }
+            }
             // Inject agent into current page using an async loader so scan start does not block on full agent evaluation.
             const injectStartedAt = Date.now()
             this._recordZapTiming('iast.agent.inject.start', zapTiming)
             try {
-                await this.injectIastAgent(tabId, this.scanResult.settings.iastScanStrategy || 'SMART')
+                const injected = skipCallbackAgent || await this.injectIastAgent(tabId, this.scanResult.settings.iastScanStrategy || 'SMART')
+                if (injected !== true) throw new Error('iast_agent_injection_failed')
                 this._recordZapTiming('iast.agent.inject.success', zapTiming, {
                     durationMs: Date.now() - injectStartedAt
                 })
@@ -3106,23 +3448,59 @@ export class ptk_iast {
     }
 
     async stopBackgroundScan(options = {}) {
+        const admittedScan = this.scanResult
         const trackedTabIds = this._trackedScanTabIds()
         let captureError = null
         try { await this.detachDevtoolsDebugger('stopped') } catch (error) { captureError = error }
+        if (this.scanResult !== admittedScan) return admittedScan
+        const frames = trackedTabIds.flatMap(tabId => Array.from(new Set([0,
+            ...Array.from(this._iastExpectedDocuments?.values() || []).filter(entry => entry.tabId === tabId).map(entry => entry.frameId)
+        ])).map(frameId => ({ tabId, frameId })))
+        await Promise.all(frames.map(async ({ tabId, frameId }) => {
+            try {
+                if (await this._isRetiredSettledIastFrame(tabId, frameId)) return
+                if (this.scanResult !== admittedScan) return
+                const reply = await browser.tabs.sendMessage(tabId, {
+                    channel: "ptk_background_iast2content", type: "stop iast result"
+                }, { frameId })
+                if (this.scanResult !== admittedScan) return
+                if (!this._recordIastTerminalReply(tabId, reply, frameId)) {
+                    this.recordIastCompletenessGap('terminal_receipt_missing', 0)
+                }
+            } catch (_) {
+                if (this.scanResult === admittedScan) this.recordIastCompletenessGap('terminal_receipt_missing', 0)
+            }
+        }))
+        if (this.scanResult !== admittedScan) return admittedScan
+        this._iastSealedScan = admittedScan
+        await Promise.allSettled(Array.from(this._iastFindingReportTasks || []))
+        if (this.scanResult !== admittedScan) return admittedScan
         this.scopedTabCoordinator?.unregisterSession?.('IAST')
-        await Promise.all(trackedTabIds.map(tabId => this._clearIastBufferForTab(tabId)))
-        for (const tabId of trackedTabIds) {
-            browser.tabs.sendMessage(tabId, {
-                channel: "ptk_background_iast2content",
-                type: "clean iast result"
-            }).catch(() => { })
-        }
+        await Promise.all(trackedTabIds.map(tabId => {
+            const expected = Array.from(this._iastExpectedDocuments?.values() || []).filter(entry => entry.tabId === tabId)
+            // Preserve available buffered evidence on an incomplete Stop. Only
+            // a fully accounted tab may use cleanup as storage reclamation.
+            const completeness = admittedScan.scanCompleteness
+            const hasUnsettledEvidence = completeness?.status === 'partial'
+                || (completeness?.reasons || []).some(reason => reason !== 'document_receipts_pending')
+            if (!hasUnsettledEvidence && expected.length
+                && expected.every(entry => this._hasSettledIastDocumentReceipt(entry))) {
+                return this._clearIastBufferForTab(tabId)
+            }
+        }))
+        if (this.scanResult !== admittedScan) return admittedScan
         this.isScanRunning = false
+        const completeDocuments = this._hasCompleteIastDocumentReceipts()
+        this.finalizeIastCompleteness({ complete: completeDocuments,
+            reasons: completeDocuments ? [] : ['document_receipt_missing'] })
         this.currentRulepackOverride = null
         this.currentRulepackLoadOptions = null
         for (const tabId of trackedTabIds) {
             activeIastTabs.delete(tabId)
             this.agentReadyTabs.delete(tabId)
+            for (const [key, receipt] of this.agentReadyDocuments || []) {
+                if (receipt.tabId === tabId) this.agentReadyDocuments.delete(key)
+            }
             this.agentFailedTabs.delete(tabId)
             clearIastModuleSendTracking(tabId)
         }
@@ -3139,9 +3517,9 @@ export class ptk_iast {
             this.scanResult.finishedAt = finished
         }
         await this._flushPersistScanResult()
-        this.broadcastScanUpdate()
+        if (this.scanResult === admittedScan) this.broadcastScanUpdate()
         if (captureError) throw captureError
-        return this.scanResult
+        return admittedScan
     }
 
     recordHttpEvent(evt) {
@@ -3180,6 +3558,22 @@ export class ptk_iast {
 
     _prepareFindingAggregation(prepared = null) {
         if (!prepared?.finding) return null
+        if (this.scanResult?.identityVersion === 2) {
+            const evidence = prepared.finding.evidence?.iast || {}
+            if (validateIastEvidenceVersion(evidence) !== 2) throw new Error('missing_iast_observation')
+            const observation = sanitizeIastObservation(evidence.observation)
+            const primaryKey = evidence.sourceKey || evidence.primarySource?.key || evidence.sources?.[0]?.key || null
+            if (observation.kind === 'source_relationship' && observation.sourceBinding.key !== primaryKey) throw new Error('invalid_iast_source_binding')
+            if (observation.acquisition === 'sink_storage_snapshot') {
+                if (['high', 'critical', 'medium'].includes(prepared.finding.severity)) prepared.finding.severity = 'low'
+                evidence.primaryClass = 'observation'
+                evidence.sourceRole = 'observed'
+            }
+            const identity = admitIastObservationIdentity(this, prepared.finding, { documentIdentity: prepared.documentIdentity || null })
+            const mode = resolveIastFindingPresentationAggregate(prepared.ruleMeta, prepared.moduleMeta)
+            applyIastFindingAggregateState(prepared.finding, { aggregateKey: identity.publicId, mode })
+            return { aggregateKey: identity.publicId, mode: 'url-site-stratum', sample: null }
+        }
         const mode = normalizeIastFindingAggregationMode(
             resolveIastFindingPresentationAggregate(prepared.ruleMeta, prepared.moduleMeta)
         )
@@ -3205,17 +3599,22 @@ export class ptk_iast {
         }
     }
 
-    addOrUpdateFinding(finding) {
+    addOrUpdateFinding(finding, { documentIdentity = null } = {}) {
         if (!finding || !this.scanResult?.scanId) return
         let prepared
         try {
             prepared = this.prepareFindingMetadata(finding)
+            if (prepared) prepared.documentIdentity = documentIdentity
         } catch (e) {
             try { console.warn('[PTK IAST][background] prepareFindingMetadata failed', e) } catch (_) { }
             return
         }
         if (!prepared) return
-        const aggregation = this._prepareFindingAggregation(prepared)
+        let aggregation
+        try { aggregation = this._prepareFindingAggregation(prepared) } catch (error) {
+            this.recordIastCompletenessGap(error?.code || error?.message || 'invalid_iast_observation', 1, { rejected: true })
+            return false
+        }
         if (aggregation?.aggregateKey) {
             const existing = this._lookupAggregatedFinding(aggregation.aggregateKey)
             if (existing) {
@@ -3232,7 +3631,7 @@ export class ptk_iast {
                 if (runtimeEventChanged) {
                     this.broadcastScanUpdate()
                 }
-                return
+                return existing
             }
         }
         const normalizedFinding = scanResultStore.upsertFinding({
@@ -3258,6 +3657,7 @@ export class ptk_iast {
         if (runtimeEventChanged) {
             this.broadcastScanUpdate()
         }
+        return prepared.finding
     }
 
     addOrUpdateRuntimeSignal(signal) {
@@ -3311,9 +3711,13 @@ export class ptk_iast {
     }
 
     async normalizeScanResult(raw) {
-        await loadIastModules()
         const payload = this._extractPersistedData(raw || {})
         const source = payload.scanResult || {}
+        const importedVersion = source.identityVersion == null ? 1 : source.identityVersion
+        if (importedVersion !== 1 && importedVersion !== 2) throw new Error('unsupported_iast_identity_version')
+        validateIastImportedFindings([...(Array.isArray(source.findings) ? source.findings : []), ...(Array.isArray(payload.rawFindings) ? payload.rawFindings : [])])
+        const completeness = importedVersion === 2 ? sanitizeIastScanCompleteness(source.scanCompleteness) : source.scanCompleteness || null
+        await loadIastModules()
         const scanId = source.scanId || ptk_utils.UUID()
         this.scanResult = this.getScanResultSchema({
             scanId,
@@ -3321,6 +3725,10 @@ export class ptk_iast {
             startedAt: source.startedAt || source.date || new Date().toISOString()
         })
         this.scanResult.tabId = source.tabId || null
+        this.scanResult.identityVersion = importedVersion
+        this.scanResult.scanCompleteness = completeness ? cloneIastValue(completeness, null) : null
+        // Imported/redacted tuples cannot rebuild private live identities.
+        forgetIastIdentityState(this)
         this.scanResult.policyId = source.policyId || null
         this.scanResult.settings = source.settings || {}
         this.scanResult.httpEvents = Array.isArray(source.httpEvents) ? source.httpEvents : []
@@ -3868,7 +4276,8 @@ export class ptk_iast {
             finding.ruleName = ruleInfo.ruleName
         }
         const urls = this.collectFindingUrls(finding)
-        if (urls.length > 0) {
+        const isV2 = getIastEvidencePayload(finding)?.schemaVersion === 2
+        if (!isV2 && urls.length > 0) {
             finding.location.url = urls[0]
         }
         finding.affectedUrls = urls
@@ -3899,6 +4308,10 @@ export class ptk_iast {
     }
 
     collectFindingUrls(finding) {
+        if (validateIastEvidenceVersion(getIastEvidencePayload(finding) || {}) === 2) {
+            const owner = finding?.location?.url
+            return typeof owner === 'string' && /^https?:\/\//i.test(owner) ? [owner] : []
+        }
         const urls = new Set()
         const add = (value) => {
             if (!value) return
@@ -4241,7 +4654,7 @@ export class ptk_iast {
             if (browser?.scripting?.registerContentScripts) {
                 const contentScript = {
                     id: 'iast-agent',
-                    js: files,
+                    js: buildIastAgentScriptFiles(scanStrategy, true),
                     matches: registrationScope.matches,
                     runAt: 'document_start',
                     world: 'MAIN',
@@ -4249,6 +4662,9 @@ export class ptk_iast {
                 }
                 try {
                     await browser.scripting.registerContentScripts([contentScript])
+                    this.iastScriptRegistrationReceipt = { scanId: this.scanResult?.scanId,
+                        ready: true, documentStart: true, branch: 'scripting-main',
+                        registeredAt: Date.now() }
                     return true
                 } catch (e) {
                     // Current Firefox MV2 releases can expose `scripting`
@@ -4276,6 +4692,9 @@ export class ptk_iast {
                     matchAboutBlank: false
                 }
                 this.firefoxIastContentScriptRegistration = await browser.contentScripts.register(contentScript)
+                this.iastScriptRegistrationReceipt = { scanId: this.scanResult?.scanId,
+                    ready: true, documentStart: true, branch: 'mv2-script-loader',
+                    registeredAt: Date.now() }
                 return true
             }
 
@@ -4356,10 +4775,92 @@ export class ptk_iast {
     }
 
     isAgentReady(tabId) {
-        return this.agentReadyTabs.has(tabId)
+        const receipt = this.agentReadyDocuments?.get(JSON.stringify([tabId, 0]))
+        return receipt?.scanId === this.scanResult?.scanId && this.agentReadyTabs.has(tabId)
+    }
+
+    async _isCurrentIastDocument(sender = {}, message = {}) {
+        const tabId = sender?.tab?.id
+        const frameId = Number.isInteger(sender?.frameId) ? sender.frameId : 0
+        if (!this.isScanRunning || !this.isTrackedScanTab(tabId)) return false
+        try {
+            if (sender.documentId && browser.webNavigation?.getFrame) {
+                const current = await browser.webNavigation.getFrame({ tabId, frameId })
+                if (current?.documentId) return current.documentId === sender.documentId
+            }
+            // Firefox's fallback is a receipt from the current isolated frame,
+            // never a nonce supplied by the target page or a tab-ready cache.
+            const current = await browser.tabs.sendMessage(tabId, {
+                channel: 'ptk_background_iast2content', type: 'document_identity'
+            }, { frameId })
+            return typeof current?.documentGeneration === 'string'
+                && current.documentGeneration === message?.context?.documentGeneration
+        } catch (_) { return false }
+    }
+
+    getRegistrationReceipt(tabId) {
+        const receipt = this.iastScriptRegistrationReceipt
+        if (!receipt || receipt.scanId !== this.scanResult?.scanId || !this.isScanRunning
+            || !this.isTrackedScanTab(tabId)) return null
+        return { ...receipt, tabId }
+    }
+
+    // Observation snapshot for an exact current native document. This does not
+    // terminate the producer or prove that no later timer can run; a visit
+    // coordinator must establish an observation interval and compare cuts.
+    async getCurrentIastObservationSnapshot({ tabId, frameId = 0, documentId } = {}) {
+        if (!this.isScanRunning || !this.isTrackedScanTab(tabId)
+            || !Number.isInteger(frameId) || frameId < 0
+            || typeof documentId !== 'string' || !documentId || documentId.length > 160
+            || typeof browser?.webNavigation?.getFrame !== 'function') return null
+        const scanResult = this.scanResult
+        const scanId = scanResult?.scanId
+        if (typeof scanId !== 'string' || !scanId) return null
+        let nativeFrame
+        try { nativeFrame = await browser.webNavigation.getFrame({ tabId, frameId }) }
+        catch (_) { return null }
+        if (nativeFrame?.documentId !== documentId || this.scanResult !== scanResult
+            || !this.isScanRunning || !this.isTrackedScanTab(tabId)) return null
+        const expectedKey = this._iastCurrentExpectedDocuments?.get(JSON.stringify([tabId, frameId]))
+        const expected = this._iastExpectedDocuments?.get(expectedKey)
+        const receiptKey = JSON.stringify([tabId, frameId, documentId])
+        if (expected?.receiptKey !== receiptKey) return null
+        const state = this._iastObservationStates?.get(receiptKey)
+        if (!state || state.documentId !== documentId
+            || typeof state.documentGeneration !== 'string' || !state.documentGeneration
+            || typeof browser?.tabs?.sendMessage !== 'function') return null
+        // A receipt from this browser document can outlive its isolated-world
+        // bridge after document.open/write. Require a live response from the
+        // current frame, then recheck both native and recorded identities.
+        let live
+        let frameAfter
+        try {
+            live = await browser.tabs.sendMessage(tabId, {
+                channel: 'ptk_background_iast2content', type: 'document_identity'
+            }, { frameId })
+            frameAfter = await browser.webNavigation.getFrame({ tabId, frameId })
+        } catch (_) { return null }
+        if (live?.documentGeneration !== state.documentGeneration
+            || frameAfter?.documentId !== documentId || this.scanResult !== scanResult
+            || !this.isScanRunning || !this.isTrackedScanTab(tabId)
+            || this._iastObservationStates?.get(receiptKey) !== state
+            || this._iastCurrentExpectedDocuments?.get(JSON.stringify([tabId, frameId])) !== expectedKey) return null
+        return Object.freeze({ scanId, tabId, frameId, documentId,
+            documentGeneration: state.documentGeneration,
+            revision: state.revision, operationHighWater: state.operationHighWater,
+            emittedRelationships: state.emittedRelationships,
+            receivedRelationships: state.receivedRelationships,
+            pendingObservations: state.pendingObservations,
+            lossCount: state.lossCount,
+            installationState: state.installationState,
+            completeAtSnapshot: state.installationState === 'ready'
+                && state.pendingObservations === 0 && state.lossCount === 0
+                && state.receivedRelationships >= state.emittedRelationships
+                && scanResult.scanCompleteness?.status !== 'partial' })
     }
 
     async unregisterScript() {
+        this.iastScriptRegistrationReceipt = null
         const firefoxRegistration = this.firefoxIastContentScriptRegistration
         this.firefoxIastContentScriptRegistration = null
         if (firefoxRegistration?.unregister) {
@@ -4386,6 +4887,7 @@ export const __iastTestHooks = {
     buildIastAgentScriptFiles,
     buildIastAgentScriptRegistrationScope,
     isIastNavigationUrlInScope,
+    shouldSkipZapCallbackAgentInjection,
     shouldReinjectIastAgentForTabUpdate,
     buildIastModulesSignature,
     normalizeIastNavigationCorrelationUrl,

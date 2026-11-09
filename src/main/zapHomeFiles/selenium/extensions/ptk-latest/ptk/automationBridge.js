@@ -2,11 +2,18 @@
 ;(function() {
     'use strict'
 
-    const bridgeScript = document.currentScript
+    // The generated, extension-owned ZAP MAIN entry passes this lexical value
+    // as an executeScript argument. Ordinary script/declarative entry points do
+    // not define it and keep their existing currentScript behavior.
+    const ownedBootstrap = typeof __PTK_ZAP_MAIN_BOOTSTRAP_CONFIG__ === 'undefined'
+        ? null
+        : __PTK_ZAP_MAIN_BOOTSTRAP_CONFIG__
+    const bridgeScript = ownedBootstrap ? null : document.currentScript
     const declarativeAutomationBootstrap = !bridgeScript
     const automationEnabledAttr = bridgeScript?.dataset?.ptkAutomationEnabled
-    const initialAutomationEnabled = declarativeAutomationBootstrap
-        || automationEnabledAttr === '1' || automationEnabledAttr === 'true'
+    const initialAutomationEnabled = ownedBootstrap
+        ? ownedBootstrap.enabled === true
+        : (declarativeAutomationBootstrap || automationEnabledAttr === '1' || automationEnabledAttr === 'true')
     const AUTOMATION_REQUEST_EVENT = 'ptk-automation-request'
     const AUTOMATION_RESPONSE_EVENT = 'ptk-automation-response'
     let isTopFrame = true
@@ -16,8 +23,8 @@
         isTopFrame = true
     }
 
-    const VERSION = bridgeScript?.dataset?.ptkVersion || 'unknown'
-    const EXTENSION_ORIGIN = bridgeScript?.dataset?.ptkExtensionOrigin || ''
+    const VERSION = ownedBootstrap?.version || bridgeScript?.dataset?.ptkVersion || 'unknown'
+    const EXTENSION_ORIGIN = ownedBootstrap?.extensionOrigin || bridgeScript?.dataset?.ptkExtensionOrigin || ''
     const BRIDGE_ID = 'ptk-automation-bridge'
     const bridgeGeneration = Number(window.__PTK_AUTOMATION_BRIDGE_GENERATION__ || 0) + 1
     window.__PTK_AUTOMATION_BRIDGE_GENERATION__ = bridgeGeneration
@@ -45,7 +52,7 @@
     // Marker value shared with ptkAgentAutomation.js (PTK_AGENT_SESSION_SCOPE);
     // callers passing this opt into strict lookup in getFindings().
     const PTK_AGENT_SESSION_SCOPE = 'current-tab'
-    let currentNonce = bridgeScript?.dataset?.ptkNonce || ''
+    let currentNonce = ownedBootstrap?.nonce || bridgeScript?.dataset?.ptkNonce || ''
     if (!currentNonce) {
         currentNonce = `ptk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
     }

@@ -4,9 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
-import java.util.List;
 import java.util.Set;
-import org.apache.commons.httpclient.URI;
 import org.apache.commons.httpclient.URIException;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.core.scanner.Alert;
@@ -14,10 +12,22 @@ import org.parosproxy.paros.core.scanner.Category;
 import org.parosproxy.paros.network.HttpMalformedHeaderException;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpRequestHeader;
+import org.zaproxy.addon.client.spider.ClientSpider;
 import org.zaproxy.addon.commonlib.PolicyTag;
-import org.zaproxy.zap.model.StructuralNode;
 
 class PtkActiveScanRuleTest {
+
+    @Test
+    void incompleteSecondPassHasAnExplicitNonSuccessReason() {
+        assertEquals("PTK Client Spider did not complete: INCOMPLETE",
+                PtkActiveScanRule.incompleteClientSpiderReason(
+                        ClientSpider.CompletionOutcome.INCOMPLETE));
+        assertEquals("PTK Client Spider did not complete: CANCELLED",
+                PtkActiveScanRule.incompleteClientSpiderReason(
+                        ClientSpider.CompletionOutcome.CANCELLED));
+        assertEquals("PTK Client Spider did not complete: UNAVAILABLE",
+                PtkActiveScanRule.incompleteClientSpiderReason(null));
+    }
 
     @Test
     void shouldReturnDefaultMetadata() {
@@ -37,39 +47,6 @@ class PtkActiveScanRuleTest {
                 rule.getAlertTags().keySet());
     }
 
-    // ---- getFirstStartNodeUrl(List<?>) ----
-
-    @Test
-    void getFirstStartNodeUrl_returnsUrlOfFirstNode() throws URIException {
-        StructuralNode node = structuralNodeWithUri(new URI("https://example.com/app/", true));
-        assertEquals(
-                "https://example.com/app/", PtkActiveScanRule.getFirstStartNodeUrl(List.of(node)));
-    }
-
-    @Test
-    void getFirstStartNodeUrl_usesFirstOfMultipleNodes() throws URIException {
-        StructuralNode first = structuralNodeWithUri(new URI("https://example.com/first/", true));
-        StructuralNode second = structuralNodeWithUri(new URI("https://example.com/second/", true));
-        assertEquals(
-                "https://example.com/first/",
-                PtkActiveScanRule.getFirstStartNodeUrl(List.of(first, second)));
-    }
-
-    @Test
-    void getFirstStartNodeUrl_returnsNullForEmptyList() {
-        assertNull(PtkActiveScanRule.getFirstStartNodeUrl(List.of()));
-    }
-
-    @Test
-    void getFirstStartNodeUrl_returnsNullForNullList() {
-        assertNull(PtkActiveScanRule.getFirstStartNodeUrl((List<?>) null));
-    }
-
-    @Test
-    void getFirstStartNodeUrl_returnsNullWhenFirstNodeHasNoUri() {
-        assertNull(PtkActiveScanRule.getFirstStartNodeUrl(List.of(structuralNodeWithUri(null))));
-    }
-
     // ---- resolveClientSpiderStartUrl ----
 
     @Test
@@ -85,93 +62,21 @@ class PtkActiveScanRuleTest {
                 PtkActiveScanRule.resolveClientSpiderStartUrl(null, baseMsg));
     }
 
-    // ---- urlFromStructuralNode ----
-
     @Test
-    void urlFromStructuralNode_returnsNullForNullNode() {
-        assertNull(PtkActiveScanRule.urlFromStructuralNode(null));
-    }
-
-    @Test
-    void urlFromStructuralNode_returnsUriString() throws URIException {
-        URI uri = new URI("https://example.com/path/", true);
+    void resolveClientSpiderStartUrl_usesExactBaseMessageNotHostRoot() throws Exception {
+        HttpMessage baseMsg = messageForUrl("https://example.com/dom/dompropagation/");
         assertEquals(
-                "https://example.com/path/",
-                PtkActiveScanRule.urlFromStructuralNode(structuralNodeWithUri(uri)));
+                "https://example.com/dom/dompropagation/",
+                PtkActiveScanRule.resolveClientSpiderStartUrl(null, baseMsg));
     }
 
     @Test
-    void urlFromStructuralNode_returnsNullWhenNoUriAvailable() {
-        assertNull(PtkActiveScanRule.urlFromStructuralNode(structuralNodeWithUri(null)));
-    }
-
-    private static StructuralNode structuralNodeWithUri(URI uri) {
-        return new StructuralNode() {
-            @Override
-            public StructuralNode getParent() {
-                return null;
-            }
-
-            @Override
-            public java.util.Iterator<StructuralNode> getChildIterator() {
-                return List.<StructuralNode>of().iterator();
-            }
-
-            @Override
-            public long getChildNodeCount() {
-                return 0;
-            }
-
-            @Override
-            public org.parosproxy.paros.model.HistoryReference getHistoryReference() {
-                return null;
-            }
-
-            @Override
-            public String getName() {
-                return null;
-            }
-
-            @Override
-            public String getRegexPattern() {
-                return null;
-            }
-
-            @Override
-            public String getRegexPattern(boolean incChildren) {
-                return null;
-            }
-
-            @Override
-            public URI getURI() {
-                return uri;
-            }
-
-            @Override
-            public String getMethod() {
-                return null;
-            }
-
-            @Override
-            public boolean isRoot() {
-                return false;
-            }
-
-            @Override
-            public boolean isLeaf() {
-                return false;
-            }
-
-            @Override
-            public boolean isDataDriven() {
-                return false;
-            }
-
-            @Override
-            public boolean isSameAs(StructuralNode node) {
-                return false;
-            }
-        };
+    void isClientSpiderSeedInScope_rejectsOutsideContext() {
+        assertEquals(true, PtkActiveScanRule.isClientSpiderSeedInScope(
+                "https://example.com/dom/page", url -> url.startsWith("https://example.com/dom/")));
+        assertEquals(false, PtkActiveScanRule.isClientSpiderSeedInScope(
+                "https://example.com/", url -> url.startsWith("https://example.com/dom/")));
+        assertEquals(false, PtkActiveScanRule.isClientSpiderSeedInScope(null, url -> true));
     }
 
     private static HttpMessage messageForUrl(String url)

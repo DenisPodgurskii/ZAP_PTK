@@ -408,7 +408,8 @@ export class ptk_sast {
   async _acquireBrowserCapture(tabId, scope, opts = {}) {
     const scanId = this.scanResult.scanId;
     const ownerId = `sast:${scanId}:${tabId}`;
-    const entry = { ownerId, tabId, scanId, lease: null, initialDocuments: new Set(), gaps: [] };
+    const entry = { ownerId, tabId, scanId, lease: null, initialDocuments: new Set(), gaps: [],
+      activityRevision: 0, activityOverflow: false, analyzedDomStreams: new Set() };
     this.browserCaptureLeases.set(tabId, entry);
     try {
       const prepared = this.preparedBrowserCapture;
@@ -428,7 +429,11 @@ export class ptk_sast {
       if (!this.isBrowserCaptureOwnerActive({ ownerId: entry.ownerId, tabId }) || !entry.lease.getSnapshot().ready) throw new Error('sast_source_owner_changed');
       entry.initialDocuments = new Set(entry.lease.getDocuments().map(document => this._nativeDocumentKey(document)));
       entry.unsubscribe = entry.lease.subscribe(event => {
-        if (event.type === 'gap' && event.record?.affectsSources !== false && entry.gaps.length < 128) entry.gaps.push(event.record);
+        if (event.type === 'protocol' && event.method === 'Page.documentOpened') this._recordSastActivity(entry);
+        if (event.type === 'gap' && event.record?.affectsSources !== false) {
+          this._recordSastActivity(entry);
+          if (entry.gaps.length < 128) entry.gaps.push(event.record);
+        }
         if (event.type === 'gap' && ['source_batch_incomplete', 'source_batch_delivery_failed',
           'sast_dom_push_failed', 'sast_push_unavailable'].includes(event.record?.reason)) {
           entry.sourceBatchError = 'sast_captured_source_partial:1';
@@ -448,6 +453,7 @@ export class ptk_sast {
       });
       const token = this.sessionCoordinator.sessionToken;
       entry.unsubscribeSources = entry.lease.subscribeSourceBatches?.(batch => {
+        this._recordSastActivity(entry);
         // Synchronous admission only. Returning the analysis promise to capture
         // drainage would deadlock collections which themselves drain capture.
         this.sessionCoordinator.enqueueSourceBatch(() => this._scanSourceBatch(entry, batch, token), () => batch.release())
@@ -458,6 +464,8 @@ export class ptk_sast {
       });
       entry.pendingDomBatches = new Set();
       entry.unsubscribeDom = entry.lease.subscribeSastPayload(batch => {
+        this._recordSastActivity(entry);
+        entry.analyzedDomStreams.delete(this._nativeDocumentKey(batch.identity));
         entry.pendingDomBatches.add(batch);
         this._queueSastDomBatch(entry, batch);
       });
@@ -476,11 +484,44 @@ export class ptk_sast {
 
   _nativeDocumentKey(document) {
     return JSON.stringify([document.epoch, document.captureId, document.tabId, document.sessionId || '', document.frameId,
-      document.documentId, document.sessionGeneration, document.navigationGeneration]);
+      document.documentId, document.sessionGeneration, document.navigationGeneration, document.streamGeneration]);
+  }
+
+  _recordSastActivity(entry) {
+    if (!Number.isSafeInteger(entry.activityRevision) || entry.activityRevision >= Number.MAX_SAFE_INTEGER) {
+      entry.activityOverflow = true;
+      return;
+    }
+    entry.activityRevision += 1;
+  }
+
+  // An exact-current-stream analysis cut, not a terminal receipt. The visit
+  // coordinator must still compare cuts after its observation interval and
+  // obtain independent IAST/DAST and stored-alert evidence.
+  getCurrentSastAnalysisSnapshot({ tabId, identity } = {}) {
+    const entry = this.browserCaptureLeases?.get(tabId);
+    const coordinator = this.sessionCoordinator;
+    if (!entry?.lease || !identity || !Number.isSafeInteger(identity.streamGeneration)
+      || !this.isBrowserCaptureOwnerActive(entry) || this.scanResult?.scanId !== entry.scanId
+      || coordinator?.isTrackedScanTab(tabId) !== true) return null;
+    const key = this._nativeDocumentKey(identity);
+    const current = entry.lease.getDocuments?.().filter(document => this._nativeDocumentKey(document) === key) || [];
+    if (current.length !== 1) return null;
+    const acquisition = entry.lease.getSastDocumentAcquisitionStatus?.(current[0]);
+    if (!acquisition) return null;
+    const settled = coordinator.pendingCollectionCount === 0 && coordinator.activeCollectionCount === 0
+      && coordinator.scanningRequest !== true && coordinator.analysisState === 'complete'
+      && !coordinator.firstCollectionError && !entry.sourceBatchError;
+    return Object.freeze({ scanId: entry.scanId, tabId, documentId: identity.documentId,
+      streamGeneration: identity.streamGeneration, revision: entry.activityRevision,
+      complete: !entry.activityOverflow && settled && entry.analyzedDomStreams.has(key)
+        && acquisition.domPayloadAdmitted === true && acquisition.pendingNativeSources === false
+        && acquisition.unresolvedSourceReferences === 0 && acquisition.analysisFailure === false });
   }
 
   _queueCapturedSourceCollection(entry) {
     if (this.sessionCoordinator.admissionFrozen || !this.isBrowserCaptureOwnerActive(entry)) return;
+    this._recordSastActivity(entry);
     for (const batch of entry.pendingDomBatches || []) this._queueSastDomBatch(entry, batch);
     entry.sourceCollectionDirty = true;
     if (entry.sourceCollectionPending) return;
@@ -520,9 +561,16 @@ export class ptk_sast {
       let pending = false;
       try {
         if (!batch.active || this.sessionCoordinator.sessionToken !== token || !this.isBrowserCaptureOwnerActive(entry)) return;
-        const options = batch.browserDocument ? { browserBatch: batch } : { domBatch: batch };
+        const options = batch.browserDocument ? { browserBatch: batch }
+          : batch.retainedDom ? { retainedDomBatch: batch } : { domBatch: batch };
         await this.sessionCoordinator._collectAndScanTabNow(entry.tabId, options);
         pending = options.pendingNativeAcquisition === true && batch.active && !this.sessionCoordinator.admissionFrozen;
+        if (!pending && batch.active && this.isBrowserCaptureOwnerActive(entry)
+          && entry.lease.getDocuments().some(document => this._nativeDocumentKey(document) === this._nativeDocumentKey(batch.identity))) {
+          entry.analyzedDomStreams.add(this._nativeDocumentKey(batch.identity));
+          const current = new Set(entry.lease.getDocuments().map(document => this._nativeDocumentKey(document)));
+          for (const key of entry.analyzedDomStreams) if (!current.has(key)) entry.analyzedDomStreams.delete(key);
+        }
       } finally {
         entry.queuedDomBatches.delete(batch);
         if (!pending) release();
@@ -548,9 +596,43 @@ export class ptk_sast {
     }
   }
 
+  // A document.write reopen advances the stream without changing the native
+  // document/loader. Analysis admitted against a complete captured snapshot
+  // may finish for that old stream; this does not authorize new acquisition or
+  // reuse a result across a navigation, owner, engine, or scan replacement.
+  _admittedSameLoaderStreamAdvanced(entry, document, admission) {
+    if (!admission || admission.entry !== entry || admission.identity !== document
+      || admission.token !== this.sessionCoordinator.sessionToken
+      || admission.run !== this._completedAnalysisRun || admission.engine !== this.sastEngine
+      || !Number.isSafeInteger(document?.streamGeneration)
+      || !this.isBrowserCaptureOwnerActive(entry) || !entry.lease.getSnapshot().active) return false;
+    const matching = entry.lease.getDocuments().filter(current => current.epoch === document.epoch
+      && current.captureId === document.captureId && current.tabId === document.tabId
+      && (current.sessionId || '') === (document.sessionId || '') && current.frameId === document.frameId
+      && current.documentId === document.documentId && current.sessionGeneration === document.sessionGeneration
+      && current.navigationGeneration === document.navigationGeneration && current.url === document.url
+      && Number.isSafeInteger(current.streamGeneration)
+      && current.streamGeneration > document.streamGeneration);
+    return matching.length === 1;
+  }
+
   _assertAnalysisContext(context) {
     if (context?.cancelled) throw new Error('sast_scan_cancelled');
-    if (!context?.sourceBatch) return this._assertNativeDocument(context?.entry, context?.identity);
+    if (context?.retainedDomBatch) {
+      const { entry, retainedDomBatch, sessionToken } = context;
+      if (this.browserCaptureLeases.get(entry?.tabId) !== entry
+        || !this.isBrowserCaptureOwnerActive({ ownerId: entry.ownerId, tabId: entry.tabId })
+        || this.sessionCoordinator.sessionToken !== sessionToken
+        || !entry.lease.getSnapshot().active || !retainedDomBatch.isActive()
+        || this._nativeDocumentKey(context.identity) !== this._nativeDocumentKey(retainedDomBatch.identity)) {
+        throw new Error('sast_source_owner_changed');
+      }
+      return;
+    }
+    if (!context?.sourceBatch) {
+      if (this._admittedSameLoaderStreamAdvanced(context?.entry, context?.identity, context?.admittedStream)) return;
+      return this._assertNativeDocument(context?.entry, context?.identity);
+    }
     const { entry, sourceBatch, sessionToken } = context;
     if (this.browserCaptureLeases.get(entry.tabId) !== entry
       || !this.isBrowserCaptureOwnerActive({ ownerId: entry.ownerId, tabId: entry.tabId })
@@ -730,7 +812,7 @@ export class ptk_sast {
     // Drain accepted native body completions before snapshotting the batch.
     await entry.lease.drain();
     this._assertNativeDocument(entry, identity);
-    const resources = entry.lease.getResources({ documentId: identity.documentId, frameId: identity.frameId,
+    const resources = entry.lease.getResources({ capability: 'sources', documentId: identity.documentId, frameId: identity.frameId,
       sessionId: identity.sessionId, sessionGeneration: identity.sessionGeneration })
       .filter(record => (record.sessionId || '') === (identity.sessionId || ''));
     const complete = resources.filter(record => record.complete === true && !record.base64Encoded && typeof record.body === 'string');
@@ -1340,6 +1422,13 @@ export class ptk_sast {
   async scanCode(scripts, html, file, options = {}) {
     const entry = this.browserCaptureLeases?.get(options.tabId ?? this.activeTabId);
     if (!entry || !options.nativeDocument) throw new Error('sast_source_capture_required');
+    if (options.retainedDomBatch) {
+      if (options.retainedDomBatch.identity !== options.nativeDocument
+        || !options.retainedDomBatch.isActive()
+        || this.browserCaptureLeases.get(entry.tabId) !== entry) throw new Error('sast_source_owner_changed');
+      return this._scanCodeNow(scripts, html, file, { ...options,
+        sessionToken: this.sessionCoordinator.sessionToken });
+    }
     if (options.browserBatch) {
       if (options.browserBatch.identity !== options.nativeDocument || !options.browserBatch.isActive()
         || this.browserCaptureLeases.get(entry.tabId) !== entry) throw new Error('sast_source_owner_changed');
@@ -1349,13 +1438,17 @@ export class ptk_sast {
     const token = this.sessionCoordinator.sessionToken;
     const run = this._completedAnalysisRun;
     const engine = this.sastEngine;
+    const admittedStream = { entry, identity: options.nativeDocument, token, run, engine };
+    let admitted = false;
     const assertOwner = () => {
       if (this.sessionCoordinator.sessionToken !== token || this._completedAnalysisRun !== run || this.sastEngine !== engine) {
         throw new Error('sast_source_owner_changed');
       }
+      if (admitted && this._admittedSameLoaderStreamAdvanced(entry, options.nativeDocument, admittedStream)) return;
       this._assertNativeDocument(entry, options.nativeDocument);
     };
     assertOwner();
+    admitted = true;
     const borrowed = entry.lease.acquireSastAnalysisReceipt(options.nativeDocument);
     try {
     // A bounded receipt belongs to this exact native document. Policy is fixed at worker creation
@@ -1397,7 +1490,7 @@ export class ptk_sast {
       if (reuseOriginal) originalFindings = structuredClone(previous.findings.slice(0, previous.originalCount));
       else try {
         originalFindings = await this._scanCodeNow(options.originalScripts || scripts, options.originalHtml, options.nativeDocument.url, { ...options,
-          collectionId: `${options.collectionId}:original`, completion: originalCompletion });
+          collectionId: `${options.collectionId}:original`, completion: originalCompletion, admittedStream });
       } catch (error) {
         let stillOwned = false;
         try { assertOwner(); stillOwned = true; } catch (_) { }
@@ -1425,7 +1518,7 @@ export class ptk_sast {
     let liveFindings;
     try {
       liveFindings = await this._scanCodeNow(scripts, html, file, { ...options,
-        collectionId: `${options.collectionId}:live`, completion: liveCompletion });
+        collectionId: `${options.collectionId}:live`, completion: liveCompletion, admittedStream });
     } catch (error) {
       let stillOwned = false;
       try { assertOwner(); stillOwned = true; } catch (_) { }
@@ -1454,8 +1547,9 @@ export class ptk_sast {
 
   async _scanCodeNow(scripts, html, file, options = {}) {
     const entry = this.browserCaptureLeases.get(options.tabId ?? this.activeTabId);
-    const context = { entry, identity: options.nativeDocument, sourceBatch: options.sourceBatch, sessionToken: options.sessionToken,
-      generation: options.generation, collectionId: options.collectionId, file };
+    const context = { entry, identity: options.nativeDocument, sourceBatch: options.sourceBatch,
+      retainedDomBatch: options.retainedDomBatch, sessionToken: options.sessionToken,
+      generation: options.generation, collectionId: options.collectionId, file, admittedStream: options.admittedStream };
     this._assertAnalysisContext(context);
     this._nativeAnalysisContext = context;
     try {

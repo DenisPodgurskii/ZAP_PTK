@@ -415,6 +415,16 @@ public final class PtkAlertBuilder {
                 sb.append("DOM: ").append(finding.getContext().getDomPath());
             }
         }
+        if (finding.getObservation() != null) {
+            if (sb.length() > 0) sb.append("\n");
+            sb.append("Observation (page-observed, untrusted): ")
+                    .append(GSON.toJson(finding.getObservation()));
+        }
+        if (finding.getFlow() != null) {
+            if (sb.length() > 0) sb.append("\n");
+            sb.append("Ordered redacted flow (page-observed, untrusted; not proven causality): ")
+                    .append(finding.getFlow().toString());
+        }
         return sb.length() > 0 ? sb.toString() : null;
     }
 

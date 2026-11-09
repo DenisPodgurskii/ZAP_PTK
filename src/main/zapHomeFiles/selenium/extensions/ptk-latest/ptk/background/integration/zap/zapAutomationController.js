@@ -664,7 +664,13 @@ export class ZapAutomationController {
         if (finalEngines.length) {
             const capture = bridge.browserCapture
             if (!capture) throw new Error('browser_capture_unsupported')
-            await capture.prepare({ tabId: context.tabId, zapid: context.zapid, version: rawConfig?.browserCaptureVersion, engines: finalEngines })
+            await capture.prepare({ tabId: context.tabId, zapid: context.zapid,
+                version: rawConfig?.browserCaptureVersion, engines: finalEngines,
+                // DAST-only capture remains prepared through navigation. Bind
+                // its first native document to the configured target origin,
+                // never the synthetic HTTPS ZAP callback visited beforehand.
+                ...(!finalEngines.includes('SAST') && finalEngines.includes('DAST')
+                    && configSeedTargetUrl ? { preparedTargetUrl: configSeedTargetUrl } : {}) })
         }
         this._transition(run, ZAP_AUTOMATION_STATES.CONFIG_READY, {
             engines: finalEngines,
