@@ -73,7 +73,7 @@ public class PtkParam extends VersionedAbstractParam {
     public static final EngineRunLocation DEFAULT_SAST_RUN_LOCATION =
             EngineRunLocation.CLIENT_SPIDER;
     public static final EngineRunLocation DEFAULT_IAST_RUN_LOCATION =
-            EngineRunLocation.CLIENT_SPIDER;
+            EngineRunLocation.ACTIVE_SCAN_RULE;
 
     private boolean automatedScanningEnabled = false;
     private boolean activeScanRuleEnabled = true;
