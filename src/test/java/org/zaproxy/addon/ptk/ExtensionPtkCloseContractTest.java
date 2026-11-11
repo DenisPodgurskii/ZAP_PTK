@@ -35,6 +35,7 @@ import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpSender;
 import org.zaproxy.addon.client.ClientCallBackImplementor.ClientCallBackContext;
 import org.zaproxy.addon.client.ClientCallBackUtils;
+import org.zaproxy.addon.ptk.options.EngineRunLocation;
 import org.zaproxy.zap.extension.selenium.SeleniumScriptUtils;
 import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
@@ -1728,6 +1729,7 @@ class ExtensionPtkCloseContractTest {
     void resolvedClientConfigPreservesIastSastOnlyPartialClose() throws Exception {
         ExtensionPtk extension = new ExtensionPtk();
         extension.getParam().load(new ZapXmlConfiguration());
+        extension.getParam().setIastRunLocation(EngineRunLocation.CLIENT_SPIDER);
         Map<String, Object> config =
                 postConfig(extension, "browser-partial", HttpSender.SPIDER_INITIATOR);
         assertTrue(nested(config, "dast").isEmpty());
