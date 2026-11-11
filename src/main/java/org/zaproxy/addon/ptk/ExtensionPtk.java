@@ -834,6 +834,10 @@ public class ExtensionPtk extends ExtensionAdaptor
     private final Set<String> closeWaitActiveLogged = ConcurrentHashMap.newKeySet();
     private final Set<String> manualModeConfigZapIds = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> closedZapIds = new ConcurrentHashMap<>();
+    private static final int START_PENDING_RETRY_AFTER_MS = 1000;
+    private final Map<String, Integer> startPendingPollsByZapId = new ConcurrentHashMap<>();
+    private final PtkStartGate startGate =
+            new PtkStartGate(PtkStartGate.isReadyApiAvailable(), this::isClientSpiderRunningAsUser);
 
     private static final class ZapHistorySeedCacheEntry {
         private final List<String> urls;
@@ -996,6 +1000,33 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
     }
 
+    /**
+     * Whether an active Client Spider scan is run as a user, in which case the browsers it launches
+     * may authenticate before they are ready.
+     */
+    private boolean isClientSpiderRunningAsUser() {
+        ExtensionClientIntegration clientExtension =
+                Control.getSingleton()
+                        .getExtensionLoader()
+                        .getExtension(ExtensionClientIntegration.class);
+        try {
+            List<?> activeScans = clientExtension.getActiveScans();
+            if (activeScans == null) {
+                return false;
+            }
+            for (Object scan : activeScans) {
+                // Reflection as ClientSpider#getUser needs Client 0.35.0 or later, which is also
+                // the version that reports when a browser is ready.
+                if (scan != null && scan.getClass().getMethod("getUser").invoke(scan) != null) {
+                    return true;
+                }
+            }
+        } catch (LinkageError | ReflectiveOperationException | RuntimeException e) {
+            LOGGER.debug("PTK could not check if a Client Spider is run as a user", e);
+        }
+        return false;
+    }
+
     public void seedActiveScanClientSpiderTasks(String targetUrl) {
         if (targetUrl == null || targetUrl.isBlank()) {
             return;
@@ -1131,9 +1162,6 @@ public class ExtensionPtk extends ExtensionAdaptor
                 Control.getSingleton()
                         .getExtensionLoader()
                         .getExtension(ExtensionClientIntegration.class);
-        if (clientExtension == null) {
-            return;
-        }
 
         List<?> activeScans;
         try {
@@ -1304,6 +1332,11 @@ public class ExtensionPtk extends ExtensionAdaptor
         super.hook(extensionHook);
         extensionHook.addOverrideMessageProxyListener(browserBackgroundTrafficProxyListener);
         callBackImplementor = new CallBackImplementor();
+        LOGGER.info(
+                "PTK waits for authentication before starting in Client Spider browsers: {}",
+                PtkStartGate.isReadyApiAvailable()
+                        ? "supported"
+                        : "not supported, requires Selenium 15.61.0 and Client 0.35.0 or later");
         Control.getSingleton()
                 .getExtensionLoader()
                 .getExtension(ExtensionClientIntegration.class)
@@ -1680,6 +1713,41 @@ public class ExtensionPtk extends ExtensionAdaptor
             LOGGER.debug("PTK /ptk/config cache miss; rebuilt response");
             return json;
         }
+    }
+
+    /**
+     * Logs how many times a browser asked for the config while it was held, and when it was first
+     * served without being held, to show whether the PTK extension waits as requested.
+     */
+    private void logStartGatePolls(String zapid, boolean startPending) {
+        if (zapid == null) {
+            return;
+        }
+        if (startPending) {
+            startPendingPollsByZapId.merge(zapid, 1, Integer::sum);
+            return;
+        }
+        Integer polls = startPendingPollsByZapId.remove(zapid);
+        if (polls != null) {
+            LOGGER.info(
+                    "PTK start gate zapid={} served config without startPending after {} held config requests",
+                    zapid,
+                    polls);
+        }
+    }
+
+    /**
+     * The response telling the PTK extension to ask again later. It deliberately has no mode or
+     * rules, the extension must only start once it gets a config with them.
+     */
+    private static String buildStartPendingJson() {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("startPending", true);
+        response.put("retryAfterMs", START_PENDING_RETRY_AFTER_MS);
+        response.put("contractVersion", 2);
+        response.put("ptkControlSupported", true);
+        response.put("controlPath", "/ptk/control");
+        return GSON.toJson(response);
     }
 
     private String getConfigJsonForRequest(
@@ -4168,7 +4236,26 @@ public class ExtensionPtk extends ExtensionAdaptor
                                     "mode",
                                     zapAutomationEnabled ? "automated" : "manual"));
                 }
-                String configJson = getConfigJsonForRequest(requestData, cbContext);
+                // Only extensions that say they understand it are told to wait, older ones would
+                // treat a config without rules as manual mode and never start.
+                boolean supportsStartPending =
+                        Boolean.TRUE.equals(getBooleanField(requestData, "supportsStartPending"));
+                boolean startPending = supportsStartPending && startGate.isPending(zapid);
+                // While pending no rules are returned, so there is nothing PTK could start with
+                String configJson =
+                        startPending
+                                ? buildStartPendingJson()
+                                : getConfigJsonForRequest(requestData, cbContext);
+                logStartGatePolls(zapid, startPending);
+                if (contractCallbackLogged.add(zapid + ":start_gate")) {
+                    LOGGER.info(
+                            "PTK start gate zapid={} startPending={} extensionSupportsIt={} supported={} authenticationExpected={}",
+                            zapid,
+                            startPending,
+                            supportsStartPending,
+                            startGate.isSupported(),
+                            startGate.isAuthenticationExpected());
+                }
                 msg.getResponseBody().setBody(configJson);
                 long finishedAt = System.currentTimeMillis();
                 Map<String, Object> configResponse = parseRequestBody(configJson);
@@ -5087,8 +5174,23 @@ public class ExtensionPtk extends ExtensionAdaptor
             return "callback_not_seen";
         }
 
+        // Not annotated with @Override as it requires Client add-on 0.35.0 or later, earlier
+        // versions never call it (see PtkStartGate#isReadyApiAvailable).
+        public void browserReady(ClientCallBackUtils ccbutils) {
+            if (ccbutils == null || ccbutils.getUuid() == null) {
+                return;
+            }
+            String zapid = ccbutils.getUuid().toString();
+            startGate.browserReady(zapid);
+            LOGGER.info("PTK start gate zapid={} browser ready, releasing PTK to start", zapid);
+        }
+
         @Override
         public void browserClosing(ClientCallBackUtils ccbutils) {
+            if (ccbutils != null && ccbutils.getUuid() != null) {
+                startGate.forget(ccbutils.getUuid().toString());
+                startPendingPollsByZapId.remove(ccbutils.getUuid().toString());
+            }
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug("PTK browserClosing uuid={}", ccbutils.getUuid());
             }

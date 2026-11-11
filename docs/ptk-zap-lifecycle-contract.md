@@ -233,6 +233,19 @@ Config cost is split in two:
 
 If config cannot be fetched, the extension falls back to default PTK engine behavior rather than blocking forever. That can keep a run alive, but it is a diagnostic warning because ZAP-controlled rulepack selection may not have been applied.
 
+## Start Pending Contract
+
+A Client Spider run as a user may authenticate in the browser (e.g. via the authhelper add-on) after the PTK extension has loaded, and PTK must not start before that has finished.
+
+- The extension adds `supportsStartPending: true` to its `/ptk/config` request.
+- While authentication may still be running in that browser, ZAP replies `{startPending: true, retryAfterMs, contractVersion, ptkControlSupported, controlPath}`. It has no `mode` or rulepacks, so there is nothing to start with.
+- The extension keeps asking, waiting `retryAfterMs` (capped at 10s), until it gets a config without `startPending`.
+- ZAP releases a browser when `ClientCallBackImplementor.browserReady` is called for it (Client 0.35.0 and Selenium 15.61.0 or later), which is after all of the launch hooks, including authentication, have run. Browsers are also released when no Client Spider is being run as a user.
+- After 150s the extension asks once more with `supportsStartPending: false`, which always returns the full config, so a missed `browserReady` cannot block PTK forever.
+- Extensions that do not send `supportsStartPending`, and ZAP versions that do not reply with it, behave as before: PTK starts as soon as it has a config.
+
+ZAP logs `PTK start gate ...` lines at INFO for each browser with the decision, the number of held requests and the release.
+
 ## Progress Contract
 
 ```mermaid
