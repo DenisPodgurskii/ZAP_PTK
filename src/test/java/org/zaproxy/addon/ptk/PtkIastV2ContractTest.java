@@ -192,6 +192,34 @@ class PtkIastV2ContractTest {
     }
 
     @Test
+    void passiveCallsiteProofIsAcceptedOnlyAsLowSignalWithBoundedHashAndCoordinates() {
+        JsonObject batch = actualContentBatch();
+        JsonObject finding = batch.getAsJsonObject("payload").getAsJsonArray("findings").get(0).getAsJsonObject();
+        JsonObject observation = finding.getAsJsonObject("observation");
+        observation.addProperty("acquisition", "callsite_entailed_read");
+        observation.addProperty("gradeAuthority", "native_body_callsite_binding");
+        observation.getAsJsonObject("site").addProperty("line", 2);
+        observation.getAsJsonObject("site").addProperty("column", 1);
+        JsonObject proof = new JsonObject();
+        proof.addProperty("kind", "straight_line_classic");
+        proof.addProperty("bodySha256", "a".repeat(64));
+        proof.addProperty("readLine", 1);
+        proof.addProperty("readColumn", 15);
+        proof.addProperty("sinkLine", 2);
+        proof.addProperty("sinkColumn", 1);
+        observation.add("readProof", proof);
+        PtkIastV2Contract.validate(batch);
+        finding.addProperty("severity", "high");
+        assertThrows(IllegalArgumentException.class, () -> PtkIastV2Contract.validate(batch));
+        finding.addProperty("severity", "low");
+        proof.addProperty("bodySha256", "bad");
+        assertThrows(IllegalArgumentException.class, () -> PtkIastV2Contract.validate(batch));
+        proof.addProperty("bodySha256", "a".repeat(64));
+        proof.addProperty("sinkLine", 3);
+        assertThrows(IllegalArgumentException.class, () -> PtkIastV2Contract.validate(batch));
+    }
+
+    @Test
     void managedRoutingKeyBoundsCopiesAndOwnerAreStrictWithoutCouplingNativeSessionId() {
         JsonObject batch = actualContentBatch();
         String owner = "o".repeat(128);

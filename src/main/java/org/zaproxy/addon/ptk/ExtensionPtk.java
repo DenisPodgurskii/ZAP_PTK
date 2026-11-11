@@ -816,6 +816,7 @@ public class ExtensionPtk extends ExtensionAdaptor
             List.of(Browser.CHROME, Browser.CHROME_HEADLESS, Browser.EDGE, Browser.EDGE_HEADLESS);
     private static final List<Browser> PTK_FIREFOX_BROWSERS =
             List.of(Browser.FIREFOX, Browser.FIREFOX_HEADLESS);
+    static final String PTK_FIREFOX_EXTENSION_ID = "pentestkit@DenisPodgurskii";
     private static final char[] CHROMIUM_EXTENSION_ID_ALPHABET = "abcdefghijklmnop".toCharArray();
     private static final String PTK_ZAP_RUNNER_PATH = "/ptk/internal/zap-runner.html";
     private static final int PTK_BROWSER_BACKGROUND_PROXY_LISTENER_ORDER = 0;
@@ -1402,6 +1403,10 @@ public class ExtensionPtk extends ExtensionAdaptor
         return Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest");
     }
 
+    static Path getPtkFirefoxExtensionPath() {
+        return Path.of(Constant.getZapHome(), "selenium", "extensions", "ptk-latest.xpi");
+    }
+
     static String chromiumExtensionIdForPath(Path extensionPath) {
         if (extensionPath == null) {
             return "";
@@ -1446,10 +1451,50 @@ public class ExtensionPtk extends ExtensionAdaptor
     static boolean isSupportedVisitBrowserFamily(String browserFamily) {
         if (browserFamily == null || browserFamily.isBlank()) return false;
         try {
-            return PTK_CHROMIUM_BROWSERS.contains(
-                    Browser.getBrowserWithIdNoFailSafe(browserFamily));
+            Browser browser = Browser.getBrowserWithIdNoFailSafe(browserFamily);
+            return PTK_CHROMIUM_BROWSERS.contains(browser) || PTK_FIREFOX_BROWSERS.contains(browser);
         } catch (RuntimeException ignored) {
             return false;
+        }
+    }
+
+    static boolean isPtkVisitArtifactAvailable(String browserId) {
+        if (!isSupportedVisitBrowserFamily(browserId)) return false;
+        Browser browser = Browser.getBrowserWithIdNoFailSafe(browserId);
+        Path path = PTK_FIREFOX_BROWSERS.contains(browser)
+                ? getPtkFirefoxExtensionPath() : getPtkChromiumExtensionPath();
+        return isPtkExtensionPathPresent(path, browser);
+    }
+
+    static String resolvePtkVisitRunnerUrl(WebDriver driver, String browserId) {
+        if (!isPtkVisitArtifactAvailable(browserId)) return null;
+        Browser browser = Browser.getBrowserWithIdNoFailSafe(browserId);
+        return PTK_FIREFOX_BROWSERS.contains(browser)
+                ? resolveInstalledFirefoxRunnerUrl(driver)
+                : buildChromiumZapRunnerUrl(getPtkChromiumExtensionPath());
+    }
+
+    static String resolveInstalledFirefoxRunnerUrl(WebDriver driver) {
+        try {
+            if (!(driver instanceof RemoteWebDriver remoteDriver)) return null;
+            Object profileValue = remoteDriver.getCapabilities().getCapability("moz:profile");
+            if (!(profileValue instanceof String profilePath) || profilePath.isBlank()) return null;
+            Path prefsPath = Path.of(profilePath).resolve("prefs.js");
+            if (!Files.isRegularFile(prefsPath)) return null;
+            String prefs = Files.readString(prefsPath, StandardCharsets.UTF_8);
+            String marker = "\\\"" + PTK_FIREFOX_EXTENSION_ID + "\\\":\\\"";
+            int markerIndex = prefs.indexOf(marker);
+            if (markerIndex < 0) return null;
+            int uuidStart = markerIndex + marker.length();
+            int uuidEnd = prefs.indexOf("\\\"", uuidStart);
+            if (uuidEnd <= uuidStart) return null;
+            String extensionUuid = prefs.substring(uuidStart, uuidEnd);
+            if (!extensionUuid.matches("[A-Fa-f0-9-]{32,64}")) return null;
+            return "moz-extension://" + extensionUuid + PTK_ZAP_RUNNER_PATH;
+        } catch (IOException | RuntimeException error) {
+            LOGGER.debug("PTK could not resolve installed Firefox runner: {}",
+                    error.getClass().getSimpleName());
+            return null;
         }
     }
 
@@ -2344,17 +2389,17 @@ public class ExtensionPtk extends ExtensionAdaptor
     // WebDriver-to-ZAP owner. Probe only the installed protocol here; every
     // subsequent visit request still requires the live owner mapping.
     boolean probeInstalledVisitCapability(WebDriver driver, String browserid) {
-        Path extensionPath = getPtkChromiumExtensionPath();
         if (!getParam().isZapAutomationEnabled()
                 || browserid == null
-                || !isSupportedVisitBrowserFamily(browserid)
-                || !Files.isDirectory(extensionPath)) {
+                || !isSupportedVisitBrowserFamily(browserid)) {
             return false;
         }
         String requestId = "visit-cap-" + UUID.randomUUID();
         try {
+            String runnerUrl = resolvePtkVisitRunnerUrl(driver, browserid);
+            if (runnerUrl == null) return false;
             Map<String, Object> reply =
-                    PtkVisitRunner.request(driver, buildChromiumZapRunnerUrl(extensionPath),
+                    PtkVisitRunner.request(driver, runnerUrl,
                             Map.of("channel", "ptk_extension_zap_runner",
                                     "type", "visit_capability", "requestId", requestId));
             return PtkVisitRunner.isValidCapability(reply);
@@ -2383,13 +2428,13 @@ public class ExtensionPtk extends ExtensionAdaptor
                     || !targetUrl.equals(target.toString())) {
                 return Map.of("ok", false, "reason", "visit_prestart_target_invalid");
             }
-            Path extensionPath = getPtkChromiumExtensionPath();
-            if (!Files.isDirectory(extensionPath)) {
+            String runnerUrl = resolvePtkVisitRunnerUrl(driver, state.nativeBrowserFamily());
+            if (runnerUrl == null) {
                 return Map.of("ok", false, "reason", "visit_runner_unavailable");
             }
             String requestId = "visit-prestart-" + UUID.randomUUID();
             Map<String, Object> reply = PtkVisitRunner.request(
-                    driver, buildChromiumZapRunnerUrl(extensionPath),
+                    driver, runnerUrl,
                     Map.of("channel", "ptk_extension_zap_runner", "type", "visit_prestart",
                             "requestId", requestId, "zapid", zapid,
                             "browserid", browserid, "targetUrl", targetUrl));
@@ -2494,8 +2539,8 @@ public class ExtensionPtk extends ExtensionAdaptor
                 || !isSupportedVisitBrowserFamily(nativeBrowserFamily)) {
             return Map.of("ok", false, "reason", "visit_owner_unavailable");
         }
-        Path extensionPath = getPtkChromiumExtensionPath();
-        if (!Files.isDirectory(extensionPath)) {
+        String runnerUrl = resolvePtkVisitRunnerUrl(driver, nativeBrowserFamily);
+        if (runnerUrl == null) {
             return Map.of("ok", false, "reason", "visit_runner_unavailable");
         }
         String requestId = "visit-" + UUID.randomUUID();
@@ -2518,7 +2563,7 @@ public class ExtensionPtk extends ExtensionAdaptor
         if ("observe_depart".equals(phase)) payload.put("depart", true);
         try {
             Map<String, Object> reply = PtkVisitRunner.request(
-                    driver, buildChromiumZapRunnerUrl(extensionPath), payload);
+                    driver, runnerUrl, payload);
             if (!zapid.equals(getZapIdForWebDriver(driver))
                     || !browserid.equals(browserIdByZapId.get(zapid))
                     || !sessionId.equals(sessionIdByZapId.get(zapid))) {
@@ -4125,41 +4170,7 @@ public class ExtensionPtk extends ExtensionAdaptor
                         ? buildChromiumZapRunnerUrl(chromiumPath)
                         : null;
             }
-            try {
-                if (!(driver instanceof RemoteWebDriver remoteDriver)) {
-                    return null;
-                }
-                Object profileValue = remoteDriver.getCapabilities().getCapability("moz:profile");
-                if (!(profileValue instanceof String profilePath) || profilePath.isBlank()) {
-                    return null;
-                }
-                Path prefsPath = Path.of(profilePath).resolve("prefs.js");
-                if (!Files.isRegularFile(prefsPath)) {
-                    return null;
-                }
-                String prefs = Files.readString(prefsPath, StandardCharsets.UTF_8);
-                String marker = "\\\"pentestkit@DenisPodgurskii\\\":\\\"";
-                int markerIndex = prefs.indexOf(marker);
-                if (markerIndex < 0) {
-                    return null;
-                }
-                int uuidStart = markerIndex + marker.length();
-                int uuidEnd = prefs.indexOf("\\\"", uuidStart);
-                if (uuidEnd <= uuidStart) {
-                    return null;
-                }
-                String extensionUuid = prefs.substring(uuidStart, uuidEnd);
-                if (!extensionUuid.matches("[A-Fa-f0-9-]{32,64}")) {
-                    return null;
-                }
-                return "moz-extension://" + extensionUuid + PTK_ZAP_RUNNER_PATH;
-            } catch (IOException | RuntimeException e) {
-                LOGGER.debug(
-                        "PTK closeContract could not resolve trusted runner for zapid {}: {}",
-                        zapid,
-                        e.getMessage());
-                return null;
-            }
+            return resolveInstalledFirefoxRunnerUrl(driver);
         }
 
         private Map<String, Object> normalizeCloseScriptResult(Object rawResult, String windowUrl) {

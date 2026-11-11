@@ -21,6 +21,8 @@ final class PtkVisitRunner {
     private static final Pattern ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
     private static final Pattern RUNNER_URL =
             Pattern.compile("chrome-extension://[a-p]{32}/ptk/internal/zap-runner\\.html");
+    private static final Pattern FIREFOX_RUNNER_URL =
+            Pattern.compile("moz-extension://[A-Fa-f0-9-]{32,64}/ptk/internal/zap-runner\\.html");
     private static final String TRUSTED_RUNNER = "ptk-zap-visit-v1";
     private record RunnerTab(String handle, String url) {}
     // One trusted extension tab per owned WebDriver. Reopening and closing a
@@ -160,7 +162,8 @@ final class PtkVisitRunner {
     }
 
     static boolean isSupportedRunnerUrl(String runnerUrl) {
-        return runnerUrl != null && RUNNER_URL.matcher(runnerUrl).matches();
+        return runnerUrl != null && (RUNNER_URL.matcher(runnerUrl).matches()
+                || FIREFOX_RUNNER_URL.matcher(runnerUrl).matches());
     }
 
     static Map<String, Object> request(
@@ -313,8 +316,10 @@ final class PtkVisitRunner {
     }
 
     private static void awaitRunnerReady(JavascriptExecutor javascript, String runnerUrl) {
-        String extensionId = runnerUrl.substring("chrome-extension://".length(),
-                "chrome-extension://".length() + 32);
+        String extensionId = RUNNER_URL.matcher(runnerUrl).matches()
+                ? runnerUrl.substring("chrome-extension://".length(),
+                        "chrome-extension://".length() + 32)
+                : ExtensionPtk.PTK_FIREFOX_EXTENSION_ID;
         long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
         do {
             try {

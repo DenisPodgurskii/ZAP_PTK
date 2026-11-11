@@ -19,11 +19,14 @@ import org.zaproxy.addon.client.spider.VisitOutcome;
 
 class PtkSpiderPolicyTest {
     @Test
-    void selectsOnlyOwnedChromiumParticipation() {
+    void selectsOnlyOwnedSupportedBrowserParticipation() {
         assertTrue(PtkSpiderPolicy.eligible(true, "edge", false, true, false));
         assertTrue(PtkSpiderPolicy.eligible(true, "chrome", false, false, true));
+        assertTrue(PtkSpiderPolicy.eligible(true, "firefox", false, true, false));
+        assertTrue(PtkSpiderPolicy.eligible(true, "firefox-headless", false, false, true));
         assertFalse(PtkSpiderPolicy.eligible(false, "edge", false, true, true));
-        assertFalse(PtkSpiderPolicy.eligible(true, "firefox", false, true, true));
+        assertFalse(PtkSpiderPolicy.eligible(false, "firefox", false, true, true));
+        assertFalse(PtkSpiderPolicy.eligible(true, "firefox", true, true, true));
         assertFalse(PtkSpiderPolicy.eligible(true, "edge", true, true, true));
         assertFalse(PtkSpiderPolicy.eligible(true, "edge", false, false, false));
     }

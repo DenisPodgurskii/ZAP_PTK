@@ -1,6 +1,5 @@
 package org.zaproxy.addon.ptk;
 
-import java.nio.file.Files;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Predicate;
@@ -15,7 +14,7 @@ import org.zaproxy.addon.client.spider.SpiderVisitCoordinator;
 import org.zaproxy.addon.client.spider.VisitOutcome;
 import org.zaproxy.zap.extension.selenium.SeleniumOptions;
 
-/** PTK-owned Chromium Client Spider policy; nonparticipants keep Client's ordinary browser policy. */
+/** PTK-owned Client Spider policy; nonparticipants keep Client's ordinary browser policy. */
 final class PtkSpiderPolicy {
     private final ExtensionPtk ptk;
     private final SpiderSessionPolicyProvider provider;
@@ -53,7 +52,7 @@ final class PtkSpiderPolicy {
                 included, globallyEnabled)) {
             return null;
         }
-        if (!Files.isDirectory(ExtensionPtk.getPtkChromiumExtensionPath())
+        if (!ExtensionPtk.isPtkVisitArtifactAvailable(context.browserId())
                 || !context.adaptiveWaitEnabled()
                 || context.adaptiveTimeoutMs() < 1
                 || context.adaptiveQuiesceFirstAccessMs() < 1
@@ -66,7 +65,7 @@ final class PtkSpiderPolicy {
 
     static boolean eligible(boolean automation, String browserId, boolean excluded,
             boolean included, boolean globallyEnabled) {
-        return automation && ExtensionPtk.isChromiumBrowserName(browserId) && !excluded
+        return automation && ExtensionPtk.isSupportedVisitBrowserFamily(browserId) && !excluded
                 && (included || globallyEnabled);
     }
 

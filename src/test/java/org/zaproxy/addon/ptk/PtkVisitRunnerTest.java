@@ -2,17 +2,23 @@ package org.zaproxy.addon.ptk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Proxy;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.remote.RemoteWebDriver;
+import org.openqa.selenium.ImmutableCapabilities;
 
 class PtkVisitRunnerTest {
     @Test
@@ -37,8 +43,15 @@ class PtkVisitRunnerTest {
         String id = "a".repeat(32);
         assertTrue(PtkVisitRunner.isSupportedRunnerUrl(
                 "chrome-extension://" + id + "/ptk/internal/zap-runner.html"));
+        String firefoxUuid = "01234567-89ab-cdef-0123-456789abcdef";
+        assertTrue(PtkVisitRunner.isSupportedRunnerUrl(
+                "moz-extension://" + firefoxUuid + "/ptk/internal/zap-runner.html"));
         assertFalse(PtkVisitRunner.isSupportedRunnerUrl(
                 "chrome-extension://" + id + "/ptk/zap-runner.html"));
+        assertFalse(PtkVisitRunner.isSupportedRunnerUrl(
+                "moz-extension://" + firefoxUuid + "/ptk/zap-runner.html"));
+        assertFalse(PtkVisitRunner.isSupportedRunnerUrl(
+                "moz-extension://foreign/ptk/internal/zap-runner.html"));
         assertFalse(PtkVisitRunner.isSupportedRunnerUrl(
                 "https://example.test/ptk/internal/zap-runner.html"));
     }
@@ -64,7 +77,8 @@ class PtkVisitRunnerTest {
         assertTrue(ExtensionPtk.isSupportedVisitBrowserFamily(state.nativeBrowserFamily()));
         assertFalse(ExtensionPtk.isSupportedVisitBrowserFamily(
                 "03142f9f-1ecd-43f8-bb91-357e3b96c9e5"));
-        assertFalse(ExtensionPtk.isSupportedVisitBrowserFamily("firefox"));
+        assertTrue(ExtensionPtk.isSupportedVisitBrowserFamily("firefox"));
+        assertTrue(ExtensionPtk.isSupportedVisitBrowserFamily("firefox-headless"));
     }
 
     @Test
@@ -104,6 +118,44 @@ class PtkVisitRunnerTest {
         assertThrows(IllegalStateException.class,
                 () -> PtkVisitRunner.validateResponse(Map.of("ok", false,
                         "reason", "visit_response_timeout", "requestId", "visit-1"), "visit-1"));
+    }
+
+    @Test
+    void firefoxRunnerUsesInstalledAddonRuntimeIdAndRestoresTarget() {
+        String url = "moz-extension://01234567-89ab-cdef-0123-456789abcdef"
+                + "/ptk/internal/zap-runner.html";
+        AtomicReference<String> current = new AtomicReference<>("target");
+        AtomicInteger closed = new AtomicInteger();
+        Map<String, Object> response = Map.of("ok", true, "kind", "visit_capability",
+                "trustedRunner", "ptk-zap-visit-v1", "requestId", "visit-firefox");
+        WebDriver driver = fakeDriver(url, response, current, closed);
+        assertEquals(response, PtkVisitRunner.request(driver, url,
+                Map.of("type", "visit_capability", "requestId", "visit-firefox")));
+        assertEquals("target", current.get());
+        PtkVisitRunner.release(driver);
+        assertEquals(1, closed.get());
+        assertEquals("target", current.get());
+    }
+
+    @Test
+    void firefoxRunnerUrlUsesTheInstalledProfileUuid(@TempDir Path testDir) throws Exception {
+        Path profile = Files.createDirectory(testDir.resolve("profile"));
+        String uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        Files.writeString(profile.resolve("prefs.js"),
+                "user_pref(\"extensions.webextensions.uuids\", "
+                        + "\"{\\\"pentestkit@DenisPodgurskii\\\":\\\"" + uuid
+                        + "\\\"}\");");
+        RemoteWebDriver driver = new ProfileDriver(profile.toString());
+        assertEquals("moz-extension://" + uuid + "/ptk/internal/zap-runner.html",
+                ExtensionPtk.resolveInstalledFirefoxRunnerUrl(driver));
+        Files.writeString(profile.resolve("prefs.js"),
+                "\\\"foreign@example.test\\\":\\\"" + uuid + "\\\"");
+        assertNull(ExtensionPtk.resolveInstalledFirefoxRunnerUrl(driver));
+        Files.writeString(profile.resolve("prefs.js"),
+                "\\\"pentestkit@DenisPodgurskii\\\":\\\"invalid\\\"");
+        assertNull(ExtensionPtk.resolveInstalledFirefoxRunnerUrl(driver));
+        Files.delete(profile.resolve("prefs.js"));
+        assertNull(ExtensionPtk.resolveInstalledFirefoxRunnerUrl(driver));
     }
 
     @Test
@@ -274,6 +326,14 @@ class PtkVisitRunnerTest {
         assertEquals(1, requests.get());
     }
 
+    private static final class ProfileDriver extends RemoteWebDriver {
+        ProfileDriver(String profilePath) {
+            super();
+            capabilities = new ImmutableCapabilities("browserName", "firefox",
+                    "moz:profile", profilePath);
+        }
+    }
+
     private static WebDriver fakeDriver(String runnerUrl, Object response,
             AtomicReference<String> current, AtomicInteger closed) {
         return fakeDriver(runnerUrl, response, current, closed,
@@ -359,7 +419,8 @@ class PtkVisitRunnerTest {
                     case "executeScript" -> {
                         int poll = readinessPolls != null ? readinessPolls.incrementAndGet() : 2;
                         yield Map.of("url", runnerUrl, "state", poll < 2 ? "loading" : "complete",
-                                "runtimeId", "a".repeat(32));
+                                "runtimeId", runnerUrl.startsWith("moz-extension://")
+                                        ? ExtensionPtk.PTK_FIREFOX_EXTENSION_ID : "a".repeat(32));
                     }
                     case "executeAsyncScript" -> response;
                     case "close" -> { closed.incrementAndGet(); yield null; }

@@ -103,7 +103,8 @@ final class PtkIastV2Contract {
                 integer(response.get("statusCode"), 100, 599);
                 string(response, "raw", 4096, false);
             }
-            if ("sink_storage_snapshot".equals(observation.get("acquisition").getAsString())) {
+            if (Set.of("sink_storage_snapshot", "callsite_entailed_read")
+                    .contains(observation.get("acquisition").getAsString())) {
                 require(
                         Set.of("info", "low").contains(finding.get("severity").getAsString())
                                 && "signal".equals(proof.get("mode").getAsString()));
@@ -179,7 +180,7 @@ final class PtkIastV2Contract {
     private static void validateObservation(JsonObject value) {
         fields(
                 value,
-                "schemaVersion,identityVersion,kind,operationId,acquisition,evidenceGrade,inheritedGrade,valueRelation,propagation,gradeAuthority,attackerControl,controlReason,site,completeness,sourceBinding",
+                "schemaVersion,identityVersion,kind,operationId,acquisition,evidenceGrade,inheritedGrade,valueRelation,propagation,gradeAuthority,attackerControl,controlReason,site,completeness,sourceBinding,readProof",
                 "schemaVersion,identityVersion,kind,operationId,acquisition,evidenceGrade,inheritedGrade,valueRelation,propagation,gradeAuthority,attackerControl,controlReason,site,completeness,sourceBinding");
         integer(value.get("schemaVersion"), 2, 2);
         integer(value.get("identityVersion"), 2, 2);
@@ -194,8 +195,11 @@ final class PtkIastV2Contract {
                         "instrumented_write",
                         "initial_snapshot",
                         "sink_storage_snapshot",
+                        "callsite_entailed_read",
                         "existing_other"));
-        require("page_observed_untrusted".equals(string(value, "gradeAuthority", 64, false)));
+        boolean callsiteProof = "callsite_entailed_read".equals(value.get("acquisition").getAsString());
+        require((callsiteProof ? "native_body_callsite_binding" : "page_observed_untrusted")
+                .equals(string(value, "gradeAuthority", 64, false)));
         enumValue(
                 value,
                 "attackerControl",
@@ -251,6 +255,28 @@ final class PtkIastV2Contract {
             integer(site.get("line"), 1, Integer.MAX_VALUE);
             integer(site.get("column"), 0, Integer.MAX_VALUE);
         }
+        if (callsiteProof) {
+            require(!policy && value.get("propagation").isJsonNull()
+                    && "unknown".equals(value.get("attackerControl").getAsString())
+                    && "complete_value_equality".equals(value.get("evidenceGrade").getAsString())
+                    && "complete_value_equality".equals(value.get("valueRelation").getAsString())
+                    && "code".equals(site.get("kind").getAsString())
+                    && "code.eval".equals(site.get("operation").getAsString()));
+            JsonObject binding = object(value.get("sourceBinding"));
+            String kind = string(binding, "kind", 80, false);
+            require(Set.of("localStorage", "sessionStorage").contains(kind)
+                    && string(binding, "key", 512, false).startsWith(kind + ":"));
+            JsonObject proof = object(value.get("readProof"));
+            fields(proof, "kind,bodySha256,readLine,readColumn,sinkLine,sinkColumn",
+                    "kind,bodySha256,readLine,readColumn,sinkLine,sinkColumn");
+            require("straight_line_classic".equals(string(proof, "kind", 80, false))
+                    && string(proof, "bodySha256", 64, false).matches("[a-f0-9]{64}"));
+            long readLine = integer(proof.get("readLine"), 1, Integer.MAX_VALUE);
+            integer(proof.get("readColumn"), 1, Integer.MAX_VALUE);
+            require(readLine < integer(proof.get("sinkLine"), 1, Integer.MAX_VALUE)
+                    && proof.get("sinkLine").equals(site.get("line"))
+                    && proof.get("sinkColumn").equals(site.get("column")));
+        } else require(!value.has("readProof"));
         JsonObject completeness = object(value.get("completeness"));
         fields(completeness, "status,reasons", "status,reasons");
         enumValue(completeness, "status", Set.of("complete", "limited"));
