@@ -1,5 +1,8 @@
 package org.zaproxy.addon.ptk.ascan;
 
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,8 +26,10 @@ import org.zaproxy.addon.client.spider.ClientSpiderOptions;
 import org.zaproxy.addon.client.spider.ScanOptions;
 import org.zaproxy.addon.commonlib.PolicyTag;
 import org.zaproxy.addon.ptk.ExtensionPtk;
+import org.zaproxy.addon.ptk.options.EngineRunLocation;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.model.Context;
+import org.zaproxy.zap.model.StructuralNode;
 import org.zaproxy.zap.users.User;
 
 /**
@@ -127,10 +132,14 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
             skipScan(hostProcess, "fail.skipped");
             return;
         }
+        if (!extPtk.hasEnabledRulesAt(EngineRunLocation.ACTIVE_SCAN_RULE)) {
+            LOGGER.debug("PTK active scan rule has no enabled active-phase rules");
+            return;
+        }
 
         HttpMessage baseMsg = getBaseMsg();
-        String url = resolveClientSpiderStartUrl(hostProcess, baseMsg);
-        if (url == null || url.isBlank()) {
+        String baseUrl = baseMessageUrl(baseMsg);
+        if (baseUrl == null) {
             skipScan(hostProcess, "fail.badurl");
             return;
         }
@@ -143,13 +152,14 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
             // The active rule can be launched without a named context even
             // though the official plan has one. Use only an unambiguous ZAP
             // context containing this seed; never infer a host-root scope.
-            List<Context> matching = Model.getSingleton().getSession().getContextsForUrl(url);
+            List<Context> matching = Model.getSingleton().getSession().getContextsForUrl(baseUrl);
             if (matching.size() > 1) {
                 skipScan(hostProcess, "fail.badurl");
                 return;
             }
             if (matching.size() == 1) context = matching.get(0);
         }
+        String url = resolveClientSpiderStartUrl(hostProcess, baseMsg, context);
         if (!isClientSpiderSeedInScope(url, context == null ? null : context::isInContext)) {
             skipScan(hostProcess, "fail.badurl");
             return;
@@ -254,14 +264,149 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
         }
     }
 
-    /** The active rule's public base message is the in-scope seed, not the host tree root. */
-    static String resolveClientSpiderStartUrl(HostProcess hostProcess, HttpMessage baseMsg) {
+    private static String baseMessageUrl(HttpMessage baseMsg) {
         if (baseMsg == null
                 || baseMsg.getRequestHeader() == null
                 || baseMsg.getRequestHeader().getURI() == null) {
             return null;
         }
         return baseMsg.getRequestHeader().getURI().toString();
+    }
+
+    /** The base message is a representative request, not necessarily the requested scan root. */
+    static String resolveClientSpiderStartUrl(
+            HostProcess hostProcess, HttpMessage baseMsg, Context context) {
+        String baseUrl = baseMessageUrl(baseMsg);
+        if (baseUrl == null || hostProcess == null || context == null) {
+            return baseUrl;
+        }
+        return resolveClientSpiderStartUrl(
+                baseUrl,
+                hostProcess.getStartNodes(),
+                context.getIncludeInContextRegexs(),
+                context::isInContext);
+    }
+
+    static String resolveClientSpiderStartUrl(
+            String baseUrl,
+            List<StructuralNode> startNodes,
+            List<String> includeRegexes,
+            Predicate<String> inContext) {
+        if (baseUrl == null || baseUrl.isBlank() || startNodes == null || startNodes.isEmpty()) {
+            return baseUrl;
+        }
+        List<String> requestedStartUrls = new ArrayList<>();
+        boolean contextWideStart = true;
+        for (StructuralNode startNode : startNodes) {
+            if (startNode == null || startNode.getURI() == null) {
+                return baseUrl;
+            }
+            String startUrl = startNode.getURI().toString();
+            if (!isHostRootUrl(startUrl)) {
+                contextWideStart = false;
+            }
+            if (!isHostRootUrl(startUrl)
+                    && inContext != null
+                    && inContext.test(startUrl)
+                    && isSameOriginPathAncestor(startUrl, baseUrl)) {
+                requestedStartUrls.add(startUrl);
+            }
+        }
+        if (requestedStartUrls.size() == 1) {
+            return requestedStartUrls.get(0);
+        }
+        if (!requestedStartUrls.isEmpty() || !contextWideStart) {
+            return baseUrl;
+        }
+        return resolveContextRootUrl(baseUrl, includeRegexes, inContext);
+    }
+
+    private static String resolveContextRootUrl(
+            String baseUrl, List<String> includeRegexes, Predicate<String> inContext) {
+        if (includeRegexes == null || includeRegexes.size() != 1 || inContext == null) {
+            return baseUrl;
+        }
+        String includeRegex = includeRegexes.get(0);
+        if (includeRegex == null || !includeRegex.endsWith(".*")) {
+            return baseUrl;
+        }
+        String rootUrl = includeRegex.substring(0, includeRegex.length() - 2);
+        URI root = parseHttpUrl(rootUrl);
+        if (root == null
+                || root.getRawUserInfo() != null
+                || root.getRawQuery() != null
+                || root.getRawFragment() != null
+                || root.getRawPath() == null
+                || "/".equals(root.getRawPath())
+                || !root.getRawPath().endsWith("/")
+                || hasRegexMetacharacters(rootUrl)
+                || !inContext.test(rootUrl)
+                || !isSameOriginPathAncestor(rootUrl, baseUrl)) {
+            return baseUrl;
+        }
+        return rootUrl;
+    }
+
+    private static boolean hasRegexMetacharacters(String url) {
+        for (char character :
+                new char[] {'\\', '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '^', '$'}) {
+            if (url.indexOf(character) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isHostRootUrl(String url) {
+        URI uri = parseHttpUrl(url);
+        return uri != null
+                && uri.getRawQuery() == null
+                && uri.getRawFragment() == null
+                && (uri.getRawPath() == null
+                        || uri.getRawPath().isEmpty()
+                        || "/".equals(uri.getRawPath()));
+    }
+
+    private static boolean isSameOriginPathAncestor(String requestedUrl, String baseUrl) {
+        URI requested = parseHttpUrl(requestedUrl);
+        URI base = parseHttpUrl(baseUrl);
+        if (requested == null
+                || base == null
+                || !requested.getScheme().equalsIgnoreCase(base.getScheme())
+                || !requested.getHost().equalsIgnoreCase(base.getHost())
+                || effectivePort(requested) != effectivePort(base)) {
+            return false;
+        }
+        String requestedPath = requested.getRawPath() == null ? "/" : requested.getRawPath();
+        String basePath = base.getRawPath() == null ? "/" : base.getRawPath();
+        return basePath.equals(requestedPath)
+                || basePath.startsWith(
+                        requestedPath.endsWith("/") ? requestedPath : requestedPath + "/");
+    }
+
+    private static URI parseHttpUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return null;
+        }
+        try {
+            URI uri = new URI(url);
+            if (("http".equalsIgnoreCase(uri.getScheme())
+                            || "https".equalsIgnoreCase(uri.getScheme()))
+                    && uri.getHost() != null
+                    && uri.equals(uri.normalize())) {
+                return uri;
+            }
+        } catch (URISyntaxException e) {
+            // A context regex is not necessarily a literal URL.
+        }
+        return null;
+    }
+
+    private static int effectivePort(URI uri) {
+        if (uri.getPort() >= 0) {
+            return uri.getPort();
+        }
+        return "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
     }
 
     static boolean isClientSpiderSeedInScope(String url, Predicate<String> inContext) {

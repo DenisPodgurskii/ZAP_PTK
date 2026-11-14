@@ -118,7 +118,8 @@ final class PtkVisitGate {
         Map<?, ?> lastSast = (Map<?, ?>) last.get("sast");
         return Objects.equals(firstIast.get("scanId"), lastIast.get("scanId"))
                 && Objects.equals(firstIast.get("documentId"), lastIast.get("documentId"))
-                && Objects.equals(firstSast.get("scanId"), lastSast.get("scanId"));
+                && Objects.equals(firstSast.get("scanId"), lastSast.get("scanId"))
+                && Objects.equals(first.get("dast"), last.get("dast"));
     }
 
     private static boolean sameRoot(Object first, Object last) {

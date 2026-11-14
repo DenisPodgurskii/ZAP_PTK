@@ -1817,6 +1817,19 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
     }
 
+    /** Whether this phase has at least one effective enabled PTK rule or attack. */
+    public boolean hasEnabledRulesAt(EngineRunLocation location) {
+        PtkParam param = getParam();
+        return location != null
+                && param != null
+                && !PtkConfigFilter.filter(getLoadedResources(), param, location).isEmpty();
+    }
+
+    static String modeForEffectiveConfig(Map<String, PtkModulesDefinition> config) {
+        // A global automation flag cannot make an empty phase a PTK participant.
+        return config != null && !config.isEmpty() ? "auto" : "manual";
+    }
+
     private String getCachedConfigJson(ClientCallBackImplementor.ClientCallBackContext cbContext) {
         PtkParam param = getParam();
         PtkResourcesLoader.LoadedPtkResources resources = getLoadedResources();
@@ -1847,21 +1860,14 @@ public class ExtensionPtk extends ExtensionAdaptor
             Map<String, PtkModulesDefinition> config =
                     PtkConfigFilter.filter(resources, param, currentContext);
 
-            // Auto mode if: deprecated flag set, active-scan-rule path, or engines are present
-            // for this context (covers the CLIENT_SPIDER run-location case).
-            boolean zapAutomationEnabled =
-                    param.isAutomatedScanningEnabled()
-                            || (cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
-                                    && param.isActiveScanRuleEnabled())
-                            || !config.isEmpty();
-            String mode = zapAutomationEnabled ? "auto" : "manual";
+            String mode = modeForEffectiveConfig(config);
 
             LOGGER.info(
                     "PTK mode {} auto={} active={} effective={}",
                     mode,
                     param.isAutomatedScanningEnabled(),
                     param.isActiveScanRuleEnabled(),
-                    zapAutomationEnabled);
+                    "auto".equals(mode));
             LOGGER.info(
                     "PTK config context={} initiator={} sast={} iast={} dast={}",
                     currentContext,
@@ -1934,12 +1940,13 @@ public class ExtensionPtk extends ExtensionAdaptor
             Map<String, Object> requestData,
             ClientCallBackImplementor.ClientCallBackContext cbContext) {
         String baseJson = getCachedConfigJson(cbContext);
-        Map<String, Object> seedConfig = buildZapHistorySeedConfig(requestData);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> response = GSON.fromJson(baseJson, Map.class);
+        boolean phaseAutomated = "auto".equals(getStringField(response, "mode"));
+        Map<String, Object> seedConfig = buildZapHistorySeedConfig(requestData, phaseAutomated);
         if (seedConfig.isEmpty()) {
             return baseJson;
         }
-        @SuppressWarnings("unchecked")
-        Map<String, Object> response = GSON.fromJson(baseJson, Map.class);
         if (response == null) {
             response = new LinkedHashMap<>();
         }
@@ -1947,7 +1954,8 @@ public class ExtensionPtk extends ExtensionAdaptor
         return GSON.toJson(response);
     }
 
-    private Map<String, Object> buildZapHistorySeedConfig(Map<String, Object> requestData) {
+    private Map<String, Object> buildZapHistorySeedConfig(
+            Map<String, Object> requestData, boolean phaseAutomated) {
         if (requestData == null || requestData.isEmpty()) {
             return Map.of();
         }
@@ -1966,7 +1974,9 @@ public class ExtensionPtk extends ExtensionAdaptor
         }
         LOGGER.debug(
                 "PTK /ptk/config returning {} ZAP history seed URLs scope={}", urls.size(), scope);
-        seedActiveClientSpiderTasksForPtkTarget(zapid, targetUrl, urls);
+        if (phaseAutomated) {
+            seedActiveClientSpiderTasksForPtkTarget(zapid, targetUrl, urls);
+        }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("zapHistorySeedUrls", urls);
         result.put("zapHistorySeedCount", urls.size());
@@ -2523,17 +2533,10 @@ public class ExtensionPtk extends ExtensionAdaptor
                 return Map.of("ok", false, "reason", "visit_prestart_owner_changed");
             }
             if (!Boolean.TRUE.equals(reply.get("ok"))) return reply;
-            Object enginesValue = reply.get("requiredEngines");
-            boolean dastOnly = enginesValue instanceof java.util.List<?> engines
-                    && engines.size() == 1 && "DAST".equals(engines.get(0));
-            boolean pageObservationReady = dastOnly
-                    ? Boolean.TRUE.equals(reply.get("captureReady"))
-                            && Boolean.FALSE.equals(reply.get("iastDocumentStart"))
-                    : Boolean.TRUE.equals(reply.get("iastDocumentStart"));
             if (!"visit_prestarted".equals(reply.get("kind"))
                     || !zapid.equals(reply.get("zapid"))
                     || !browserid.equals(reply.get("browserid"))
-                    || !pageObservationReady
+                    || !hasOwnedVisitPreparationProof(reply)
                     || !(reply.get("sessionId") instanceof String sessionId)
                     || sessionId.isBlank()) {
                 return Map.of("ok", false, "reason", "visit_prestart_receipt_invalid");
@@ -2547,6 +2550,21 @@ public class ExtensionPtk extends ExtensionAdaptor
             LOGGER.debug("PTK visit prestart unavailable: {}", error.getClass().getSimpleName());
             return Map.of("ok", false, "reason", "visit_prestart_unavailable");
         }
+    }
+
+    static boolean hasOwnedVisitPreparationProof(Map<String, Object> reply) {
+        Object enginesValue = reply.get("requiredEngines");
+        if (!(enginesValue instanceof java.util.List<?> engines) || engines.isEmpty()) {
+            return false;
+        }
+        if (engines.stream().anyMatch(engine -> !"DAST".equals(engine)
+                && !"IAST".equals(engine) && !"SAST".equals(engine))) {
+            return false;
+        }
+        return engines.contains("IAST")
+                ? Boolean.TRUE.equals(reply.get("iastDocumentStart"))
+                : Boolean.TRUE.equals(reply.get("captureReady"))
+                        && Boolean.FALSE.equals(reply.get("iastDocumentStart"));
     }
 
     Map<String, Object> requestOwnedVisitCheckpoint(
@@ -4976,24 +4994,8 @@ public class ExtensionPtk extends ExtensionAdaptor
                 }
                 configState = sessionState(zapid);
                 rememberBrowserId(zapid, browserid);
-                boolean zapAutomationEnabled =
-                        getParam().isAutomatedScanningEnabled()
-                                || (cbContext.initiator() == HttpSender.ACTIVE_SCANNER_INITIATOR
-                                        && getParam().isActiveScanRuleEnabled());
-                rememberConfigMode(zapid, zapAutomationEnabled);
                 markCallbackStart(zapid);
                 logBrowserEvidence(zapid, browserid, "config_callback", null, null);
-                if (zapid != null && contractCallbackLogged.add(zapid + ":config")) {
-                    logContractPhase(
-                            "callback_detected",
-                            zapid,
-                            browserid,
-                            Map.of(
-                                    "path",
-                                    "config",
-                                    "mode",
-                                    zapAutomationEnabled ? "automated" : "manual"));
-                }
                 // Only extensions that say they understand it are told to wait, older ones would
                 // treat a config without rules as manual mode and never start.
                 boolean supportsStartPending =
@@ -5017,13 +5019,28 @@ public class ExtensionPtk extends ExtensionAdaptor
                 msg.getResponseBody().setBody(configJson);
                 long finishedAt = System.currentTimeMillis();
                 Map<String, Object> configResponse = parseRequestBody(configJson);
+                String servedMode = getStringField(configResponse, "mode");
+                if (!startPending && ("auto".equals(servedMode) || "manual".equals(servedMode))) {
+                    rememberConfigMode(zapid, "auto".equals(servedMode));
+                }
+                if (zapid != null && contractCallbackLogged.add(zapid + ":config")) {
+                    logContractPhase(
+                            "callback_detected",
+                            zapid,
+                            browserid,
+                            Map.of(
+                                    "path",
+                                    "config",
+                                    "mode",
+                                    startPending ? "pending" : String.valueOf(servedMode)));
+                }
                 if (configState != null) {
                     configState.rememberResolvedDastAssignment(
                             browserid, PtkCloseContract.resolvedDastAssignment(configResponse));
                 }
                 Map<String, Object> configServedFields = new LinkedHashMap<>();
                 configServedFields.put("durationMs", finishedAt - startedAt);
-                configServedFields.put("automated", zapAutomationEnabled);
+                configServedFields.put("automated", "auto".equals(servedMode));
                 configServedFields.put("activeScanRule", getParam().isActiveScanRuleEnabled());
                 String targetUrl = getStringField(requestData, "targetUrl");
                 if (targetUrl != null && !targetUrl.isBlank()) {

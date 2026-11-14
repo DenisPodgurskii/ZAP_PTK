@@ -17,6 +17,7 @@ import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.model.PtkRule;
 import org.zaproxy.addon.ptk.model.ZapMappingDefinition;
+import org.zaproxy.addon.ptk.options.EngineRunLocation;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
@@ -92,6 +93,35 @@ class PtkConfigFilterTest {
         Map<String, PtkModulesDefinition> result = PtkConfigFilter.filter(resources, param);
 
         assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void emptyClientPhaseIsManualWhileSelectedIastStartsOnlyInActivePhase() {
+        PtkModulesDefinition iast = definition("IAST", module("m1", rule("r1")));
+        PtkResourcesLoader.LoadedPtkResources resources =
+                new PtkResourcesLoader.LoadedPtkResources(null, iast, null, null);
+        param.setAutomatedScanningEnabled(true);
+        param.setIastRunLocation(EngineRunLocation.ACTIVE_SCAN_RULE);
+
+        assertEquals(
+                "manual",
+                ExtensionPtk.modeForEffectiveConfig(
+                        PtkConfigFilter.filter(resources, param, EngineRunLocation.CLIENT_SPIDER)));
+        assertEquals(
+                "auto",
+                ExtensionPtk.modeForEffectiveConfig(
+                        PtkConfigFilter.filter(resources, param, EngineRunLocation.ACTIVE_SCAN_RULE)));
+
+        param.setEngineEnabled("IAST", false);
+        assertEquals(
+                "manual",
+                ExtensionPtk.modeForEffectiveConfig(
+                        PtkConfigFilter.filter(resources, param, EngineRunLocation.ACTIVE_SCAN_RULE)));
+        param.setRuleEnabled("IAST", "m1", "r1", true);
+        assertEquals(
+                "auto",
+                ExtensionPtk.modeForEffectiveConfig(
+                        PtkConfigFilter.filter(resources, param, EngineRunLocation.ACTIVE_SCAN_RULE)));
     }
 
     // --- module-level disabled ---

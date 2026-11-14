@@ -29,7 +29,7 @@ description = "Adds the OWASP PTK extension to browsers launched from ZAP."
 zapAddOn {
     addOnId.set("ptk")
     addOnName.set(if (diagnosticBuild) "OWASP PTK Diagnostic" else "OWASP PTK")
-    zapVersion.set("2.17.0")
+    zapVersion.set("2.18.0")
     addOnStatus.set(AddOnStatus.BETA)
 
     manifest {

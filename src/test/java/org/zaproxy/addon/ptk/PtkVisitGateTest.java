@@ -16,6 +16,55 @@ class PtkVisitGateTest {
             "publisher", Map.of("lastAckedBatchSeq", 3));
 
     @Test
+    void sastOnlyReceiptNeedsCaptureAndNoIastRegistration() {
+        Map<String, Object> valid = Map.of("requiredEngines", java.util.List.of("SAST"),
+                "captureReady", true, "iastDocumentStart", false);
+        assertTrue(ExtensionPtk.hasOwnedVisitPreparationProof(valid));
+        assertFalse(ExtensionPtk.hasOwnedVisitPreparationProof(Map.of(
+                "requiredEngines", java.util.List.of("SAST"),
+                "captureReady", false, "iastDocumentStart", false)));
+        assertFalse(ExtensionPtk.hasOwnedVisitPreparationProof(Map.of(
+                "requiredEngines", java.util.List.of("SAST"),
+                "captureReady", true, "iastDocumentStart", true)));
+        assertTrue(ExtensionPtk.hasOwnedVisitPreparationProof(Map.of(
+                "requiredEngines", java.util.List.of("DAST"),
+                "captureReady", true, "iastDocumentStart", false)));
+        assertTrue(ExtensionPtk.hasOwnedVisitPreparationProof(Map.of(
+                "requiredEngines", java.util.List.of("IAST"),
+                "captureReady", false, "iastDocumentStart", true)));
+        assertTrue(ExtensionPtk.hasOwnedVisitPreparationProof(Map.of(
+                "requiredEngines", java.util.List.of("DAST", "SAST"),
+                "captureReady", true, "iastDocumentStart", false)));
+        assertFalse(ExtensionPtk.hasOwnedVisitPreparationProof(Map.of(
+                "requiredEngines", java.util.List.of("DAST", "SAST"),
+                "captureReady", false, "iastDocumentStart", false)));
+        assertTrue(ExtensionPtk.hasOwnedVisitPreparationProof(Map.of(
+                "requiredEngines", java.util.List.of("DAST", "IAST", "SAST"),
+                "captureReady", false, "iastDocumentStart", true)));
+        assertFalse(ExtensionPtk.hasOwnedVisitPreparationProof(Map.of(
+                "requiredEngines", java.util.List.of("SAST", "foreign"),
+                "captureReady", true, "iastDocumentStart", false)));
+    }
+
+    @Test
+    void dastAndSastDepartureRequiresTheSameNamedDastScan() {
+        Map<String, Object> first = Map.of("root", CUT.get("root"),
+                "iast", Map.of("required", false), "sast", Map.of("scanId", "sast-1"),
+                "dast", Map.of("scanId", "dast-1"));
+        Map<String, Object> changed = Map.of("root", CUT.get("root"),
+                "iast", Map.of("required", false), "sast", Map.of("scanId", "sast-1"),
+                "dast", Map.of("scanId", "dast-2"));
+        AtomicReference<Map<String, Object>> observation = new AtomicReference<>(Map.of(
+                "ok", true, "kind", "observed_interval", "elapsedMs", 2500,
+                "cut", first));
+        AtomicReference<Map<String, Object>> departure = new AtomicReference<>(Map.of(
+                "ok", true, "kind", "departure_cut", "cut", changed));
+        PtkVisitGate gate = gate(observation, departure);
+        assertTrue(gate.observe().complete());
+        assertEquals("visit_departure_changed", gate.depart().reason());
+    }
+
+    @Test
     void stableObservationAndDepartureAreBothRequired() {
         AtomicReference<Map<String, Object>> observation = new AtomicReference<>(Map.of(
                 "ok", true, "kind", "observed_interval", "elapsedMs", 2500, "cut", CUT));

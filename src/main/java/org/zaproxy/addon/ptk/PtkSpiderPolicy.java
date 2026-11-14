@@ -12,6 +12,7 @@ import org.zaproxy.addon.client.spider.SpiderSessionPolicy;
 import org.zaproxy.addon.client.spider.SpiderSessionPolicyProvider;
 import org.zaproxy.addon.client.spider.SpiderVisitCoordinator;
 import org.zaproxy.addon.client.spider.VisitOutcome;
+import org.zaproxy.addon.ptk.options.EngineRunLocation;
 import org.zaproxy.zap.extension.selenium.SeleniumOptions;
 
 /** PTK-owned Client Spider policy; nonparticipants keep Client's ordinary browser policy. */
@@ -49,7 +50,8 @@ final class PtkSpiderPolicy {
                         selenium.getBrowserExtensions(), context.browserId());
         if (!eligible(ptk.getParam().isZapAutomationEnabled(), context.browserId(),
                 context.scanOptions().getExcludeExtensions().contains("ptk-latest"),
-                included, globallyEnabled)) {
+                included, globallyEnabled,
+                ptk.hasEnabledRulesAt(EngineRunLocation.CLIENT_SPIDER))) {
             return null;
         }
         if (!ExtensionPtk.isPtkVisitArtifactAvailable(context.browserId())
@@ -64,9 +66,10 @@ final class PtkSpiderPolicy {
     }
 
     static boolean eligible(boolean automation, String browserId, boolean excluded,
-            boolean included, boolean globallyEnabled) {
+            boolean included, boolean globallyEnabled, boolean clientPhaseRulesEnabled) {
+        // Client still crawls for active-phase engines when it has no PTK rules.
         return automation && ExtensionPtk.isSupportedVisitBrowserFamily(browserId) && !excluded
-                && (included || globallyEnabled);
+                && (included || globallyEnabled) && clientPhaseRulesEnabled;
     }
 
     static void applyCapabilities(MutableCapabilities capabilities) {
