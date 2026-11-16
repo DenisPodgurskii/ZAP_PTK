@@ -121,10 +121,25 @@ zap.sh -config ptk.useRecommendedDefaults=false \
         -config ptk.scanrules.SAST.dom-xss.no-inner-outer-html.enabled=true
 </pre>
 
-Run DAST in the Client Spider instead of the active scan rule:
+Run all selected PTK engines during one ordinary Client Spider pass:
 <pre>
-zap.sh -config ptk.engine.DAST.runLocation=CLIENT_SPIDER
+zap.sh -config ptk.useRecommendedDefaults=false \
+        -config ptk.engine.DAST.runLocation=CLIENT_SPIDER \
+        -config ptk.engine.SAST.runLocation=CLIENT_SPIDER \
+        -config ptk.engine.IAST.runLocation=CLIENT_SPIDER \
+        -config ptk.automatedScanning.enabled=false \
+        -config ptk.activescan.rule.enabled=true
 </pre>
+The Automation Framework plan must include a <code>spiderClient</code> job.
+Run location assigns an engine to a phase; it does not enable disabled engines or rules.
+Use <code>ptk.scanrules.<i>ENGINE</i>.enabled=false</code> to exclude an engine in custom mode.
+The PTK active scan rule skips its own browser crawl when no enabled engine is assigned to it;
+other ZAP active scan rules still run.
+<p>
+For a plan that only runs an active scan, explicitly assign each selected PTK engine to
+<code>ACTIVE_SCAN_RULE</code> instead. Engines assigned to <code>CLIENT_SPIDER</code>
+require the ordinary Client Spider job and do not automatically move to the active phase.
+These explicit settings do not change the default run locations listed above.
 
 Enable the PTK active scan rule:
 <pre>

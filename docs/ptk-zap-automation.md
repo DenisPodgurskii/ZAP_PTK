@@ -6,7 +6,28 @@ The important rule is simple: do not hide instability by changing scan strategy,
 
 For the full callback, progress, finding-publish, Client Spider, and browser-close lifecycle contract, see [ptk-zap-lifecycle-contract.md](ptk-zap-lifecycle-contract.md).
 
-## Standard Flow
+## One Ordinary Client Spider Pass
+
+To run all selected PTK engines during one ordinary Client Spider pass, set the engine locations explicitly:
+
+```text
+-config ptk.useRecommendedDefaults=false
+-config ptk.engine.DAST.runLocation=CLIENT_SPIDER
+-config ptk.engine.SAST.runLocation=CLIENT_SPIDER
+-config ptk.engine.IAST.runLocation=CLIENT_SPIDER
+-config ptk.automatedScanning.enabled=false
+-config ptk.activescan.rule.enabled=true
+```
+
+Use the normal Automation Framework `spiderClient` job. This is supported engine placement, independent of the deprecated automated-scanning mode. The plan sequence is `spider` → `spiderClient` → `passiveScan-wait` → `activeScan`. With all selected engines assigned to `CLIENT_SPIDER`, the PTK active rule skips its own second browser crawl; other ZAP active scan rules still execute.
+
+Location settings do not enable disabled rules. In custom mode, use `ptk.scanrules.ENGINE.enabled=false` for engines that should not participate; selected engines can be any nonempty combination of DAST, SAST and IAST. Per-module and per-rule overrides still follow the normal inheritance rules.
+
+This is an explicit configuration, not a change to existing defaults or saved preferences. Plans without an ordinary `spiderClient` job must assign selected engines to `ACTIVE_SCAN_RULE`; engines do not automatically move between phases. Mixed locations can cause separate PTK browser passes and need separate timing and coverage validation.
+
+Use ZAP-maintained Firing Range plans and scorers from `zapbot/zap-mgmt-scripts/scans/firingrange` for coverage comparisons. Preserve the official jobs, section scope, active rule `230000` and scorer. Record engine participation, imported URL/rule pairs, terminal state, publisher drainage and incomplete observations separately. A full official score does not prove exhaustive IAST observation.
+
+## Active Scan Rule Flow
 
 A normal active-scan-rule PTK/ZAP browser automation run should keep the ZAP exploration path intact:
 
@@ -17,7 +38,7 @@ A normal active-scan-rule PTK/ZAP browser automation run should keep the ZAP exp
 5. PTK publishes findings back to ZAP through the PTK callback endpoints.
 6. ZAP stores and reports the imported PTK alerts.
 
-The canonical Firing Range release-style plans live under `zap_plans/active_scan_rule`. Legacy `spiderClient` compatibility plans live under `zap_plans/spider_client`. The low-level release runner rejects mixed mode/plan families before ZAP starts, so active-scan-rule mode must use active-scan-rule plans and legacy automated-scanning mode must use spiderClient plans. Local runs may override browser id, browser count, or headed/headless mode for capacity testing, but that must be reported as a different test case.
+Historical local plan families under `zap_plans` are not the official Firing Range coverage oracle. A runner that conflates ordinary Client Spider engine placement with deprecated automated scanning must be updated or avoided for the ordinary-pass configuration. Local runs may select browser id and browser count, but those values must be reported with the result.
 
 Do not compare a diagnostic plan with fewer browsers, diagnostic-only jobs, or explicit URL lists as if it were the same release plan.
 
@@ -30,7 +51,7 @@ The default release mode enables the PTK active scan rule and disables deprecate
 -config ptk.automatedScanning.enabled=false
 ```
 
-For legacy `spiderClient` compatibility only, invert those flags:
+For the deprecated automated-scanning mode only, invert those flags. Ordinary Client Spider engine placement above uses the current active-scan-rule flags and does not require this legacy mode:
 
 ```text
 -config ptk.automatedScanning.enabled=true
