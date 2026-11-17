@@ -1305,6 +1305,10 @@ class ZapTransport {
                     zapid,
                     browserid: this.browserid
                 }
+                // Tells ZAP it can answer with startPending, with no config, to make PTK wait
+                if (options?.supportsStartPending !== false) {
+                    requestBody.supportsStartPending = true
+                }
                 const targetUrl = toNonEmptyString(options?.targetUrl)
                 if (targetUrl) {
                     requestBody.targetUrl = targetUrl

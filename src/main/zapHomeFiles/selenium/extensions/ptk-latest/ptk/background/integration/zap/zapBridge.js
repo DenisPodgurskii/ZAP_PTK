@@ -116,6 +116,12 @@ function createBatchId() {
     throw new Error('secure_random_unavailable')
 }
 
+// ZAP holds PTK until the browser is ready (e.g. authenticated) or the scan ends, so cap how long to
+// wait before proceeding regardless.
+const ZAP_START_PENDING_POLL_MS = 1000
+const ZAP_START_PENDING_MAX_POLL_MS = 10000
+const ZAP_START_PENDING_MAX_WAIT_MS = 240000
+
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -2733,7 +2739,28 @@ class ZapBridge {
 
     async confirmAndGetConfig(options = {}) {
         this._debugLog('[PTK ZAP] Fetching ZAP config...')
-        const config = await this.transport.fetchConfig(options)
+        let config = await this.transport.fetchConfig(options)
+        // ZAP answers startPending, with no config, while the browser is still being prepared
+        // (e.g. authenticating). Keep asking until it returns a config with the rules, so nothing
+        // starts before then. Older ZAP versions never answer this.
+        const waitStartedAt = Date.now()
+        while (
+            config?.startPending === true &&
+            config?.ptkConfigFetchFailed !== true &&
+            Date.now() - waitStartedAt < ZAP_START_PENDING_MAX_WAIT_MS
+        ) {
+            const retryAfterMs = Number(config?.retryAfterMs)
+            this._debugLog('[PTK ZAP] ZAP asked PTK to wait before starting; polling config')
+            await sleep(Number.isFinite(retryAfterMs) && retryAfterMs > 0
+                ? Math.min(retryAfterMs, ZAP_START_PENDING_MAX_POLL_MS)
+                : ZAP_START_PENDING_POLL_MS)
+            config = await this.transport.fetchConfig(options)
+        }
+        if (config?.startPending === true && config?.ptkConfigFetchFailed !== true) {
+            // Waited long enough, ask for the real config without allowing a delay
+            this._debugLog('[PTK ZAP] Gave up waiting for ZAP start signal; requesting config anyway')
+            config = await this.transport.fetchConfig({ ...options, supportsStartPending: false })
+        }
         this._debugLog('[PTK ZAP] ZAP config resolved:', config)
         return config
     }
