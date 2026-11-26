@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Stream;
 import org.zaproxy.addon.ptk.model.PtkAttack;
 import org.zaproxy.addon.ptk.model.PtkModule;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
@@ -63,6 +65,55 @@ public final class PtkConfigFilter {
         return out;
     }
 
+    /**
+     * Tells whether or not the given rule/attack is enabled: per "Use recommended defaults" if that
+     * is selected, otherwise per {@link PtkParam#isRuleEnabled}.
+     *
+     * @param engine the engine name, e.g. "DAST"
+     * @param moduleId the module id
+     * @param ruleId the rule or attack id
+     * @param param the param instance to query for enabled state
+     * @param resources the loaded definitions, for the recommended defaults
+     * @return {@code true} if enabled, {@code false} otherwise
+     */
+    public static boolean isRuleEnabled(
+            String engine,
+            String moduleId,
+            String ruleId,
+            PtkParam param,
+            PtkResourcesLoader.LoadedPtkResources resources) {
+        return param.isUseRecommendedDefaults()
+                ? resources.isRecommendedEnabled(engine, moduleId, ruleId)
+                : param.isRuleEnabled(engine, moduleId, ruleId);
+    }
+
+    /**
+     * Tells whether or not the given module is enabled, that is, whether at least one of its rules
+     * or attacks is enabled (see {@link #isRuleEnabled}), and so would be included by {@link
+     * #filter}.
+     *
+     * @param engine the engine name, e.g. "DAST"
+     * @param module the module
+     * @param param the param instance to query for enabled state
+     * @param resources the loaded definitions, for the recommended defaults
+     * @return {@code true} if enabled, {@code false} otherwise
+     */
+    public static boolean isModuleEnabled(
+            String engine,
+            PtkModule module,
+            PtkParam param,
+            PtkResourcesLoader.LoadedPtkResources resources) {
+        return Stream.concat(
+                        module.getRules() == null
+                                ? Stream.<String>empty()
+                                : module.getRules().stream().map(PtkRule::getId),
+                        module.getAttacks() == null
+                                ? Stream.<String>empty()
+                                : module.getAttacks().stream().map(PtkAttack::getId))
+                .filter(Objects::nonNull)
+                .anyMatch(id -> isRuleEnabled(engine, module.getId(), id, param, resources));
+    }
+
     private static void addFiltered(
             Map<String, PtkModulesDefinition> out,
             String key,
@@ -87,7 +138,6 @@ public final class PtkConfigFilter {
             PtkResourcesLoader.LoadedPtkResources resources) {
         if (def == null || def.getModules() == null) return null;
         String engine = def.getEngine();
-        boolean useRecommended = param.isUseRecommendedDefaults();
         List<PtkModule> filteredModules = new ArrayList<>();
         for (PtkModule mod : def.getModules()) {
             String moduleId = mod.getId();
@@ -95,10 +145,7 @@ public final class PtkConfigFilter {
             if (mod.getRules() != null) {
                 ruleList = new ArrayList<>();
                 for (PtkRule r : mod.getRules()) {
-                    boolean enabled =
-                            useRecommended
-                                    ? resources.isRecommendedEnabled(engine, moduleId, r.getId())
-                                    : param.isRuleEnabled(engine, moduleId, r.getId());
+                    boolean enabled = isRuleEnabled(engine, moduleId, r.getId(), param, resources);
                     if (r.getId() != null && enabled) {
                         ruleList.add(r);
                     }
@@ -108,10 +155,7 @@ public final class PtkConfigFilter {
             if (mod.getAttacks() != null) {
                 attackList = new ArrayList<>();
                 for (PtkAttack a : mod.getAttacks()) {
-                    boolean enabled =
-                            useRecommended
-                                    ? resources.isRecommendedEnabled(engine, moduleId, a.getId())
-                                    : param.isRuleEnabled(engine, moduleId, a.getId());
+                    boolean enabled = isRuleEnabled(engine, moduleId, a.getId(), param, resources);
                     if (a.getId() != null && enabled) {
                         attackList.add(a);
                     }

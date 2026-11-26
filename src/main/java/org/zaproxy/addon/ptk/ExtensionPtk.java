@@ -52,6 +52,8 @@ import org.parosproxy.paros.network.HttpSender;
 import org.zaproxy.addon.client.ClientCallBackImplementor;
 import org.zaproxy.addon.client.ClientCallBackUtils;
 import org.zaproxy.addon.client.ExtensionClientIntegration;
+import org.zaproxy.addon.commonlib.ExtensionCommonlib;
+import org.zaproxy.addon.ptk.gspm.GspmPtkRegistrar;
 import org.zaproxy.addon.ptk.model.PtkModulesDefinition;
 import org.zaproxy.addon.ptk.options.EngineRunLocation;
 import org.zaproxy.addon.ptk.options.PtkOptionsPanel;
@@ -742,7 +744,10 @@ public class ExtensionPtk extends ExtensionAdaptor
     }
 
     private static final List<Class<? extends Extension>> EXTENSION_DEPENDENCIES =
-            List.of(ExtensionClientIntegration.class, ExtensionSelenium.class);
+            List.of(
+                    ExtensionClientIntegration.class,
+                    ExtensionSelenium.class,
+                    ExtensionCommonlib.class);
     private static final List<Browser> PTK_CHROMIUM_BROWSERS =
             List.of(Browser.CHROME, Browser.CHROME_HEADLESS, Browser.EDGE, Browser.EDGE_HEADLESS);
     private static final List<Browser> PTK_FIREFOX_BROWSERS =
@@ -770,6 +775,7 @@ public class ExtensionPtk extends ExtensionAdaptor
     private final List<PtkDiagnosticExtension> diagnosticExtensions = new ArrayList<>();
     private final Object configCacheLock = new Object();
     private volatile PtkResourcesLoader.LoadedPtkResources cachedResources;
+    private GspmPtkRegistrar gspmRegistrar;
     private volatile String cachedConfigKey;
     private volatile String cachedConfigJson;
     private volatile int cachedInitiator;
@@ -1352,6 +1358,20 @@ public class ExtensionPtk extends ExtensionAdaptor
     }
 
     @Override
+    public void postInit() {
+        gspmRegistrar = new GspmPtkRegistrar(this::getLoadedResources, this::getParam, getAddOn());
+        try {
+            gspmRegistrar.register(
+                    Control.getSingleton()
+                            .getExtensionLoader()
+                            .getExtension(ExtensionCommonlib.class));
+        } catch (Exception e) {
+            // Showing the rules in GSPM is optional, it must not stop PTK from working.
+            LOGGER.warn("Failed to register the PTK rules with GSPM: {}", e.getMessage(), e);
+        }
+    }
+
+    @Override
     public void optionsChanged(OptionsParam optionsParam) {
         clearConfigCache();
     }
@@ -1386,6 +1406,12 @@ public class ExtensionPtk extends ExtensionAdaptor
 
     @Override
     public void unload() {
+        if (gspmRegistrar != null) {
+            gspmRegistrar.unregister(
+                    Control.getSingleton()
+                            .getExtensionLoader()
+                            .getExtension(ExtensionCommonlib.class));
+        }
         unloadDiagnosticExtensions();
         Control.getSingleton()
                 .getExtensionLoader()

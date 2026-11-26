@@ -3,6 +3,13 @@ All notable changes to this add-on will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+### Added
+- Show the PTK rules in the Global Scan Policy Manager (read-only for now).
+
+### Changed
+- Depend on commonlib 1.45.0 or later.
+
 ## 0.11.0 - 2026-11-18
 ### Added
 - Wait for authentication to finish before PTK starts, when the Client Spider is run as a user.

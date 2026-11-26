@@ -485,6 +485,19 @@ public final class PtkAlertBuilder {
         return meta != null ? meta.getRecommendation() : null;
     }
 
+    /**
+     * Returns the alert tags common to every alert raised by the given module: its OWASP Top 10
+     * tags and {@link #TAG_TOOL_PTK}.
+     *
+     * @param module the module
+     * @return the tags, never {@code null}
+     */
+    public static Map<String, String> getModuleTags(PtkModule module) {
+        Map<String, String> tags = owaspToZapTags(parseModuleMetadata(module.getMetadata()));
+        tags.put(TAG_TOOL_PTK, TAG_TOOL_PTK_URL);
+        return tags;
+    }
+
     static Map<String, String> owaspToZapTags(PtkModuleMetadata meta) {
         Map<String, String> tags = new LinkedHashMap<>();
         if (meta == null || meta.getOwasp() == null) {
