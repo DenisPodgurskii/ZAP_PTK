@@ -8,6 +8,7 @@
         {
           "moduleId": "sql_injection",
           "baseAlertId": 200000,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
 		  "recommended": false,
           "rules": {
             "sqlinjection_1": 1,
@@ -19,6 +20,7 @@
         {
           "moduleId": "os_command_injection",
           "baseAlertId": 200001,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
 		  "recommended": false,
           "rules": {
             "oscommand_inband_pipe_passwd": 1
@@ -27,6 +29,7 @@
         {
           "moduleId": "xss",
           "baseAlertId": 200002,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
 		  "recommended": false,
           "rules": {
             "xss_1": 1,
@@ -52,6 +55,7 @@
         {
           "moduleId": "angularjs_client_template_injection",
           "baseAlertId": 200021,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "angularjs_csti_reflected_1_0_1_to_1_1_5": 1,
             "angularjs_csti_expression_1_0_1_to_1_1_5": 2,
@@ -83,6 +87,7 @@
         {
           "moduleId": "jwt_injection",
           "baseAlertId": 200003,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "jwt_probe_no_both": 1,
             "jwt_probe_no_authz": 2,
@@ -98,6 +103,7 @@
         {
           "moduleId": "version_control_exposure",
           "baseAlertId": 200004,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
 		  "recommended": false,
           "rules": {
             "repo_1": 1,
@@ -108,6 +114,7 @@
         {
           "moduleId": "headers",
           "baseAlertId": 200005,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
 		  "recommended": false,
           "rules": {
             "header_csp_missing": 1,
@@ -138,6 +145,7 @@
         {
           "moduleId": "sensitive_data_exposure",
           "baseAlertId": 200006,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
 		  "recommended": false,
           "rules": {
             "credit_card_number": 1,
@@ -147,6 +155,7 @@
         {
           "moduleId": "spa_dom_xss",
           "baseAlertId": 200007,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "spa_dom_xss_default": 1
           }
@@ -154,6 +163,7 @@
         {
           "moduleId": "websocket_security",
           "baseAlertId": 200008,
+          "tags": ["POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "ws_1": 1
           }
@@ -161,6 +171,7 @@
         {
           "moduleId": "recon_sourcemaps_debug",
           "baseAlertId": 200009,
+          "tags": ["POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "recon_sourcemap_in_js": 1,
             "recon_sourcemap_reference_in_html": 2,
@@ -171,6 +182,7 @@
         {
           "moduleId": "recon_error_stacktraces",
           "baseAlertId": 200010,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
 		  "recommended": false,
           "rules": {
             "recon_node_stacktrace": 1,
@@ -184,6 +196,7 @@
         {
           "moduleId": "recon_client_config_secrets",
           "baseAlertId": 200011,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "recon_private_key_material": 1,
             "recon_aws_access_key_id": 2,
@@ -199,6 +212,7 @@
         {
           "moduleId": "recon_api_docs_specs",
           "baseAlertId": 200012,
+          "tags": ["POLICY_PENTEST"],
 		  "recommended": false,
           "rules": {
             "recon_swagger_ui": 1,
@@ -211,6 +225,7 @@
         {
           "moduleId": "recon_well_known_metadata",
           "baseAlertId": 200013,
+          "tags": ["POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "recon_security_txt": 1,
             "recon_oidc_well_known": 2,
@@ -221,6 +236,7 @@
         {
           "moduleId": "recon_tokens_in_url",
           "baseAlertId": 200014,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
           "rules": {
             "recon_access_token_param": 1,
             "recon_jwt_like_in_url": 2,
@@ -230,6 +246,7 @@
         {
           "moduleId": "recon_parameter_leads",
           "baseAlertId": 200015,
+          "tags": ["POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "recon_param_open_redirect": 1,
             "recon_param_ssrf": 2,
@@ -240,6 +257,7 @@
         {
           "moduleId": "recon_internal_hosts_env_hints",
           "baseAlertId": 200016,
+          "tags": ["POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "recon_internal_ip_leak": 1,
             "recon_localhost_leak": 2,
@@ -250,6 +268,7 @@
         {
           "moduleId": "recon_cors_posture",
           "baseAlertId": 200017,
+          "tags": ["POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "recon_cors_missing_vary_origin": 1,
             "recon_cors_permissive_methods": 2,
@@ -259,6 +278,7 @@
         {
           "moduleId": "recon_cache_privacy",
           "baseAlertId": 200018,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
 		  "recommended": false,
           "rules": {
             "recon_cache_public_with_set_cookie": 1
@@ -267,6 +287,7 @@
         {
           "moduleId": "recon_interesting_endpoints",
           "baseAlertId": 200019,
+          "tags": ["POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "recon_admin_paths": 1,
             "recon_debug_paths": 2,
@@ -282,6 +303,7 @@
         {
           "moduleId": "jsonp_callback_injection",
           "baseAlertId": 200024,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "jsonp_callback_1": 1
           }
@@ -289,6 +311,7 @@
         {
           "moduleId": "open_redirect",
           "baseAlertId": 200023,
+          "tags": ["TOOL_PTK_ZAP_DUP"],
           "rules": {
             "redir_1": 1,
             "redir_2": 2,
@@ -303,6 +326,7 @@
         {
           "moduleId": "iast_dom_xss",
           "baseAlertId": 210000,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "dom_inline_event_handler": 1,
             "dom_innerhtml_xss": 2,
@@ -315,6 +339,7 @@
         {
           "moduleId": "iast_dangerous_url_scheme_execution",
           "baseAlertId": 210003,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "href_javascript_url_execution": 1,
             "location_href_javascript_url_execution": 2,
@@ -336,6 +361,7 @@
         {
           "moduleId": "iast_js_execution",
           "baseAlertId": 210001,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "eval_js_execution": 1,
             "function_constructor_execution": 2,
@@ -345,6 +371,7 @@
         {
           "moduleId": "iast_open_redirect",
           "baseAlertId": 210002,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "window_open_redirect": 1,
             "navigation_api_redirect": 2
@@ -353,6 +380,7 @@
         {
           "moduleId": "iast_angularjs_expression_injection",
           "baseAlertId": 210009,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "angularjs_expression_function_constructor": 1,
             "angularjs_parse_from_form": 2,
@@ -364,6 +392,7 @@
         {
           "moduleId": "iast_postmessage_misuse",
           "baseAlertId": 210010,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "postmessage_star_origin_leak": 1,
             "postmessage_cross_origin_leak": 2
@@ -372,6 +401,7 @@
         {
           "moduleId": "iast_timer_js_execution",
           "baseAlertId": 210011,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "settimeout_string_execution": 1,
             "setinterval_string_execution": 2
@@ -380,6 +410,7 @@
         {
           "moduleId": "iast_iframe_navigation",
           "baseAlertId": 210012,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "iframe_src_redirect": 1,
             "iframe_srcdoc_xss": 2
@@ -388,6 +419,7 @@
         {
           "moduleId": "iast_client_http_exfiltration",
           "baseAlertId": 210013,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "fetch_url_exfiltration": 1,
             "fetch_headers_exfiltration": 2,
@@ -401,6 +433,7 @@
         {
           "moduleId": "iast_dom_link_manipulation",
           "baseAlertId": 210014,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "dom_attr_href_navigation": 1,
             "dom_attr_src_navigation": 2,
@@ -411,6 +444,7 @@
         {
           "moduleId": "iast_dom_url_navigation",
           "baseAlertId": 210015,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "location_href_redirect": 1,
             "location_assign_redirect": 2,
@@ -422,6 +456,7 @@
         {
           "moduleId": "iast_dom_parser_xss",
           "baseAlertId": 210016,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "domparser_parsefromstring_html_xss": 1,
             "range_contextual_fragment_xss": 2,
@@ -432,6 +467,7 @@
         {
           "moduleId": "iast_dom_xss_secondary_sources",
           "baseAlertId": 210017,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "dom_innerhtml_xss_secondary_sources": 1,
             "dom_outerhtml_xss_secondary_sources": 2,
@@ -445,6 +481,7 @@
         {
           "moduleId": "iast_route_controlled_navigation",
           "baseAlertId": 210004,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "route_replacestate_navigation": 1,
             "route_navigation_api_navigation": 2,
@@ -454,6 +491,7 @@
         {
           "moduleId": "iast_form_submission_hijack",
           "baseAlertId": 210005,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "form_action_hijack": 1,
             "form_formaction_hijack": 2
@@ -462,6 +500,7 @@
         {
           "moduleId": "iast_dangerous_form_scheme_execution",
           "baseAlertId": 210006,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "form_action_javascript_url_execution": 1,
             "form_formaction_javascript_url_execution": 2,
@@ -472,6 +511,7 @@
         {
           "moduleId": "iast_response_field_dom_reachability",
           "baseAlertId": 210007,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "response_dom_innerhtml_reachability": 1,
             "response_dom_document_write_reachability": 2,
@@ -487,6 +527,7 @@
         {
           "moduleId": "iast_prototype_pollution_impact",
           "baseAlertId": 210008,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "prototype_pollution_fetch_init": 1,
             "prototype_pollution_write": 2
@@ -495,6 +536,7 @@
         {
           "moduleId": "iast_storage_taint_to_exec",
           "baseAlertId": 210018,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "eval_storage_taint_execution": 1,
             "function_constructor_storage_taint_execution": 2,
@@ -506,6 +548,7 @@
         {
           "moduleId": "iast_source_scoped_open_redirect",
           "baseAlertId": 210019,
+          "tags": ["POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "location_href_redirect_sources": 1,
             "location_assign_redirect_sources": 2,
@@ -524,6 +567,7 @@
         {
           "moduleId": "dom-xss",
           "baseAlertId": 220000,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
 		  "recommended": false,
           "rules": {
             "no-inner-outer-html": 1,
@@ -544,6 +588,7 @@
         {
           "moduleId": "cookie-manipulation",
           "baseAlertId": 220001,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "no-document-cookie-assignment": 1,
             "cookie-manipulation-taint": 2
@@ -555,6 +600,7 @@
         {
           "moduleId": "open-redirection",
           "baseAlertId": 220002,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
 		  "recommended": false,
           "rules": {
             "no-open-primitive-usage": 1,
@@ -568,6 +614,7 @@
         {
           "moduleId": "javascript-injection",
           "baseAlertId": 220003,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
 		  "recommended": false,
           "rules": {
             "no-string-based-timers": 1,
@@ -583,6 +630,7 @@
         {
           "moduleId": "angularjs-expression-injection",
           "baseAlertId": 220004,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "angularjs-tainted-dollar-parse": 1,
             "angularjs-tainted-template-compile": 2,
@@ -595,6 +643,7 @@
         {
           "moduleId": "client-template-injection",
           "baseAlertId": 220005,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "dynamic-template-compilation": 1,
             "template-output-dom-injection": 2,
@@ -610,6 +659,7 @@
         {
           "moduleId": "network-destination-poisoning",
           "baseAlertId": 220006,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
 		  "recommended": false,
           "rules": {
             "sendbeacon-review": 1,
@@ -625,6 +675,7 @@
         {
           "moduleId": "client-script-loader-poisoning",
           "baseAlertId": 220007,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
 		  "recommended": false,
           "rules": {
             "jquery-getscript-review": 1,
@@ -643,6 +694,7 @@
         {
           "moduleId": "web-message",
           "baseAlertId": 220008,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "postmessage-wildcard-target": 1,
             "postmessage-missing-target": 2,
@@ -664,6 +716,7 @@
         {
           "moduleId": "link-manipulation",
           "baseAlertId": 220009,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "link-attribute-assignment": 1,
             "link-manipulation-taint": 2
@@ -675,6 +728,7 @@
         {
           "moduleId": "dom-data-manipulation",
           "baseAlertId": 220010,
+          "tags": ["POLICY_DEV_STD", "POLICY_DEV_FULL", "POLICY_QA_STD", "POLICY_QA_FULL", "POLICY_PENTEST"],
           "rules": {
             "dom-data-nav-taint": 1,
             "dom-data-htmldoc-taint": 2,

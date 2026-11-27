@@ -48,7 +48,9 @@ zapAddOn {
                 if (diagnosticBuild) {
                     register("automation")
                 }
-                register("commonlib")
+                register("commonlib") {
+                    version.set(">=1.45.0")
+                }
                 register("selenium")
                 register("client") {
                     version.set(">=0.28.0")
@@ -89,7 +91,7 @@ dependencies {
     if (diagnosticBuild) {
         zapAddOn("org.zaproxy.addon:automation:0.60.0")
     }
-    zapAddOn("org.zaproxy.addon:commonlib:1.40.0")
+    zapAddOn("org.zaproxy.addon:commonlib:1.45.0")
     zapAddOn("org.zaproxy.addon:client:0.28.0")
     zapAddOn("org.zaproxy.addon:selenium:15.49.0")
     compileOnly("org.projectlombok:lombok:1.18.34")
@@ -216,8 +218,9 @@ tasks.named("check") {
 
 tasks.register<JavaExec>("runPtkMappingCheck") {
     group = "verification"
-    description = "Runs the PTK↔ZAP mapping 1:1 check from the command line"
-    classpath = sourceSets["main"].runtimeClasspath
+    description = "Runs the PTK↔ZAP mapping 1:1 and policy tags check from the command line"
+    // Includes the compile classpath for commonlib (PolicyTag), provided by ZAP at runtime.
+    classpath = sourceSets["main"].runtimeClasspath + sourceSets["main"].compileClasspath
     mainClass.set("org.zaproxy.addon.ptk.PtkMappingCheck")
 }
 

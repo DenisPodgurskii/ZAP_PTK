@@ -1,5 +1,6 @@
 package org.zaproxy.addon.ptk.model;
 
+import java.util.List;
 import java.util.Map;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -31,4 +32,12 @@ public class ModuleRuleMapping {
      * {@link #recommended} value are needed. {@code null} means no overrides.
      */
     private Map<String, Boolean> recommendedRuleOverrides;
+
+    /**
+     * The alert tags of the module, added to all of its alerts and used by the Global Scan Policy
+     * Manager to select the module by tag, e.g. the ZAP policy tags ({@code POLICY_QA_STD}). Only
+     * the tag names, their values are those of the corresponding ZAP tags, if any. {@code null}
+     * means no tags.
+     */
+    private List<String> tags;
 }

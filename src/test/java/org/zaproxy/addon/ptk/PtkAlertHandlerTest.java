@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.zaproxy.addon.commonlib.CommonAlertTag;
+import org.zaproxy.addon.commonlib.PolicyTag;
 import org.zaproxy.addon.ptk.model.PtkFinding;
 import org.zaproxy.addon.ptk.model.PtkFindingBatch;
 import org.zaproxy.addon.ptk.model.PtkFindingLocation;
@@ -140,6 +141,23 @@ class PtkAlertHandlerTest {
                 PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT_URL,
                 tags.get(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT));
         assertNull(tags.get(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT));
+    }
+
+    @Test
+    void findingAlertIncludesTagsOfModuleFromMapping() {
+        assumeResourcesLoaded();
+        setMappingTags("DAST", "headers", List.of(PolicyTag.QA_STD.getTag()));
+        PtkFinding headersFinding =
+                loadBatch(DAST_EXAMPLE).getFindings().stream()
+                        .filter(f -> "headers".equals(f.getModuleId()))
+                        .findFirst()
+                        .orElseThrow();
+
+        Alert alert = PtkAlertBuilder.buildFromFinding(headersFinding, "DAST", mapper, resources);
+
+        assertNotNull(alert);
+        assertEquals("", alert.getTags().get(PolicyTag.QA_STD.getTag()));
+        assertTrue(alert.getTags().containsKey(PtkAlertBuilder.TAG_TOOL_PTK));
     }
 
     @Test
@@ -378,5 +396,15 @@ class PtkAlertHandlerTest {
     private void assumeResourcesLoaded() {
         Assumptions.assumeTrue(
                 mapper != null, "zap-mapping.json or module resources not available");
+    }
+
+    private void setMappingTags(String engine, String moduleId, List<String> tags) {
+        resources.getZapMapping().getEngines().stream()
+                .filter(e -> engine.equalsIgnoreCase(e.getEngine()))
+                .flatMap(e -> e.getModuleMappings().stream())
+                .filter(mm -> moduleId.equals(mm.getModuleId()))
+                .findFirst()
+                .orElseThrow()
+                .setTags(tags);
     }
 }

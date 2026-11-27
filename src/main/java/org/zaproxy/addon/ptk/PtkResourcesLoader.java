@@ -142,20 +142,41 @@ public class PtkResourcesLoader {
          * @return {@code true} if the rule should be active under recommended defaults
          */
         public boolean isRecommendedEnabled(String engine, String moduleId, String ruleId) {
-            if (zapMapping == null || zapMapping.getEngines() == null) return true;
+            ModuleRuleMapping mm = getModuleMapping(engine, moduleId);
+            if (mm == null) return true;
+            Map<String, Boolean> overrides = mm.getRecommendedRuleOverrides();
+            if (overrides != null && overrides.containsKey(ruleId)) {
+                return overrides.get(ruleId);
+            }
+            return mm.isRecommended();
+        }
+
+        /**
+         * Returns the alert tags of a module defined in the ZAP mapping.
+         *
+         * @param engine the engine name (e.g. "DAST", "SAST", "IAST")
+         * @param moduleId the module identifier
+         * @return the tag names, empty if the module has none or is not in the ZAP mapping
+         */
+        public List<String> getModuleTags(String engine, String moduleId) {
+            ModuleRuleMapping mm = getModuleMapping(engine, moduleId);
+            if (mm == null || mm.getTags() == null) return List.of();
+            return mm.getTags();
+        }
+
+        private ModuleRuleMapping getModuleMapping(String engine, String moduleId) {
+            if (engine == null
+                    || moduleId == null
+                    || zapMapping == null
+                    || zapMapping.getEngines() == null) return null;
             for (EngineMapping em : zapMapping.getEngines()) {
                 if (!engine.equalsIgnoreCase(em.getEngine()) || em.getModuleMappings() == null)
                     continue;
                 for (ModuleRuleMapping mm : em.getModuleMappings()) {
-                    if (!moduleId.equals(mm.getModuleId())) continue;
-                    Map<String, Boolean> overrides = mm.getRecommendedRuleOverrides();
-                    if (overrides != null && overrides.containsKey(ruleId)) {
-                        return overrides.get(ruleId);
-                    }
-                    return mm.isRecommended();
+                    if (moduleId.equals(mm.getModuleId())) return mm;
                 }
             }
-            return true;
+            return null;
         }
     }
 }

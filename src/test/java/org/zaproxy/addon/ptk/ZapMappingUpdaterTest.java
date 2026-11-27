@@ -1,7 +1,10 @@
 package org.zaproxy.addon.ptk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -99,6 +102,42 @@ class ZapMappingUpdaterTest {
         assertNotNull(m1);
         assertEquals(220000, m1.getBaseAlertId());
         assertEquals(Map.of("r1", 1), m1.getRules());
+    }
+
+    @Test
+    void merge_preservesRecommendedStateAndTags() {
+        ZapMappingDefinition existing = new ZapMappingDefinition();
+        EngineMapping em = engineWithModule("SAST", "m1", 220000, Map.of("r1", 1));
+        ModuleRuleMapping existingMapping = em.getModuleMappings().get(0);
+        existingMapping.setRecommended(false);
+        existingMapping.setRecommendedRuleOverrides(Map.of("r1", true));
+        existingMapping.setTags(List.of("POLICY_QA_STD", "POLICY_PENTEST"));
+        existing.setEngines(List.of(em));
+        PtkModulesDefinition def = new PtkModulesDefinition();
+        def.setEngine("SAST");
+        def.setModules(List.of(moduleWithRules("m1", List.of(rule("r1"), rule("r2")))));
+
+        ZapMappingDefinition out = ZapMappingUpdater.merge(existing, def, null, null);
+
+        ModuleRuleMapping m1 = findModule(out, "SAST", "m1");
+        assertNotNull(m1);
+        assertFalse(m1.isRecommended());
+        assertEquals(Map.of("r1", true), m1.getRecommendedRuleOverrides());
+        assertEquals(List.of("POLICY_QA_STD", "POLICY_PENTEST"), m1.getTags());
+    }
+
+    @Test
+    void merge_addsNewModuleWithoutTags() {
+        PtkModulesDefinition def = new PtkModulesDefinition();
+        def.setEngine("SAST");
+        def.setModules(List.of(moduleWithRules("m1", List.of(rule("r1")))));
+
+        ZapMappingDefinition out = ZapMappingUpdater.merge(null, def, null, null);
+
+        ModuleRuleMapping m1 = findModule(out, "SAST", "m1");
+        assertNotNull(m1);
+        assertNull(m1.getTags());
+        assertTrue(m1.isRecommended());
     }
 
     private static EngineMapping engineWithModule(

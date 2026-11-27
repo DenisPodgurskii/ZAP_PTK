@@ -69,6 +69,24 @@ public final class PtkAlertBuilder {
                             Collectors.toUnmodifiableMap(
                                     CommonAlertTag::getTag, CommonAlertTag::getValue));
 
+    /**
+     * Tag applied to the alerts of DAST modules which duplicate ZAP scan rules, set in
+     * zap-mapping.json.
+     */
+    public static final String TAG_TOOL_PTK_ZAP_DUP = "TOOL_PTK_ZAP_DUP";
+
+    /** URL for the TOOL_PTK_ZAP_DUP tag. */
+    public static final String TAG_TOOL_PTK_ZAP_DUP_URL =
+            "https://www.zaproxy.org/docs/desktop/addons/owasp-ptk/#tool_ptk_zap_dup";
+
+    /** The values of the known tags that can be set in zap-mapping.json. */
+    private static final Map<String, String> KNOWN_TAG_VALUES =
+            Stream.concat(
+                            Stream.of(CommonAlertTag.values())
+                                    .map(t -> Map.entry(t.getTag(), t.getValue())),
+                            Stream.of(Map.entry(TAG_TOOL_PTK_ZAP_DUP, TAG_TOOL_PTK_ZAP_DUP_URL)))
+                    .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
+
     private PtkAlertBuilder() {}
 
     /**
@@ -112,6 +130,7 @@ public final class PtkAlertBuilder {
         int cweId = parseFirstCwe(meta);
         Map<String, String> tags = owaspToZapTags(meta);
         tags.put(TAG_TOOL_PTK, TAG_TOOL_PTK_URL);
+        addMappingTags(tags, engine, moduleId, resources);
         addRecommendedDefaultTag(tags, engine, moduleId, ruleOrAttackId, resources);
 
         Alert.Builder builder =
@@ -182,6 +201,7 @@ public final class PtkAlertBuilder {
         int cweId = parseFirstCwe(meta);
         Map<String, String> tags = owaspToZapTags(meta);
         tags.put(TAG_TOOL_PTK, TAG_TOOL_PTK_URL);
+        addMappingTags(tags, engine, finding.getModuleId(), resources);
         String lookupId = finding.getRuleId() != null ? finding.getRuleId() : finding.getAttackId();
         addRecommendedDefaultTag(tags, engine, finding.getModuleId(), lookupId, resources);
 
@@ -483,6 +503,42 @@ public final class PtkAlertBuilder {
 
     private static String getRecommendation(PtkModuleMetadata meta) {
         return meta != null ? meta.getRecommendation() : null;
+    }
+
+    /**
+     * Returns the alert tags common to every alert raised by the given module: its OWASP Top 10
+     * tags, {@link #TAG_TOOL_PTK} and the tags defined for the module in the ZAP mapping.
+     *
+     * @param engine the engine name (SAST, IAST, DAST)
+     * @param module the module
+     * @param resources the loaded PTK resources, for the ZAP mapping; may be {@code null}
+     * @return the tags, never {@code null}
+     */
+    public static Map<String, String> getModuleTags(
+            String engine, PtkModule module, PtkResourcesLoader.LoadedPtkResources resources) {
+        Map<String, String> tags = owaspToZapTags(parseModuleMetadata(module.getMetadata()));
+        tags.put(TAG_TOOL_PTK, TAG_TOOL_PTK_URL);
+        addMappingTags(tags, engine, module.getId(), resources);
+        return tags;
+    }
+
+    /**
+     * Adds the tags defined for the module in the ZAP mapping, with the values of the corresponding
+     * {@link CommonAlertTag}s, or empty values (e.g. the ZAP policy tags).
+     */
+    private static void addMappingTags(
+            Map<String, String> tags,
+            String engine,
+            String moduleId,
+            PtkResourcesLoader.LoadedPtkResources resources) {
+        if (resources == null) {
+            return;
+        }
+        for (String tag : resources.getModuleTags(engine, moduleId)) {
+            if (tag != null && !tag.isBlank()) {
+                tags.putIfAbsent(tag, KNOWN_TAG_VALUES.getOrDefault(tag, ""));
+            }
+        }
     }
 
     static Map<String, String> owaspToZapTags(PtkModuleMetadata meta) {
