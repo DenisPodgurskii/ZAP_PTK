@@ -153,12 +153,18 @@ public final class ZapMappingUpdater {
         return result;
     }
 
-    /** Keeps existing baseAlertId and rule→subId; adds new rules with next available subIds. */
+    /**
+     * Keeps existing baseAlertId, rule→subId and the fields maintained by hand (recommended state
+     * and tags); adds new rules with next available subIds.
+     */
     private static ModuleRuleMapping mergeModuleRules(
             ModuleRuleMapping existing, PtkModule module) {
         ModuleRuleMapping out = new ModuleRuleMapping();
         out.setModuleId(existing.getModuleId());
         out.setBaseAlertId(existing.getBaseAlertId());
+        out.setRecommended(existing.isRecommended());
+        out.setRecommendedRuleOverrides(existing.getRecommendedRuleOverrides());
+        out.setTags(existing.getTags());
         Map<String, Integer> rules =
                 existing.getRules() != null
                         ? new LinkedHashMap<>(existing.getRules())

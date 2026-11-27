@@ -13,10 +13,12 @@ import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.core.scanner.Plugin.AlertThreshold;
+import org.zaproxy.addon.commonlib.PolicyTag;
 import org.zaproxy.addon.commonlib.gspm.GspmCategory;
 import org.zaproxy.addon.commonlib.gspm.GspmPhase;
 import org.zaproxy.addon.commonlib.gspm.GspmRegistry;
 import org.zaproxy.addon.commonlib.gspm.GspmRule;
+import org.zaproxy.addon.commonlib.gspm.GspmRuleSet;
 import org.zaproxy.addon.commonlib.gspm.GspmScanRuleRegistrar.RuleOwner;
 import org.zaproxy.addon.ptk.PtkAlertBuilder;
 import org.zaproxy.addon.ptk.PtkResourcesLoader;
@@ -102,12 +104,41 @@ class GspmPtkRegistrarTest {
 
         // Then
         assertEquals(module.getName(), rule.getName());
-        assertEquals(PtkAlertBuilder.getModuleTags(module), rule.getAlertTags());
-        assertEquals(
-                List.copyOf(PtkAlertBuilder.getModuleTags(module).keySet()),
-                List.copyOf(rule.getAlertTags().keySet()));
+        Map<String, String> moduleTags =
+                PtkAlertBuilder.getModuleTags(Engine.DAST.name(), module, resources);
+        assertEquals(moduleTags, rule.getAlertTags());
+        assertEquals(List.copyOf(moduleTags.keySet()), List.copyOf(rule.getAlertTags().keySet()));
         assertTrue(rule.getAlertTags().containsKey(PtkAlertBuilder.TAG_TOOL_PTK));
         assertNull(rule.getAttackStrength());
+    }
+
+    @Test
+    void shouldIncludeTagsOfModuleFromMapping() {
+        // Given
+        PtkModule module = Engine.IAST.getModules(resources).getModules().get(0);
+        moduleMapping(Engine.IAST, module).setTags(List.of(PolicyTag.QA_STD.getTag(), "CUSTOM"));
+
+        // When
+        GspmRule rule = ruleFor(Engine.IAST, module);
+
+        // Then
+        assertEquals("", rule.getAlertTags().get(PolicyTag.QA_STD.getTag()));
+        assertEquals("", rule.getAlertTags().get("CUSTOM"));
+        assertTrue(rule.getAlertTags().containsKey(PtkAlertBuilder.TAG_TOOL_PTK));
+    }
+
+    @Test
+    void shouldBeMatchedByRuleSetWithTagOfModuleFromMapping() {
+        // Given
+        PtkModule module = Engine.DAST.getModules(resources).getModules().get(0);
+        PtkModule otherModule = Engine.DAST.getModules(resources).getModules().get(1);
+        moduleMapping(Engine.DAST, module).setTags(List.of(PolicyTag.QA_STD.getTag()));
+        GspmRuleSet ruleSet = new GspmRuleSet();
+        ruleSet.setTags(List.of(PolicyTag.QA_STD.getTag()));
+
+        // When / Then
+        assertTrue(ruleSet.matches(ruleFor(Engine.DAST, module)));
+        assertFalse(ruleSet.matches(ruleFor(Engine.DAST, otherModule)));
     }
 
     @Test
@@ -226,6 +257,15 @@ class GspmPtkRegistrarTest {
     private PtkModule moduleWithRules(Engine engine) {
         return engine.getModules(resources).getModules().stream()
                 .filter(m -> m.getRules() != null && m.getRules().size() > 1)
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private ModuleRuleMapping moduleMapping(Engine engine, PtkModule module) {
+        return resources.getZapMapping().getEngines().stream()
+                .filter(e -> engine.name().equalsIgnoreCase(e.getEngine()))
+                .flatMap(e -> e.getModuleMappings().stream())
+                .filter(mm -> module.getId().equals(mm.getModuleId()))
                 .findFirst()
                 .orElseThrow();
     }

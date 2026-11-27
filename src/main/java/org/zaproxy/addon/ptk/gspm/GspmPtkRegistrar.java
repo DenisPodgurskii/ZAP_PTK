@@ -177,7 +177,15 @@ public class GspmPtkRegistrar {
                 LOGGER.debug("No ZAP alert id for PTK {} module {}", engine, module.getId());
                 continue;
             }
-            rules.add(new RuleOwner(new PtkGspmRule(id, engine, module, categories), null));
+            rules.add(
+                    new RuleOwner(
+                            new PtkGspmRule(
+                                    id,
+                                    engine,
+                                    module,
+                                    categories,
+                                    PtkAlertBuilder.getModuleTags(engine.name(), module, res)),
+                            null));
         }
         return rules;
     }
@@ -211,12 +219,17 @@ public class GspmPtkRegistrar {
         private final List<GspmCategory> categories;
         private final Map<String, String> alertTags;
 
-        PtkGspmRule(int id, Engine engine, PtkModule module, List<GspmCategory> categories) {
+        PtkGspmRule(
+                int id,
+                Engine engine,
+                PtkModule module,
+                List<GspmCategory> categories,
+                Map<String, String> alertTags) {
             this.id = id;
             this.engine = engine;
             this.module = module;
             this.categories = categories;
-            this.alertTags = Collections.unmodifiableMap(PtkAlertBuilder.getModuleTags(module));
+            this.alertTags = Collections.unmodifiableMap(alertTags);
         }
 
         @Override

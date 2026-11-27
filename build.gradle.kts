@@ -218,8 +218,9 @@ tasks.named("check") {
 
 tasks.register<JavaExec>("runPtkMappingCheck") {
     group = "verification"
-    description = "Runs the PTK↔ZAP mapping 1:1 check from the command line"
-    classpath = sourceSets["main"].runtimeClasspath
+    description = "Runs the PTK↔ZAP mapping 1:1 and policy tags check from the command line"
+    // Includes the compile classpath for commonlib (PolicyTag), provided by ZAP at runtime.
+    classpath = sourceSets["main"].runtimeClasspath + sourceSets["main"].compileClasspath
     mainClass.set("org.zaproxy.addon.ptk.PtkMappingCheck")
 }
 

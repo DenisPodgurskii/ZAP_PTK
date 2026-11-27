@@ -40,6 +40,15 @@ the <a href="ptk-options.html#userecommendeddefaults">recommended rule set</a> a
 </ul>
 These tags make it easy to filter for the alerts that PTK raises by default, as opposed to those only raised when
 non-default (custom) rules have been enabled - see <a href="ptk-options.html">OWASP PTK Options</a> for more details.
+<p>
+Alerts raised by DAST rules which duplicate ZAP's own scan rules are also tagged with:
+<ul>
+<li id="tool_ptk_zap_dup"><strong>TOOL_PTK_ZAP_DUP</strong> — added to alerts raised by DAST rules which find the same
+issues as ZAP scan rules, so that they can be filtered out. These rules do not have any of the ZAP scan policy tags.</li>
+</ul>
+<p>
+The other PTK rules are also tagged with the ZAP scan policy tags (e.g. POLICY_QA_STD), so that tag-based scan policies
+can select them.
 
 <p>
 You can enable and disable OWASP PTK and other browser extensions via the Selenium Options page.

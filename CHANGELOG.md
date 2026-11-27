@@ -6,9 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## Unreleased
 ### Added
 - Show the PTK rules in the Global Scan Policy Manager (read-only for now).
+- The PTK rules and their alerts, including the example alerts, are tagged with the ZAP scan policy
+  tags (e.g. POLICY_QA_STD), so that tag-based scan policies can select them.
+- The alerts of the DAST rules which find the same issues as ZAP scan rules are tagged with
+  TOOL_PTK_ZAP_DUP, so that they can be filtered out. These rules do not have the scan policy tags.
 
 ### Changed
 - Depend on commonlib 1.45.0 or later.
+- The PTK active scan rule no longer has the scan policy tags, the PTK rules have their own.
 
 ## 0.11.0 - 2026-11-18
 ### Added

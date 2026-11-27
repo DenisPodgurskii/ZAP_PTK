@@ -12,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.zaproxy.addon.commonlib.CommonAlertTag;
+import org.zaproxy.addon.commonlib.PolicyTag;
 
 /** Unit tests for {@link PtkExampleAlerts}: alert count and field verification. */
 class PtkExampleAlertsTest {
@@ -26,6 +27,64 @@ class PtkExampleAlertsTest {
         Assumptions.assumeTrue(
                 resources.getZapMapping() != null, "zap-mapping.json must be loadable");
         alerts = PtkExampleAlerts.getExampleAlerts(resources);
+    }
+
+    @Test
+    void exampleAlertsIncludeTagsOfModuleFromMapping() {
+        setMappingTags("SAST", "dom-xss", List.of(PolicyTag.QA_STD.getTag(), "CUSTOM"));
+
+        List<Alert> taggedAlerts = PtkExampleAlerts.getExampleAlerts(resources);
+
+        List<Alert> moduleAlerts =
+                taggedAlerts.stream().filter(a -> a.getPluginId() == 220000).toList();
+        assertFalse(moduleAlerts.isEmpty());
+        for (Alert alert : moduleAlerts) {
+            assertEquals("", alert.getTags().get(PolicyTag.QA_STD.getTag()));
+            assertEquals("", alert.getTags().get("CUSTOM"));
+            assertTrue(alert.getTags().containsKey(PtkAlertBuilder.TAG_TOOL_PTK));
+        }
+        assertTrue(
+                taggedAlerts.stream()
+                        .filter(a -> a.getPluginId() != 220000)
+                        .noneMatch(a -> a.getTags().containsKey("CUSTOM")));
+    }
+
+    @Test
+    void exampleAlertsUseValueOfCommonTagFromMapping() {
+        String tag = CommonAlertTag.WSTG_V42_INPV_01_REFLECTED_XSS.getTag();
+        setMappingTags("SAST", "dom-xss", List.of(tag));
+
+        Alert alert =
+                PtkExampleAlerts.getExampleAlerts(resources).stream()
+                        .filter(a -> a.getPluginId() == 220000)
+                        .findFirst()
+                        .orElseThrow();
+
+        assertEquals(
+                CommonAlertTag.WSTG_V42_INPV_01_REFLECTED_XSS.getValue(), alert.getTags().get(tag));
+    }
+
+    @Test
+    void exampleAlertsUseUrlOfZapDupTag() {
+        Alert alert =
+                alerts.stream().filter(a -> a.getPluginId() == 200000).findFirst().orElseThrow();
+
+        assertEquals(
+                PtkAlertBuilder.TAG_TOOL_PTK_ZAP_DUP_URL,
+                alert.getTags().get(PtkAlertBuilder.TAG_TOOL_PTK_ZAP_DUP));
+        assertTrue(alert.getTags().keySet().stream().noneMatch(t -> t.startsWith("POLICY_")));
+    }
+
+    @Test
+    void domXssExampleAlertsAreNotTaggedAsZapDups() {
+        assertTrue(
+                alerts.stream()
+                        .filter(a -> a.getPluginId() == 200007)
+                        .allMatch(
+                                a ->
+                                        !a.getTags()
+                                                .containsKey(
+                                                        PtkAlertBuilder.TAG_TOOL_PTK_ZAP_DUP)));
     }
 
     @Test
@@ -223,5 +282,15 @@ class PtkExampleAlertsTest {
                 PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT_URL,
                 tags.get(PtkAlertBuilder.TAG_TOOL_PTK_ACTIVE_DEFAULT));
         assertFalse(tags.containsKey(PtkAlertBuilder.TAG_TOOL_PTK_PASSIVE_DEFAULT));
+    }
+
+    private void setMappingTags(String engine, String moduleId, List<String> tags) {
+        resources.getZapMapping().getEngines().stream()
+                .filter(e -> engine.equalsIgnoreCase(e.getEngine()))
+                .flatMap(e -> e.getModuleMappings().stream())
+                .filter(mm -> moduleId.equals(mm.getModuleId()))
+                .findFirst()
+                .orElseThrow()
+                .setTags(tags);
     }
 }
