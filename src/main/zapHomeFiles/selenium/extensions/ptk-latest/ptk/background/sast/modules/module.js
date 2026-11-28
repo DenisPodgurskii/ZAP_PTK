@@ -63,7 +63,13 @@ function _applySinkGuard(kind, node) {
   if (kind === "script_text") return _guardScriptText(node);
   if (kind === "exclude_location") return _guardExcludeLocation(node);
   if (kind === "dom_selector") return !!isDomSelectorCall(node);
-  if (kind === "event_handler_string") return !!getEventHandlerSink(node);
+  // Taint rules must register identifier/member payloads as possible sinks so
+  // graph provenance can decide whether they are attacker controlled. Pattern
+  // rules use the stricter default and only report values that are provably
+  // strings, avoiding ordinary callback assignments such as el.onload = fn.
+  if (kind === "event_handler_string") {
+    return !!getEventHandlerSink(node, { allowAmbiguousValue: true });
+  }
   return true;
 }
 
@@ -258,7 +264,12 @@ function compileSinkMatchers(sinks, catalogs) {
       const match = compilePattern(p);
       return { pattern: p, match };
     });
-    const guardKind = (overlay && overlay.guard) || (cat && cat.guard) || null;
+    // `href` on Location is a navigation sink, not a displayed-link sink.
+    // Navigation analysis models Location independently. Keeping it in the
+    // generic href matcher duplicates the same operation as link manipulation
+    // and overstates one browser operation as two vulnerability classes.
+    const implicitGuard = id === "link:anchor_href_assign" ? "exclude_location" : null;
+    const guardKind = (overlay && overlay.guard) || (cat && cat.guard) || implicitGuard;
     const sinkMeta = Object.assign({}, cat || {});
     sinkMeta.context = _inferSinkContext(id, cat);
     sinkMeta.criticality = sinkMeta.criticality || _inferSinkCriticality(sinkMeta.context);

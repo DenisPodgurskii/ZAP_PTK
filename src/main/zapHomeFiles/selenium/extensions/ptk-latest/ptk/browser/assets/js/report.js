@@ -18,7 +18,8 @@ import { renderEvidencePackageDetailHtml } from "./dastBugBountyWorkspace.js"
 import { escapeUiText, renderDataTableText, renderPreformattedJson } from "./safeUiText.js"
 import { escapeMarkdownCell, escapeMarkdownText, stripHtmlTags } from "./report/textEncoding.js"
 import {
-    countDastPresentationAttacks,
+    countDastExecutedAttacks,
+    groupDastReconFindings,
     isIastReportFinding,
     partitionReportFindings,
     resolveReportEngineResult,
@@ -87,7 +88,7 @@ const exportModel = {
         sast: [],
         sca: []
     },
-    discoveries: { sast: [] },
+    discoveries: { sast: [], dast: [] },
     summary: {
         byEngine: {},
         bySeverity: {}
@@ -132,7 +133,7 @@ function initExportModel(reportType) {
         sast: [],
         sca: []
     }
-    exportModel.discoveries = { sast: [] }
+    exportModel.discoveries = { sast: [], dast: [] }
     exportModel.summary = { byEngine: {}, bySeverity: {} }
     exportModel.scanStats = {
         urlsSpidered: 0,
@@ -1000,6 +1001,7 @@ function getFilteredExportModel() {
             sca: []
         },
         discoveries: {
+            dast: Array.isArray(exportModel.discoveries?.dast) ? exportModel.discoveries.dast.slice() : [],
             sast: Array.isArray(exportModel.discoveries?.sast) ? exportModel.discoveries.sast.slice() : []
         },
         summary: {
@@ -1060,6 +1062,7 @@ function buildReportModel(sourceModel, options = {}) {
         },
         sections: { dast: [], iast: [], sast: [], sca: [] },
         discoveries: {
+            dast: [],
             sast: Array.isArray(sourceModel.discoveries?.sast) ? sourceModel.discoveries.sast : []
         },
         findings: [],
@@ -1118,14 +1121,15 @@ function buildReportModel(sourceModel, options = {}) {
         { id: "dast", prefix: "DAST" },
         { id: "iast", prefix: "IAST" },
         { id: "sast", prefix: "SAST" },
-        { id: "sca", prefix: "SCA" }
+        { id: "sca", prefix: "SCA" },
+        { id: "dast", prefix: "DAST-RECON", discovery: true }
     ]
 
     const byEngine = {}
     const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
 
     sectionMap.forEach(section => {
-        const raw = sourceModel.sections?.[section.id] || []
+        const raw = (section.discovery ? sourceModel.discoveries?.dast : sourceModel.sections?.[section.id]) || []
         const sorted = raw.slice().sort((a, b) => severityRank(a?.severity) - severityRank(b?.severity))
         const mapped = sorted.map((finding, index) => {
             const confidence = Number.isFinite(finding?.confidence) ? finding.confidence : null
@@ -1152,6 +1156,19 @@ function buildReportModel(sourceModel, options = {}) {
                 }
             }
         })
+        if (section.discovery) {
+            model.discoveries.dast = mapped.map(item => ({
+                ...item,
+                summary: item.description,
+                details: [
+                    item.recommendation,
+                    item.evidence.requestSnippet,
+                    item.evidence.responseSnippet,
+                    item.evidence.notes
+                ].filter(Boolean)
+            }))
+            return
+        }
         model.sections[section.id] = mapped
         model.findings = model.findings.concat(mapped)
         if (mapped.length) byEngine[section.prefix] = mapped.length
@@ -1169,6 +1186,7 @@ function hasExportData() {
     if (hasBugBountyReportData()) return true
     if (exportModel.findings.length) return true
     if ((exportModel.discoveries?.sast || []).length) return true
+    if ((exportModel.discoveries?.dast || []).length) return true
     const dashboard = exportModel.dashboard || {}
     return Object.values(dashboard).some(list => Array.isArray(list) && list.length)
 }
@@ -2173,16 +2191,17 @@ function buildMarkdownFromExportModel(model) {
             })
         })
 
-        const discoveryItems = Array.isArray(model.discoveries?.sast) ? model.discoveries.sast : []
+        ;[['sast', 'SAST Discovery'], ['dast', 'DAST Reconnaissance']].forEach(([engine, heading]) => {
+        const discoveryItems = Array.isArray(model.discoveries?.[engine]) ? model.discoveries[engine] : []
         if (discoveryItems.length) {
-            push(`## SAST Discovery`)
+            push(`## ${heading}`)
             push(``)
             discoveryItems.forEach(item => {
                 push(`### ${escapeMarkdownText(item.title || "Discovery")}`)
                 if (item.file || item.location) {
                     const locationLabel = [
                         item.file ? `File: ${escapeMarkdownText(item.file)}` : "",
-                        item.location ? `Location: ${escapeMarkdownText(formatRange(item.location))}` : ""
+                        item.location ? `Location: ${escapeMarkdownText(engine === 'dast' ? item.location.url || '' : formatRange(item.location))}` : ""
                     ].filter(Boolean).join(" | ")
                     if (locationLabel) {
                         push(locationLabel)
@@ -2205,6 +2224,7 @@ function buildMarkdownFromExportModel(model) {
                 push(``)
             })
         }
+        })
 
         // Methodology & Scope for technical reports too (footer)
         push(``)
@@ -2827,9 +2847,10 @@ function buildPdfFromExportModel(model) {
         })
     })
 
-    const discoveryItems = Array.isArray(model.discoveries?.sast) ? model.discoveries.sast : []
+    ;[['sast', 'SAST Discovery'], ['dast', 'DAST Reconnaissance']].forEach(([engine, heading]) => {
+    const discoveryItems = Array.isArray(model.discoveries?.[engine]) ? model.discoveries[engine] : []
     if (discoveryItems.length) {
-        addSectionTitle("SAST Discovery")
+        addSectionTitle(heading)
         discoveryItems.forEach(item => {
             ensureSpace(100)
             setBody(doc, pdfTheme)
@@ -2841,7 +2862,7 @@ function buildPdfFromExportModel(model) {
 
             const metaLine = [
                 item.file ? `File: ${item.file}` : "",
-                item.location ? `Location: ${formatRange(item.location)}` : ""
+                item.location ? `Location: ${engine === 'dast' ? item.location.url || '' : formatRange(item.location)}` : ""
             ].filter(Boolean).join(" | ")
             if (metaLine) {
                 doc.setFont("helvetica", "normal")
@@ -2887,6 +2908,7 @@ function buildPdfFromExportModel(model) {
             cursorY += pdfTheme.spacing.md
         })
     }
+    })
 
     cursorY += pdfTheme.spacing.lg
     ensureSpace(80)
@@ -5153,9 +5175,14 @@ jQuery(function () {
     // -- R-Attacker -- //
 
     function generateRattacker(result) {
+        $('#dast_recon_content').empty()
+        $('#dast_recon_section').hide()
+        $('#dast_report_recon_count').text(0)
+        replaceSectionDiscoveries("dast", [])
         const scanResult = result?.scanResult
         if (!scanResult) {
             replaceSectionFindings("dast", [])
+            replaceSectionDiscoveries("dast", [])
             markSectionReady("rattacker")
             return
         }
@@ -5166,8 +5193,9 @@ jQuery(function () {
         const normalizedFindings = Array.isArray(vm.findings) ? vm.findings : []
         const partitionedFindings = partitionReportFindings('DAST', normalizedFindings)
         const findings = partitionedFindings.findings
+        const reconGroups = groupDastReconFindings(vm, partitionedFindings.discoveries)
         const legacyItems = Array.isArray(scanResult.items) ? scanResult.items : []
-        if (!findings.length && !legacyItems.length) {
+        if (!normalizedFindings.length && !legacyItems.length) {
             $('.loader.rattacker').hide()
             replaceSectionFindings("dast", [])
             markSectionReady("rattacker")
@@ -5177,11 +5205,23 @@ jQuery(function () {
         $('#rattacker_report').show()
         const $content = $("#rattacker_content")
         $content.html("")
+        const $reconContent = $('#dast_recon_content').empty()
+        $('#dast_recon_section').toggle(reconGroups.length > 0)
+        $('#dast_report_recon_count').text(reconGroups.length)
+        reconGroups.forEach((group) => {
+            const title = group[0]?.ruleName || group[0]?.ruleId || 'Reconnaissance'
+            $reconContent.append(`<h4>${ptk_utils.escapeHtml(title)} (${group.length} observations)</h4>`)
+            group.forEach((finding) => {
+                const legacy = mapDastFindingToLegacy(finding, vm)
+                $reconContent.append(bindReportItem(legacy.info, legacy.original))
+            })
+        })
+        replaceSectionDiscoveries("dast", partitionedFindings.discoveries.map(finding => buildExportFindingFromNormalized(finding, vm)))
 
         const severityLevels = ["critical", "high", "medium", "low", "info"]
         const matchesSeverity = (value, level) => String(value || "").toLowerCase() === level
         let exportFindings = []
-        if (findings.length) {
+        if (normalizedFindings.length) {
             severityLevels.forEach(level => {
                 findings
                     .filter(f => matchesSeverity(f.severity, level))
@@ -5243,7 +5283,7 @@ jQuery(function () {
         }
 
         bindCanonicalSectionStats('#rattacker_report', exportFindings, {
-            attacksCount: countDastPresentationAttacks(vm)
+            attacksCount: countDastExecutedAttacks(vm)
         })
         $('.loader.rattacker').hide()
 

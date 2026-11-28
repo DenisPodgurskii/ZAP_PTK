@@ -1,8 +1,10 @@
 package org.zaproxy.addon.ptk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
@@ -11,11 +13,25 @@ import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import org.apache.commons.httpclient.URI;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.openqa.selenium.remote.RemoteWebDriver;
+import org.openqa.selenium.remote.SessionId;
+import org.parosproxy.paros.network.HttpMessage;
+import org.parosproxy.paros.network.HttpSender;
+import org.zaproxy.addon.client.ClientCallBackUtils;
+import org.zaproxy.zap.extension.selenium.SeleniumScriptUtils;
 
 /** Smoke-level tests for the PTK browser close contract. */
 @SuppressWarnings("auxiliaryclass")
@@ -594,8 +610,178 @@ class ExtensionPtkCloseContractTest {
                         state.snapshot(), "session-1", "browser-1", 62_000L));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"sast", "iast"})
+    void passiveOnlyControlPollWaitsForBrowserOwnerClose(String engine) throws Exception {
+        ExtensionPtk extension = new ExtensionPtk();
+        String zapid = "zap-control-" + engine;
+        PtkZapSessionState state = new PtkZapSessionState(zapid);
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("mode", "auto");
+        config.put("sast", Map.of());
+        config.put("iast", Map.of());
+        config.put("dast", Map.of());
+        config.put(engine, Map.of("modules", List.of("fixture")));
+        int initiator =
+                "sast".equals(engine)
+                        ? HttpSender.SPIDER_INITIATOR
+                        : HttpSender.ACTIVE_SCANNER_INITIATOR;
+        state.rememberPassiveOnlyConfig(
+                PtkCloseContract.isPassiveOnlyAutoConfig(config, initiator));
+        state.recordProgress(
+                "browser-1", "session-1", 99, "running", "findings=74", false, 2, true, 24, 1L);
+        sessionStateByZapId(extension).put(zapid, state);
+        Map<String, Object> poll =
+                Map.of("zapid", zapid, "browserid", "browser-1", "sessionId", "session-1");
+
+        assertEquals(false, invokeControlPoll(extension, poll).get("closeRequested"));
+        assertNull(state.snapshot().closeRequest());
+        assertNull(closeRequestIdByZapId(extension).get(zapid));
+        var later =
+                state.recordProgress(
+                        "browser-1",
+                        "session-1",
+                        99,
+                        "running",
+                        "findings=75",
+                        false,
+                        2,
+                        true,
+                        25,
+                        System.currentTimeMillis());
+        assertTrue(later.progressChanged());
+        assertEquals(false, invokeControlPoll(extension, poll).get("closeRequested"));
+
+        PtkCloseRequestState request =
+                state.ensureCloseRequest(
+                        "owner_browser_close_requested", System.currentTimeMillis());
+        assertEquals(request.id(), invokeControlPoll(extension, poll).get("closeRequestId"));
+    }
+
     @Test
-    void controlPollCreatesCloseRequestForStaleRunningSession() throws Exception {
+    void passiveOnlyCloseScopeUsesTheDeliveredEngineConfigAndRejectsMixedOwners() {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("mode", "auto");
+        config.put("sast", Map.of());
+        config.put("iast", Map.of("modules", List.of("fixture")));
+        config.put("dast", Map.of());
+        int active = HttpSender.ACTIVE_SCANNER_INITIATOR;
+        assertTrue(PtkCloseContract.isPassiveOnlyAutoConfig(config, HttpSender.SPIDER_INITIATOR));
+        assertFalse(PtkCloseContract.isPassiveOnlyAutoConfig(config, -1));
+
+        PtkZapSessionState state = new PtkZapSessionState("zap-config-scope");
+        state.rememberPassiveOnlyConfig(PtkCloseContract.isPassiveOnlyAutoConfig(config, active));
+        assertTrue(state.hasPassiveOnlyConfig());
+        config.put("dast", Map.of("modules", List.of("fixture")));
+        assertFalse(PtkCloseContract.isPassiveOnlyAutoConfig(config, active));
+        state.rememberPassiveOnlyConfig(PtkCloseContract.isPassiveOnlyAutoConfig(config, active));
+        config.put("dast", Map.of());
+        state.rememberPassiveOnlyConfig(PtkCloseContract.isPassiveOnlyAutoConfig(config, active));
+        assertFalse(state.hasPassiveOnlyConfig());
+        config.put("sca", Map.of("modules", List.of("fixture")));
+        assertFalse(PtkCloseContract.isPassiveOnlyAutoConfig(config, active));
+        config.remove("sca");
+        config.remove("iast");
+        assertFalse(PtkCloseContract.isPassiveOnlyAutoConfig(config, active));
+    }
+
+    @Test
+    void mixedDastStopHasItsOwnReceiptAndDoesNotAuthorizeClose() throws Exception {
+        ExtensionPtk extension = new ExtensionPtk();
+        PtkZapSessionState state = new PtkZapSessionState("zap-mixed");
+        Map<String, Object> config =
+                Map.of(
+                        "mode",
+                        "auto",
+                        "sast",
+                        Map.of(),
+                        "iast",
+                        Map.of("modules", List.of("iast")),
+                        "dast",
+                        Map.of("modules", List.of("dast")));
+        assertFalse(
+                PtkCloseContract.isMixedIastDastAutoConfig(config, HttpSender.SPIDER_INITIATOR));
+        state.rememberMixedIastDastConfig(
+                PtkCloseContract.isMixedIastDastAutoConfig(
+                        config, HttpSender.ACTIVE_SCANNER_INITIATOR),
+                "browser-1");
+        state.recordProgress(
+                "browser-1", "session-1", 99, "running", "idle", false, 2, true, 24, 1L);
+        sessionStateByZapId(extension).put("zap-mixed", state);
+        Map<String, Object> poll =
+                new LinkedHashMap<>(
+                        Map.of(
+                                "zapid",
+                                "zap-mixed",
+                                "browserid",
+                                "browser-1",
+                                "sessionId",
+                                "session-1",
+                                "dastStopSupported",
+                                true));
+
+        poll.put("browserid", "foreign");
+        assertNull(invokeControlPoll(extension, poll).get("dastStop"));
+        poll.put("browserid", "browser-1");
+        poll.put("sessionId", "foreign");
+        assertNull(invokeControlPoll(extension, poll).get("dastStop"));
+        poll.put("sessionId", "session-1");
+        Map<String, Object> response = invokeControlPoll(extension, poll);
+        Map<?, ?> request = (Map<?, ?>) response.get("dastStop");
+        assertNotNull(request);
+        assertEquals("stop_dast_and_drain", request.get("mode"));
+        assertEquals(false, response.get("closeRequested"));
+        assertNull(state.closeRequest());
+        poll.put("dastStopReceipt", Map.of("id", "foreign", "result", "completed"));
+        assertEquals(request, invokeControlPoll(extension, poll).get("dastStop"));
+        poll.put(
+                "dastStopReceipt",
+                Map.of(
+                        "id",
+                        request.get("id"),
+                        "result",
+                        "engine_incomplete",
+                        "error",
+                        "stop_timeout"));
+        response = invokeControlPoll(extension, poll);
+        assertEquals(request.get("id"), response.get("dastStopAcknowledged"));
+        assertEquals(false, response.get("closeRequested"));
+        assertNull(state.closeRequest());
+        poll.remove("dastStopSupported");
+        assertEquals(false, invokeControlPoll(extension, poll).get("closeRequested"));
+
+        PtkCloseRequestState close =
+                state.ensureCloseRequest(
+                        "owner_browser_close_requested", System.currentTimeMillis());
+        response = invokeControlPoll(extension, poll);
+        assertEquals(close.id(), response.get("closeRequestId"));
+        assertFalse(close.id().equals(request.get("id")));
+    }
+
+    @Test
+    void mixedConfigWithLegacyBridgeStillUsesExistingStaleClose() throws Exception {
+        ExtensionPtk extension = new ExtensionPtk();
+        PtkZapSessionState state = new PtkZapSessionState("zap-legacy");
+        state.rememberMixedIastDastConfig(true, "browser-1");
+        state.recordProgress(
+                "browser-1", "session-1", 99, "running", "idle", false, 2, true, 24, 1L);
+        sessionStateByZapId(extension).put("zap-legacy", state);
+        Map<String, Object> response =
+                invokeControlPoll(
+                        extension,
+                        Map.of(
+                                "zapid",
+                                "zap-legacy",
+                                "sessionId",
+                                "session-1",
+                                "browserid",
+                                "browser-1"));
+        assertEquals(true, response.get("closeRequested"));
+        assertNull(response.get("dastStop"));
+    }
+
+    @Test
+    void controlPollCreatesCloseRequestForStaleRunningSessionWithUnknownConfig() throws Exception {
         ExtensionPtk extension = new ExtensionPtk();
         PtkZapSessionState state = new PtkZapSessionState("zap-control-stale");
         state.recordProgress(
@@ -956,26 +1142,211 @@ class ExtensionPtkCloseContractTest {
         assertEquals(false, PtkCloseContract.isBrowserLocalTabSafeToCloseDecision(closeDecision));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void boundNativeCloseWaitsForTheExactTerminalDrain(boolean partial) throws Exception {
+        ExtensionPtk extension = new ExtensionPtk();
+        ExtensionPtk.CallBackImplementor callback = extension.new CallBackImplementor();
+        UUID uuid = UUID.randomUUID();
+        String zapid = uuid.toString();
+        ClientCallBackUtils owner = closeCallback(uuid, "native-owner");
+        postCloseProgress(callback, zapid, "session-1", "ptk-browser", null, "running", true, 1);
+        PtkZapSessionState state = sessionStateByZapId(extension).get(zapid);
+        assertNotNull(state);
+
+        ClientCallBackUtils sibling = closeCallback(uuid, "native-sibling");
+        callback.browserClosing(sibling);
+        extension.rememberWebDriverZapId(sibling.getWebDriver(), UUID.randomUUID().toString());
+        callback.browserClosing(sibling);
+        assertNull(state.closeRequest());
+        assertEquals(state, sessionStateByZapId(extension).get(zapid));
+
+        extension.rememberWebDriverZapId(owner.getWebDriver(), zapid);
+        String terminalStatus = partial ? "engine_incomplete" : "completed";
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            var closing = executor.submit(() -> callback.browserClosing(owner));
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+            while (state.closeRequest() == null && !closing.isDone() && System.nanoTime() < until) {
+                Thread.sleep(5);
+            }
+            PtkCloseRequestState request = state.closeRequest();
+            assertNotNull(request, "bound owner gets a close even with no readable page URL");
+            assertEquals("owner_browser_close_requested", request.reason());
+            assertEquals("ptk-browser", request.browserId());
+            assertEquals(request.id(), callback.requestBoundOwnerClose(zapid, zapid));
+
+            postCloseProgress(
+                    callback,
+                    zapid,
+                    "session-1",
+                    "ptk-browser",
+                    request.id(),
+                    terminalStatus,
+                    false,
+                    2);
+            assertTrue(state.snapshot().terminalProgressSeen());
+            assertTrue(request.acknowledged());
+            assertFalse(state.snapshot().isV2ReadyForBrowserRelease());
+            postCloseProgress(
+                    callback,
+                    zapid,
+                    "foreign",
+                    "ptk-browser",
+                    request.id(),
+                    terminalStatus,
+                    true,
+                    7);
+            postCloseProgress(
+                    callback, zapid, "session-1", "foreign", request.id(), terminalStatus, true, 7);
+            postCloseProgress(
+                    callback,
+                    zapid,
+                    "session-1",
+                    "ptk-browser",
+                    "wrong-close",
+                    terminalStatus,
+                    true,
+                    7);
+            postCloseProgress(
+                    callback,
+                    zapid,
+                    "session-1",
+                    "ptk-browser",
+                    request.id(),
+                    terminalStatus,
+                    true,
+                    1);
+            postCloseProgress(
+                    callback, zapid, "session-1", "ptk-browser", request.id(), "running", true, 7);
+            assertFalse(state.snapshot().isV2ReadyForBrowserRelease());
+            assertThrows(
+                    TimeoutException.class,
+                    () ->
+                            closing.get(
+                                    PtkCloseContract.BROWSER_CLOSE_WAIT_SLICE_MS + 300,
+                                    TimeUnit.MILLISECONDS));
+
+            postCloseProgress(
+                    callback,
+                    zapid,
+                    "session-1",
+                    "ptk-browser",
+                    request.id(),
+                    terminalStatus,
+                    true,
+                    3);
+            closing.get(6, TimeUnit.SECONDS);
+            assertTrue(state.snapshot().isV2ReadyForBrowserRelease());
+            assertEquals(!partial, state.snapshot().isV2ReleaseClean());
+            assertNull(sessionStateByZapId(extension).get(zapid));
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     @Test
-    void activeBrowserWorkWaitDecisionIsRecognizedButNotTerminal() {
-        Map<String, Object> closeDecision = new LinkedHashMap<>();
-        closeDecision.put("decision", "wait");
-        closeDecision.put("scanState", "running");
-        closeDecision.put("reason", "active_browser_work");
-        closeDecision.put("stopRequested", false);
+    void expiredOwnerCloseReleasesWithAnUnsettledPublisher() throws Exception {
+        ExtensionPtk extension = new ExtensionPtk();
+        ExtensionPtk.CallBackImplementor callback = extension.new CallBackImplementor();
+        UUID uuid = UUID.randomUUID();
+        String zapid = uuid.toString();
+        ClientCallBackUtils owner = closeCallback(uuid, "native-owner");
+        extension.rememberWebDriverZapId(owner.getWebDriver(), zapid);
+        postCloseProgress(callback, zapid, "session-1", "ptk-browser", null, "running", true, 1);
+        PtkZapSessionState state = sessionStateByZapId(extension).get(zapid);
+        String request = callback.requestBoundOwnerClose(zapid, zapid);
+        assertNotNull(request);
+        postCloseProgress(
+                callback, zapid, "session-1", "ptk-browser", request, "completed", false, 2);
 
-        assertEquals(true, PtkCloseContract.isActiveBrowserWorkCloseDecision(closeDecision));
+        callback.browserClosing(
+                owner,
+                System.currentTimeMillis() - PtkCloseContract.BROWSER_CLOSE_MAX_WALL_CLOCK_MS);
 
-        closeDecision.put("stopRequested", true);
-        assertEquals(false, PtkCloseContract.isActiveBrowserWorkCloseDecision(closeDecision));
+        assertNull(sessionStateByZapId(extension).get(zapid));
+        assertFalse(state.snapshot().isV2ReadyForBrowserRelease());
+        assertTrue(state.snapshot().isV2ReleaseIncomplete());
+    }
 
-        closeDecision.put("stopRequested", false);
-        closeDecision.put("reason", "owner_waiting_for_terminal");
-        assertEquals(false, PtkCloseContract.isActiveBrowserWorkCloseDecision(closeDecision));
+    private static ClientCallBackUtils closeCallback(UUID zapid, String webDriverSession) {
+        RemoteWebDriver driver =
+                new RemoteWebDriver() {
+                    @Override
+                    public SessionId getSessionId() {
+                        return new SessionId(webDriverSession);
+                    }
 
-        closeDecision.put("decision", "safe_to_close");
-        closeDecision.put("reason", "active_browser_work");
-        assertEquals(false, PtkCloseContract.isActiveBrowserWorkCloseDecision(closeDecision));
+                    @Override
+                    public String getCurrentUrl() {
+                        throw new IllegalStateException("closing page unavailable");
+                    }
+
+                    @Override
+                    public Set<String> getWindowHandles() {
+                        return Set.of();
+                    }
+                };
+        return new ClientCallBackUtils(
+                new SeleniumScriptUtils(
+                        driver, HttpSender.SPIDER_INITIATOR, "edge-headless", "", 0),
+                zapid);
+    }
+
+    private static void postCloseProgress(
+            ExtensionPtk.CallBackImplementor callback,
+            String zapid,
+            String sessionId,
+            String browserid,
+            String requestId,
+            String status,
+            boolean drained,
+            int activitySeq)
+            throws Exception {
+        boolean terminal = !"running".equals(status);
+        Map<String, Object> progress =
+                new LinkedHashMap<>(
+                        Map.of(
+                                "contractVersion",
+                                2,
+                                "zapid",
+                                zapid,
+                                "sessionId",
+                                sessionId,
+                                "browserid",
+                                browserid,
+                                "progress",
+                                terminal ? 100 : 99,
+                                "status",
+                                status,
+                                "activitySeq",
+                                activitySeq,
+                                "publisher",
+                                Map.of("drained", drained),
+                                "safeToClose",
+                                terminal && drained));
+        if (requestId != null) {
+            progress.put("closeRequestId", requestId);
+            progress.put("closeRequestAck", true);
+        }
+        if (terminal) {
+            progress.put("completionStatus", status);
+            progress.put(
+                    "releaseStatus",
+                    drained && "completed".equals(status) ? "clean" : "incomplete");
+        }
+        HttpMessage message = new HttpMessage();
+        message.getRequestHeader().setURI(new URI("https://zap/test/ptk/progress", true));
+        message.getRequestHeader().setMethod("POST");
+        message.getRequestBody().setBody(new com.google.gson.Gson().toJson(progress));
+        callback.handleCallBack(message, null);
+        assertEquals(
+                "OK",
+                com.google.gson.JsonParser.parseString(message.getResponseBody().toString())
+                        .getAsJsonObject()
+                        .get("result")
+                        .getAsString());
     }
 
     @Test
@@ -1224,5 +1595,49 @@ class ExtensionPtkCloseContractTest {
                 callback.getClass().getDeclaredMethod("buildControlPollResponse", Map.class);
         method.setAccessible(true);
         return (Map<String, Object>) method.invoke(callback, payload);
+    }
+
+    @Test
+    void normalClosedOwnerRetainsActualCallbackAck3AndLegacyRetrySemantics() throws Exception {
+        for (boolean v3 : List.of(true, false)) {
+            try (var receiver = new PtkIastOfflineReceiver()) {
+                var batch = PtkIastV3ContractTest.fixture();
+                if (!v3) {
+                    batch.addProperty("schema", "ptk-zap-iast-finding-v2");
+                    PtkIastV3ContractTest.finding(batch).remove("flow");
+                }
+                String zapid = batch.get("zapid").getAsString();
+                String sessionId = batch.getAsJsonObject("payload").get("sessionId").getAsString();
+                ExtensionPtk extension = new ExtensionPtk();
+                ExtensionPtk.CallBackImplementor callback = extension.new CallBackImplementor();
+                HttpMessage message = new HttpMessage();
+                message.getRequestHeader().setURI(new URI("https://zap/test/ptk/alert", true));
+                message.getRequestHeader().setMethod("POST");
+                message.getRequestBody().setBody(batch.toString());
+                callback.handleCallBack(message, null);
+                String original = message.getResponseBody().toString();
+                assertEquals(
+                        v3 ? 3 : 2,
+                        com.google.gson.JsonParser.parseString(original)
+                                .getAsJsonObject()
+                                .get("contractVersion")
+                                .getAsInt());
+                var sessionIds = ExtensionPtk.class.getDeclaredField("sessionIdByZapId");
+                sessionIds.setAccessible(true);
+                @SuppressWarnings("unchecked")
+                var sessions = (Map<String, String>) sessionIds.get(extension);
+                sessions.put(zapid, sessionId);
+                Method cleanup =
+                        callback.getClass().getDeclaredMethod("clearTrackingState", String.class);
+                cleanup.setAccessible(true);
+                cleanup.invoke(callback, zapid);
+                callback.handleCallBack(message, null);
+                assertEquals(
+                        original,
+                        message.getResponseBody().toString(),
+                        "normal closed owner must retain exact retired publication ACK");
+                assertEquals(1, receiver.receive(batch.toString()).get("historyWrites").getAsInt());
+            }
+        }
     }
 }

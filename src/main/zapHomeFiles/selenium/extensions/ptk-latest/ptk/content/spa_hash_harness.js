@@ -7,6 +7,7 @@ const spaJsEvents = []
 const xssExecutionEvents = []
 const leakEvents = []
 const spaNetworkEvents = []
+const SPA_XSS_EXECUTION_MARKER_ATTRIBUTE = 'data-ptk-spa-xss'
 let hookInjected = false
 
 function injectSpaJsHook() {
@@ -43,6 +44,7 @@ function detectDomXss(marker) {
             }
         } else if (node.nodeType === Node.ELEMENT_NODE) {
             for (const attr of node.attributes) {
+                if (attr.name === SPA_XSS_EXECUTION_MARKER_ATTRIBUTE) continue
                 if (attr.value && attr.value.includes(marker)) {
                     return {
                         type: 'attribute',
@@ -198,6 +200,7 @@ function detectDomReflection(marker) {
             }
         } else if (node.nodeType === Node.ELEMENT_NODE) {
             for (const attr of node.attributes) {
+                if (attr.name === SPA_XSS_EXECUTION_MARKER_ATTRIBUTE) continue
                 if (attr.value && attr.value.includes(marker)) {
                     const el = node
                     return {
@@ -227,6 +230,26 @@ function buildSinkKey(context) {
     return parts.join('|')
 }
 
+function clearDomXssExecutionMarker(marker = null) {
+    try {
+        const root = document.documentElement
+        if (!root || typeof root.getAttribute !== 'function' || typeof root.removeAttribute !== 'function') return
+        const current = root.getAttribute(SPA_XSS_EXECUTION_MARKER_ATTRIBUTE)
+        if (marker === null || current === marker) {
+            root.removeAttribute(SPA_XSS_EXECUTION_MARKER_ATTRIBUTE)
+        }
+    } catch (_) { }
+}
+
+function hasExactDomXssExecutionMarker(marker) {
+    try {
+        return !!marker
+            && document.documentElement?.getAttribute?.(SPA_XSS_EXECUTION_MARKER_ATTRIBUTE) === marker
+    } catch (_) {
+        return false
+    }
+}
+
 async function waitForDomXssEvidence(marker, { maxWaitMs = 1300, pollMs = 50 } = {}) {
     const boundedWaitMs = Number.isFinite(Number(maxWaitMs))
         ? Math.max(0, Math.min(5000, Number(maxWaitMs)))
@@ -243,6 +266,7 @@ async function waitForDomXssEvidence(marker, { maxWaitMs = 1300, pollMs = 50 } =
         if (!context) context = detectDomReflection(marker)
         if (!executed) {
             executed = xssExecutionEvents.some(event => event && event.id === marker)
+                || hasExactDomXssExecutionMarker(marker)
         }
     }
 
@@ -270,6 +294,7 @@ async function waitForDomXssEvidence(marker, { maxWaitMs = 1300, pollMs = 50 } =
         } while (true)
     } finally {
         if (observer) observer.disconnect()
+        clearDomXssExecutionMarker(marker)
     }
 
     const reflected = !!context
@@ -294,6 +319,7 @@ async function runSpaParamTest({ param, payload, checks = [], markerDomain, mark
         xssExecutionEvents.length = 0
         leakEvents.length = 0
         spaNetworkEvents.length = 0
+        clearDomXssExecutionMarker()
 
         const effectiveMarker = markerToken || payload
 

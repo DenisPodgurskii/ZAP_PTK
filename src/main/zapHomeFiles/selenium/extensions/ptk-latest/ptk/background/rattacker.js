@@ -18,6 +18,11 @@ import { sensitiveArtifactStorage } from "./sensitiveArtifactStore.js"
 import { EvidencePackageStore } from "./bugbounty/evidencePackageStore.js"
 import { scanResultStore } from "./scanResultStore.js"
 import { portalPolicyRuntimeStore } from "./common/portalPolicyRuntimeStore.js"
+import { DastRuntimeController } from "./dast/runtime/dastRuntimeController.js"
+import { ptk_request } from "./rbuilder.js"
+import { applyDastRequestTransportFlags } from "./dast/runtime/browserOperations.js"
+import { DastPrivilegedBrowserAdapter } from "./dast/runtime/privilegedBrowserAdapter.js"
+import { RemoteDastEngineFacade } from "./dast/runtime/remoteDastEngineFacade.js"
 
 
 const worker = self
@@ -84,13 +89,40 @@ function cloneForTransport(value) {
     }
 }
 
+function getCypressControllerAdmission() {
+    const scope = worker?.ptk_app?.devLocalConfig?.cypressControllerScope
+    return scope ? cloneForTransport(scope) : null
+}
+
+export function createDastRuntimeEngine(settings, runtimeController) {
+    if (runtimeController?.remote === true) {
+        return new RemoteDastEngineFacade({ controller: runtimeController, settings })
+    }
+    return new dastEngine(settings)
+}
+
 export class ptk_rattacker {
 
-    constructor(settings) {
+    constructor(settings, { offscreenManager = null, forceLocalDastRuntime = false } = {}) {
         this.settings = settings
         this.storageKey = "ptk_rattacker"
 
-        this.engine = new dastEngine(this.settings)
+        this.runtimeController = new DastRuntimeController({
+            browserApi: browser,
+            offscreenManager,
+            forceLocal: forceLocalDastRuntime,
+            operationHandler: operation => this._handleDastPrivilegedOperation(operation)
+        })
+        this.privilegedBrowserAdapter = new DastPrivilegedBrowserAdapter({
+            browserApi: browser,
+            onEvent: event => this.runtimeController?.client?.port?.postMessage?.({
+                type: "privileged_event",
+                controllerNonce: this.runtimeController.client.controllerNonce,
+                event
+            })
+        })
+        this.engine = createDastRuntimeEngine(this.settings, this.runtimeController)
+        this.runtimeReady = Promise.resolve().then(() => this._initializeDastRuntime())
         this._persistTimer = null
         this._persistDebounceMs = 1000
         this.scanResultLifecycle = new DastScanResultLifecycleService({
@@ -110,7 +142,10 @@ export class ptk_rattacker {
             suppressionsStorageKey: ANALYSIS_SUPPRESSIONS_STORAGE_KEY,
             getAppState: () => worker?.ptk_app,
             getCurrentScanResult: () => this.scanResult,
-            getEngineIsRunning: () => this.engine?.isRunning === true
+            getEngineIsRunning: () => this.engine?.isRunning === true,
+            persistCompletedAnalysis: (source) => this.scanResult === source
+                ? this.scanResultLifecycle.persistScanResult(source, { isCurrent: () => this.scanResult === source })
+                : null
         })
         this.resultProjector = new DastResultProjector({
             analysisService: this.analysisService,
@@ -183,13 +218,28 @@ export class ptk_rattacker {
         })
         this.importTransfers = new Map()
         if (this.engine?.setResultMutationListener) {
-            this.engine.setResultMutationListener((payload = null) => {
+            this.engine.setResultMutationListener(async (payload = null) => {
                 this._setAuthoritativeScanResult(this.engine.scanResult, {
                     markFinished: !!(this.engine?.scanResult?.finishedAt || this.engine?.scanResult?.finished)
                 })
                 this._schedulePersistScanResult()
-                if (payload?.type === "attack_finding") {
-                    worker?.ptk_app?.automation?.zap?.publisher?.requestFlush?.()
+                if (["attack_finding", "runtime_adopted_snapshot", "runtime_replay_snapshot"].includes(payload?.type)) {
+                    const publisher = worker?.ptk_app?.automation?.zap?.publisher
+                    publisher?.requestFlush?.()
+                }
+            })
+        }
+        if (this.engine?.setDisplayMessageListener) {
+            this.engine.setDisplayMessageListener(async (message) => {
+                try {
+                    // Dispatch in event order, but do not make authoritative
+                    // drainage depend on an optional dashboard's response.
+                    void Promise.resolve(browser.runtime.sendMessage(message)).catch(() => { })
+                    return true
+                } catch (_) {
+                    // Match the local engine's best-effort dashboard delivery:
+                    // there might be no open extension page to receive it.
+                    return false
                 }
             })
         }
@@ -205,9 +255,189 @@ export class ptk_rattacker {
         this.scopedTabCoordinator = null
     }
 
+    async _handleDastPrivilegedOperation(operation = {}) {
+        if (operation.type === "request_send") {
+            const request = new ptk_request()
+            applyDastRequestTransportFlags(request, operation.transport)
+            return request.sendRequest(operation.schema)
+        }
+        if (operation.type === "request_reconcile") return { completed: false }
+        if (operation.type === "runtime_message") {
+            return browser.runtime.sendMessage(operation.message)
+        }
+        if (operation.type === "session_profiles_list") {
+            if (!this.sessionProfileStore?.listProfiles) return []
+            return this.sessionProfileStore.listProfiles(operation.options || {})
+        }
+        if (["browser_call", "browser_subscribe", "browser_unsubscribe", "browser_cleanup"].includes(operation.type)) {
+            return this.privilegedBrowserAdapter.execute(operation)
+        }
+        if (operation.type === "controller_disconnect") return this.privilegedBrowserAdapter.cleanup()
+        throw new Error("unsupported_dast_privileged_operation")
+    }
+
+    async _initializeDastRuntime() {
+        try {
+            const connected = await this.runtimeController.ensureConnected()
+            if (!this.runtimeController.remote) return connected
+            const status = await this.runtimeController.reconnect(null)
+            if (!status?.ok) throw new Error(status?.error || "dast_runtime_reconnect_failed")
+            if (status.sessionId && status.executorGeneration && status.status !== "idle") {
+                await this.engine.adopt(status)
+                this._adoptRemoteDastSession(status)
+                return { ok: true, mode: "offscreen", adopted: true, status }
+            }
+            return { ok: true, mode: "offscreen", adopted: false, status }
+        } catch (error) {
+            return {
+                ok: false,
+                mode: this.runtimeController.remote ? "offscreen" : "local",
+                error: error?.message || String(error)
+            }
+        }
+    }
+
+    _adoptRemoteDastSession(status = {}) {
+        if (!this.runtimeController.remote || this.engine?.isRunning !== true) return false
+        const state = this.sessionCoordinator?.getState?.()
+        if (!state) return false
+        const settings = status.executorState?.settings || this.engine.settings || {}
+        const controllerState = status.executorState?.controllerState || this.engine.controllerState || {}
+        state.sentAllAttacksCompleted = false
+        state.acceptIncomingRequests = controllerState.acceptIncomingRequests !== false
+        state.requireUserInteractionBeforeCapture = controllerState.requireUserInteractionBeforeCapture
+            ?? (settings.allowCaptureWithoutInteraction !== true)
+        state.userInteractionUnlocked = controllerState.userInteractionUnlocked
+            ?? !state.requireUserInteractionBeforeCapture
+        state.enableSyntheticRedirectRequests = controllerState.enableSyntheticRedirectRequests
+            ?? (settings.enableSyntheticRedirectRequests === true)
+        state.zapManaged = controllerState.zapManaged ?? (settings.zapManaged === true)
+        state.pendingAutomationSeeds = 0
+        state.automationSession = status.executorState?.automationSessionId
+            ? { id: status.executorState.automationSessionId }
+            : null
+        this.captureAdapter?.addListeners?.()
+        this._setAuthoritativeScanResult(this.engine.scanResult)
+        this._registerScopedTabSession(this.engine.tabId, settings)?.catch?.(() => {})
+        return true
+    }
+
+
+    setBrowserCaptureManager(manager) {
+        this.browserCaptureManager = manager
+        this.captureLeases ||= new Map()
+        this.privilegedBrowserAdapter?.setBrowserCaptureManager(manager)
+        this.engine?.setBrowserCaptureManager?.(manager)
+        return this
+    }
+
+    isBrowserCaptureOwnerActive({ ownerId, tabId }) {
+        const entry = this.captureLeases?.get(tabId)
+        return (entry?.ownerId === ownerId && entry.active !== false) || this.privilegedBrowserAdapter?.isBrowserCaptureOwnerActive({ ownerId, tabId }) === true || this.engine?.isBrowserCaptureOwnerActive?.({ ownerId, tabId }) === true
+    }
+
+    async _acquireBrowserCapture(tabId, settings = {}) {
+        if (!this.browserCaptureManager) throw new Error('capture_manager_unavailable')
+        this.captureLeases ||= new Map()
+        if (this.captureLeases.has(tabId)) {
+            const entry = this.captureLeases.get(tabId)
+            if (entry.active === false || entry.releasing === true) throw new Error('capture_owner_unavailable')
+            return entry.promise
+        }
+        const scanId = this.engine?.scanResult?.scanId
+        const ownerId = 'DAST:' + scanId
+        let targetUrl = settings.targetUrl || settings.zapTiming?.targetUrl
+        if (!targetUrl) targetUrl = (await browser.tabs.get(tabId))?.url
+        const scope = Object.freeze({ targetUrl, mode: settings.zapManaged === true ? 'path' : 'origin' })
+        const entry = { ownerId, lease: null, scope }
+        this.captureLeases.set(tabId, entry)
+        entry.promise = this.browserCaptureManager.acquire({
+            ownerId, tabId, capabilities: ['network'],
+            scope
+        }).then(async lease => {
+            if (this.captureLeases.get(tabId) !== entry) {
+                await lease.release('replaced')
+                throw new Error('capture_owner_unavailable')
+            }
+            entry.lease = lease
+            return lease
+        }).catch(error => {
+            if (this.captureLeases.get(tabId) === entry) this.captureLeases.delete(tabId)
+            throw error
+        })
+        return entry.promise
+    }
+
+    async _releaseBrowserCapture(tabId, reason = 'stopped') {
+        const entry = this.captureLeases?.get(tabId)
+        if (!entry) return
+        if (entry.releaseFlight) {
+            if (entry.releaseReason !== reason) throw new Error('capture_release_policy_conflict')
+            return entry.releaseFlight
+        }
+        // Reject new acquisitions without revoking this exact owner's ability
+        // to drain already-admitted work. The lease's freeze closes admission;
+        // native release, not the start of drainage, ends its authorization.
+        entry.releasing = true
+        if (reason === 'reset' || reason === 'tab_released') entry.active = false
+        entry.releaseReason = reason
+        const release = async () => {
+            await entry.promise
+            if (this.captureLeases.get(tabId) !== entry) throw new Error('capture_owner_unavailable')
+            if (entry.lease) {
+                if (reason === 'reset' || reason === 'tab_released') {
+                    await entry.lease.release(reason)
+                } else {
+                    entry.drainPromise ||= Promise.resolve().then(async () => {
+                        entry.lease.freeze()
+                        const result = await entry.lease.drain()
+                        if (result?.complete !== true) throw new Error('capture_drain_incomplete')
+                    })
+                    try { await entry.drainPromise } finally {
+                        entry.active = false
+                        await entry.lease.release(reason)
+                    }
+                }
+            }
+            if (this.captureLeases.get(tabId) !== entry) throw new Error('capture_owner_unavailable')
+            this.captureLeases.delete(tabId)
+        }
+        // Reserve before asynchronous acquisition or native cleanup can reenter.
+        entry.releaseFlight = Promise.resolve().then(release)
+        try { return await entry.releaseFlight }
+        finally { entry.releaseFlight = null }
+    }
+
+    async _releaseAllBrowserCapture(reason = 'stopped') {
+        const results = await Promise.allSettled([...this.captureLeases?.keys() || []].map(tabId => this._releaseBrowserCapture(tabId, reason)))
+        const failed = results.find(result => result.status === 'rejected')
+        if (failed) throw failed.reason
+    }
+
     setScopedTabCoordinator(coordinator) {
         this.scopedTabCoordinator = coordinator || null
         return this
+    }
+
+    async getDastPhasePerformance({ refresh = true } = {}) {
+        await this.runtimeReady
+        const telemetry = typeof this.engine?.getPerformanceTelemetry === "function"
+            ? await this.engine.getPerformanceTelemetry({ refresh })
+            : this.engine?._performanceTelemetry
+        const phases = telemetry?.phases
+        if (!phases || typeof phases !== "object") return null
+        return typeof structuredClone === "function"
+            ? structuredClone(phases)
+            : JSON.parse(JSON.stringify(phases))
+    }
+
+    async refreshDastRuntimeProgress() {
+        const ready = await this.runtimeReady
+        if (ready?.ok === false) throw new Error(ready.error || "dast_runtime_initialization_failed")
+        if (typeof this.engine?.refreshProgress === "function") {
+            return this.engine.refreshProgress()
+        }
+        return this.engine?.getProgressSnapshot?.() || null
     }
 
     _registerScopedTabSession(tabId, settings = {}) {
@@ -216,8 +446,14 @@ export class ptk_rattacker {
             primaryTabId: tabId,
             targetUrl,
             scopeMode: settings?.zapManaged === true && targetUrl ? 'path' : 'origin',
-            onEnroll: (meta) => this.sessionCoordinator.registerRelatedTab(meta.tabId, meta),
-            onRelease: (meta) => this.sessionCoordinator.releaseRelatedTab(meta.tabId)
+            onEnroll: async meta => {
+                await this._acquireBrowserCapture(meta.tabId, this._captureRunSettings)
+                return this.sessionCoordinator.registerRelatedTab(meta.tabId, meta)
+            },
+            onRelease: async meta => {
+                await this._releaseBrowserCapture(meta.tabId, 'tab_released')
+                return this.sessionCoordinator.releaseRelatedTab(meta.tabId)
+            }
         })
     }
 
@@ -324,12 +560,17 @@ export class ptk_rattacker {
             return this._initPromise
         }
         const initPromise = (async () => {
+            const runtimeState = await this.runtimeReady
+            if (this.runtimeController.remote && runtimeState?.ok !== true) {
+                throw new Error(runtimeState?.error || "dast_runtime_initialization_failed")
+            }
             await portalPolicyRuntimeStore.ensureLoaded()
             if (force || !this._analysisStateLoaded) {
                 await this.analysisService.loadState()
                 this._analysisStateLoaded = true
             }
             if (this.engine.isRunning) {
+                worker.ptk_app?.proxy?.beginScanHistory?.(this.engine.tabId)
                 if (this.scanResult !== this.engine.scanResult) {
                     this._setAuthoritativeScanResult(this.engine.scanResult)
                 }
@@ -391,6 +632,22 @@ export class ptk_rattacker {
             force,
             engineIsRunning: this.engine?.isRunning === true
         })
+    }
+
+    _scheduleCompletedAnalysis(scanResult) {
+        // A task turn, not a Promise microtask: native Stop/capture cleanup and
+        // its response settle before any synchronous post-analysis can run.
+        const schedule = () => this.analysisService.ensureCompletedAnalysis(scanResult, { defer: true }).then(() => {
+                if (this.scanResult === scanResult) this._invalidateUiSnapshot()
+            }).catch(error => {
+                console.warn('[PTK DAST] Background post-analysis failed', error?.message || 'analysis_failed')
+            })
+        // Stop All dispatches independent engine requests. Do not occupy the
+        // shared worker while an already-requested SAST Stop needs to finish.
+        // Only the background job joins this existing promise, never Stop.
+        const pendingSastStop = worker?.ptk_app?.sast?._sastStopPromise
+        if (pendingSastStop) Promise.resolve(pendingSastStop).then(schedule, schedule)
+        else schedule()
     }
 
     _resolveSessionProfileHost(host = null) {
@@ -480,21 +737,29 @@ export class ptk_rattacker {
     }
 
     _notifyScanCompleted() {
-        return Promise.all([
-            browser.runtime.sendMessage({
+        for (const message of [
+            {
                 channel: "ptk_background2popup_rattacker",
                 type: "all attacks completed",
                 info: { completed: true }
-            }).catch(e => e),
-            browser.runtime.sendMessage({
+            },
+            {
                 channel: "ptk_background2popup_rattacker",
                 type: "dast_scan_completed",
                 info: { completed: true }
-            }).catch(e => e)
-        ])
+            }
+        ]) {
+            // These are optional display notifications, not engine/worker ACKs.
+            try { void Promise.resolve(browser.runtime.sendMessage(message)).catch(() => { }) }
+            catch (_) { /* A missing display receiver must not block cleanup. */ }
+        }
+        return Promise.resolve()
     }
 
     async reset() {
+        // Reset may discard results only after the existing executor has proved cleanup.
+        if (!this.runtimeController?.remote || this.engine?.sessionId) await this.engine?.stop?.()
+        await this._releaseAllBrowserCapture('reset')
         const previousScanId = this.scanResult?.scanId || this.engine?.scanResult?.scanId || null
         const previousHost = this.scanResult?.host || this.engine?.scanResult?.host || null
         if (this._persistTimer) {
@@ -506,13 +771,13 @@ export class ptk_rattacker {
             host: previousHost,
             scanId: previousScanId
         })
-        this.engine.reset()
+        await this.engine.reset()
         this.storage = {}
         this._persistedScanHydrated = true
         this._candidateRunStateScopeKey = null
         this._setLoadedScanResult(this.engine.scanResult)
         await this.candidateRunService.clearHostState(previousHost)
-        void ptk_storage.setItem(this.storageKey, {})
+        void this.scanResultLifecycle.persistScanResult({})
     }
 
     async loadRegularModules() {
@@ -751,6 +1016,59 @@ export class ptk_rattacker {
 
     }
 
+    async _captureChildSpaUrl(message, sender) {
+        const reject = reason => ({ ok: false, ignored: reason })
+        const tabId = sender?.tab?.id, frameId = sender?.frameId, documentId = sender?.documentId
+        const uiUrl = message?.url
+        if (!ptk_utils.isTrustedContentSender(sender) || !Number.isInteger(frameId) || frameId <= 0
+            || typeof documentId !== 'string' || !documentId || typeof uiUrl !== 'string'
+            || uiUrl.split('#')[0] !== sender.url.split('#')[0]) {
+            return reject('child_identity_invalid')
+        }
+        const entry = this.captureLeases?.get(tabId)
+        const engine = this.engine
+        const scanId = engine?.scanResult?.scanId
+        const state = this.sessionCoordinator.getState()
+        const current = () => {
+            const snapshot = entry?.lease?.getSnapshot?.()
+            return !!scanId && this.engine === engine && engine?.scanResult?.scanId === scanId
+                && this.captureLeases?.get(tabId) === entry && entry?.ownerId === 'DAST:' + scanId
+                && entry?.lease?.ownerId === entry.ownerId && entry.lease.tabId === tabId
+                && snapshot?.active === true && snapshot.ready === true && snapshot.prepared === false
+                && this.sessionCoordinator.getState() === state && state?.acceptIncomingRequests === true
+                && this.sessionCoordinator.isRunningForTab(tabId)
+                && !this.sessionCoordinator.isCaptureBlockedByInteraction()
+        }
+        if (!current()) return reject('child_capture_owner_unavailable')
+        let parsed, target
+        try {
+            parsed = new URL(uiUrl)
+            target = new URL(entry.scope?.targetUrl)
+        } catch (_) { return reject('child_scope_invalid') }
+        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== target.origin
+            || !['origin', 'path'].includes(entry.scope?.mode)
+            || (entry.scope.mode === 'path' && parsed.pathname !== target.pathname
+                && !parsed.pathname.startsWith(target.pathname.replace(/\/$/, '') + '/'))) return reject('child_scope_invalid')
+        if (!parsed.hash) return reject('no_hash')
+        let frame
+        try {
+            // Select the current frame, not a potentially retired document ID.
+            frame = await browser.webNavigation.getFrame({ tabId, frameId })
+        } catch (_) { return reject('child_native_frame_unavailable') }
+        if (!current()) return reject('child_capture_owner_unavailable')
+        if (!frame || (frame.frameId !== undefined && frame.frameId !== frameId)
+            || !Number.isInteger(frame.parentFrameId) || frame.parentFrameId < 0
+            || frame.documentId !== documentId || frame.url !== uiUrl
+            || frame.errorOccurred === true) return reject('child_native_frame_mismatch')
+        const cleanedUrl = uiUrl.split('#')[0]
+        const response = { url: cleanedUrl, ui_url: uiUrl, type: 'sub_frame', tabId, frameId, documentId }
+        try {
+            await this.engine.enqueue({ raw: `GET ${cleanedUrl} HTTP/1.1\nHost: ${parsed.host}`,
+                ui_url: uiUrl, responseType: 'sub_frame', frameId, documentId, fingerprint: `spa:${uiUrl}` }, response)
+            return { ok: true, enqueued: true }
+        } catch (_) { return reject('child_enqueue_failed') }
+    }
+
     onMessage(message, sender, sendResponse) {
         if (CONTENT_WS_TO_BACKGROUND_CHANNELS.has(message.channel)) {
             if (!ptk_utils.isTrustedContentSender(sender)) {
@@ -791,6 +1109,7 @@ export class ptk_rattacker {
             }
 
             if (message.type == 'spa_url_changed' && sender?.tab?.id) {
+                if (sender.frameId !== 0) return this._captureChildSpaUrl(message, sender)
                 const tabId = sender.tab.id
                 const uiUrl = typeof message.url === 'string' ? message.url : ''
                 const contentDiagnostic = message.diagnostic && typeof message.diagnostic === 'object'
@@ -798,7 +1117,7 @@ export class ptk_rattacker {
                     : {}
                 const appendSpaUrlDiagnostic = (patch = {}) => {
                     try {
-                        this.engine?._appendRuntimeEvent?.(Object.assign({
+                        const result = this.engine?._appendRuntimeEvent?.(Object.assign({
                             type: 'dast_spa_url_changed',
                             tabId,
                             url: uiUrl || null,
@@ -811,7 +1130,16 @@ export class ptk_rattacker {
                             contentReadyState: contentDiagnostic.readyState || null,
                             contentVisibilityState: contentDiagnostic.visibilityState || null
                         }, patch))
-                    } catch (_) { }
+                        Promise.resolve(result).catch((error) => console.error('[PTK DAST] SPA diagnostic append failed', {
+                            active: this.engine?.isRunning === true,
+                            error: error?.message || String(error)
+                        }))
+                    } catch (error) {
+                        console.error('[PTK DAST] SPA diagnostic append failed', {
+                            active: this.engine?.isRunning === true,
+                            error: error?.message || String(error)
+                        })
+                    }
                 }
                 this.requestCaptureStore?.rememberTabUrl?.(tabId, uiUrl)
                     || worker?.ptk_app?.proxy?.tabUrlMap?.set?.(tabId, uiUrl)
@@ -846,7 +1174,18 @@ export class ptk_rattacker {
                             type: 'main_frame',
                             tabId: sender.tab.id
                         }
-                        this.engine.enqueue({ raw: rawRequest, ui_url: uiUrl, responseType: 'main_frame', fingerprint: `spa:${uiUrl}` }, response)
+                        Promise.resolve(this.engine.enqueue({ raw: rawRequest, ui_url: uiUrl, responseType: 'main_frame', fingerprint: `spa:${uiUrl}` }, response))
+                            .catch((error) => {
+                                console.error('[PTK DAST] SPA capture enqueue failed', {
+                                    active: this.engine?.isRunning === true,
+                                    error: error?.message || String(error)
+                                })
+                                appendSpaUrlDiagnostic({
+                                    phase: 'error',
+                                    reason: 'enqueue_failed',
+                                    error: error?.message || String(error || 'enqueue_failed')
+                                })
+                            })
                         appendSpaUrlDiagnostic({
                             phase: 'enqueued',
                             cleanedUrl,
@@ -854,6 +1193,10 @@ export class ptk_rattacker {
                         })
                         return Promise.resolve({ ok: true, enqueued: true })
                     } catch (e) {
+                        console.error('[PTK DAST] SPA capture enqueue failed', {
+                            active: this.engine?.isRunning === true,
+                            error: e?.message || String(e)
+                        })
                         appendSpaUrlDiagnostic({
                             phase: 'error',
                             reason: 'enqueue_failed',
@@ -870,8 +1213,8 @@ export class ptk_rattacker {
             }
 
             if (message.type == 'start') {
-                this.runBackgroundScan(sender.tab.id, new URL(sender.origin).host)
-                return Promise.resolve({ success: true, scanResult: this._cloneScanResultForUi() })
+                return this.runBackgroundScan(sender.tab.id, new URL(sender.origin).host)
+                    .then(success => ({ success, scanResult: this._cloneScanResultForUi() }))
             }
 
             if (message.type == 'stop') {
@@ -885,6 +1228,12 @@ export class ptk_rattacker {
 
     async msg_init(message) {
         await this.init()
+        const analyzedSource = this.scanResult
+        if (!this.engine.isRunning && (analyzedSource?.finishedAt || analyzedSource?.finished)) {
+            await this.analysisService.ensureCompletedAnalysis(analyzedSource)
+            if (this.scanResult !== analyzedSource || this.engine.isRunning) throw new Error('scan_result_owner_changed')
+            this._invalidateUiSnapshot()
+        }
         const scanResult = this._cloneScanResultForUi()
         const hasRenderableData = this._hasRenderableScanData(scanResult)
         const shouldWarmRulepackPreview = !this.engine.isRunning && !hasRenderableData
@@ -995,6 +1344,13 @@ export class ptk_rattacker {
         if (requestedScanId && String(targetScan?.scanId || '') !== requestedScanId) {
             await this.analysisService?.hydratePersistedRelatedScans?.(this.scanResult)
             targetScan = scanResultStore.getScan(requestedScanId) || targetScan
+        }
+        if ((!requestedScanId || String(this.scanResult?.scanId || '') === requestedScanId)
+            && targetScan === this.scanResult
+            && this.runtimeController.remote
+            && this.engine?.sessionId
+            && this.engine?.executorGeneration) {
+            return this.engine.getRequestSnapshot(message?.requestId || null, message?.attackId || null)
         }
         return Promise.resolve(
             this.findingPresentationService.getRequestSnapshot(targetScan, {
@@ -1315,8 +1671,11 @@ export class ptk_rattacker {
     }
 
     async msg_get_related_finding_summaries(message) {
-        await this.analysisService?.hydratePersistedRelatedScans?.(this.scanResult)
-        const relatedScans = this.analysisService?.getRelatedScansForCoverage?.(this.scanResult) || []
+        const source = this.scanResult
+        if (source?.finishedAt || source?.finished) await this.analysisService.ensureCompletedAnalysis(source)
+        else await this.analysisService?.hydratePersistedRelatedScans?.(source)
+        if (this.scanResult !== source) throw new Error('scan_result_owner_changed')
+        const relatedScans = this.analysisService?.getRelatedScansForCoverage?.(source, { analyze: false }) || []
         const summaries = []
         relatedScans.forEach((scan) => {
             const engine = String(scan?.engine || '').trim().toUpperCase()
@@ -1359,8 +1718,16 @@ export class ptk_rattacker {
             })
         }
         try {
-            await this.analysisService.hydratePersistedRelatedScans(this.scanResult)
-            this._applyAnalysis(this.scanResult, true)
+            const source = this.scanResult
+            if (this.engine.isRunning) {
+                await this.analysisService.hydratePersistedRelatedScans(source)
+                if (this.scanResult !== source) throw new Error('scan_result_owner_changed')
+                this._applyAnalysis(source, true)
+            } else {
+                await this.analysisService.ensureCompletedAnalysis(source, { force: true })
+                if (this.scanResult !== source) throw new Error('scan_result_owner_changed')
+            }
+            this._invalidateUiSnapshot()
             await this._flushPersistScanResult()
             return Promise.resolve({
                 success: true,
@@ -1401,7 +1768,10 @@ export class ptk_rattacker {
             this._persistedScanHydrated = true
             this._setLoadedScanResult(this.storage)
         }
-        return this.portalClient.saveScan(worker.ptk_app.settings.profile || {}, this.scanResult, {
+        const source = this.scanResult
+        await this.analysisService.ensureCompletedAnalysis(source)
+        if (this.scanResult !== source) throw new Error('scan_result_owner_changed')
+        return this.portalClient.saveScan(worker.ptk_app.settings.profile || {}, source, {
             projectId: message?.projectId || null
         })
     }
@@ -1413,8 +1783,11 @@ export class ptk_rattacker {
             this._setLoadedScanResult(this.storage)
         }
         if (!this.scanResult) return null
+        const exportSource = this.scanResult
         try {
-            return await this.exportService.createChunkedExport(this.scanResult, {
+            await this.analysisService.ensureCompletedAnalysis(exportSource)
+            if (this.scanResult !== exportSource) throw new Error('scan_result_owner_changed')
+            return await this.exportService.createChunkedExport(exportSource, {
                 target: message?.target || "download",
                 fileName: message?.fileName || "PTK_DAST_scan.json",
                 includeSecrets: message?.includeSecrets === true,
@@ -1612,7 +1985,7 @@ export class ptk_rattacker {
     async msg_run_bg_scan(message) {
         try {
             const effectiveSettings = await this._resolveDastRunSettings(message?.settings || {})
-            const started = this.runBackgroundScan(message.tabId, message.host, message.domains, effectiveSettings)
+            const started = await this.runBackgroundScan(message.tabId, message.host, message.domains, effectiveSettings)
             if (!started || !this.engine.isRunning) {
                 return Promise.resolve({
                     success: false,
@@ -1657,44 +2030,81 @@ export class ptk_rattacker {
         })
     }
 
-    runBackgroundScan(tabId, host, domains, settings) {
+    async msg_runtime_test_status() {
+        if (!this.runtimeController.remote) {
+            return { ok: true, mode: "local", isRunning: this.engine?.isRunning === true }
+        }
+        await this.runtimeReady
+        return this.runtimeController.client.request("status", {})
+    }
+
+    async msg_runtime_test_disconnect_controller() {
+        if (!this.runtimeController.remote) return { ok: false, error: "local_runtime" }
+        const client = this.runtimeController.client
+        const sessionId = this.engine?.sessionId || null
+        const executorGeneration = this.engine?.executorGeneration || null
+        client?.port?.disconnect?.()
+        return { ok: true, sessionId, executorGeneration }
+    }
+
+    async runBackgroundScan(tabId, host, domains, settings) {
+        const runtimeState = await this.runtimeReady
+        if (this.runtimeController.remote && runtimeState?.ok !== true) return false
         const effectiveSettings = Object.assign({}, settings || {})
         // Always send an explicit rulepack value for each run so the engine
         // cannot inherit a portal policy snapshot from a previous scan.
         effectiveSettings.rulepack = effectiveSettings.rulepack || null
-        const started = this.sessionCoordinator.runBackgroundScan(tabId, host, domains, effectiveSettings)
+        effectiveSettings._cypressControllerAdmission = getCypressControllerAdmission()
+        const started = await this.sessionCoordinator.runBackgroundScan(tabId, host, domains, effectiveSettings)
         if (started) {
-            this._setAuthoritativeScanResult(this.engine.scanResult)
-            this._registerScopedTabSession(tabId, effectiveSettings)?.catch?.(() => { })
+            this._captureRunSettings = effectiveSettings
+            try {
+                await this._acquireBrowserCapture(tabId, effectiveSettings)
+                this._setAuthoritativeScanResult(this.engine.scanResult)
+                worker.ptk_app?.proxy?.beginScanHistory?.(tabId)
+                await this._registerScopedTabSession(tabId, effectiveSettings)
+            } catch (_) {
+                this.scopedTabCoordinator?.unregisterSession?.('DAST')
+                await this.sessionCoordinator.stopBackgroundScan({ waitForIdleBeforeStop: false, skipPostStopAnalysis: true })
+                await this._releaseAllBrowserCapture('start_failed')
+                worker.ptk_app?.proxy?.endScanHistory?.()
+                return false
+            }
         }
         return started
     }
 
     async stopBackgroundScan(options = {}) {
         this.scopedTabCoordinator?.unregisterSession?.('DAST')
-        const scanResult = await this.sessionCoordinator.stopBackgroundScan(options)
+        let scanResult
+        try {
+            scanResult = await this.sessionCoordinator.stopBackgroundScan(options)
+        } finally {
+            await this._releaseAllBrowserCapture()
+            worker.ptk_app?.proxy?.endScanHistory?.()
+        }
         if (scanResult) {
             this._setAuthoritativeScanResult(scanResult, {
                 markFinished: !!(scanResult?.finishedAt || scanResult?.finished)
             })
-            if (!options?.skipPostStopAnalysis && this.scanResult && (this.scanResult.finishedAt || this.scanResult.finished)) {
-                try {
-                    await this.analysisService.hydratePersistedRelatedScans(this.scanResult)
-                    this._applyAnalysis(this.scanResult, true)
-                    await this._flushPersistScanResult()
-                } catch (_) { }
-            }
+            this._scheduleCompletedAnalysis(this.scanResult)
         }
         return scanResult
     }
 
 
     checkConfirmedAttack(data) {
-        this.engine.updateScanResult(null, data)
+        Promise.resolve(this.engine.updateScanResult(null, data)).catch((error) => {
+            console.error('[PTK DAST] Runtime confirmation update failed', {
+                active: this.engine?.isRunning === true,
+                error: error?.message || String(error)
+            })
+        })
     }
 
     async startAutomationSession({ sessionId, tabId, host, domains, settings, policyCode, hooks }) {
         const effectiveSettings = await this._resolveDastRunSettings(settings || {})
+        effectiveSettings._cypressControllerAdmission = getCypressControllerAdmission()
         const result = await this.sessionCoordinator.startAutomationSession({
             sessionId,
             tabId,
@@ -1704,7 +2114,14 @@ export class ptk_rattacker {
             policyCode,
             hooks
         })
-        await this._registerScopedTabSession(tabId, effectiveSettings)
+        this._captureRunSettings = effectiveSettings
+        try {
+            await this._acquireBrowserCapture(tabId, effectiveSettings)
+            await this._registerScopedTabSession(tabId, effectiveSettings)
+        } catch (error) {
+            await this._stopOwnedAutomationSession(sessionId, 0, { waitForIdleBeforeStop: false, skipPostStopAnalysis: true }, 'start_failed')
+            throw error
+        }
         return result
     }
 
@@ -1760,8 +2177,61 @@ export class ptk_rattacker {
     }
 
     async stopAutomationSession(sessionId, timeoutMs = 180000, options = {}) {
-        this.scopedTabCoordinator?.unregisterSession?.('DAST')
-        return this.sessionCoordinator.stopAutomationSession(sessionId, timeoutMs, options)
+        return this._stopOwnedAutomationSession(sessionId, timeoutMs, options, 'stopped')
+    }
+
+    async _stopOwnedAutomationSession(sessionId, timeoutMs, options, captureReason) {
+        const coordinator = this.sessionCoordinator
+        const stopOwner = { owner: coordinator.state.automationSession, sessionId }
+        coordinator._assertAutomationStopOwner(stopOwner)
+        const owner = stopOwner.owner
+        // The exact owner's first in-flight Stop owns its policy and cleanup.
+        // A duplicate joins without interpreting or replacing later options.
+        if (owner.stopFlight) return owner.stopFlight.promise
+        const policy = coordinator._resolveAutomationStopPolicy(timeoutMs, options)
+        coordinator._assertAutomationStopOwner(stopOwner)
+        const retainedPolicy = owner.stopFlight?.policy || owner.stopQualification?.policy
+        if ((retainedPolicy && !coordinator._sameAutomationStopPolicy(retainedPolicy, policy))
+            || (owner.stopCaptureReason && owner.stopCaptureReason !== captureReason)) {
+            throw new Error("automation_stop_policy_conflict")
+        }
+        let resolveFlight, rejectFlight
+        const promise = new Promise((resolve, reject) => {
+            resolveFlight = resolve
+            rejectFlight = reject
+        })
+        const flight = { policy, captureReason, promise }
+        owner.stopCaptureReason = captureReason
+        owner.stopFlight = flight
+        // Reserve before unregister, the coordinator and its capture-cleanup finally.
+        const flow = (async () => {
+            coordinator._assertAutomationStopOwner(stopOwner)
+            this.scopedTabCoordinator?.unregisterSession?.('DAST')
+            let result
+            try {
+                result = await coordinator.stopAutomationSession(sessionId, policy.timeoutMs, {
+                    zapCloseRequest: policy.zapCloseRequest,
+                    skipPostStopAnalysis: policy.skipPostStopAnalysis,
+                    ...(policy.zapCloseRequest ? { drainTimeoutMs: policy.drainTimeoutMs } : {})
+                })
+            } finally {
+                coordinator._assertAutomationStopOwner(stopOwner)
+                await this._releaseAllBrowserCapture(captureReason)
+                coordinator._assertAutomationStopOwner(stopOwner)
+            }
+            coordinator._assertAutomationStopOwner(stopOwner)
+            coordinator.state.automationSession = null
+            this._scheduleCompletedAnalysis(this.scanResult)
+            return result
+        })()
+        flow.then(result => {
+            if (owner.stopFlight === flight) delete owner.stopFlight
+            resolveFlight(result)
+        }, error => {
+            if (owner.stopFlight === flight) delete owner.stopFlight
+            rejectFlight(error)
+        })
+        return promise
     }
 
     _collectSeverityStats(scanResult = this.scanResult) {

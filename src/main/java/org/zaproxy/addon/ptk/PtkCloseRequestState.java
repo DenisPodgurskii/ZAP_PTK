@@ -7,6 +7,7 @@ final class PtkCloseRequestState {
     private final String sessionId;
     private final String browserId;
     private boolean acknowledged;
+    private boolean terminalDrainAcknowledged;
 
     PtkCloseRequestState(String id, String reason, long createdAtMs) {
         this(id, reason, createdAtMs, null, null);
@@ -47,5 +48,14 @@ final class PtkCloseRequestState {
 
     synchronized void acknowledge() {
         acknowledged = true;
+    }
+
+    synchronized void acknowledgeTerminalDrain() {
+        acknowledged = true;
+        terminalDrainAcknowledged = true;
+    }
+
+    synchronized boolean terminalDrainAcknowledged() {
+        return terminalDrainAcknowledged;
     }
 }

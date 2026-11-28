@@ -5,6 +5,9 @@ import buildExportScanResult from './export/buildExportScanResult.js'
 import { resultsRegistry } from './resultsRegistry.js'
 import { collapseDastAggregatedFindings } from './dast/services/dastFindingAggregation.js'
 import { sastCollectionLooksComplete } from './sast/sast_progress.js'
+import { applyScanAnalysis } from './analysis/scanAnalysisEngine.js'
+import { scanResultStore } from './scanResultStore.js'
+import { stripPrivateDastAnalysisMetadata } from './dast/services/dastAnalysisService.js'
 
 // Mirrors the add-on close-contract PTK stop budget. This is a drain budget
 // for current engine work, not permission to start new work during close.
@@ -367,7 +370,12 @@ class EngineAdapter {
         stop: async (sessionId, timeoutMs = 180000, options = {}) => {
             const dast = this.app?.dast || this.app?.rattacker
             const automationState = this.automationModule?._getDastAutomationCoordinatorState?.(sessionId)
-            if (!automationState?.automationSession) return this._createEmptyStats()
+            if (!automationState?.automationSession) {
+                const retained = this.automationModule?._getRetainedDastStopOutcome?.(sessionId)
+                if (retained?.error) throw new Error(retained.error)
+                if (retained) return retained
+                throw new Error('automation_session_mismatch')
+            }
             // Use stopAutomationSession which quiesces/drains and returns stats.
             return dast.stopAutomationSession(sessionId, timeoutMs, withResolvedImmediateAnalysisOptions(options))
         },
@@ -689,16 +697,23 @@ class EngineAdapter {
                     timeoutMs: Math.max(250, Math.floor(effectiveTimeoutMs * 0.8))
                 })
             }
+            const scanId = session?.scanIds?.SAST
+            const stopOutcome = scanId && sast.scanResult?.scanId === scanId ? {} : null
             const stopPromise = sast.stopBackgroundScan({
-                skipPostStopAnalysis: stopOptions.skipPostStopAnalysis
+                skipPostStopAnalysis: stopOptions.skipPostStopAnalysis,
+                ...(stopOutcome ? { dashboardStopOutcome: stopOutcome } : {})
             })
             const stopped = await Promise.race([
                 Promise.resolve(stopPromise).then(() => true),
                 sleep(effectiveTimeoutMs).then(() => false)
             ])
             const drained = stopped && collectionDrained !== false
+            const partial = drained && stopOutcome?.status === 'partial' && sast.isScanRunning === false
+                && this.automationModule.sessions.get(sessionId) === session
+                && this.app.sast === sast && session.scanIds?.SAST === scanId && sast.scanResult?.scanId === scanId
             return Object.assign(this._extractStats(sast.scanResult), {
-                completionStatus: drained ? 'completed' : 'engine_incomplete',
+                completionStatus: partial ? 'partial' : drained && stopOutcome?.status !== 'failed'
+                    ? 'completed' : 'engine_incomplete',
                 drained
             })
         },
@@ -860,7 +875,17 @@ export class ptk_automation {
         const parentTabId = Number(details?.parentTabId)
         if (!session || !Number.isInteger(tabId) || !Number.isInteger(parentTabId)) return { ok: false, reason: 'invalid_ptk_child_tab' }
         if (Number(session.tabId) !== parentTabId) return { ok: false, reason: 'parent_tab_mismatch' }
-        const record = {
+        const phase = details?.phase === 'prepared' ? 'prepared' : 'ready'
+        if (phase === 'prepared' && (!['starting', 'running'].includes(session.status)
+            || !this._sessionUrlInScope(session, details?.url))) {
+            return { ok: false, reason: 'child_scope_or_session_unavailable' }
+        }
+        const key = this._ptkChildTabKey(sessionId, tabId)
+        const prior = this.ptkChildTabRecords.get(key)
+        if (prior && (prior.parentTabId !== parentTabId || prior.url !== details?.url)) {
+            return { ok: false, reason: 'child_owner_changed' }
+        }
+        const record = prior || {
             sessionId,
             tabId,
             parentTabId,
@@ -868,15 +893,17 @@ export class ptk_automation {
             url: typeof details?.url === 'string' ? details.url : null,
             sourceEngine: String(details?.sourceEngine || 'DAST'),
             createdAt: Date.now(),
-            sastPromise: null
+            sastPromise: null,
+            iastPrepared: false
         }
-        this.ptkChildTabRecords.set(this._ptkChildTabKey(sessionId, tabId), record)
+        this.ptkChildTabRecords.set(key, record)
 
-        if (this._sessionHasEngine(session, 'IAST')) {
+        if (this._sessionHasEngine(session, 'IAST') && !record.iastPrepared) {
             const iast = this.app?.iast || null
             const iastReady = await this._waitForEngineReady(() => iast?.isScanRunning === true && typeof iast.enrollRelatedScanTab === 'function')
+            if (!iastReady && phase === 'prepared') return { ok: false, reason: 'iast_not_ready' }
             if (iastReady) {
-                await iast.enrollRelatedScanTab(tabId, {
+                const enrolled = await iast.enrollRelatedScanTab(tabId, {
                     parentTabId,
                     role: record.role,
                     url: record.url,
@@ -891,10 +918,16 @@ export class ptk_automation {
                     })
                     return false
                 })
+                if (phase === 'prepared') {
+                    if (!enrolled) return { ok: false, reason: 'iast_enrollment_failed' }
+                    record.iastPrepared = true
+                }
             }
         }
 
-        if (this._sessionHasEngine(session, 'SAST')) {
+        if (phase === 'prepared') return { ok: true, iastPrepared: record.iastPrepared }
+
+        if (this._sessionHasEngine(session, 'SAST') && !record.sastPromise) {
             const sast = this.app?.sast || null
             record.sastPromise = Promise.resolve()
                 .then(async () => {
@@ -1296,6 +1329,24 @@ export class ptk_automation {
                 mode: CONTENT_RUNTIME_MODE_MANUAL,
                 script: CONTENT_RUNTIME_SCRIPT_MANUAL,
                 reason: 'dev_local_manual_ready'
+            }
+        }
+
+        if (
+            isTopFrame
+            && !isZapActive
+            && !isZapAutomationTab
+            && !isPtkChildTab
+            && !this._hasActiveSessionInAnyTab()
+            && this._isBrowserEngineScanRunningForTab(tabId)
+        ) {
+            // Dashboard-started manual engines do not create an automation
+            // session. Keep their own tab's manual content runtime available
+            // (including JWT storage reads) without admitting other tabs.
+            return {
+                mode: CONTENT_RUNTIME_MODE_MANUAL,
+                script: CONTENT_RUNTIME_SCRIPT_MANUAL,
+                reason: 'manual_scan_tab'
             }
         }
 
@@ -1822,6 +1873,43 @@ export class ptk_automation {
 
     // === Session Lifecycle ===
 
+    // Extension-owned content entry only. The ordinary/manual loader remains
+    // unchanged; this admits the generated MAIN entry only for a live ZAP
+    // capture owner and the exact sender document.
+    async msg_zap_main_bootstrap(message, sender) {
+        const unavailable = reason => ({ ok: false, reason, requestId: message?.requestId })
+        const transport = this.zap?.transport
+        const capture = this.zap?.browserCapture
+        if (this.zap?.isActive?.() !== true
+            || typeof capture?.getVerifiedCurrentRootDocument !== 'function') {
+            return unavailable('main_bootstrap_owner_unavailable')
+        }
+        const zapid = transport?.getZapId?.()
+        const browserid = transport?.getBrowserId?.()
+        let manifest
+        let extensionOrigin
+        try {
+            manifest = browser.runtime.getManifest()
+            const bridgeUrl = browser.runtime.getURL('ptk/automationBridge.js')
+            extensionOrigin = /^(chrome-extension:\/\/[a-z]{32})\/ptk\/automationBridge\.js$/u.exec(bridgeUrl)?.[1]
+        } catch (_) {
+            return unavailable('main_bootstrap_runtime_unavailable')
+        }
+        // Auto excludes ZAP integration modules. Load this only after the
+        // exact active ZAP owner gate above, so Auto's background can start.
+        const { installZapOwnedMainBootstrap } = await import('./integration/zap/zapMainBootstrap.js')
+        const result = await installZapOwnedMainBootstrap({
+            sender, zapid, browserid, version: manifest?.version,
+            extensionOrigin, nonce: message?.nonce,
+            getOwnedRoot: identity => capture.getVerifiedCurrentRootDocument(identity)
+        })
+        if (this.zap?.isActive?.() !== true || transport?.getZapId?.() !== zapid
+            || transport?.getBrowserId?.() !== browserid) {
+            return unavailable('main_bootstrap_owner_changed')
+        }
+        return { ...result, requestId: message?.requestId }
+    }
+
     async msg_session_start(message, sender) {
         debugAutomationLog('[PTK Automation] msg_session_start called', { message, sender: sender?.tab?.id })
         const { options, pageUrl, requestId } = message
@@ -1846,6 +1934,7 @@ export class ptk_automation {
                 }
             }
             // Clean up stale session
+            this._lateZapDastCleanup?.get(existingSession)?.disposeObservation?.()
             this.sessions.delete(existingSessionId)
             this.activeSessionByTabId.delete(tabId)
         }
@@ -1989,6 +2078,7 @@ export class ptk_automation {
                     requiredEngines: Array.isArray(existingSession?.engines) ? existingSession.engines.slice() : engines
                 }
             }
+            this._lateZapDastCleanup?.get(existingSession)?.disposeObservation?.()
             this.sessions.delete(existingSessionId)
             this.activeSessionByTabId.delete(tabId)
         }
@@ -2160,6 +2250,57 @@ export class ptk_automation {
         return this.getZapManagedScanContexts(options).map(entry => entry.scanId)
     }
 
+    async requestZapDastStop(sessionId, { id, tabId, browserid, zapid, sessionKey, timeoutMs } = {}) {
+        const session = this.sessions.get(sessionId)
+        if (!toNonEmptyString(id) || !browserid || !zapid || this.zap?.transport?.getBrowserId?.() !== browserid
+            || session?.source !== 'zap' || session.tabId !== tabId
+            || !Number.isInteger(tabId) || this.activeSessionByTabId.get(tabId) !== sessionId
+            || !sessionKey?.endsWith(`|${zapid}`) || session.zapSessionKey !== sessionKey
+            || session.engines.length !== 2 || !session.engines.includes('DAST')
+            || !session.engines.includes('IAST')) {
+            return { id, result: 'engine_incomplete', error: 'owner_mismatch' }
+        }
+        this._zapDastStops ||= new WeakMap()
+        const existing = this._zapDastStops.get(session)
+        if (existing && existing.id === id) {
+            return (await existing.promise).receipt
+        }
+        if (existing || session.stopRequestedAt || session.status !== 'running') {
+            return { id, result: 'engine_incomplete', error: 'stop_not_available' }
+        }
+        const scanId = toNonEmptyString(session.scanIds?.DAST)
+        const dast = this.app?.dast || this.app?.rattacker
+        if (!scanId || dast?.engine?.scanResult?.scanId !== scanId
+            || this._getDastAutomationCoordinatorState(sessionId)?.automationSession?.id !== sessionId) {
+            return { id, result: 'engine_incomplete', error: 'owner_mismatch' }
+        }
+
+        const boundedTimeoutMs = Math.min(this._normalizeStopTimeoutMs(timeoutMs), ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS)
+        const stopOptions = withResolvedImmediateAnalysisOptions({
+            zapCloseRequest: true, drainTimeoutMs: boundedTimeoutMs
+        })
+        const promise = Promise.resolve().then(async () => {
+            const stats = await this._stopEnginesAsync(session, boundedTimeoutMs, stopOptions, ['DAST'])
+            const state = session.engineStates.DAST
+            const settled = this._hasZapDastOwnedStopProof(session)
+            const completed = stats.completionStatus === 'completed' && settled && state.drained === true
+            if (!completed && state.completionStatus !== 'engine_incomplete') {
+                session.engineStates.DAST = {
+                    ...state, status: 'cancelled', completionStatus: 'engine_incomplete', drained: false
+                }
+            }
+            const receipt = completed
+                ? { id, result: 'completed' }
+                : { id, result: 'engine_incomplete', error: state.stopTimedOut ? 'stop_timeout' : 'stop_incomplete' }
+            return { stats, receipt }
+        }).catch(() => ({
+            stats: this._createEmptyStats(),
+            receipt: { id, result: 'engine_incomplete', error: 'stop_failed' }
+        }))
+        this._zapDastStops.set(session, { id, scanId, promise })
+        return (await promise).receipt
+    }
+
     async requestZapSessionStop(sessionId, options = {}) {
         const safeSessionId = toNonEmptyString(sessionId)
         if (!safeSessionId) {
@@ -2168,6 +2309,16 @@ export class ptk_automation {
         const session = this.sessions.get(safeSessionId)
         if (!session || session.source !== 'zap') {
             return { ok: false, error: 'session_not_found', sessionId: safeSessionId }
+        }
+        if (session.status === 'completed' && options?.source === 'zap_browser_close'
+            && toNonEmptyString(options?.closeRequestId)
+            && this._hasCompletedZapDastStopProof(session, session.engineStates?.DAST)) {
+            // A later host close acknowledges an already proved original Stop;
+            // it must not dispatch a second Stop or manufacture a cleanup token.
+            session.closeRequestId = toNonEmptyString(options.closeRequestId)
+            session.closeRequestAck = true
+            session.closeRequestMode = toNonEmptyString(options.closeRequestMode) || 'graceful_stop_and_drain'
+            session.closeRequestReason = toNonEmptyString(options.closeRequestReason) || null
         }
         if (session.status === 'completed' || session.status === 'error') {
             return {
@@ -2543,6 +2694,19 @@ export class ptk_automation {
             return { ok: false, error: resolution.error, requestId, sessionLookup: resolution.sessionLookup }
         }
 
+        if ((resolution.session.engines || []).includes('DAST')) {
+            const expected = resolution.session.scanIds?.DAST || resultsRegistry.findScanIdForEngine('DAST', {
+                tabId: resolution.session.tabId, host: resolution.session.host
+            })
+            const dast = this._getEngineExportModule('DAST')
+            const scan = dast?.scanResult
+            if (expected && scan?.scanId === expected && dast?.engine?.isRunning !== true && (scan.finishedAt || scan.finished)) {
+                await dast.analysisService?.ensureCompletedAnalysis?.(scan)
+                if (dast.scanResult !== scan || dast.engine?.isRunning === true) {
+                    return { ok: false, error: 'scan_result_owner_changed', requestId, sessionLookup: resolution.sessionLookup }
+                }
+            }
+        }
         const snapshot = this._collectAnalysisSnapshot(resolution.session)
         return {
             ok: true,
@@ -2584,6 +2748,46 @@ export class ptk_automation {
                         error: err?.message || String(err)
                     })
                 })
+        }
+
+        if (resolution.session?.engines?.includes?.('DAST')) {
+            const dast = this.app?.dast || this.app?.rattacker || null
+            const engine = dast?.engine || null
+            const scanId = resolution.session?.scanIds?.DAST || null
+            const owned = resolution.session?.status === 'running' && !!scanId
+                && engine?.scanResult?.scanId === scanId
+                && (engine?.automationSessionId === resolution.sessionId
+                    || this._getDastAutomationCoordinatorState(resolution.sessionId)?.automationSession?.id === resolution.sessionId)
+            if (owned && typeof dast?.refreshDastRuntimeProgress === 'function') {
+                const stillOwned = () => this.sessions.get(resolution.sessionId) === resolution.session
+                    && resolution.session.status === 'running'
+                    && resolution.session.scanIds?.DAST === scanId
+                    && dast?.engine === engine && engine?.scanResult?.scanId === scanId
+                Promise.resolve().then(() => dast.refreshDastRuntimeProgress()).then(() => {
+                    if (stillOwned() && resolution.session.engineStates?.DAST) {
+                        delete resolution.session.engineStates.DAST.progressRefreshError
+                    }
+                }).catch((error) => {
+                    if (stillOwned() && resolution.session.engineStates?.DAST) {
+                        resolution.session.engineStates.DAST.progressRefreshError = 'dast_runtime_progress_unavailable'
+                    }
+                    debugAutomationLog('[PTK Automation] Failed to refresh DAST runtime progress', {
+                        sessionId: resolution.sessionId,
+                        error: error?.message || String(error)
+                    })
+                })
+            }
+        }
+
+        let diagnostics = null
+        if (options?.includeDiagnostics === true && resolution.session?.engines?.includes?.('DAST')) {
+            const dast = this.app?.dast || this.app?.rattacker || null
+            const phasePerformance = await dast?.getDastPhasePerformance?.({ refresh: true })
+            diagnostics = {
+                dast: {
+                    phasePerformance: phasePerformance || null
+                }
+            }
         }
 
         const snapshot = this.getSessionProgressSnapshot(resolution.sessionId)
@@ -2660,6 +2864,7 @@ export class ptk_automation {
         return {
             ...snapshot,
             ...zapCloseProgress,
+            ...(diagnostics ? { diagnostics } : {}),
             requestId,
             sessionLookup: resolution.sessionLookup
         }
@@ -3230,6 +3435,7 @@ export class ptk_automation {
         const warnings = []
         const exports = []
         const allowChunked = options.allowChunked !== false
+        const forceChunked = allowChunked && exportOptions.forceChunked === true
 
         for (const engine of enginesToExport) {
             let scanId = session.scanIds[engine]
@@ -3250,16 +3456,23 @@ export class ptk_automation {
 
             try {
                 let scanExport = null
-                try {
-                    scanExport = await this._buildEngineExport(engine, scanId, session, exportOptions)
-                } catch (err) {
-                    if (!allowChunked || String(err?.message || '') !== 'export_too_large') {
-                        throw err
-                    }
+                if (forceChunked) {
                     scanExport = await this._buildEngineChunkedExport(engine, session, {
                         ...exportOptions,
                         owner: this._pageExportOwner(session, sender, engine, PAGE_EXPORT_MODE)
                     })
+                } else {
+                    try {
+                        scanExport = await this._buildEngineExport(engine, scanId, session, exportOptions)
+                    } catch (err) {
+                        if (!allowChunked || String(err?.message || '') !== 'export_too_large') {
+                            throw err
+                        }
+                        scanExport = await this._buildEngineChunkedExport(engine, session, {
+                            ...exportOptions,
+                            owner: this._pageExportOwner(session, sender, engine, PAGE_EXPORT_MODE)
+                        })
+                    }
                 }
                 exports.push(scanExport)
             } catch (err) {
@@ -3474,6 +3687,9 @@ export class ptk_automation {
 
     // Use adapter.stop() which waits for idle
     async _stopEngines(session, timeoutMs = 180000, options = {}) {
+        if (this._zapDastStops?.has(session)) {
+            return this._stopEnginesAsync(session, timeoutMs, options)
+        }
         const stats = { findingsCount: 0, bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 } }
 
         for (const engineName of session.engines) {
@@ -3496,12 +3712,20 @@ export class ptk_automation {
                 const resolvedStats = this._resolveStoppedEngineStats(engineName, session, engineStats)
                 this._mergeStats(stats, resolvedStats)
                 const incomplete = engineStats?.completionStatus === 'engine_incomplete'
+                const completionStatus = engineStats?.completionStatus || 'completed'
+                const keepSastPartial = completionStatus === 'completed' && engineName === 'SAST'
+                    && session.engineStates.SAST?.completionStatus === 'partial'
                 session.engineStates[engineName] = Object.assign({}, session.engineStates[engineName], {
                     status: incomplete ? 'cancelled' : 'stopped',
-                    completionStatus: engineStats?.completionStatus || (incomplete ? 'engine_incomplete' : 'completed'),
+                    completionStatus: keepSastPartial ? 'partial' : completionStatus,
                     drained: engineStats?.drained !== false
                 })
                 if (incomplete) stats.completionStatus = 'engine_incomplete'
+                if (completionStatus === 'partial' || keepSastPartial) {
+                    stats.completionStatus = 'engine_incomplete'
+                    stats.incompleteEngines = Array.isArray(stats.incompleteEngines) ? stats.incompleteEngines : []
+                    if (!stats.incompleteEngines.includes(engineName)) stats.incompleteEngines.push(engineName)
+                }
             } catch (err) {
                 session.engineStates[engineName] = {
                     status: 'error',
@@ -3518,7 +3742,7 @@ export class ptk_automation {
         return stats
     }
 
-    async _stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options = {}) {
+    async _stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options = {}, lateCleanup = null) {
         const zapCloseRequest = options?.zapCloseRequest === true || options?.source === 'zap_browser_close'
         const boundedTimeoutMs = zapCloseRequest
             ? Math.min(this._normalizeStopTimeoutMs(timeoutMs), ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS)
@@ -3536,8 +3760,10 @@ export class ptk_automation {
             }, boundedTimeoutMs)
         })
         try {
+            const originalStop = Promise.resolve(adapter.stop(session.id, boundedTimeoutMs, options))
+            if (lateCleanup) this._observeOriginalZapDastCleanup(lateCleanup, originalStop)
             const result = await Promise.race([
-                Promise.resolve(adapter.stop(session.id, boundedTimeoutMs, options)),
+                originalStop,
                 timeoutResult
             ])
             return result
@@ -3546,23 +3772,198 @@ export class ptk_automation {
         }
     }
 
+    _retainZapDastCleanup(session, { dast, coordinator, state, owner, runtime, facade, scanId, closeRequestId }) {
+        const bridge = this.zap
+        const transport = bridge?.transport
+        const client = facade?.client
+        const zapid = transport?.getZapId?.()
+        const browserid = transport?.getBrowserId?.()
+        // Retain one original flight, never another Stop or a late retry. Missing
+        // native/host/capture identity cannot establish a late physical receipt.
+        if (!Number.isInteger(session.tabId) || !zapid || !browserid || !client?.port
+            || session.scanIds?.DAST !== scanId
+            || this.sessions.get(session.id) !== session
+            || !toNonEmptyString(session.zapSessionKey)?.endsWith(`|${zapid}`)
+            || bridge.isActive?.() !== true || bridge.publisher?.disabled === true
+            || !client.controllerNonce || !facade.sessionId || !facade.executorGeneration
+            || !(dast.captureLeases instanceof Map)
+            || typeof bridge?._flushPublisherWithTimeout !== 'function'
+            || typeof bridge?.publisher?.getDrainState !== 'function'
+            || typeof browser?.tabs?.get !== 'function') return null
+        this._lateZapDastCleanup ||= new WeakMap()
+        if (this._lateZapDastCleanup.has(session)) return null
+        const retained = { session, dast, coordinator, state, owner, runtime, facade, scanId, closeRequestId,
+            tabId: session.tabId, zapSessionKey: session.zapSessionKey,
+            bridge, publisher: bridge.publisher, transport, zapid, browserid, client,
+            port: client.port, nonce: client.controllerNonce, nativeSessionId: facade.sessionId,
+            generation: facade.executorGeneration, captureLeases: dast.captureLeases,
+            originalSucceeded: false, timedOut: false, settling: false, qualified: false }
+        const monitor = Array.from(bridge._progressMonitorsByKey?.values?.() || [])
+            .find(candidate => candidate?.sessionId === session.id && candidate?.zapid === zapid)
+        if (monitor?.sessionKey === session.zapSessionKey && monitor.closeRequest?.id === closeRequestId
+            && monitor.closeRequest.acked === true && monitor.lastRuntimeSnapshot?.tabId === session.tabId) {
+            // Retain the object, not a sequence snapshot: the original terminal
+            // POST may still advance it while this cleanup flight is pending.
+            retained.terminalContext = Object.freeze({ monitor, session, sessionId: session.id, zapid,
+                tabId: session.tabId, sessionKey: session.zapSessionKey, closeRequestId })
+        }
+        this._lateZapDastCleanup.set(session, retained)
+        // Keep the original cleanup transaction observable, not the caller
+        // waiting. The 25s ZAP outcome deadline and ordinary RPC timeout remain
+        // unchanged. Retention is capped by the existing general Stop ceiling.
+        retained.deadlineAt = Date.now() + this._normalizeStopTimeoutMs()
+        const current = () => !retained.expired && !retained.hostRemoved
+            && this._lateZapDastCleanup?.get(session) === retained
+            && this.sessions.get(session.id) === session && session.source === 'zap'
+            && session.tabId === retained.tabId && session.scanIds?.DAST === scanId
+            && session.closeRequestId === closeRequestId && session.zapSessionKey === retained.zapSessionKey
+            && (this.app?.dast || this.app?.rattacker) === dast && dast.engine === facade
+            && dast.runtimeController === runtime && dast.sessionCoordinator === coordinator
+            && coordinator.getState() === state
+            && (state.automationSession === owner || state.automationSession === null)
+            && this.zap === bridge && bridge.transport === transport && bridge.publisher === retained.publisher
+            && bridge.isActive?.() === true && retained.publisher.disabled !== true
+            && transport.getZapId?.() === zapid && transport.getBrowserId?.() === browserid
+            && client.port === retained.port && client.controllerNonce === retained.nonce
+        retained.cleanupObservation = facade.setCleanupObservation?.({ deadlineAt: retained.deadlineAt, isCurrent: current })
+        const removed = tabId => {
+            if (tabId !== retained.tabId) return
+            retained.hostRemoved = true
+            retained.disposeObservation()
+        }
+        retained.disposeObservation = () => {
+            clearTimeout(retained.observationTimer)
+            browser.tabs?.onRemoved?.removeListener?.(removed)
+            retained.cleanupObservation?.cancel()
+        }
+        browser.tabs?.onRemoved?.addListener?.(removed)
+        retained.observationTimer = setTimeout(() => {
+            retained.expired = true
+            retained.disposeObservation()
+        }, Math.max(0, retained.deadlineAt - Date.now()))
+        return retained
+    }
+
+    _observeOriginalZapDastCleanup(retained, originalStop) {
+        const flight = retained.owner.stopFlight
+        if (!flight?.promise || flight.captureReason !== 'stopped' || flight.policy?.zapCloseRequest !== true) {
+            retained.disposeObservation?.()
+            return
+        }
+        retained.flight = flight
+        // Both resolutions must be the same original Rattacker outcome. Its
+        // promise settles only after capture release and exact-owner clearing.
+        retained.observation = Promise.all([originalStop, flight.promise]).then(([adapterResult, flightResult]) => {
+            retained.originalSucceeded = adapterResult === flightResult && !!adapterResult
+                && !adapterResult.error && adapterResult.__ptkStopTimedOut !== true
+            if (retained.originalSucceeded && retained.timedOut) return this._settleLateZapDastCleanup(retained)
+            return false
+        }, () => false).catch(err => {
+            // The original adapter rejection still reaches its original caller.
+            // A late observer failure never changes that historical outcome.
+            debugAutomationLog('[PTK Automation] Late ZAP cleanup settlement failed', {
+                sessionId: retained.session.id, error: err?.message || String(err)
+            })
+            return false
+        }).finally(() => retained.disposeObservation?.())
+    }
+
+    _isLateZapDastCleanupCurrent(retained, engineState) {
+        const { session, dast, coordinator, state, owner, runtime, facade, client, transport } = retained
+        if (this._lateZapDastCleanup?.get(session) !== retained || retained.expired || retained.hostRemoved || !retained.originalSucceeded
+            || !retained.timedOut || retained.timeoutState !== engineState
+            || this.sessions.get(session.id) !== session || session.source !== 'zap'
+            || session.tabId !== retained.tabId || session.scanIds?.DAST !== retained.scanId
+            || session.closeRequestId !== retained.closeRequestId || session.zapSessionKey !== retained.zapSessionKey
+            || engineState?.status !== 'cancelled' || engineState.completionStatus !== 'engine_incomplete'
+            || engineState.stopTimedOut !== true || engineState.error
+            || (this.app?.dast || this.app?.rattacker) !== dast || dast.engine !== facade
+            || dast.runtimeController !== runtime || runtime.remote !== true
+            || dast.sessionCoordinator !== coordinator || coordinator.getState() !== state
+            || state.automationSession !== null || owner.id !== session.id || owner.stopFlight
+            || dast.captureLeases !== retained.captureLeases || retained.captureLeases.size !== 0
+            || this.zap !== retained.bridge || this.zap.transport !== transport || this.zap.publisher !== retained.publisher
+            || this.zap.isActive?.() !== true || retained.publisher.disabled === true
+            || transport.getZapId?.() !== retained.zapid || transport.getBrowserId?.() !== retained.browserid
+            || transport.isReady?.({ zapid: retained.zapid }) !== true
+            || facade.client !== client || client.port !== retained.port || client.controllerNonce !== retained.nonce
+            || client.pending?.size !== 0) return false
+        const receipt = facade.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: retained.scanId })
+        return !!receipt && receipt.client === client && receipt.port === retained.port
+            && receipt.nonce === retained.nonce && receipt.sessionId === retained.nativeSessionId
+            && receipt.generation === retained.generation && receipt.automationSessionId === session.id
+            && receipt.scanId === retained.scanId
+            && (!retained.receipt || retained.receipt === receipt)
+    }
+
+    async _settleLateZapDastCleanup(retained) {
+        if (retained.settling) return false
+        retained.settling = true
+        const { session } = retained
+        const current = () => this._isLateZapDastCleanupCurrent(retained, session.engineStates?.DAST)
+        if (!current()) return false
+        const host = await browser.tabs.get(retained.tabId).catch(() => null)
+        if (host?.id !== retained.tabId || !current()) return false
+        // Native/capture settlement is independent of publisher availability.
+        // Preserve its exact receipt before attempting final publication so an
+        // existing monitor can finish drainage after a transient flush failure.
+        // This proof alone never authorizes closure: the bridge and ZAP still
+        // require the same accepted callback's final publisher acknowledgement.
+        retained.receipt = retained.facade.getRemoteCleanupReceipt({ sessionId: session.id, scanId: retained.scanId })
+        retained.qualified = true
+        session.engineStates.DAST.remoteCleanup = {
+            sessionId: session.id, scanId: retained.scanId, closeRequestId: retained.closeRequestId
+        }
+        this._remoteCleanupOwners ||= new WeakMap()
+        this._remoteCleanupOwners.set(session, { facade: retained.facade, runtime: retained.runtime,
+            coordinator: retained.coordinator, state: retained.state })
+        if (await retained.bridge._flushPublisherWithTimeout() !== true || !current()) return false
+        const publisher = await retained.publisher.getDrainState()
+        if (publisher?.drained !== true || publisher.pendingFindings !== 0
+            || publisher.inFlightBatches !== 0 || !current()) return false
+        const stillOpen = await browser.tabs.get(retained.tabId).catch(() => null)
+        if (stillOpen?.id !== retained.tabId) {
+            retained.hostRemoved = true
+            retained.disposeObservation?.()
+            return false
+        }
+        if (!current()) return false
+        // Only physical proof changes. Timeout, Partial status, summary, findings
+        // and drain history remain untouched; the existing publisher posts them.
+        if (retained.terminalContext && session.finishedAt && ['completed', 'cancelled', 'error'].includes(session.status)) {
+            const posted = await retained.bridge.postTerminalProgressForClose({
+                sessionId: session.id, zapid: retained.zapid, allowRetry: false,
+                terminalContext: retained.terminalContext
+            })
+            return posted?.ok === true && posted.posted === true
+        }
+        return false // The original finalizer still owns terminal publication.
+    }
+
     /**
      * Stop engines asynchronously (fire-and-forget with completion tracking)
      * Updates engineStates as each engine stops
      */
-    async _stopEnginesAsync(session, timeoutMs = 180000, options = {}) {
+    async _stopEnginesAsync(session, timeoutMs = 180000, options = {}, onlyEngines = null) {
         const stats = this._createEmptyStats()
         stats.completionStatus = 'completed'
         stats.incompleteEngines = []
+        const earlyDastStop = !onlyEngines ? this._zapDastStops?.get(session) : null
+        const engineNames = onlyEngines || (earlyDastStop
+            ? session.engines.filter(engine => engine !== 'DAST') : session.engines)
 
+        // An already released DAST owner has no new stop outcome. Reuse only
+        // this registered session's proven terminal state, never empty stats.
+        const retainedDast = this._getRetainedDastStopOutcome(session.id)
         // Mark all engines as stopping
-        for (const engineName of session.engines) {
+        for (const engineName of engineNames) {
             session.engineStates[engineName] = session.engineStates[engineName] || {}
+            if (engineName === 'DAST' && retainedDast) continue
             session.engineStates[engineName].status = 'stopping'
         }
 
         // Stop each engine with individual error handling
-        const stopPromises = session.engines.map(async (engineName) => {
+        const stopPromises = engineNames.map(async (engineName) => {
             const adapter = this.engines?.getAdapter(engineName)
             if (!adapter) {
                 session.engineStates[engineName].status = 'error'
@@ -3575,19 +3976,138 @@ export class ptk_automation {
             }
 
             try {
-                const engineStats = await this._stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options)
-                const resolvedStats = this._resolveStoppedEngineStats(engineName, session, engineStats)
+                if (engineName === 'DAST' && retainedDast?.error) throw new Error(retainedDast.error)
+                // A returned local Stop includes Rattacker's capture release and
+                // exact-owner clear. Retained stats and timeout fallbacks do not.
+                const localDast = this.app?.dast || this.app?.rattacker
+                const localCoordinator = localDast?.sessionCoordinator
+                const localState = engineName === 'DAST' && !retainedDast
+                    ? localCoordinator?.getState?.() : null
+                const localOwner = localState?.automationSession
+                const localRuntime = localDast?.runtimeController
+                const localEngine = localDast?.engine
+                const localScanResult = localEngine?.scanResult
+                const localCaptureLeases = localDast?.captureLeases
+                // Local startup may leave the presentation-derived session ID
+                // empty. Pin the exact executor result before Stop instead;
+                // an already bound, conflicting session ID must still fail.
+                const localScanId = session.scanIds?.DAST || localScanResult?.scanId
+                const localCloseRequestId = session.closeRequestId
+                const qualifyCompletedStop = engineName === 'DAST' && !retainedDast
+                    && session.source === 'zap' && localOwner?.id === session.id
+                    && !!localScanId && localScanResult?.scanId === localScanId
+                    && localCaptureLeases instanceof Map
+                    && [true, false].includes(localRuntime?.remote)
+                    && !session.engineStates[engineName]?.error && !session.engineStates[engineName]?.stopTimedOut
+                const qualifyLocalCleanup = engineName === 'DAST' && !retainedDast
+                    && session.source === 'zap' && options?.source === 'zap_browser_close'
+                    && localRuntime?.remote === false
+                    && localOwner?.id === session.id && !!localScanId
+                    && localScanResult?.scanId === localScanId
+                    && !!localCloseRequestId && options.closeRequestId === localCloseRequestId
+                    && !session.engineStates[engineName]?.error
+                    && !session.engineStates[engineName]?.stopTimedOut
+                const qualifyRemoteCleanup = engineName === 'DAST' && !retainedDast
+                    && session.source === 'zap' && options?.source === 'zap_browser_close'
+                    && localRuntime?.remote === true && localOwner?.id === session.id
+                    && !!localScanId && localScanResult?.scanId === localScanId
+                    && !!localCloseRequestId && options.closeRequestId === localCloseRequestId
+                    && !session.engineStates[engineName]?.error && !session.engineStates[engineName]?.stopTimedOut
+                const lateCleanup = qualifyRemoteCleanup ? this._retainZapDastCleanup(session, {
+                    dast: localDast, coordinator: localCoordinator, state: localState, owner: localOwner,
+                    runtime: localRuntime, facade: localEngine, scanId: localScanId, closeRequestId: localCloseRequestId
+                }) : null
+                const engineStats = engineName === 'DAST' && retainedDast
+                    ? retainedDast
+                    : await this._stopEngineWithHardTimeout(adapter, session, engineName, timeoutMs, options, lateCleanup)
+                const resolvedStats = engineName === 'DAST' && retainedDast
+                    ? engineStats
+                    : this._resolveStoppedEngineStats(engineName, session, engineStats)
                 const timedOut = engineStats?.__ptkStopTimedOut === true
                 const incomplete = timedOut || engineStats?.completionStatus === 'engine_incomplete'
+                const remoteCleanup = qualifyRemoteCleanup && !timedOut && engineStats && !engineStats.error
+                    && this.sessions.get(session.id) === session
+                    && (this.app?.dast || this.app?.rattacker) === localDast
+                    && localDast.sessionCoordinator === localCoordinator
+                    && localDast.runtimeController === localRuntime && localRuntime.remote === true
+                    && localCoordinator.getState() === localState && localState.automationSession === null
+                    && localOwner.id === session.id && session.scanIds?.DAST === localScanId
+                    && localDast.engine === localEngine && session.closeRequestId === localCloseRequestId
+                    && !session.engineStates[engineName]?.error && !session.engineStates[engineName]?.stopTimedOut
+                    && localEngine.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: localScanId })
+                    ? { sessionId: session.id, scanId: localScanId, closeRequestId: localCloseRequestId }
+                    : null
+                const localCleanup = qualifyLocalCleanup && !timedOut && engineStats && !engineStats.error
+                    && this.sessions.get(session.id) === session
+                    && (this.app?.dast || this.app?.rattacker) === localDast
+                    && localDast.sessionCoordinator === localCoordinator
+                    && localDast.runtimeController === localRuntime && localRuntime.remote === false
+                    && localCoordinator.getState() === localState
+                    && localState.automationSession === null
+                    && localOwner.id === session.id
+                    && session.scanIds?.DAST === localScanId
+                    // The presentation envelope is rehydrated during normal Stop;
+                    // executor identity, not that replaceable copy, owns cleanup.
+                    && localDast.engine === localEngine
+                    && localEngine.scanResult === localScanResult
+                    && localEngine.scanResult?.scanId === localScanId
+                    && session.closeRequestId === localCloseRequestId
+                    && !session.engineStates[engineName]?.error
+                    && !session.engineStates[engineName]?.stopTimedOut
+                    ? { sessionId: session.id, scanId: localScanId, closeRequestId: localCloseRequestId }
+                    : null
+                const producerStopped = qualifyCompletedStop && !timedOut && !engineStats?.error
+                    && ['completed', 'engine_incomplete'].includes(engineStats?.completionStatus)
+                    && this.sessions.get(session.id) === session
+                    && (this.app?.dast || this.app?.rattacker) === localDast
+                    && localDast.engine === localEngine && localEngine.isRunning === false
+                    && localDast.runtimeController === localRuntime && localDast.sessionCoordinator === localCoordinator
+                    && localCoordinator.getState() === localState && localState.automationSession === null
+                    && localOwner.id === session.id && session.scanIds?.DAST === localScanId
+                    && localDast.captureLeases === localCaptureLeases && localCaptureLeases.size === 0
+                    && !session.engineStates[engineName]?.error && !session.engineStates[engineName]?.stopTimedOut
+                    && (localRuntime.remote === true
+                        ? !!localEngine.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: localScanId })
+                        : localEngine.scanResult === localScanResult && localScanResult.scanId === localScanId)
+                const completedStop = producerStopped
+                    && engineStats.completionStatus === 'completed' && engineStats.drained === true
+                if (engineName === 'DAST' && !retainedDast) {
+                    this._remoteCleanupOwners ||= new WeakMap()
+                    this._remoteCleanupOwners.delete(session)
+                    // Reuse this existing exact-owner record for a completed
+                    // original local/remote Stop too. It is internal settlement
+                    // proof, never a manufactured close-bound cleanup marker.
+                    if (remoteCleanup || completedStop || (onlyEngines && producerStopped)) this._remoteCleanupOwners.set(session, {
+                        facade: localEngine, runtime: localRuntime, coordinator: localCoordinator, state: localState,
+                        producerStopped: !!producerStopped, completedStop: !!completedStop,
+                        scanId: localScanId, owner: localOwner,
+                        captureLeases: localCaptureLeases, scanResult: localScanResult
+                    })
+                }
+                const completionStatus = engineStats?.completionStatus || 'completed'
+                const keepSastPartial = completionStatus === 'completed' && engineName === 'SAST'
+                    && session.engineStates.SAST?.completionStatus === 'partial'
                 session.engineStates[engineName] = Object.assign({}, session.engineStates[engineName], {
                     status: incomplete ? 'cancelled' : 'stopped',
-                    completionStatus: incomplete ? 'engine_incomplete' : (engineStats?.completionStatus || 'completed'),
+                    completionStatus: incomplete ? 'engine_incomplete' : keepSastPartial ? 'partial' : completionStatus,
                     drained: engineStats?.drained !== false && !timedOut,
-                    stopTimedOut: timedOut || undefined
+                    stopTimedOut: timedOut || undefined,
+                    ...(engineName === 'DAST' && !retainedDast ? { localCleanup, remoteCleanup } : {})
                 })
+                if (lateCleanup && timedOut) {
+                    lateCleanup.timeoutState = session.engineStates[engineName]
+                    lateCleanup.timedOut = true
+                    // Also handles an original resolution between the timeout
+                    // winner and recording its historical incomplete state.
+                    if (lateCleanup.originalSucceeded) void this._settleLateZapDastCleanup(lateCleanup).catch(() => false)
+                }
                 if (incomplete) {
                     stats.completionStatus = 'engine_incomplete'
                     stats.incompleteEngines.push(engineName)
+                }
+                if (completionStatus === 'partial' || keepSastPartial) {
+                    stats.completionStatus = 'engine_incomplete'
+                    if (!stats.incompleteEngines.includes(engineName)) stats.incompleteEngines.push(engineName)
                 }
 
                 // Aggregate stats
@@ -3607,6 +4127,20 @@ export class ptk_automation {
         })
 
         await Promise.all(stopPromises)
+        if (earlyDastStop) {
+            const outcome = await earlyDastStop.promise
+            this._mergeStats(stats, outcome.stats)
+            if (outcome.receipt.result !== 'completed' || !this._hasZapDastOwnedStopProof(session)) {
+                stats.completionStatus = 'engine_incomplete'
+                stats.incompleteEngines.push('DAST')
+                const state = session.engineStates.DAST
+                if (state?.completionStatus !== 'engine_incomplete') {
+                    session.engineStates.DAST = {
+                        ...state, status: 'cancelled', completionStatus: 'engine_incomplete', drained: false
+                    }
+                }
+            }
+        }
         return stats
     }
 
@@ -3614,6 +4148,25 @@ export class ptk_automation {
         return {
             findingsCount: 0,
             bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
+        }
+    }
+
+    _getRetainedDastStopOutcome(sessionId) {
+        const session = this.sessions.get(sessionId)
+        if (!session || session.id !== sessionId) return null
+        if (this._getDastAutomationCoordinatorState(sessionId)?.automationSession) return null
+        const state = session.engineStates?.DAST
+        if (!state || !['stopped', 'completed', 'cancelled', 'error'].includes(state.status)
+            || !['completed', 'engine_incomplete'].includes(state.completionStatus)) return null
+        const scanId = session.scanIds?.DAST
+        const scanResult = scanId ? resultsRegistry.get('DAST', scanId) : null
+        return {
+            ...this._extractStatsFromScanResult(scanResult),
+            completionStatus: state.status !== 'error' && state.completionStatus === 'completed'
+                && state.drained === true && !state.stopTimedOut ? 'completed' : 'engine_incomplete',
+            drained: state.status !== 'error' && state.drained === true,
+            ...(state.status === 'error' ? { error: state.error || 'executor_stop_failed' } : {}),
+            __ptkStopTimedOut: state.stopTimedOut === true
         }
     }
 
@@ -3639,6 +4192,10 @@ export class ptk_automation {
     }
 
     _resolveStoppedEngineStats(engineName, session, initialStats = null) {
+        if (engineName === 'DAST') {
+            const retained = this._getRetainedDastStopOutcome(session?.id)
+            if (retained) return { findingsCount: retained.findingsCount, bySeverity: retained.bySeverity }
+        }
         const best = {
             findingsCount: Number(initialStats?.findingsCount || 0),
             bySeverity: Object.assign(
@@ -3699,6 +4256,9 @@ export class ptk_automation {
      * Called from both sync and async stop paths
      */
     _finalizeSession(session, stats) {
+        // A timeout/Partial/error terminal observation cannot be upgraded by a
+        // late competing finalizer. Native findings remain in their own stores.
+        if (session?.finishedAt && ['completed', 'cancelled', 'error'].includes(session.status)) return false
         if (session?.zapCloseTerminalFallbackTimer) {
             clearTimeout(session.zapCloseTerminalFallbackTimer)
             delete session.zapCloseTerminalFallbackTimer
@@ -3712,7 +4272,15 @@ export class ptk_automation {
             ? (stats?.completionStatus === 'publisher_incomplete' ? 'publisher_incomplete' : 'engine_incomplete')
             : 'completed'
         session.finishedAt = new Date().toISOString()
-        session.status = completionStatus === 'completed' ? 'completed' : 'cancelled'
+        const physicalTerminal = Array.isArray(session.engines) && session.engines.length > 0
+            && session.engines.every((engineName) => {
+                const state = session.engineStates?.[engineName]
+                return ['stopped', 'completed'].includes(state?.status)
+                    && ['completed', 'partial'].includes(state?.completionStatus)
+                    && state.drained === true && !state.error && !state.stopTimedOut
+                    && !!session.scanIds?.[engineName]
+            })
+        session.status = completionStatus === 'completed' || physicalTerminal ? 'completed' : 'cancelled'
         session.completionStatus = completionStatus
         session.releaseStatus = completionStatus === 'completed' ? 'clean' : 'incomplete'
 
@@ -3745,7 +4313,8 @@ export class ptk_automation {
     }
 
     _scheduleZapCloseTerminalFallback(session, { zapid = null, timeoutMs = ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS } = {}) {
-        if (!session || session.status === 'completed' || session.status === 'error') return
+        if (!session || session.status === 'completed' || session.status === 'error'
+            || (session.status === 'cancelled' && session.finishedAt)) return
         if (session.zapCloseTerminalFallbackTimer) {
             clearTimeout(session.zapCloseTerminalFallbackTimer)
         }
@@ -3779,7 +4348,8 @@ export class ptk_automation {
     }
 
     async _finalizeZapCloseSessionForTerminal(session, { zapid = null, reason = 'zap_browser_close_terminalized', timeoutMs = ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS, stopOptions = null, immediateAnalysis = undefined } = {}) {
-        if (!session || session.status === 'completed' || session.status === 'error') {
+        if (!session || session.status === 'completed' || session.status === 'error'
+            || (session.status === 'cancelled' && session.finishedAt)) {
             if (session?.id) {
                 await this.zap?.postTerminalProgressForClose?.({
                     sessionId: session.id,
@@ -3797,7 +4367,9 @@ export class ptk_automation {
             delete session.zapCloseTerminalFallbackTimer
         }
 
-        session.stopInProgress = false
+        // Keep progress/export reads from finalizing this owner while its
+        // original stop still owes the actual completed/Partial qualification.
+        session.stopInProgress = true
         session.warnings = Array.isArray(session.warnings) ? session.warnings : []
         session.warnings.push({
             code: reason,
@@ -3811,11 +4383,15 @@ export class ptk_automation {
             ...(immediateAnalysis !== undefined ? { immediateAnalysis } : {})
         })
         const stats = await this._stopEnginesAsync(session, timeoutMs, resolvedStopOptions)
+        session.stopInProgress = false
         this._finalizeSession(session, stats)
 
+        const retainedCleanup = this._lateZapDastCleanup?.get(session)
         await this.zap?.postTerminalProgressForClose?.({
             sessionId: session.id,
-            zapid
+            zapid,
+            ...(retainedCleanup?.timedOut && retainedCleanup.terminalContext
+                ? { terminalContext: retainedCleanup.terminalContext } : {})
         })
         return true
     }
@@ -3827,6 +4403,7 @@ export class ptk_automation {
         const boundedTimeoutMs = Math.max(250, Math.min(5000, this._normalizeStopTimeoutMs(timeoutMs)))
         setTimeout(() => {
             for (const engineName of engineNames) {
+                if (engineName === 'DAST' && this._zapDastStops?.has(session)) continue
                 const adapter = this.engines?.getAdapter?.(engineName)
                 if (!adapter || typeof adapter.stop !== 'function') continue
                 Promise.resolve()
@@ -3847,16 +4424,19 @@ export class ptk_automation {
     }
 
     async _completeZapCloseFallbackAfterGrace(session, { zapid = null, timeoutMs = ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS } = {}) {
-        if (!session || session.status === 'completed' || session.status === 'error') return false
+        if (!session || session.status === 'completed' || session.status === 'error'
+            || (session.status === 'cancelled' && session.finishedAt)) return false
         const deadlineMs = Date.now() + Math.max(250, Math.min(
             ZAP_CLOSE_ENGINE_STOP_TIMEOUT_MS,
             this._normalizeStopTimeoutMs(timeoutMs)
         ))
         while (Date.now() < deadlineMs) {
-            if (!session || session.status === 'completed' || session.status === 'error') return false
+            if (!session || session.status === 'completed' || session.status === 'error'
+                || (session.status === 'cancelled' && session.finishedAt)) return false
             await sleep(ZAP_CLOSE_TERMINAL_FALLBACK_POLL_MS)
         }
-        if (!session || session.status === 'completed' || session.status === 'error') return false
+        if (!session || session.status === 'completed' || session.status === 'error'
+            || (session.status === 'cancelled' && session.finishedAt)) return false
         return this._finalizeZapCloseSessionIncomplete(session, {
             reason: 'zap_close_stop_bounded',
             zapid
@@ -3864,7 +4444,8 @@ export class ptk_automation {
     }
 
     async _finalizeZapCloseSessionIncomplete(session, { reason = 'zap_close_stop_timeout', zapid = null } = {}) {
-        if (!session || session.status === 'completed' || session.status === 'error') return false
+        if (!session || session.status === 'completed' || session.status === 'error'
+            || (session.status === 'cancelled' && session.finishedAt)) return false
         if (!session.stopRequestedAt) return false
 
         if (session.zapCloseTerminalFallbackTimer) {
@@ -3957,6 +4538,12 @@ export class ptk_automation {
         const scanResult = resultsRegistry.get(engine, scanId)
         if (!scanResult) {
             throw new Error(`scan_result_not_found:${engine}`)
+        }
+
+        if (engine === 'DAST') {
+            const module = this._getEngineExportModule(engine)
+            await module?.analysisService?.ensureCompletedAnalysis?.(scanResult)
+            if (resultsRegistry.get(engine, scanId) !== scanResult) throw new Error('scan_result_owner_changed')
         }
 
         let exported = buildExportScanResult(scanId, { scanResult, includeSecrets: includeSecrets === true })
@@ -4288,6 +4875,7 @@ export class ptk_automation {
 
         debugAutomationLog('[PTK Automation] Evicting session', sessionId)
         this._recordEvictedSession(session, reason)
+        this._lateZapDastCleanup?.get(session)?.disposeObservation?.()
         this.sessions.delete(sessionId)
 
         if (this.lastCompletedSessionGlobal === sessionId) {
@@ -4803,7 +5391,29 @@ export class ptk_automation {
                 continue
             }
 
-            const analysis = cloneJsonSafe(scanResult.analysis, { warnings, label: `${engineName}.analysis` })
+            let analysisSource = scanResult
+            if (scanId && scanResult.scanId === scanId && (scanResult.finishedAt || scanResult.finished)) {
+                const clone = cloneJsonSafe(scanResult, { warnings, label: `${engineName}.scanResult` })
+                if (clone) {
+                    try {
+                        const module = this._getEngineExportModule(engineName)
+                        if (engineName === 'DAST' && module?.analysisService?.buildAnalysisOptions) {
+                            const service = module.analysisService
+                            if (!service.hasCompletedAnalysis(scanResult)) {
+                                const options = service.buildAnalysisOptions(clone, { force: false, engineIsRunning: false })
+                                applyScanAnalysis(clone, options)
+                                service.applyMergedCoverage(clone, { relatedScans: options.relatedScans })
+                                clone.analysis.meta = service.buildAnalysisMetadata(clone, { ...options, engineIsRunning: false })
+                            }
+                        } else applyScanAnalysis(clone, { force: true, relatedScans: scanResultStore.getRelatedScansForAnalysis({
+                            scanId, host: scanResult.host, tabId: scanResult.tabId, engine: engineName
+                        }) })
+                        analysisSource = clone
+                    } catch (_) { warnings.push(`snapshot_analysis_failed:${engineName}`) }
+                }
+            }
+            const analysis = cloneJsonSafe(analysisSource.analysis, { warnings, label: `${engineName}.analysis` })
+            if (engineName === 'DAST') stripPrivateDastAnalysisMetadata(analysis)
             const codeArtifacts = cloneJsonSafe(scanResult.codeArtifacts, { warnings, label: `${engineName}.codeArtifacts` })
             const explorer = analysis?.explorer || null
             const counts = {
@@ -4824,7 +5434,7 @@ export class ptk_automation {
                 engine: engineName,
                 scanId: scanResult.scanId || scanId || null,
                 available: true,
-                analysisVersion: scanResult.analysisVersion || analysis?.version || null,
+                analysisVersion: analysis?.version || analysisSource.analysisVersion || null,
                 analysis,
                 explorer,
                 codeArtifacts,
@@ -5181,6 +5791,14 @@ export class ptk_automation {
         for (const engineName of session.engines) {
             const engineState = session.engineStates[engineName] || {}
             const progress = this._getEngineProgress(engineName, engineState, session)
+            if (engineName === 'SAST'
+                && engineState.status === 'stopped' && engineState.completionStatus === 'partial') {
+                // Stop resets live collection state. Keep the final coverage outcome in this session.
+                progress.completionStatus = 'partial'
+                progress.phase = 'error'
+                progress.collectionState = 'collection_failed'
+                progress.analysisState = 'error'
+            }
             enginesProgress[engineName] = progress
             if (!firstEngineError && typeof engineState?.error === 'string' && engineState.error.trim()) {
                 firstEngineError = `${engineName}:${engineState.error.trim()}`
@@ -5226,6 +5844,88 @@ export class ptk_automation {
             ...(sessionStatus === 'completed' && session.summary ? { finalSummary: session.summary } : {}),
             warnings: session.warnings || []
         }
+    }
+
+    // This method is reached only through the trusted extension runner sender
+    // gate in app.js. Tab identity comes from the active background session,
+    // never from a page-supplied URL or a latest-scan lookup.
+    async getZapOwnedVisitCheckpoint({ sessionId, zapid, browserid, phase, observationMs } = {}) {
+        const unavailable = reason => ({ ok: false, reason })
+        if (typeof sessionId !== 'string' || !sessionId
+            || typeof zapid !== 'string' || !zapid
+            || typeof browserid !== 'string' || !browserid
+            || !['advance', 'departure', 'clear', 'rebind'].includes(phase)) {
+            return unavailable('visit_request_invalid')
+        }
+        const session = this.sessions.get(sessionId)
+        const tabId = session?.tabId
+        if (!Number.isInteger(tabId) || tabId < 0
+            || session.id !== sessionId || session.source !== 'zap'
+            || session.status !== ENGINE_STATUS_RUNNING || session.stopRequestedAt
+            || this.activeSessionByTabId.get(tabId) !== sessionId
+            || this.zap?.isActive?.() !== true
+            || this.zap?.transport?.getZapId?.() !== zapid
+            || this.zap?.transport?.getBrowserId?.() !== browserid) {
+            return unavailable('visit_owner_unavailable')
+        }
+        const owner = { zapid, browserid, tabId, sessionId }
+        const named = this.zap.getOwnedVisitScanIdentities?.(owner)
+        if (named?.ok !== true) return unavailable(named?.reason || 'visit_scan_unavailable')
+        if (phase === 'clear') {
+            return { ok: this.zap.clearOwnedVisitObservation?.(owner) === true,
+                kind: 'observation_cleared' }
+        }
+        if (phase === 'rebind') {
+            return this.zap.rebindOwnedIastStream?.(owner)
+                || unavailable('visit_rebind_unavailable')
+        }
+        if (phase === 'advance') {
+            return this.zap.advanceOwnedVisitObservation(owner, observationMs)
+        }
+        return this.zap.confirmOwnedVisitDeparture(owner)
+    }
+
+    // A visit checkpoint must use the scans owned by this exact running ZAP
+    // session. Unlike getSessionProgressSnapshot, this is read-only and never
+    // discovers a replacement "latest" scan or finalizes session state.
+    getZapOwnedScanIdentitySnapshot({ sessionId, tabId, zapSessionKey } = {}) {
+        const unavailable = reason => ({ ok: false, reason })
+        if (typeof sessionId !== 'string' || !sessionId
+            || !Number.isInteger(tabId) || tabId < 0
+            || typeof zapSessionKey !== 'string' || !zapSessionKey) {
+            return unavailable('owner_identity_invalid')
+        }
+        const session = this.sessions.get(sessionId)
+        if (!session || session.id !== sessionId || session.source !== 'zap'
+            || session.tabId !== tabId || session.zapSessionKey !== zapSessionKey
+            || session.status !== ENGINE_STATUS_RUNNING
+            || session.stopRequestedAt || this.activeSessionByTabId.get(tabId) !== sessionId) {
+            return unavailable('owner_not_running')
+        }
+        const engines = session.engines
+        if (!Array.isArray(engines) || !engines.length || engines.length > 4
+            || new Set(engines).size !== engines.length
+            || engines.some(engine => !['DAST', 'IAST', 'SAST', 'SCA'].includes(engine))) {
+            return unavailable('engine_identity_invalid')
+        }
+        const scanIds = {}
+        const earlyDastStop = this._zapDastStops?.get(session)
+        for (const engine of engines) {
+            const scanId = session.scanIds?.[engine]
+            if (typeof scanId !== 'string' || !scanId.trim() || scanId.length > 128) {
+                return unavailable('scan_identity_pending')
+            }
+            const status = session.engineStates?.[engine]?.status
+            // The selected DAST identity remains part of the visit evidence cut.
+            // Its stop must not invalidate admission for the still-owned IAST scan.
+            const retainedDastIdentity = engine === 'DAST' && earlyDastStop?.scanId === scanId
+                && ['stopping', 'stopped', 'cancelled', 'error'].includes(status)
+            if (status !== ENGINE_STATUS_RUNNING && status !== ENGINE_STATUS_COMPLETED && !retainedDastIdentity) {
+                return unavailable('engine_not_ready')
+            }
+            scanIds[engine] = scanId
+        }
+        return { ok: true, sessionId, tabId, requiredEngines: engines.slice(), scanIds }
     }
 
     getZapSessionProgressState(sessionId) {
@@ -5347,8 +6047,29 @@ export class ptk_automation {
             pendingAutomationSeeds,
             toFiniteNumber(engineProgress?.findingsCount, 0)
         ].some(value => Number.isFinite(value) && value > 0) || Boolean(toNonEmptyString(lastActivityAt))
-        return {
+        const telemetry = {
             status: engineProgress?.status || engineState?.status || 'unknown',
+            remoteCleanup: engineState?.remoteCleanup && !engineState.error
+                && (!engineState.stopTimedOut || (this._lateZapDastCleanup?.get(session)?.qualified === true
+                    && this._isLateZapDastCleanupCurrent(this._lateZapDastCleanup.get(session), engineState)))
+                && engineState.remoteCleanup.sessionId === session?.id
+                && engineState.remoteCleanup.scanId === session?.scanIds?.DAST
+                && engineState.remoteCleanup.closeRequestId === session?.closeRequestId
+                && this._remoteCleanupOwners?.has(session)
+                && (this.app?.dast || this.app?.rattacker)?.engine === this._remoteCleanupOwners.get(session).facade
+                && (this.app?.dast || this.app?.rattacker)?.runtimeController === this._remoteCleanupOwners.get(session).runtime
+                && (this.app?.dast || this.app?.rattacker)?.sessionCoordinator === this._remoteCleanupOwners.get(session).coordinator
+                && this._remoteCleanupOwners.get(session).coordinator.getState() === this._remoteCleanupOwners.get(session).state
+                && this._remoteCleanupOwners.get(session).state.automationSession === null
+                && this._remoteCleanupOwners.get(session).facade.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: session.scanIds?.DAST })
+                ? { sessionId: session.id, scanId: session.scanIds.DAST, closeRequestId: session.closeRequestId } : null,
+            localCleanup: engineState?.localCleanup && !engineState?.error && !engineState?.stopTimedOut
+                && (this.app?.dast || this.app?.rattacker)?.runtimeController?.remote === false
+                && coordinatorState?.automationSession === null
+                && engineState?.localCleanup?.sessionId === session?.id
+                && engineState.localCleanup.scanId === session?.scanIds?.DAST
+                && engineState.localCleanup.closeRequestId === session?.closeRequestId
+                ? engineState.localCleanup : null,
             isRunning: engineProgress?.isRunning === true,
             idle: engineProgress?.idle === true,
             phase: engineProgress?.phase || null,
@@ -5387,6 +6108,41 @@ export class ptk_automation {
                 || toNonEmptyString(engineState?.error)
                 || null
         }
+        // Internal bridge readiness, never a finding field or an inference from
+        // unchanged counters. Receipt creation already joins native events and
+        // capture release for this exact owner; only then can a final publisher
+        // drain be authoritative. Requested Partial remains Partial.
+        telemetry.producerSettled = !!(telemetry.remoteCleanup || telemetry.localCleanup)
+            || this._hasCompletedZapDastStopProof(session, engineState)
+        if (this._zapDastStops?.has(session)) {
+            telemetry.earlyDastStop = true
+            telemetry.earlyDastStopSettled = this._hasZapDastOwnedStopProof(session)
+        }
+        return telemetry
+    }
+
+    _hasCompletedZapDastStopProof(session, engineState) {
+        return this._remoteCleanupOwners?.get(session)?.completedStop === true
+            && session.status === 'completed' && session.completionStatus === 'completed' && !!session.finishedAt
+            && ['stopped', 'completed'].includes(engineState?.status)
+            && engineState.completionStatus === 'completed' && engineState.drained === true
+            && !engineState.error && !engineState.stopTimedOut
+            && this._hasZapDastOwnedStopProof(session)
+    }
+
+    _hasZapDastOwnedStopProof(session) {
+        const proof = this._remoteCleanupOwners?.get(session)
+        const dast = this.app?.dast || this.app?.rattacker
+        if (!proof?.producerStopped || session?.source !== 'zap' || this.sessions.get(session.id) !== session
+            || session.scanIds?.DAST !== proof.scanId || proof.owner?.id !== session.id
+            || dast?.engine !== proof.facade || dast.runtimeController !== proof.runtime
+            || dast.sessionCoordinator !== proof.coordinator || proof.coordinator.getState() !== proof.state
+            || proof.state.automationSession !== null || proof.facade.isRunning !== false
+            || dast.captureLeases !== proof.captureLeases || proof.captureLeases?.size !== 0) return false
+        return proof.runtime.remote === true
+            ? !!proof.facade.getRemoteCleanupReceipt?.({ sessionId: session.id, scanId: proof.scanId })
+            : proof.runtime.remote === false && proof.facade.scanResult === proof.scanResult
+                && proof.scanResult?.scanId === proof.scanId
     }
 
     _buildZapIastRuntime(engineState, engineProgress, session) {
@@ -5546,6 +6302,7 @@ export class ptk_automation {
 
         return {
             status: engineState?.status || 'unknown',
+            completionStatus: engineState?.completionStatus || null,
             isRunning: normalized.isSessionRunning === true,
             isSessionRunning: normalized.isSessionRunning === true,
             isAnalysisRunning: normalized.isAnalysisRunning === true,
@@ -5642,7 +6399,8 @@ export class ptk_automation {
     }
 
     _finalizeActiveSessionIfExportReady(session, reason = 'unknown') {
-        if (!session || session.status === 'completed' || session.status === 'error') {
+        if (!session || session.status === 'completed' || session.status === 'error'
+            || (session.status === 'cancelled' && session.finishedAt)) {
             return false
         }
 
@@ -5654,7 +6412,8 @@ export class ptk_automation {
     }
 
     _finalizeStoppedSessionIfExportReady(session, reason = 'unknown') {
-        if (!session || session.status === 'completed' || session.status === 'error' || !session.stopRequestedAt) {
+        if (!session || session.status === 'completed' || session.status === 'error' || !session.stopRequestedAt
+            || (session.status === 'cancelled' && session.finishedAt)) {
             return false
         }
         if (session.stopInProgress === true) {
@@ -5692,6 +6451,17 @@ export class ptk_automation {
         const status = String(progress.status || state || '').toLowerCase()
         const phase = String(progress.phase || '').toLowerCase()
         if (state === 'error' || status === 'error') return true
+        if (engineUpper === 'SAST') {
+            // Generic terminal labels/queues do not describe SAST collection work.
+            // Check its native settlement before any generic readiness shortcut.
+            const collectionState = String(progress.collectionState ?? engineState.collectionState ?? '').toLowerCase()
+            const analysisState = String(progress.analysisState ?? engineState.analysisState ?? '').toLowerCase()
+            const activeCollections = toFiniteNumber(progress.activeCollectionCount ?? engineState.activeCollectionCount, 0)
+            const pendingCollections = toFiniteNumber(progress.pendingCollectionCount ?? engineState.pendingCollectionCount, 0)
+            if (activeCollections > 0 || pendingCollections > 0
+                || !/^(completed|waiting_for_page_activity)$/.test(collectionState)
+                || !/^(complete|completed)$/.test(analysisState)) return false
+        }
         if (state === 'stopped' || state === 'completed' || status === 'stopped' || status === 'completed') return true
 
         const remaining = toFiniteNumber(progress.remaining ?? progress.progress?.remaining, 0)
@@ -5817,6 +6587,8 @@ export class ptk_automation {
 
         if (engineState.error) {
             result.error = engineState.error
+        } else if (engineState.progressRefreshError) {
+            result.error = engineState.progressRefreshError
         }
         if (session?.source === 'zap') {
             result.targetWindowRequired = false

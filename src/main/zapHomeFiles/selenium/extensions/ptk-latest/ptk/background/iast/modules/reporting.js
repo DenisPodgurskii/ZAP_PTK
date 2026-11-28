@@ -1,6 +1,7 @@
 import CryptoES from "../../../packages/crypto-es/index.js"
 import { normalizeCwe, normalizeOwasp } from "../../common/normalizeMappings.js"
 import { resolveFindingTaxonomy } from "../../common/resolveFindingTaxonomy.js"
+import { createIastPublicId, sanitizeIastObservation, validateIastEvidenceVersion } from '../observation.js'
 
 const ENGINE_IAST = "IAST"
 const DEFAULT_CATEGORY = "runtime_issue"
@@ -21,6 +22,7 @@ const SEVERITY_RANK = {
 }
 
 export function createFindingFromIAST(details = {}, meta = {}) {
+    const evidenceVersion = validateIastEvidenceVersion(details)
     const now = new Date().toISOString()
     const severity = normalizeSeverity(details?.severity)
     const category = inferCategoryFromIAST(details)
@@ -37,8 +39,8 @@ export function createFindingFromIAST(details = {}, meta = {}) {
     const description = details?.description || details?.meta?.description || null
     const recommendation = details?.recommendation || details?.meta?.recommendation || null
     const links = details?.links || details?.meta?.links || null
-    const contextKey = extractContextKey(details?.context)
-    const fingerprint = buildFingerprint({
+    const contextKey = extractContextKey(details?.context, location.url, sinkId)
+    const fingerprint = evidenceVersion === 2 ? createIastPublicId() : buildFingerprint({
         url: location.url,
         sink: sinkId,
         category,
@@ -108,7 +110,7 @@ export function getFindingFingerprint(finding = {}) {
     const evidence = getIastEvidencePayload(finding) || {}
     const fallbackSource = finding?.taintSummary?.primarySource || finding?.source || null
     const contextKey =
-        extractContextKey(evidence?.context) ||
+        extractContextKey(evidence?.context, extractLocationUrl(finding?.location), evidence?.sinkId || finding?.sinkId || null) ||
         extractContextKey(finding?.location) ||
         null
     return buildFingerprint({
@@ -137,6 +139,10 @@ export function resolveIastFindingPresentationAggregate(...sources) {
 }
 
 export function buildIastFindingAggregateKey({ finding = {}, ruleMeta = {}, moduleMeta = {}, scanId = null, host = null } = {}) {
+    const payload = getIastEvidencePayload(finding) || {}
+    if (validateIastEvidenceVersion(payload) === 2) {
+        return /^iast-v2-[a-f0-9]{32}$/.test(finding.fingerprint || '') ? finding.fingerprint : null
+    }
     const mode = resolveIastFindingPresentationAggregate(ruleMeta, moduleMeta)
     if (!mode) return null
     const evidence = getIastEvidencePayload(finding) || {}
@@ -201,6 +207,19 @@ export function buildIastFindingAggregateSample(finding = {}) {
 
 export function applyIastFindingAggregateState(finding, { aggregateKey = null, mode = null, sample = null } = {}) {
     if (!finding || !aggregateKey) return finding
+    if (getIastEvidencePayload(finding)?.schemaVersion === 2) {
+        if (!/^iast-v2-[a-f0-9]{32}$/.test(aggregateKey)) throw new Error('invalid_iast_public_identity')
+        const evidence = finding.evidence.iast
+        finding.fingerprint = aggregateKey
+        finding.id = `${finding.scanId || 'scan'}::IAST::${aggregateKey}`
+        evidence.aggregate = { identityVersion: 2, mode: 'url-site-stratum', key: aggregateKey }
+        if (normalizeIastFindingAggregationMode(mode)) finding.presentationAggregate = mode
+        evidence.occurrenceCount = 1
+        evidence.sampleLimit = 0
+        evidence.truncated = false
+        evidence.samples = []
+        return finding
+    }
     const normalizedMode = normalizeIastFindingAggregationMode(mode)
     if (!normalizedMode) return finding
     finding.evidence = finding.evidence && typeof finding.evidence === "object" ? finding.evidence : {}
@@ -224,6 +243,13 @@ export function applyIastFindingAggregateState(finding, { aggregateKey = null, m
 
 export function mergeIastFindingAggregateOccurrence(existingFinding, incomingFinding, { sample = null } = {}) {
     if (!existingFinding || !incomingFinding) return existingFinding || incomingFinding
+    if (getIastEvidencePayload(existingFinding)?.schemaVersion === 2) {
+        if (existingFinding.fingerprint !== incomingFinding.fingerprint) throw new Error('iast_identity_merge_mismatch')
+        const evidence = existingFinding.evidence.iast
+        evidence.occurrenceCount = Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Number(evidence.occurrenceCount) || 1) + 1)
+        existingFinding.lastSeenAt = new Date().toISOString()
+        return existingFinding
+    }
     const existingEvidence = getIastEvidencePayload(existingFinding) || {}
     const incomingEvidence = getIastEvidencePayload(incomingFinding) || {}
     existingFinding.severity = pickHigherSeverity(existingFinding.severity, incomingFinding.severity)
@@ -493,7 +519,8 @@ function buildIASTEvidence(details = {}) {
         sink: details?.sink || null,
         sinkContext: details?.sinkContext || null,
         context,
-        schemaVersion: details?.schemaVersion || null,
+        schemaVersion: details?.observation ? 2 : (details?.schemaVersion || null),
+        observation: sanitizeIastObservation(details?.observation),
         primaryClass: details?.primaryClass || context?.primaryClass || null,
         sourceRole: details?.sourceRole || context?.sourceRole || null,
         origin: details?.origin || context?.origin || null,
@@ -841,7 +868,47 @@ function normalizeUrl(url) {
     }
 }
 
-function extractContextKey(context = {}) {
+export function buildIastTransportCarrierKey(sinkId, context = {}, baseUrl = null) {
+    const normalizedSinkId = String(sinkId || "").trim()
+    if (!normalizedSinkId.startsWith("http.") && !normalizedSinkId.startsWith("realtime.")) return null
+    const method = String(context?.method || "").trim().toUpperCase().slice(0, 16)
+    const headerName = String(context?.headerName || "").trim().toLowerCase().slice(0, 96)
+    const rawUrl = context?.destUrl
+        || context?.networkTarget?.url
+        || context?.requestUrl
+        || context?.url
+        || context?.destOrigin
+        || context?.networkTarget?.origin
+        || ""
+    let destination = ""
+    if (rawUrl) {
+        try {
+            const parsed = new URL(String(rawUrl), baseUrl || undefined)
+            const path = String(parsed.pathname || "/").split("/").map(segment => {
+                if (!segment) return ""
+                if (/^\d+$/.test(segment)) return ":id"
+                if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(segment)) return ":uuid"
+                if (segment.length >= 24 && /^[a-z0-9_-]+$/i.test(segment) && /\d/.test(segment)) return ":token"
+                return segment.slice(0, 96)
+            }).join("/").slice(0, 384) || "/"
+            const queryNames = []
+            for (const name of parsed.searchParams.keys()) {
+                const normalizedName = String(name || "").trim().slice(0, 64)
+                if (normalizedName) queryNames.push(normalizedName)
+            }
+            const boundedNames = Array.from(new Set(queryNames)).sort().slice(0, 16)
+            const queryShape = boundedNames.length
+                ? `?keys=${boundedNames.map(name => encodeURIComponent(name)).join(",")}`
+                : ""
+            destination = `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${path}${queryShape}`
+        } catch (_) {
+            destination = String(rawUrl).split(/[?#]/, 1)[0].slice(0, 384)
+        }
+    }
+    return ["carrier-v1", normalizedSinkId, method, destination, headerName].join("|").slice(0, 640)
+}
+
+function extractContextKey(context = {}, baseUrl = null, sinkId = null) {
     if (!context) return null
     if (typeof context !== "object") {
         try {
@@ -850,7 +917,16 @@ function extractContextKey(context = {}) {
             return null
         }
     }
-    return context.domPath || context.elementId || context.attribute || context.property || context.method || null
+    const carrierKey = context.transportCarrierKey || buildIastTransportCarrierKey(sinkId, context, baseUrl)
+    const transportCarrierIsPrimary = Boolean(carrierKey) && sinkId !== "http.image.src"
+    if (transportCarrierIsPrimary) return carrierKey
+    return context.domPath
+        || context.elementId
+        || context.attribute
+        || context.property
+        || carrierKey
+        || context.method
+        || null
 }
 
 function sanitizeNumber(value) {

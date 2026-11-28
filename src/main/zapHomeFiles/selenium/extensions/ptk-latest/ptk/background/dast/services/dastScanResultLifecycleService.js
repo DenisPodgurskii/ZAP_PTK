@@ -1,5 +1,6 @@
 import { scanResultStore } from "../../scanResultStore.js"
 import buildExportScanResult from "../../export/buildExportScanResult.js"
+import { getCompletedDastAnalysis, markPersistedDastAnalysis, preparePersistedDastAnalysis, stripPrivateDastAnalysisMetadata } from "./dastAnalysisService.js"
 
 function cloneValue(value) {
     try {
@@ -20,6 +21,8 @@ export class DastScanResultLifecycleService {
         this.storageKey = storageKey
         this.scanStore = scanStore
         this.buildExport = buildExport
+        this._activePersist = null
+        this._pendingPersist = null
     }
 
     normalizeImportedScan(raw) {
@@ -72,7 +75,8 @@ export class DastScanResultLifecycleService {
     }
 
     cloneForStorage(scanResult, { dropTabId = true } = {}) {
-        const source = this.exportScanSnapshot(scanResult, {
+        const prepared = getCompletedDastAnalysis(scanResult)
+        const source = prepared ? scanResult : this.exportScanSnapshot(scanResult, {
             sync: true,
             markFinished: !!(scanResult?.finishedAt || scanResult?.finished),
             dropTabId
@@ -84,21 +88,47 @@ export class DastScanResultLifecycleService {
         if (Array.isArray(cloned?.rawFindings)) {
             delete cloned.rawFindings
         }
-        return cloned
+        if (!prepared) stripPrivateDastAnalysisMetadata(cloned.analysis)
+        return preparePersistedDastAnalysis(scanResult, cloned)
     }
 
-    async persistScanResult(scanResult, { dropTabId = true } = {}) {
+    persistScanResult(scanResult, { dropTabId = true, isCurrent = null } = {}) {
         const cloned = this.cloneForStorage(scanResult, { dropTabId })
-        if (this.storage?.setItem) {
-            await this.storage.setItem(this.storageKey, cloned)
+        if (this._pendingPersist) {
+            // Autosave already coalesces on a debounce. If storage itself stalls,
+            // retain only the latest pending snapshot, not an unbounded tail.
+            this._pendingPersist.snapshot = cloned
+            this._pendingPersist.isCurrent = isCurrent
+            return this._pendingPersist.promise
         }
-        return cloned
+        let resolve, reject
+        const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+        const job = { snapshot: cloned, isCurrent, promise, resolve, reject }
+        if (this._activePersist) this._pendingPersist = job
+        else this._startPersist(job)
+        return promise
+    }
+
+    _startPersist(job) {
+        this._activePersist = job
+        const write = async () => {
+            if (job.isCurrent && !job.isCurrent()) return null
+            await this.storage?.setItem?.(this.storageKey, job.snapshot)
+            return job.snapshot
+        }
+        const finish = () => {
+            this._activePersist = null
+            const next = this._pendingPersist
+            this._pendingPersist = null
+            if (next) this._startPersist(next)
+        }
+        write().then(value => { finish(); job.resolve(value) }, error => { finish(); job.reject(error) })
     }
 
     async loadPersistedScan() {
         if (!this.storage?.getItem) return null
         const stored = await this.storage.getItem(this.storageKey)
-        return this.hydrateImportedScan(stored)
+        return markPersistedDastAnalysis(this.hydrateImportedScan(stored))
     }
 
     hydrateImportedScan(raw) {
@@ -113,6 +143,9 @@ export class DastScanResultLifecycleService {
 
     buildExportPayload(scanResult, { target = "download", includeSecrets = false } = {}) {
         if (!scanResult || typeof scanResult !== "object") return null
+        if (getCompletedDastAnalysis(scanResult)) {
+            return this.buildExport(scanResult.scanId, { target, includeSecrets: includeSecrets === true, scanResult })
+        }
         const source = this.exportScanSnapshot(scanResult, {
             sync: true,
             markFinished: !!(scanResult.finishedAt || scanResult.finished)

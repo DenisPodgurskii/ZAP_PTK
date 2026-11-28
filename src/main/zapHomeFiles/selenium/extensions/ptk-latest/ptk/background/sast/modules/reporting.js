@@ -266,7 +266,19 @@ function primaryContext(value) {
   return contexts[0] || null;
 }
 
+// These syntax-only rules prove that a security-sensitive API is used, but not
+// that attacker-controlled data reaches it. Keep them available for review
+// without publishing them as vulnerability findings. The taint rules for the
+// same sinks remain actionable when provenance is established.
+const SYNTAX_REVIEW_RULE_IDS = new Set([
+  "no-document-cookie-assignment",
+  "no-insertadjacenthtml"
+]);
+
 function resolveFindingKind({ ruleMeta = {}, moduleMeta = {} } = {}) {
+  if (SYNTAX_REVIEW_RULE_IDS.has(String(ruleMeta.id || ruleMeta.rule_id || ""))) {
+    return "hint";
+  }
   const raw = ruleMeta.findingKind ?? moduleMeta.findingKind ?? "finding";
   const normalized = String(raw || "finding").trim().toLowerCase();
   if (normalized === "hint" || normalized === "artifact") return normalized;

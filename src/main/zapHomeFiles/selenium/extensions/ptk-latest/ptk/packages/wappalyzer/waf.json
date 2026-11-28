@@ -458,11 +458,6 @@
                 "^__ddgmark.*?=": ""
             }
         },
-        "DenyALL (Rohde & Schwarz CyberSecurity)": {
-            "cats": [
-                100
-            ]
-        },
         "Distil (Distil Networks)": {
             "cats": [
                 100
@@ -1323,11 +1318,6 @@
                 "X-Pint": "p(ort\\-)?80"
             }
         },
-        "Shadow Daemon (Zecure)": {
-            "cats": [
-                100
-            ]
-        },
         "Shieldon Firewall (Shieldon.io)": {
             "cats": [
                 100
@@ -1345,11 +1335,6 @@
                 "status-user-info",
                 "Please line up",
                 "This page is limiting the number of people online. Please wait a moment."
-            ]
-        },
-        "Shield Security (One Dollar Plugin)": {
-            "cats": [
-                100
             ]
         },
         "SiteGround (SiteGround)": {
@@ -1544,11 +1529,6 @@
                 "/vercel/security/"
             ]
         },
-        "Viettel (Cloudrity)": {
-            "cats": [
-                100
-            ]
-        },
         "VirusDie (VirusDie LLC)": {
             "cats": [
                 100
@@ -1621,11 +1601,6 @@
             "headers": {
                 "Server": " WebSEAL'"
             }
-        },
-        "WebTotem (WebTotem)": {
-            "cats": [
-                100
-            ]
         },
         "West263 CDN (West263CDN)": {
             "cats": [

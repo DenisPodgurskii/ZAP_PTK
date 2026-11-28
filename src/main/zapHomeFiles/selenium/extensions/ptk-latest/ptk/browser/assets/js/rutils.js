@@ -270,6 +270,22 @@ $("#attack_details_dialog_wrapper").prepend(
         <div class="content" style="min-height: 400px;  height: calc(100% - 30px); padding: 2px 7px 2px 2px; scrollbar-width: none;">
             <form class="ui tiny form controls" id="attack_details_form">
                 <input type="hidden" id="attack_target" name="request_url">
+                <div class="fields" id="finding_spa_section" style="display: none; height: 360px; max-height: 55vh; min-height: 300px; margin-bottom: 4px;">
+                    <div class="eight wide field" style="padding-right: 4px; min-width: 0; overflow: auto;">
+                        <div class="ui large label" style="width: 100%; height: 34px; padding-top: 10px;">Browser hash action</div>
+                        <div class="ui segment" style="height: calc(100% - 34px); margin: 0; padding: 9px; overflow: auto;">
+                            <strong>URL with tested payload</strong>
+                            <pre id="finding_spa_hash_url" style="white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; margin: 4px 0 10px;"></pre>
+                            <strong>Parameter: </strong><span id="finding_spa_param"></span>
+                            <div style="margin-top: 10px;"><strong>Payload</strong></div>
+                            <pre id="finding_spa_payload" style="white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; margin: 4px 0 0;"></pre>
+                        </div>
+                    </div>
+                    <div class="eight wide field" style="padding-right: 1px; min-width: 0; overflow: auto;">
+                        <div class="ui large label" style="width: 100%; height: 34px; padding-top: 10px;">Observed execution proof</div>
+                        <pre id="finding_spa_proof" class="ui segment" style="height: calc(100% - 34px); margin: 0; padding: 9px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;"></pre>
+                    </div>
+                </div>
                 <div class="fields" id="finding_http_section" style="min-height: 65%; margin-bottom: 4px; display: none;">
                     <div class="eight wide field" id="finding_request_column" style="padding-right: 1px; overflow:auto">
                         <div class="ui large label"
@@ -408,6 +424,7 @@ function clearElementText(id) {
 
 function resetFindingModal() {
     toggleSection("#finding_loading_section", false);
+    toggleSection("#finding_spa_section", false);
     toggleSection("#finding_http_section", false);
     toggleSection("#finding_source_sink_section", false);
     toggleSection("#finding_trace_segment", false);
@@ -436,6 +453,10 @@ function resetFindingModal() {
     $("#source_details").show();
     $("#sink_details").show();
     $("#raw_request").val("");
+    clearElementText("finding_spa_hash_url");
+    clearElementText("finding_spa_param");
+    clearElementText("finding_spa_payload");
+    clearElementText("finding_spa_proof");
     $("#raw_response").val("");
     $("#raw_response_headers").val("");
     $("#attack_target").val("");
@@ -707,7 +728,9 @@ function buildMiscMeta(info) {
     const isDisplayFinding = (info?.type === 'sast' && !isSastSupportSignal)
         || info?.type === 'iast'
         || (!!info?.success && isDastReportableAttack(info))
-    const countsAsFinding = isDisplayFinding && !(info?.type === 'dast' && isRecon)
+    // Normalized DAST attacks need not carry a type. Recon remains supporting
+    // information regardless of which representation supplied the card.
+    const countsAsFinding = isDisplayFinding && !(isRecon && info?.type !== 'iast' && info?.type !== 'sast')
 
     if (isDisplayFinding) {
         let severity = info.severity || finding?.severity || meta?.severity || 'medium'
@@ -2612,44 +2635,93 @@ export function bindAttackDetails_SAST(el, info) {
     return false;
 }
 
+function buildSpaHashUrl(baseUrl, param, payload) {
+    if (typeof baseUrl !== 'string' || typeof param !== 'string' || !param || typeof payload !== 'string' || !payload) return '';
+    try {
+        const url = new URL(baseUrl);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+        const hash = (url.hash || '#/').slice(1);
+        const queryIndex = hash.indexOf('?');
+        const basePath = queryIndex === -1 ? hash : hash.slice(0, queryIndex);
+        const params = new URLSearchParams(queryIndex === -1 ? '' : hash.slice(queryIndex + 1));
+        params.set(param, payload);
+        url.hash = basePath + '?' + params.toString();
+        return url.href;
+    } catch (_) {
+        return '';
+    }
+}
+
 export function bindAttackDetails_DAST(el, attack, original) {
     attack = attack || {}
     const finding = attack.finding || null
     resetFindingModal();
-    toggleSection("#finding_http_section", true);
+    const isSpaHashXss = (attack.moduleId || finding?.moduleId) === 'spa_dom_xss';
+    toggleSection("#finding_http_section", !isSpaHashXss);
+    toggleSection("#finding_spa_section", isSpaHashXss);
+    const originalResponse = isSpaHashXss ? null : original?.response;
     let proof = attack.proof;
     let response = attack.response?.body
         ? attack.response.body
-        : original?.response?.body || "";
+        : originalResponse?.body || "";
     let responseHeaders = attack.response?.headers
         ? attack.response.headers
-        : original?.response?.headers || [];
-    let baseRequestRaw = original?.request?.raw || "";
-    let request = attack.request?.raw ? attack.request.raw : baseRequestRaw;
+        : originalResponse?.headers || [];
+    const request = typeof attack.request?.raw === 'string' && attack.request.raw.trim()
+        ? attack.request.raw
+        : '';
+    const dastEvidence = finding?.evidence?.dast && typeof finding.evidence.dast === 'object'
+        ? finding.evidence.dast
+        : {};
+    const spaParam = attack.param || dastEvidence.param || finding?.location?.param || attack.metadata?.attacked?.name;
+    const spaPayload = attack.payload || dastEvidence.payload || attack.metadata?.payload;
+    const spaHashUrl = isSpaHashXss
+        ? buildSpaHashUrl(
+            attack.request?.ui_url || attack.request?.url || finding?.location?.url || original?.request?.url,
+            spaParam,
+            spaPayload
+        )
+        : '';
+    if (isSpaHashXss) {
+        let spaProof = attack.proof || dastEvidence.proof || '';
+        if (typeof spaProof === 'string') {
+            try { spaProof = JSON.stringify(JSON.parse(spaProof), null, 2); } catch (_) { }
+        } else {
+            spaProof = JSON.stringify(spaProof, null, 2) || '';
+        }
+        $("#finding_spa_hash_url").text(spaHashUrl || 'URL unavailable');
+        $("#finding_spa_param").text(spaParam || 'Unknown');
+        $("#finding_spa_payload").text(spaPayload || 'Payload unavailable');
+        $("#finding_spa_proof").text(spaProof || 'Proof unavailable');
+    }
     let description = finding?.description || attack.description || attack.metadata?.description || attack.metadata?.docs?.description || '';
     let recommendation = finding?.recommendation || attack.recommendation || attack.metadata?.recommendation || attack.metadata?.docs?.recommendation || '';
 
     let misc = getMisc(attack);
     let icon = misc.icon;
 
-    $("#raw_response").val(response || '');
-    $("#raw_request").val(request || '');
+    $("#raw_response")
+        .val(response || '')
+        .attr('placeholder', isSpaHashXss ? 'No raw HTTP response for this browser hash action' : 'Response Body');
+    $("#raw_request")
+        .val(request)
+        .attr('placeholder', request ? 'Request' : spaHashUrl ? 'No raw HTTP request for this browser hash action' : 'Attack request unavailable for this finding');
+    $('.send_rbuilder').toggle(Boolean(request));
     const headersText = Array.isArray(responseHeaders)
         ? responseHeaders.map(h => `${h.name}: ${h.value}`).join('\n')
         : ''
-    const statusCode = attack.response?.statusCode || attack.response?.status || original?.response?.statusCode || original?.response?.status || null
-    const statusMessage = attack.response?.statusMessage || attack.response?.statusText || original?.response?.statusMessage || original?.response?.statusText || ''
+    const statusCode = attack.response?.statusCode || attack.response?.status || originalResponse?.statusCode || originalResponse?.status || null
+    const statusMessage = attack.response?.statusMessage || attack.response?.statusText || originalResponse?.statusMessage || originalResponse?.statusText || ''
     const statusLine = statusCode ? `HTTP/1.1 ${statusCode}${statusMessage ? ` ${statusMessage}` : ''}` : ''
     const normalizedHeaders = headersText.trim()
     // Prepend status line for a raw-response look.
     const responseHeaderBlock = statusLine && !normalizedHeaders.startsWith('HTTP/')
         ? [statusLine, normalizedHeaders].filter(Boolean).join('\n')
         : headersText
-    $("#raw_response_headers").val(responseHeaderBlock);
+    $("#raw_response_headers")
+        .val(responseHeaderBlock)
+        .attr('placeholder', isSpaHashXss ? 'No raw HTTP response for this browser hash action' : 'Response Headers');
     const links = finding?.links || attack.links || attack.metadata?.links || attack.metadata?.docs?.links || {};
-    const dastEvidence = finding?.evidence?.dast && typeof finding.evidence.dast === "object"
-        ? finding.evidence.dast
-        : {}
     const aggregateSamples = Array.isArray(dastEvidence?.samples)
         ? dastEvidence.samples
             .filter((entry) => entry && typeof entry === "object" && entry.url)

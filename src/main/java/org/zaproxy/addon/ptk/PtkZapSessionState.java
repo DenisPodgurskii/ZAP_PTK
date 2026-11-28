@@ -1,8 +1,18 @@
 package org.zaproxy.addon.ptk;
 
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
 final class PtkZapSessionState {
+
+    private static final Set<String> DAST_STOP_ERRORS =
+            Set.of(
+                    "owner_mismatch",
+                    "stop_not_available",
+                    "stop_timeout",
+                    "stop_incomplete",
+                    "stop_failed");
 
     private final String zapid;
     private String browserId;
@@ -24,6 +34,13 @@ final class PtkZapSessionState {
     private Long closeDecisionAttemptedAtMs;
     private PtkCloseRequestState closeRequest;
     private long lastActivitySeq = Long.MIN_VALUE;
+    private Boolean passiveOnlyConfig;
+    private Boolean mixedIastDastConfig;
+    private String mixedConfigBrowserId;
+    private DastStopRequest dastStopRequest;
+
+    record DastStopRequest(
+            String id, String sessionId, String browserId, String result, String error) {}
 
     PtkZapSessionState(String zapid) {
         this.zapid = zapid;
@@ -44,6 +61,64 @@ final class PtkZapSessionState {
         if (sessionId != null && !sessionId.isBlank()) {
             this.sessionId = sessionId;
         }
+    }
+
+    synchronized void rememberPassiveOnlyConfig(boolean passiveOnly) {
+        // A later config cannot establish that every config served to this owner was passive only.
+        passiveOnlyConfig = !Boolean.FALSE.equals(passiveOnlyConfig) && passiveOnly;
+    }
+
+    synchronized boolean hasPassiveOnlyConfig() {
+        return Boolean.TRUE.equals(passiveOnlyConfig);
+    }
+
+    synchronized void rememberMixedIastDastConfig(boolean mixed, String browserId) {
+        mixedIastDastConfig =
+                !Boolean.FALSE.equals(mixedIastDastConfig)
+                        && mixed
+                        && nonBlankOrNull(browserId) != null
+                        && (mixedConfigBrowserId == null || mixedConfigBrowserId.equals(browserId));
+        if (mixedIastDastConfig) mixedConfigBrowserId = browserId;
+    }
+
+    synchronized boolean usesDastStop(boolean supportsDastStop) {
+        return dastStopRequest != null
+                || (supportsDastStop && Boolean.TRUE.equals(mixedIastDastConfig));
+    }
+
+    synchronized DastStopRequest pollDastStop(
+            String sessionId,
+            String browserId,
+            boolean stale,
+            String id,
+            String result,
+            String error) {
+        if (sessionId == null
+                || !sessionId.equals(this.sessionId)
+                || browserId == null
+                || !browserId.equals(this.browserId)
+                || !browserId.equals(mixedConfigBrowserId)) return null;
+        if (dastStopRequest == null && closeRequest == null && stale) {
+            dastStopRequest =
+                    new DastStopRequest(
+                            UUID.randomUUID().toString(), sessionId, browserId, null, null);
+        }
+        DastStopRequest request = dastStopRequest;
+        if (request == null
+                || !request.sessionId().equals(sessionId)
+                || !request.browserId().equals(browserId)) {
+            return null;
+        }
+        boolean validReceipt =
+                ("completed".equals(result) && error == null)
+                        || ("engine_incomplete".equals(result)
+                                && error != null
+                                && DAST_STOP_ERRORS.contains(error));
+        if (request.result() == null && request.id().equals(id) && validReceipt) {
+            dastStopRequest =
+                    new DastStopRequest(request.id(), sessionId, browserId, result, error);
+        }
+        return dastStopRequest;
     }
 
     synchronized long markCallbackStart(long nowMs) {
@@ -71,10 +146,13 @@ final class PtkZapSessionState {
             Boolean publisherDrained,
             Integer activitySeq,
             long nowMs) {
-        rememberBrowserId(browserId);
         if (activitySeq != null && activitySeq.longValue() < lastActivitySeq) {
             return new ProgressActivity(false, false, false, true, false);
         }
+        if (terminalProgressSeen && !terminalProgress) {
+            return new ProgressActivity(false, false, false, false, true);
+        }
+        rememberBrowserId(browserId);
         if (activitySeq != null) {
             lastActivitySeq = activitySeq.longValue();
         }
@@ -87,12 +165,8 @@ final class PtkZapSessionState {
         if (contractVersion != null && contractVersion.intValue() > this.contractVersion) {
             this.contractVersion = contractVersion;
         }
-        if (publisherDrained != null
-                && (!terminalProgressSeen || terminalProgress || publisherDrained.booleanValue())) {
+        if (publisherDrained != null) {
             this.publisherDrained = publisherDrained;
-        }
-        if (terminalProgressSeen && !terminalProgress) {
-            return new ProgressActivity(firstProgress, sessionEstablished, false, false, true);
         }
         if (progress != null) {
             this.progress = progress;

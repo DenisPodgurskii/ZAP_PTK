@@ -7,6 +7,7 @@ import { ptk_decoder } from "../../../background/decoder.js"
 import { shouldShowScanAnalysisUI } from "../../../background/analysis/featureFlags.js"
 import * as rutils from "../js/rutils.js"
 import { normalizeScanResult } from "../js/scanResultViewModel.js"
+import { countDastExecutedAttacks, partitionReportFindings, summarizeReportFindings } from "./report/reportingContract.js"
 import { renderAttackSurfaceRecommendationsHtml } from "../js/dastAttackSurfaceRecommendations.js"
 import { downloadScanExportResult, readScanFileText } from "../js/scanCompression.js"
 import {
@@ -63,6 +64,7 @@ let dastScopeTouchedByUser = false
 const UNKNOWN_REQ = "__ptk_unknown__"
 const DAST_COUNTERS = createEmptyCounters()
 const DAST_REQUEST_COUNTERS = new Map()
+let dastExecutedAttacks = 0
 let requestFilterDirty = false
 const decoder = new ptk_decoder()
 const DAST_SEVERITY_ORDER = {
@@ -3979,6 +3981,8 @@ function createSeverityCounters() {
 function createEmptyCounters() {
     return {
         total: 0,
+        displayVuln: 0,
+        recon: 0,
         vuln: 0,
         nonvuln: 0,
         s4xx: 0,
@@ -4001,6 +4005,7 @@ function resetDastCounters() {
         }
     })
     DAST_REQUEST_COUNTERS.clear()
+    dastExecutedAttacks = 0
 }
 
 function normalizeSeverityKey(value) {
@@ -4200,6 +4205,8 @@ function getRequestCounters(requestId) {
 function applyCountersUpdate(target, meta) {
     if (!target || !meta) return
     target.total += 1
+    if (meta.isVuln) target.displayVuln += 1
+    if (meta.isRecon) target.recon += 1
     if (meta.is4xx) {
         target.s4xx += 1
     }
@@ -4237,31 +4244,26 @@ function getBaseCounters() {
 
 function renderStatsFromCounters() {
     const base = getBaseCounters()
-    let attacksCount = base.total
+    let cardsCount = base.total
     let findingsCount = base.vuln
-    let severity = base.severity
-    const useTotalForRequest = !!attackFilterState.requestId
     if (attackFilterState.scope === 'vuln') {
-        attacksCount = base.total
+        cardsCount = base.displayVuln
         findingsCount = base.vuln
-        severity = base.severity
     } else if (attackFilterState.scope === '400') {
-        attacksCount = base.s4xx
+        cardsCount = base.s4xx
         findingsCount = base.vuln4xx
-        severity = base.severity4xx
     } else if (attackFilterState.scope === '500') {
-        attacksCount = base.s5xx
+        cardsCount = base.s5xx
         findingsCount = base.vuln5xx
-        severity = base.severity5xx
     }
     rutils.bindStats({
-        attacksCount,
-        findingsCount,
-        critical: severity.critical,
-        high: severity.high,
-        medium: severity.medium,
-        low: severity.low,
-        info: severity.info
+        attacksCount: dastExecutedAttacks,
+        findingsCount: DAST_COUNTERS.vuln,
+        critical: DAST_COUNTERS.severity.critical,
+        high: DAST_COUNTERS.severity.high,
+        medium: DAST_COUNTERS.severity.medium,
+        low: DAST_COUNTERS.severity.low,
+        info: DAST_COUNTERS.severity.info
     }, 'dast')
 }
 
@@ -6510,7 +6512,12 @@ async function ensureAttackFindingDetails(attack, requestId, attackId) {
             lookup.set(String(finding.id), finding)
         }
         if (details?.attack && typeof details.attack === 'object') {
-            Object.assign(attack, details.attack)
+            // Finding details come from the compact background mirror while a
+            // Chromium scan is live. Only the selected request snapshot owns
+            // HTTP evidence; metadata enrichment must not replace its raw data.
+            for (const [key, value] of Object.entries(details.attack)) {
+                if (key !== 'request' && key !== 'response') attack[key] = value
+            }
         }
     } catch (_) {
         // keep existing sparse payload when lazy lookup fails
@@ -6551,7 +6558,9 @@ function findAttackModel(requestModel, attackId) {
 function triggerDastStatsEvent(rawScanResult, viewModel) {
     const raw = rawScanResult || {}
     const vm = viewModel || normalizeScanResult(raw)
-    const stats = vm.stats || raw.stats || {}
+    const stats = Object.assign({}, vm.stats || raw.stats || {},
+        summarizeReportFindings(partitionReportFindings('dast', vm.findings || []).findings),
+        { attacksCount: countDastExecutedAttacks(vm) })
     $(document).trigger("bind_stats", Object.assign({}, raw, { stats }))
 }
 
@@ -6612,6 +6621,7 @@ function bindScanResult(result) {
     }
     const groupedReconObservations = new Map()
     resetDastCounters()
+    dastExecutedAttacks = countDastExecutedAttacks(vm)
     attackFilterState.requestId = null
     requestFilterDirty = false
     updateRequestFilterStyle(null)
@@ -7200,6 +7210,7 @@ function flushDastQueue() {
             const attackId = attack?.id ? String(attack.id) : null
             if (!attackId || DAST_RENDER.renderedAttackIds.has(attackId)) return
             DAST_RENDER.renderedAttackIds.add(attackId)
+            dastExecutedAttacks += 1
             let enrichedAttack = attachFindingMetadataToAttack(attack, lookup)
             enrichedAttack = enrichAttackFromCatalog(enrichedAttack)
             attacks[attackIdx] = enrichedAttack

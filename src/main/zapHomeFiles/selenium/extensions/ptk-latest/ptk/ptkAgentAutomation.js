@@ -60,6 +60,7 @@
         session_stop_failed: 'PTK scan could not be stopped',
         get_findings_failed: 'PTK findings could not be read',
         export_failed: 'PTK report export could not be prepared',
+        empty_export_plan: 'PTK report export returned no scan descriptors',
         session_not_completed: 'PTK scan must be completed before export',
         no_exportable_results: 'PTK could not prepare an export for this request'
     })
@@ -264,10 +265,19 @@
                     }
                     return toAgentFailure(result?.error || 'session_status_failed', 'session_status_failed', result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {})
                 }
+                const returnedSessionId = typeof result?.sessionId === 'string' ? result.sessionId.trim() : ''
+                const requestedSessionId = typeof options?.sessionId === 'string' ? options.sessionId.trim() : ''
+                if (!returnedSessionId || (requestedSessionId && returnedSessionId !== requestedSessionId)
+                    || typeof result?.status !== 'string' || !result.status.trim()) {
+                    return toAgentFailure('session_status_failed', 'session_status_failed')
+                }
 
                 return withNormalizedWorkflowStatus({
                     ok: true,
                     sessionId: result?.sessionId ?? null,
+                    ...(result?.completionStatus ? { completionStatus: result.completionStatus } : {}),
+                    ...(result?.releaseStatus ? { releaseStatus: result.releaseStatus } : {}),
+                    ...(result?.error ? { error: result.error } : {}),
                     startedAt: result?.startedAt ?? null,
                     finishedAt: result?.finishedAt ?? null,
                     stopRequestedAt: result?.stopRequestedAt ?? null,
@@ -429,8 +439,11 @@
                 includeSecrets: false,
                 exportMode: 'evidence',
                 allowChunked: true,
-                // Force the low-level exporter into chunked mode so exportFullReport
-                // always returns a retrieval-plan descriptor instead of inline data.
+                // Tell the background exporter this workflow requires a retrieval
+                // descriptor; avoid preparing an inline payload only to reject it.
+                forceChunked: true,
+                // Retain the one-byte ceiling as a compatibility fallback for
+                // backgrounds that do not yet understand forceChunked.
                 maxExportBytes: 1
             }
             delete exportOptions.transfer
@@ -442,6 +455,9 @@
                         ...toAgentFailure(result?.error || 'export_failed', 'export_failed', result?.sessionLookup ? { sessionLookup: result.sessionLookup } : {}),
                         warnings: Array.isArray(result?.warnings) ? result.warnings : []
                     }
+                }
+                if (result?.ok !== true || !Array.isArray(result.scans) || result.scans.length === 0) {
+                    return toAgentFailure('empty_export_plan', 'export_failed')
                 }
 
                 return {

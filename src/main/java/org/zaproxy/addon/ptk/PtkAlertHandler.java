@@ -1,11 +1,21 @@
 package org.zaproxy.addon.ptk;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.google.gson.JsonSyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.commons.httpclient.URI;
 import org.apache.logging.log4j.LogManager;
@@ -36,8 +46,53 @@ public final class PtkAlertHandler {
     private static final Map<String, Object> BATCH_ACK_LOCKS = new ConcurrentHashMap<>();
     private static final Map<String, Long> IMPORTED_FINDING_KEYS = new ConcurrentHashMap<>();
     private static final Map<String, Object> IMPORTED_FINDING_LOCKS = new ConcurrentHashMap<>();
+    private static final PtkAlertReceipts RECEIPTS = new PtkAlertReceipts();
+    // Structured batches and retirement share the class monitor. Legacy publishers
+    // keep their original caches and never consume the structured receipt budget.
+    private static final Map<String, AlertBatchAck> STRUCTURED_BATCH_ACKS = new HashMap<>();
+    private static final Set<String> STRUCTURED_FINDING_KEYS = new HashSet<>();
+    private static final Map<String, String> BATCH_DIGESTS = new HashMap<>();
+    private static final Map<String, JsonObject> COMPLETENESS = new HashMap<>();
+
+    private record RetiredAck(AlertBatchAck ack, String v3Digest) {}
+
+    private static final LinkedHashMap<String, RetiredAck> RETIRED_ACKS = new LinkedHashMap<>();
 
     private PtkAlertHandler() {}
+
+    public static synchronized void retireSession(String zapid, String sessionId) {
+        String scope = receiptScope(zapid, sessionId);
+        for (String key : RECEIPTS.retire(scope)) {
+            if (key.startsWith("batch:")) {
+                String batchKey = key.substring(6);
+                AlertBatchAck ack = STRUCTURED_BATCH_ACKS.remove(batchKey);
+                String digest = BATCH_DIGESTS.remove(batchKey);
+                if (ack != null)
+                    RETIRED_ACKS.put(
+                            batchKey,
+                            new RetiredAck(
+                                    ack, PtkIastV3Contract.V3.equals(ack.schema) ? digest : null));
+            } else if (key.startsWith("finding:")) STRUCTURED_FINDING_KEYS.remove(key.substring(8));
+        }
+        COMPLETENESS.keySet().removeIf(key -> key.startsWith(scope + ":"));
+        while (RETIRED_ACKS.size() > ACK_CACHE_MAX_ENTRIES
+                || GSON.toJson(RETIRED_ACKS).getBytes(StandardCharsets.UTF_8).length
+                        > 8 * 1024 * 1024)
+            RETIRED_ACKS.remove(RETIRED_ACKS.keySet().iterator().next());
+    }
+
+    public static synchronized void clearAllReceipts() {
+        RECEIPTS.clear();
+        BATCH_ACK_CACHE.clear();
+        BATCH_DIGESTS.clear();
+        STRUCTURED_BATCH_ACKS.clear();
+        STRUCTURED_FINDING_KEYS.clear();
+        IMPORTED_FINDING_KEYS.clear();
+        BATCH_ACK_LOCKS.clear();
+        IMPORTED_FINDING_LOCKS.clear();
+        COMPLETENESS.clear();
+        RETIRED_ACKS.clear();
+    }
 
     /**
      * Processes a PTK alert batch from the request body. Parses JSON, builds ZAP alerts for each
@@ -54,12 +109,106 @@ public final class PtkAlertHandler {
         if (requestBody == null || requestBody.isBlank()) {
             return AlertBatchAck.empty(null, null);
         }
+        if (requestBody.getBytes(StandardCharsets.UTF_8).length > 16 * 1024 * 1024)
+            return AlertBatchAck.failure(null, null, "invalid_payload");
         PtkFindingBatch batch;
+        String wireSchema = null;
         try {
-            batch = GSON.fromJson(requestBody, PtkFindingBatch.class);
+            JsonElement parsed = JsonParser.parseString(requestBody);
+            if (parsed.isJsonNull()) {
+                return AlertBatchAck.empty(null, null);
+            }
+            JsonObject root = parsed.getAsJsonObject();
+            wireSchema = optionalString(root, "schema");
+            if (PtkIastV3Contract.V3.equals(wireSchema)) {
+                PtkIastV3Contract.validate(root);
+            } else if (PtkIastV2Contract.V2.equals(wireSchema)) {
+                PtkIastV2Contract.validate(root);
+            } else {
+                if (!wireSchema.isEmpty()
+                        && "iast_findings_batch".equals(optionalString(root, "type"))
+                        && !PtkConfigFilter.supportedIastSchemas().contains(wireSchema)) {
+                    return AlertBatchAck.failure(null, null, "unsupported_schema");
+                }
+                ignoreStructuredFields(root);
+            }
+            batch = GSON.fromJson(root, PtkFindingBatch.class);
         } catch (JsonSyntaxException e) {
-            return AlertBatchAck.empty(null, null);
+            return AlertBatchAck.failure(null, null, "invalid_payload");
+        } catch (RuntimeException e) {
+            return versionAck(AlertBatchAck.failure(null, null, "invalid_payload"), wireSchema);
         }
+        if (isStructuredIast(wireSchema)) {
+            return processStructuredBatch(batch, requestBody);
+        }
+        return processLegacyBatch(batch);
+    }
+
+    private static String optionalString(JsonObject root, String key) {
+        JsonElement element = root.get(key);
+        return element == null || element.isJsonNull() ? "" : element.getAsString();
+    }
+
+    private static void ignoreStructuredFields(JsonObject root) {
+        JsonElement value = root.get("payload");
+        if (value == null || !value.isJsonObject()) {
+            return;
+        }
+        JsonObject payload = value.getAsJsonObject();
+        payload.remove("scanCompleteness");
+        JsonElement findings = payload.get("findings");
+        if (findings == null || !findings.isJsonArray()) {
+            return;
+        }
+        for (JsonElement finding : findings.getAsJsonArray()) {
+            if (finding.isJsonObject()) {
+                finding.getAsJsonObject().remove("observation");
+                finding.getAsJsonObject().remove("flow");
+            }
+        }
+    }
+
+    private static synchronized AlertBatchAck processStructuredBatch(
+            PtkFindingBatch batch, String requestBody) {
+        String ackKey = buildBatchAckKey(batch);
+        String digest = digest(requestBody);
+        RetiredAck retired = RETIRED_ACKS.get(ackKey);
+        String priorDigest = retired != null ? retired.v3Digest() : BATCH_DIGESTS.get(ackKey);
+        String batchId = batch.getBatchId();
+        Integer batchSeq = batch.getBatchSeq();
+        String schema = batch.getSchema();
+        if (priorDigest != null && !priorDigest.equals(digest)) {
+            return versionAck(
+                    AlertBatchAck.failure(batchId, batchSeq, "immutable_identity_conflict"),
+                    schema);
+        }
+        AlertBatchAck cached = retired != null ? retired.ack() : STRUCTURED_BATCH_ACKS.get(ackKey);
+        if (cached != null) {
+            return cached;
+        }
+        AlertBatchAck estimated =
+                versionAck(
+                        new AlertBatchAck(batchId, batchSeq, batch.getFindings().size()), schema);
+        for (PtkFinding finding : batch.getFindings()) {
+            estimated.add(
+                    FindingAck.rejected(
+                            findingIdentity(finding),
+                            finding,
+                            "rejected_immutable_identity_conflict"));
+        }
+        long receiptBytes = utf8(ackKey) + utf8(GSON.toJson(estimated)) + 4096L;
+        PtkAlertReceipts.Admission admission =
+                RECEIPTS.admit(scope(batch), "batch:" + ackKey, digest, receiptBytes);
+        if (admission != PtkAlertReceipts.Admission.NEW
+                && admission != PtkAlertReceipts.Admission.DUPLICATE) {
+            return versionAck(
+                    AlertBatchAck.failure(batchId, batchSeq, receiptError(admission)), schema);
+        }
+        BATCH_DIGESTS.put(ackKey, digest);
+        return processParsedAlertBatch(batch, ackKey, batchId, batchSeq);
+    }
+
+    private static AlertBatchAck processLegacyBatch(PtkFindingBatch batch) {
         String batchId = batch != null ? batch.getBatchId() : null;
         Integer batchSeq = batch != null ? batch.getBatchSeq() : null;
         String ackKey = buildBatchAckKey(batch);
@@ -87,14 +236,66 @@ public final class PtkAlertHandler {
     private static AlertBatchAck processParsedAlertBatch(
             PtkFindingBatch batch, String ackKey, String batchId, Integer batchSeq) {
         if (batch == null || batch.getPayload() == null || batch.getFindings() == null) {
-            return cacheAck(ackKey, AlertBatchAck.empty(batchId, batchSeq));
+            return cacheAck(batch, ackKey, AlertBatchAck.empty(batchId, batchSeq));
         }
         String engine = batch.getPayload().getEngine();
         if (engine == null || engine.isBlank()) {
             engine = inferEngine(batch.getType());
         }
         List<PtkFinding> findings = batch.getFindings();
-        AlertBatchAck ack = new AlertBatchAck(batchId, batchSeq, findings.size());
+        AlertBatchAck ack =
+                versionAck(
+                        new AlertBatchAck(batchId, batchSeq, findings.size()), batch.getSchema());
+        if (isStructuredIast(batch)) {
+            JsonObject summary = batch.getPayload().getScanCompleteness();
+            String summaryKey =
+                    scope(batch)
+                            + ":"
+                            + GSON.toJson(
+                                    List.of(
+                                            nullSafe(batch.getSchema()),
+                                            batch.getPayload().getScanId()));
+            synchronized (COMPLETENESS) {
+                JsonObject prior = COMPLETENESS.get(summaryKey);
+                long revision = summary.get("revision").getAsLong();
+                if (prior != null
+                        && (revision < prior.get("revision").getAsLong()
+                                || prior.get("terminal").getAsBoolean()
+                                        && !summary.get("terminal").getAsBoolean()
+                                || summary.getAsJsonObject("counters").get("lossCount").getAsLong()
+                                        < prior.getAsJsonObject("counters")
+                                                .get("lossCount")
+                                                .getAsLong()
+                                || summary.getAsJsonObject("counters")
+                                                .get("recordsRejected")
+                                                .getAsLong()
+                                        < prior.getAsJsonObject("counters")
+                                                .get("recordsRejected")
+                                                .getAsLong()))
+                    return cacheAck(
+                            batch,
+                            ackKey,
+                            versionAck(
+                                    AlertBatchAck.failure(
+                                            batchId, batchSeq, "invalid_completeness_revision"),
+                                    batch.getSchema()));
+                if (prior != null
+                        && revision == prior.get("revision").getAsLong()
+                        && !prior.equals(summary))
+                    return cacheAck(
+                            batch,
+                            ackKey,
+                            versionAck(
+                                    AlertBatchAck.failure(
+                                            batchId, batchSeq, "immutable_identity_conflict"),
+                                    batch.getSchema()));
+                if (prior == null || revision > prior.get("revision").getAsLong())
+                    COMPLETENESS.put(summaryKey, summary.deepCopy());
+                ack.scanCompletenessRevision = revision;
+                ack.scanCompletenessAccepted = true;
+            }
+            if (findings.isEmpty()) return cacheAck(batch, ackKey, ack);
+        }
         PtkResourcesLoader loader = new PtkResourcesLoader();
         PtkResourcesLoader.LoadedPtkResources resources = loader.loadAll();
         if (resources == null || resources.getZapMapping() == null) {
@@ -103,7 +304,7 @@ public final class PtkAlertHandler {
                         FindingAck.rejected(
                                 findingIdentity(finding), finding, "rejected_missing_mapping"));
             }
-            return cacheAck(ackKey, ack);
+            return cacheAck(batch, ackKey, ack);
         }
         PtkZapMapper mapper = new PtkZapMapper(resources);
         ExtensionAlert extAlert = null;
@@ -146,14 +347,19 @@ public final class PtkAlertHandler {
             }
             String findingKey = buildImportedFindingKey(batch, finding, alert);
             String status;
-            if (findingKey != null) {
+            if (isStructuredIast(batch)) {
+                status = importStructuredFinding(batch, finding, alert, extAlert, findingKey, ack);
+                if ("accepted_raised".equals(status)) {
+                    ack.alertsRaised++;
+                }
+            } else if (findingKey != null) {
                 Object findingLock =
                         IMPORTED_FINDING_LOCKS.computeIfAbsent(findingKey, key -> new Object());
                 synchronized (findingLock) {
                     if (IMPORTED_FINDING_KEYS.containsKey(findingKey)) {
                         status = "accepted_duplicate";
                     } else {
-                        status = raiseAlert(alert, finding, extAlert);
+                        status = raiseAlert(alert, finding, extAlert, false);
                         if ("accepted_raised".equals(status)) {
                             ack.alertsRaised++;
                             IMPORTED_FINDING_KEYS.put(findingKey, System.currentTimeMillis());
@@ -163,7 +369,7 @@ public final class PtkAlertHandler {
                 }
                 IMPORTED_FINDING_LOCKS.remove(findingKey, findingLock);
             } else {
-                status = raiseAlert(alert, finding, extAlert);
+                status = raiseAlert(alert, finding, extAlert, false);
                 if ("accepted_raised".equals(status)) {
                     ack.alertsRaised++;
                 }
@@ -172,7 +378,40 @@ public final class PtkAlertHandler {
         }
 
         LOGGER.debug("PTK alerts raised: {} of {} reported", ack.alertsRaised, findings.size());
-        return cacheAck(ackKey, ack);
+        return cacheAck(batch, ackKey, ack);
+    }
+
+    private static String importStructuredFinding(
+            PtkFindingBatch batch,
+            PtkFinding finding,
+            Alert alert,
+            ExtensionAlert extAlert,
+            String findingKey,
+            AlertBatchAck ack) {
+        String receiptKey = "finding:" + findingKey;
+        var admission =
+                RECEIPTS.admit(
+                        scope(batch),
+                        receiptKey,
+                        digest(GSON.toJson(finding)),
+                        utf8(findingKey) + 128L);
+        if (admission == PtkAlertReceipts.Admission.DUPLICATE) {
+            return STRUCTURED_FINDING_KEYS.contains(findingKey)
+                    ? "accepted_duplicate"
+                    : "rejected_raise_failed";
+        }
+        if (admission != PtkAlertReceipts.Admission.NEW) {
+            ack.permanentFailure = true;
+            ack.errorCode = receiptError(admission);
+            return "rejected_" + ack.errorCode;
+        }
+        String status = raiseAlert(alert, finding, extAlert, true);
+        if ("accepted_raised".equals(status)) {
+            STRUCTURED_FINDING_KEYS.add(findingKey);
+        } else {
+            RECEIPTS.release(scope(batch), receiptKey);
+        }
+        return status;
     }
 
     private static String inferEngine(String type) {
@@ -183,7 +422,8 @@ public final class PtkAlertHandler {
         return "PTK";
     }
 
-    private static String raiseAlert(Alert alert, PtkFinding finding, ExtensionAlert extAlert) {
+    private static String raiseAlert(
+            Alert alert, PtkFinding finding, ExtensionAlert extAlert, boolean requireStoredId) {
         try {
             HttpMessage msg;
             String otherInfoNote;
@@ -246,6 +486,14 @@ public final class PtkAlertHandler {
                             Model.getSingleton().getSession(), HistoryReference.TYPE_SCANNER, msg);
             alert.setMessage(msg);
             extAlert.alertFound(alert, ref);
+            // ExtensionAlert can swallow a database-write exception and return.
+            // Its supported ZAP implementations assign this ID only after
+            // TableAlert.write returns; a bare method return is not a storage
+            // acknowledgement for the publisher or a future visit checkpoint.
+            if (requireStoredId && !hasStoredAlertId(alert)) {
+                LOGGER.error("PTK alert was not stored: {}", alert.getName());
+                return "rejected_raise_failed";
+            }
             LOGGER.debug("PTK raised alert: {}", alert.getName());
             return "accepted_raised";
         } catch (Exception e) {
@@ -254,9 +502,19 @@ public final class PtkAlertHandler {
         }
     }
 
-    private static AlertBatchAck cacheAck(String ackKey, AlertBatchAck ack) {
+    // ZAP's first persisted alert can have ID 0. A fresh Alert starts at -1;
+    // ExtensionAlert changes that ID only after TableAlert.write returns.
+    static boolean hasStoredAlertId(Alert alert) {
+        return alert != null && alert.getAlertId() >= 0;
+    }
+
+    private static AlertBatchAck cacheAck(PtkFindingBatch batch, String ackKey, AlertBatchAck ack) {
         if (ackKey == null || ack == null) {
             return ack != null ? ack : AlertBatchAck.empty(null, null);
+        }
+        if (isStructuredIast(batch)) {
+            STRUCTURED_BATCH_ACKS.put(ackKey, ack);
+            return ack;
         }
         BATCH_ACK_CACHE.put(ackKey, ack);
         while (BATCH_ACK_CACHE.size() > ACK_CACHE_MAX_ENTRIES) {
@@ -275,12 +533,21 @@ public final class PtkAlertHandler {
                 batch.getPayload() != null && batch.getPayload().getSessionId() != null
                         ? batch.getPayload().getSessionId()
                         : "";
-        return String.join(
-                "|",
-                nullSafe(sessionId),
-                nullSafe(batch.getZapid()),
-                nullSafe(batch.getBatchId()),
-                String.valueOf(batch.getBatchSeq()));
+        if (!isStructuredIast(batch)) {
+            return String.join(
+                    "|",
+                    nullSafe(sessionId),
+                    nullSafe(batch.getZapid()),
+                    batch.getBatchId(),
+                    String.valueOf(batch.getBatchSeq()));
+        }
+        return GSON.toJson(
+                List.of(
+                        nullSafe(sessionId),
+                        nullSafe(batch.getZapid()),
+                        nullSafe(batch.getSchema()),
+                        nullSafe(batch.getBatchId()),
+                        String.valueOf(batch.getBatchSeq())));
     }
 
     private static String buildImportedFindingKey(
@@ -289,6 +556,15 @@ public final class PtkAlertHandler {
                 batch.getPayload() != null && batch.getPayload().getSessionId() != null
                         ? batch.getPayload().getSessionId()
                         : "";
+        if (isStructuredIast(batch))
+            return GSON.toJson(
+                    List.of(
+                            nullSafe(sessionId),
+                            nullSafe(batch.getZapid()),
+                            nullSafe(batch.getSchema()),
+                            "IAST",
+                            nullSafe(batch.getPayload().getScanId()),
+                            findingIdentity(finding)));
         return String.join(
                 "|",
                 nullSafe(sessionId),
@@ -336,9 +612,59 @@ public final class PtkAlertHandler {
         }
     }
 
+    private static boolean isStructuredIast(PtkFindingBatch batch) {
+        return batch != null && isStructuredIast(batch.getSchema());
+    }
+
+    private static boolean isStructuredIast(String schema) {
+        return PtkIastV2Contract.V2.equals(schema) || PtkIastV3Contract.V3.equals(schema);
+    }
+
+    private static AlertBatchAck versionAck(AlertBatchAck ack, String schema) {
+        if (PtkIastV3Contract.V3.equals(schema)) {
+            ack.contractVersion = 3;
+            ack.schema = PtkIastV3Contract.V3;
+        }
+        return ack;
+    }
+
+    private static String receiptScope(String zapid, String sessionId) {
+        return GSON.toJson(List.of(nullSafe(zapid), nullSafe(sessionId)));
+    }
+
+    private static String scope(PtkFindingBatch batch) {
+        return receiptScope(
+                batch.getZapid(),
+                batch.getPayload() != null ? batch.getPayload().getSessionId() : null);
+    }
+
+    private static int utf8(String value) {
+        return value.getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    private static String digest(String value) {
+        try {
+            return HexFormat.of()
+                    .formatHex(
+                            MessageDigest.getInstance("SHA-256")
+                                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private static String receiptError(PtkAlertReceipts.Admission admission) {
+        return admission == PtkAlertReceipts.Admission.CONFLICT
+                ? "immutable_identity_conflict"
+                : admission == PtkAlertReceipts.Admission.RETIRED
+                        ? "retired_session"
+                        : "receipt_capacity";
+    }
+
     public static final class AlertBatchAck {
         public String result = "OK";
         public int contractVersion = 2;
+        public String schema;
         public boolean structuredAck = true;
         public boolean legacyAck = false;
         public String batchId;
@@ -348,6 +674,10 @@ public final class PtkAlertHandler {
         public int alertsRaised;
         public List<FindingAck> findingResults = new ArrayList<>();
         public Map<String, Integer> reasonCounts = new LinkedHashMap<>();
+        public boolean permanentFailure;
+        public String errorCode;
+        public boolean scanCompletenessAccepted;
+        public Long scanCompletenessRevision;
 
         AlertBatchAck(String batchId, Integer batchSeq, int received) {
             this.batchId = batchId;
@@ -357,6 +687,14 @@ public final class PtkAlertHandler {
 
         static AlertBatchAck empty(String batchId, Integer batchSeq) {
             return new AlertBatchAck(batchId, batchSeq, 0);
+        }
+
+        static AlertBatchAck failure(String batchId, Integer batchSeq, String reason) {
+            AlertBatchAck ack = empty(batchId, batchSeq);
+            ack.result = "ERROR";
+            ack.permanentFailure = true;
+            ack.errorCode = reason;
+            return ack;
         }
 
         void add(FindingAck findingAck) {

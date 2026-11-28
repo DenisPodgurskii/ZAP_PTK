@@ -1,7 +1,54 @@
 import { ANALYSIS_VERSION, applyScanAnalysis } from "../../analysis/scanAnalysisEngine.js"
 import { buildHostCoverageAnalysis } from "../../analysis/hostCoverageAnalysis.js"
+import CryptoES from "../../../packages/crypto-es/index.js"
 
 const FROZEN_ANALYSIS_CONTEXT_PROP = "__ptkDastFrozenAnalysisContext"
+const COMPLETED_ANALYSIS = Symbol("completedDastAnalysis")
+const TRUSTED_PERSISTED_ANALYSIS = Symbol("trustedPersistedDastAnalysis")
+const PERSISTED_INPUTS = "__ptkCompletedAnalysisInputs"
+// Never walk response bodies or source scripts merely to validate a read.
+const RAW_INPUT_KEYS = new Set(["body", "raw", "responseBody", "requestBody", "sourceCode", "sourceText", "script", "code", "content", "text", "snippet", "analysis", "analysisVersion"])
+
+function inputSignature(scan) {
+    const compact = (value, policy = false) => {
+        if (!value || typeof value !== "object") return value
+        if (Array.isArray(value)) return value.map(item => compact(item, policy))
+        const output = {}
+        for (const key of Object.keys(value).sort()) {
+            // Policy definitions are analysis authority, not captured HTTP or
+            // source bodies. Same-ID policy edits must change the receipt too.
+            if ((policy || !RAW_INPUT_KEYS.has(key)) && !key.startsWith("_")) output[key] = compact(value[key], policy || key === 'settings')
+        }
+        return output
+    }
+    const input = {}
+    for (const key of ["engine", "scanId", "host", "tabId", "startedAt", "finishedAt", "finished", "policyId", "settings", "findings", "requests", "runtimeEvents", "files", "recon", "stats", "scanStats", "codeArtifacts"]) input[key] = scan?.[key]
+    input.tabId = scan?.tabId ?? null
+    return CryptoES.SHA256(JSON.stringify(compact(input))).toString()
+}
+
+// A serialized/imported version or metadata field is not a completion receipt.
+export function getCompletedDastAnalysis(scan) {
+    const receipt = scan?.[COMPLETED_ANALYSIS]
+    return receipt?.analysis === scan?.analysis && receipt?.isCurrent?.() ? receipt.analysis : null
+}
+
+export function markPersistedDastAnalysis(scan) {
+    if (scan && typeof scan === "object") Object.defineProperty(scan, TRUSTED_PERSISTED_ANALYSIS, { value: true, configurable: true })
+    return scan
+}
+
+export function preparePersistedDastAnalysis(source, copy) {
+    if (getCompletedDastAnalysis(source) && copy?.analysis?.meta) {
+        copy.analysis.meta[PERSISTED_INPUTS] = source[COMPLETED_ANALYSIS].signatureFor(copy)
+    }
+    return copy
+}
+
+export function stripPrivateDastAnalysisMetadata(analysis) {
+    if (analysis?.meta) delete analysis.meta[PERSISTED_INPUTS]
+    return analysis
+}
 
 function deepClone(value) {
     try {
@@ -19,7 +66,8 @@ export class DastAnalysisService {
         suppressionsStorageKey = "ptk_dast_analysis_suppressions_v1",
         getAppState = () => (typeof self !== "undefined" ? self?.ptk_app : null),
         getCurrentScanResult = () => null,
-        getEngineIsRunning = () => false
+        getEngineIsRunning = () => false,
+        persistCompletedAnalysis = null
     } = {}) {
         this.storage = storage
         this.scanResultStore = scanResultStore
@@ -28,8 +76,55 @@ export class DastAnalysisService {
         this.getAppState = getAppState
         this.getCurrentScanResult = getCurrentScanResult
         this.getEngineIsRunning = getEngineIsRunning
+        this.persistCompletedAnalysis = persistCompletedAnalysis
         this.diffBases = {}
         this.suppressions = {}
+    }
+
+    _completedSignature(scan) {
+        const related = this.getRelatedScansForCoverage(scan, { analyze: false })
+        return [ANALYSIS_VERSION, inputSignature(scan), this._buildRelatedScansIdentitySignature(related),
+            this._deriveExtraEnginesPresentFromInputs({ scanResult: scan, relatedScans: related, engineIsRunning: false }).join(","),
+            this.getSuppressionsForHost(scan?.host).join("|")].join(";")
+    }
+
+    hasCompletedAnalysis(scan) {
+        return !!getCompletedDastAnalysis(scan)
+    }
+
+    ensureCompletedAnalysis(scan, { force = false, defer = false } = {}) {
+        if (!scan || !(scan.finishedAt || scan.finished)) return Promise.resolve(scan)
+        const existing = scan[COMPLETED_ANALYSIS]
+        if (existing?.promise) return force
+            ? existing.promise.then(() => this.ensureCompletedAnalysis(scan, { force: true }))
+            : existing.promise
+        if (!force && getCompletedDastAnalysis(scan)) return Promise.resolve(scan)
+        const receipt = {}
+        Object.defineProperty(scan, COMPLETED_ANALYSIS, { value: receipt, configurable: true })
+        const run = async () => {
+            await this.hydratePersistedRelatedScans(scan, { strict: true })
+            // Sibling reads may await storage. Keep all analysis/diff writes pinned
+            // to the captured scan, even when a newer scan starts in the meantime.
+            const signature = this._completedSignature(scan)
+            const restored = !force && scan[TRUSTED_PERSISTED_ANALYSIS] && this.hasCurrentAnalysis(scan)
+                && scan.analysis?.meta?.mode === "finalized" && scan.analysis.meta[PERSISTED_INPUTS] === signature
+            if (!restored) this.applyAnalysis(scan, { force: true, engineIsRunning: false })
+            delete scan[TRUSTED_PERSISTED_ANALYSIS]
+            receipt.signature = this._completedSignature(scan)
+            receipt.analysis = scan.analysis
+            receipt.isCurrent = () => receipt.signature === this._completedSignature(scan)
+            receipt.signatureFor = copy => this._completedSignature(copy)
+            if (!restored) await this.persistCompletedAnalysis?.(scan)
+            return scan
+        }
+        const work = defer
+            ? new Promise((resolve, reject) => setTimeout(() => { run().then(resolve, reject) }, 0))
+            : run()
+        receipt.promise = work.then(value => { delete receipt.promise; return value }, error => {
+            if (scan[COMPLETED_ANALYSIS] === receipt) delete scan[COMPLETED_ANALYSIS]
+            throw error
+        })
+        return receipt.promise
     }
 
     _unwrapStoredScan(value) {
@@ -90,6 +185,14 @@ export class DastAnalysisService {
         return scan
     }
 
+    _hydrateRelatedScan(envelope, engine) {
+        return this.scanResultStore.hydrateScan(envelope, { engineFallback: engine, extraFields: {
+            tabId: envelope?.tabId ?? null,
+            codeArtifacts: envelope?.codeArtifacts,
+            scanStats: envelope?.scanStats
+        } })
+    }
+
     _getFrozenAnalysisContext(scanResult) {
         if (!scanResult || typeof scanResult !== "object") return null
         return scanResult[FROZEN_ANALYSIS_CONTEXT_PROP] && typeof scanResult[FROZEN_ANALYSIS_CONTEXT_PROP] === "object"
@@ -136,7 +239,8 @@ export class DastAnalysisService {
                 Number(Array.isArray(scan?.findings) ? scan.findings.length : 0),
                 Number(Array.isArray(scan?.requests) ? scan.requests.length : 0),
                 Number(Array.isArray(scan?.runtimeEvents) ? scan.runtimeEvents.length : 0),
-                Number(Array.isArray(scan?.files) ? scan.files.length : 0)
+                Number(Array.isArray(scan?.files) ? scan.files.length : 0),
+                inputSignature(scan)
             ].join("|"))
             .sort((a, b) => a.localeCompare(b))
         return entries.join("||")
@@ -160,7 +264,7 @@ export class DastAnalysisService {
             if (!scan || typeof scan !== "object") return
             const engine = String(scan?.engine || "").toUpperCase()
             if (!engine) return
-            if (this._hasSignals(scan)) {
+            if (this._hasSignals(scan) || this.isCompletedEngineScan(scan)) {
                 engines.add(engine)
             }
         })
@@ -239,12 +343,13 @@ export class DastAnalysisService {
         return Array.from(engines)
     }
 
-    normalizeRelatedScanCandidate(candidate, { expectedHost = null, engineFallback = null } = {}) {
+    normalizeRelatedScanCandidate(candidate, { expectedHost = null, engineFallback = null, preferSource = false, analyze = true } = {}) {
         const envelope = this._unwrapStoredScan(candidate)
         if (!envelope || typeof envelope !== "object") return null
         if (!this.isCompletedEngineScan(envelope, { isRunning: false, expectedHost })) return null
         const engine = String(envelope?.engine || engineFallback || "").toUpperCase()
         if (!engine || engine === "DAST") return null
+        if (preferSource || !analyze) return !analyze || this.hasCurrentAnalysis(envelope) ? envelope : this.ensureRelatedScanAnalysis(envelope)
         if (!this.scanResultStore?.hydrateScan) {
             return envelope
         }
@@ -255,7 +360,7 @@ export class DastAnalysisService {
                 return this.ensureRelatedScanAnalysis(existing)
             }
         }
-        const hydrated = this.scanResultStore.hydrateScan(envelope, { engineFallback: engine }) || envelope
+        const hydrated = this._hydrateRelatedScan(envelope, engine) || envelope
         return this.ensureRelatedScanAnalysis(hydrated)
     }
 
@@ -273,7 +378,7 @@ export class DastAnalysisService {
         })
     }
 
-    getRelatedScansFromApp(scanResult = this.getCurrentScanResult?.() || null) {
+    getRelatedScansFromApp(scanResult = this.getCurrentScanResult?.() || null, { analyze = true } = {}) {
         const currentScan = scanResult && typeof scanResult === "object" ? scanResult : null
         const expectedHost = currentScan?.host || null
         const app = this.getAppState?.()
@@ -286,12 +391,14 @@ export class DastAnalysisService {
         return candidates
             .map(({ scan, engine }) => this.normalizeRelatedScanCandidate(scan, {
                 expectedHost,
-                engineFallback: engine
+                engineFallback: engine,
+                preferSource: true,
+                analyze
             }))
             .filter(Boolean)
     }
 
-    async hydratePersistedRelatedScans(scanResult = this.getCurrentScanResult?.() || null) {
+    async hydratePersistedRelatedScans(scanResult = this.getCurrentScanResult?.() || null, { strict = false } = {}) {
         if (!this.storage?.getItem || !this.scanResultStore?.hydrateScan) return []
         const currentScan = scanResult && typeof scanResult === "object" ? scanResult : null
         const expectedHost = currentScan?.host || null
@@ -320,9 +427,9 @@ export class DastAnalysisService {
                     hydrated.push(this.ensureRelatedScanAnalysis(this.scanResultStore.getScan(scanId)))
                     continue
                 }
-                const scan = this.scanResultStore.hydrateScan(envelope, { engineFallback: source.engine })
+                const scan = this._hydrateRelatedScan(envelope, source.engine)
                 if (scan) hydrated.push(this.ensureRelatedScanAnalysis(scan))
-            } catch (_) { }
+            } catch (error) { if (strict) throw error }
         }
         return hydrated
     }
@@ -361,6 +468,8 @@ export class DastAnalysisService {
     rememberAnalysisDiffBase(scanResult) {
         if (!scanResult || typeof scanResult !== "object") return
         if (!(scanResult?.finishedAt || scanResult?.finished)) return
+        const current = this.getCurrentScanResult?.()
+        if (current && current !== scanResult) return
         const hostKey = this.normalizeAnalysisHostKey(scanResult?.host)
         if (!hostKey) return
         const compact = this.compactAnalysisForDiff(scanResult?.analysis)
@@ -533,29 +642,31 @@ export class DastAnalysisService {
         }
     }
 
-    getRelatedScansForCoverage(scanResult = this.getCurrentScanResult?.() || null) {
+    getRelatedScansForCoverage(scanResult = this.getCurrentScanResult?.() || null, { analyze = true } = {}) {
         if (!scanResult || typeof scanResult !== "object") return []
         const expectedHost = scanResult?.host || null
         const relatedFromStoreRaw = this.scanResultStore?.getRelatedScansForAnalysis?.({
             scanId: scanResult?.scanId || null,
             host: scanResult?.host || null,
             tabId: scanResult?.tabId,
-            engine: scanResult?.engine || "DAST"
+            engine: scanResult?.engine || "DAST",
+            clone: analyze
         }) || []
         const relatedFromStore = relatedFromStoreRaw
             .map((scan) => this.normalizeRelatedScanCandidate(scan, {
                 expectedHost,
-                engineFallback: scan?.engine || null
+                engineFallback: scan?.engine || null,
+                analyze
             }))
             .filter(Boolean)
-        const relatedFromApp = this.getRelatedScansFromApp(scanResult)
+        const relatedFromApp = this.getRelatedScansFromApp(scanResult, { analyze })
         const merged = new Map()
         ;[...relatedFromStore, ...relatedFromApp].forEach((scan) => {
             if (!scan || typeof scan !== "object") return
             const key = String(scan?.scanId || `${scan?.engine || "ENGINE"}:${scan?.finishedAt || scan?.startedAt || ""}`)
-            if (!merged.has(key)) {
-                merged.set(key, scan)
-            }
+            // A completed live engine is authoritative over its earlier stored
+            // copy, including same-ID late findings/artifact updates.
+            merged.set(key, scan)
         })
         return Array.from(merged.values())
     }

@@ -1,11 +1,9 @@
 package org.zaproxy.addon.ptk.ascan;
 
-import java.lang.reflect.Field;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.apache.commons.httpclient.URI;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.Constant;
@@ -25,7 +23,6 @@ import org.zaproxy.addon.commonlib.PolicyTag;
 import org.zaproxy.addon.ptk.ExtensionPtk;
 import org.zaproxy.addon.ptk.options.PtkParam;
 import org.zaproxy.zap.model.Context;
-import org.zaproxy.zap.model.StructuralNode;
 import org.zaproxy.zap.users.User;
 
 /**
@@ -130,22 +127,16 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
         }
 
         HttpMessage baseMsg = getBaseMsg();
-        String url = resolveClientSpiderStartUrl(hostProcess, baseMsg);
-        if (url == null || url.isBlank()) {
-            skipScan(hostProcess, "fail.badurl");
-            return;
-        }
         String baseUrl =
                 baseMsg != null
                                 && baseMsg.getRequestHeader() != null
                                 && baseMsg.getRequestHeader().getURI() != null
                         ? baseMsg.getRequestHeader().getURI().toString()
                         : null;
-        if (baseUrl != null && !baseUrl.equals(url)) {
-            LOGGER.debug(
-                    "PTK active scan rule using HostProcess start node URL {} (base message URL {})",
-                    url,
-                    baseUrl);
+        String url = extPtk.resolveActiveScanStartUrl(hostProcess, baseUrl);
+        if (url == null) {
+            skipScan(hostProcess, "fail.badurl");
+            return;
         }
         if (hostProcess.getHttpSender() == null) {
             skipScan(hostProcess, "fail.missingdependency");
@@ -236,69 +227,6 @@ public class PtkActiveScanRule extends AbstractHostPlugin {
         } else {
             LOGGER.warn("PTK active scan rule skipped: {}", message);
         }
-    }
-
-    /**
-     * Resolves the client spider seed URL from the host process's first {@code startNodes} entry,
-     * falling back to the active scan rule's base message when reflection is unavailable.
-     */
-    static String resolveClientSpiderStartUrl(HostProcess hostProcess, HttpMessage baseMsg) {
-        String startNodeUrl = getFirstStartNodeUrl(hostProcess);
-        if (startNodeUrl != null && !startNodeUrl.isBlank()) {
-            return startNodeUrl;
-        }
-        if (baseMsg == null || baseMsg.getRequestHeader().getURI() == null) {
-            return null;
-        }
-        return baseMsg.getRequestHeader().getURI().toString();
-    }
-
-    private static String getFirstStartNodeUrl(HostProcess hostProcess) {
-        if (hostProcess == null) {
-            return null;
-        }
-        try {
-            // The startNodes will be publicly accessible from ZAP 2.18.0
-            Field startNodesField = HostProcess.class.getDeclaredField("startNodes");
-            startNodesField.setAccessible(true);
-            Object value = startNodesField.get(hostProcess);
-            if (!(value instanceof List<?> nodes)) {
-                return null;
-            }
-            return getFirstStartNodeUrl(nodes);
-        } catch (ReflectiveOperationException e) {
-            LOGGER.debug(
-                    "PTK active scan rule could not read HostProcess.startNodes; using base message URL",
-                    e);
-            return null;
-        }
-    }
-
-    // Package-private for testing; avoids constructing a HostProcess in unit tests.
-    static String getFirstStartNodeUrl(List<?> startNodes) {
-        if (startNodes == null || startNodes.isEmpty()) {
-            return null;
-        }
-        Object first = startNodes.get(0);
-        if (!(first instanceof StructuralNode startNode)) {
-            return null;
-        }
-        return urlFromStructuralNode(startNode);
-    }
-
-    static String urlFromStructuralNode(StructuralNode startNode) {
-        if (startNode == null) {
-            return null;
-        }
-        URI uri = startNode.getURI();
-        if (uri != null) {
-            return uri.toString();
-        }
-        if (startNode.getHistoryReference() != null
-                && startNode.getHistoryReference().getURI() != null) {
-            return startNode.getHistoryReference().getURI().toString();
-        }
-        return null;
     }
 
     private static <T extends org.parosproxy.paros.extension.Extension> T getExtension(

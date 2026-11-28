@@ -29,6 +29,9 @@ function getFindingKinds(finding = {}) {
 export function isReportDiscovery(engine, finding = {}) {
     const normalizedEngine = normalizeEngine(engine || finding?.engine)
     const kinds = getFindingKinds(finding)
+    if (normalizedEngine === 'dast') {
+        return kinds.includes('recon')
+    }
     if (normalizedEngine === 'sast') {
         return kinds.some((kind) => SAST_DISCOVERY_KINDS.has(kind))
     }
@@ -220,6 +223,31 @@ export function countDastPresentationAttacks(scanResult = {}) {
         })
     })
     return count
+}
+
+// Execution totals and presentation groups deliberately have different meanings.
+// Prefer the engine's cumulative total when a bounded UI snapshot is supplied.
+export function countDastExecutedAttacks(scanResult = {}) {
+    const total = Number(scanResult?.stats?.attacksCount)
+    if (scanResult?.stats?.attacksCount != null && Number.isFinite(total) && total >= 0) return total
+    const records = Array.isArray(scanResult?.requests) && scanResult.requests.length
+        ? scanResult.requests : scanResult?.items
+    return (Array.isArray(records) ? records : []).reduce((sum, record) =>
+        sum + (Array.isArray(record?.attacks) ? record.attacks.length : 0), 0)
+}
+
+export function groupDastReconFindings(scanResult = {}, findings = []) {
+    const requests = new Map((scanResult.requests || []).map(record => [String(record.id), record]))
+    const groups = new Map()
+    findings.forEach((finding, index) => {
+        const record = requests.get(String(finding?.evidence?.dast?.requestId)) || {
+            original: { request: finding?.location || {} }
+        }
+        const key = buildReconPresentationKey(finding, finding, record) || `recon-${index}`
+        if (!groups.has(key)) groups.set(key, [])
+        groups.get(key).push(finding)
+    })
+    return [...groups.values()]
 }
 
 export async function captureReportEngineSnapshots(getController, { engines = REPORT_ENGINES, now = () => new Date() } = {}) {

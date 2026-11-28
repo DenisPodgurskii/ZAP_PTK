@@ -1,0 +1,108 @@
+{
+  "source": "ptk",
+  "type": "iast_findings_batch",
+  "schema": "ptk-zap-iast-finding-v2",
+  "ts": 1,
+  "batchId": "actual-content-fixture",
+  "batchSeq": 1,
+  "zapid": "owner",
+  "browserid": "offline-browser",
+  "zapSessionKey": "https://zap/zapCallBackUrl/offline_fixture|owner",
+  "payload": {
+    "engine": "IAST",
+    "scanId": "scan",
+    "sessionId": "session",
+    "zapSessionKey": "https://zap/zapCallBackUrl/offline_fixture|owner",
+    "findings": [
+      {
+        "id": "iast-v2-6fc0638f38274816368df4811826c7f3:1793805872906",
+        "fingerprint": "iast-v2-6fc0638f38274816368df4811826c7f3",
+        "moduleId": "iast_storage_taint_to_exec",
+        "ruleId": "eval_storage_taint_execution",
+        "severity": "low",
+        "confidence": 22,
+        "summary": "Inferred equality between current storage and sink input; application storage read was not observed. from source localStorage[\"badValue\"] (marker()) to sink eval",
+        "location": {
+          "url": "https://app.test/dom/test",
+          "route": null,
+          "method": null,
+          "param": null
+        },
+        "proof": {
+          "mode": "signal",
+          "payload": "marker()",
+          "proof": null,
+          "summary": "Inferred equality between current storage and sink input; application storage read was not observed."
+        },
+        "request": {
+          "method": "GET",
+          "url": "https://app.test/dom/test",
+          "raw": "GET https://app.test/dom/test HTTP/1.1\r\nHost: app.test\r\n\r\n"
+        },
+        "response": {
+          "statusCode": 200,
+          "raw": "HTTP/1.1 200 OK\r\n\r\n"
+        },
+        "source": {
+          "id": "localStorage:badValue",
+          "label": "localStorage[\"badValue\"] (marker())",
+          "kind": "localStorage"
+        },
+        "sink": {
+          "id": "code.eval",
+          "label": "eval"
+        },
+        "trace": "Error: Sink: xss-via-eval\nat https://app.test/application.js:1:34\nat Script.runInContext (node:vm:149:12)\nat Object.runInContext (node:vm:301:6)\nat Object.run (eval at actualContentFixture (eval at <anonymous> (file:///Users/ptk/dev/ptk_pro/pentestkit/[eval1]:2:277)), <anonymous>:8:76)",
+        "context": {
+          "domPath": null,
+          "elementId": null,
+          "tagName": null
+        },
+        "observation": {
+          "schemaVersion": 2,
+          "identityVersion": 2,
+          "kind": "source_relationship",
+          "operationId": "o_test-document_1",
+          "acquisition": "sink_storage_snapshot",
+          "evidenceGrade": "complete_value_equality",
+          "inheritedGrade": null,
+          "valueRelation": "complete_value_equality",
+          "gradeAuthority": "page_observed_untrusted",
+          "attackerControl": "unknown",
+          "controlReason": "Application storage read not observed; equal stored value only.",
+          "propagation": null,
+          "site": {
+            "kind": "code",
+            "scriptUrl": "https://app.test/application.js",
+            "line": 1,
+            "column": 34,
+            "operation": "code.eval"
+          },
+          "completeness": {
+            "status": "complete",
+            "reasons": []
+          },
+          "sourceBinding": {
+            "sourceId": null,
+            "key": "localStorage:badValue",
+            "kind": "localStorage"
+          }
+        }
+      }
+    ],
+    "truncated": true,
+    "scanCompleteness": {
+      "schemaVersion": 2,
+      "revision": 1,
+      "status": "unknown",
+      "reasons": [
+        "document_receipts_pending"
+      ],
+      "counters": {
+        "lossCount": 0,
+        "recordsRejected": 0
+      },
+      "terminal": false
+    }
+  }
+}

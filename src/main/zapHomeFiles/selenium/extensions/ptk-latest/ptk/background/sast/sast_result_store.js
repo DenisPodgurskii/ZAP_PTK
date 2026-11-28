@@ -66,6 +66,13 @@ function stableHashHex(value) {
   return `${(h2 >>> 0).toString(16).padStart(8, "0")}${(h1 >>> 0).toString(16).padStart(8, "0")}`;
 }
 
+function normalizeInlineFileForFingerprint(value) {
+  return String(value || "").replace(
+    /(\s+::\s+inline-script)\[#\d+\]$/,
+    "$1"
+  );
+}
+
 function sanitizeIdPart(value, fallback = "part") {
   const normalized = toNonEmptyString(value) || fallback;
   return normalized.replace(/[^a-zA-Z0-9_.:-]+/g, "_").slice(0, 80) || fallback;
@@ -394,17 +401,26 @@ export class SastResultStore {
     const ruleMeta = finding.metadata || {};
     const ruleId = ruleMeta.id || ruleMeta.rule_id || ruleMeta.name || "";
     const severity = ruleMeta.severity || finding.severity || "";
-    const srcFile = this._canonicalFileId(
+    const srcFile = normalizeInlineFileForFingerprint(this._canonicalFileId(
       finding?.source?.sourceFileFull || finding?.source?.sourceFile || "",
       finding?.pageUrl
-    );
-    const sinkFile = this._canonicalFileId(
+    ));
+    const sinkFile = normalizeInlineFileForFingerprint(this._canonicalFileId(
       finding?.sink?.sinkFileFull || finding?.sink?.sinkFile || "",
       finding?.pageUrl
-    );
+    ));
     const srcLoc = finding?.source?.sourceLoc ? JSON.stringify(finding.source.sourceLoc) : "";
     const sinkLoc = finding?.sink?.sinkLoc ? JSON.stringify(finding.sink.sinkLoc) : "";
-    return [ruleId, severity, srcFile, sinkFile, srcLoc, sinkLoc].join('@@');
+    const usesInlineScript = /\s+::\s+inline-script$/.test(srcFile)
+      || /\s+::\s+inline-script$/.test(sinkFile);
+    const inlineEvidence = usesInlineScript
+      ? stableHashHex([
+          finding?.source?.label || finding?.source?.sourceName || "",
+          finding?.sink?.label || finding?.sink?.sinkName || "",
+          finding?.codeSnippet || ""
+        ].join("@@"))
+      : "";
+    return [ruleId, severity, srcFile, sinkFile, srcLoc, sinkLoc, inlineEvidence].join('@@');
   }
 
   buildSastFingerprintFromUnified(finding) {

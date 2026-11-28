@@ -14,6 +14,19 @@ const runtime = (typeof browser !== 'undefined' && browser?.runtime)
     : (typeof chrome !== 'undefined' && chrome?.runtime ? chrome.runtime : null);
 
 const PTK_AGENT_AUTOMATION_SCRIPT_ID = 'ptk-agent-automation-layer';
+const AUTOMATION_REQUEST_EVENT = 'ptk-automation-request'
+const AUTOMATION_RESPONSE_EVENT = 'ptk-automation-response'
+
+function parseAutomationRequestEvent(event) {
+    try { return JSON.parse(String(event?.detail || '')) } catch (_) { return null }
+}
+
+function dispatchAutomationResponse(payload) {
+    const detail = JSON.stringify(payload, (_, value) => value instanceof Uint8Array
+        ? { __ptkType: 'Uint8Array', data: Array.from(value) }
+        : value)
+    document.dispatchEvent(new CustomEvent(AUTOMATION_RESPONSE_EVENT, { detail }))
+}
 
 function runtimeGetURL(path) {
     if (typeof shared.runtimeGetURL === 'function') return shared.runtimeGetURL(path);
@@ -415,12 +428,15 @@ function enableAutomation() {
     if (automationEnabled) return
     automationEnabled = true
 
-    // Generate nonce for this session
-    automationNonce = `ptk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-
     // Expose nonce via DOM element for test frameworks (Cypress runs AUT in iframe)
     // This allows tests to read the nonce and include it in their messages
     let nonceEl = document.getElementById('__ptk_automation_nonce__')
+    const preIastBridgeOwned = nonceEl?.dataset?.bridgeOwned === '1'
+        && typeof nonceEl?.dataset?.nonce === 'string'
+        && nonceEl.dataset.nonce.startsWith('ptk-')
+    automationNonce = preIastBridgeOwned
+        ? nonceEl.dataset.nonce
+        : `ptk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
     if (!nonceEl) {
         nonceEl = document.createElement('div')
         nonceEl.id = '__ptk_automation_nonce__'
@@ -431,20 +447,20 @@ function enableAutomation() {
     nonceEl.dataset.automationEnabled = '1'
     nonceEl.dataset.automationRuntime = 'manual'
 
-    installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true)
+    if (preIastBridgeOwned) injectPtkAgentAutomationLayer()
+    else installPtkAutomationBridge(ptkAutomationVersion, automationNonce, true)
     notifyAutomationStatus(true, automationNonce)
     initPtkAutomationMessaging()
 
     // Listen for messages only when enabled
     automationMessageHandler = function(event) {
-        if (event.source !== window) return
-        const data = event.data
+        const data = parseAutomationRequestEvent(event)
         if (data?.source !== 'ptk-automation') return
         // Validate nonce (require always)
         if (data.nonce !== automationNonce) return
         handleAutomationBridgeMessage(data)
     }
-    window.addEventListener("message", automationMessageHandler)
+    document.addEventListener(AUTOMATION_REQUEST_EVENT, automationMessageHandler)
 }
 
 function disableAutomation() {
@@ -453,16 +469,19 @@ function disableAutomation() {
 
     // Remove message listener (can't uninject bridge JS, but stop responding)
     if (automationMessageHandler) {
-        window.removeEventListener("message", automationMessageHandler)
+        document.removeEventListener(AUTOMATION_REQUEST_EVENT, automationMessageHandler)
         automationMessageHandler = null
     }
     notifyAutomationStatus(false, automationNonce)
     automationNonce = null
 
-    // Remove nonce element
+    // Keep the bridge-owned nonce metadata so a later enable adopts the same
+    // pre-IAST bridge closure instead of injecting a replacement after IAST.
+    // The privileged listener is removed above; this DOM correlation value is
+    // intentionally not an authorization secret.
     const nonceEl = document.getElementById('__ptk_automation_nonce__')
     if (nonceEl) {
-        nonceEl.remove()
+        nonceEl.dataset.automationEnabled = '0'
     }
 }
 
@@ -488,10 +507,9 @@ function isZapBrowserCloseBridgeMessage(data) {
 function initZapCloseAutomationMessaging() {
     if (zapCloseAutomationMessageHandlerInstalled) return
     zapCloseAutomationMessageHandlerInstalled = true
-    window.addEventListener("message", (event) => {
+    document.addEventListener(AUTOMATION_REQUEST_EVENT, (event) => {
         if (automationEnabled) return
-        if (event.source !== window) return
-        const data = event.data
+        const data = parseAutomationRequestEvent(event)
         if (!isZapBrowserCloseBridgeMessage(data)) return
         handleAutomationBridgeMessage(data, { responseNonce: data.nonce || '' })
     })
@@ -502,14 +520,14 @@ async function handleManualAutomationActivationRequest(data = {}) {
     const requestId = data.requestId || null
     try {
         if (automationEnabled) {
-            window.postMessage({
+            dispatchAutomationResponse({
                 source: 'ptk-extension',
                 nonce: responseNonce,
                 requestId,
                 ok: true,
                 allowed: true,
                 reason: 'already_enabled'
-            }, '*')
+            })
             return
         }
 
@@ -520,7 +538,7 @@ async function handleManualAutomationActivationRequest(data = {}) {
             reason: data.reason || 'bridge_request'
         })
 
-        window.postMessage({
+        dispatchAutomationResponse({
             source: 'ptk-extension',
             nonce: responseNonce,
             requestId,
@@ -528,29 +546,31 @@ async function handleManualAutomationActivationRequest(data = {}) {
             allowed: response?.allowed === true,
             reason: response?.reason || 'manual_activation_denied',
             error: response?.allowed === true ? undefined : (response?.reason || 'manual_activation_denied')
-        }, '*')
+        })
         if (response?.allowed === true) {
             setTimeout(() => enableAutomation(), 0)
         }
     } catch (error) {
-        window.postMessage({
+        dispatchAutomationResponse({
             source: 'ptk-extension',
             nonce: responseNonce,
             requestId,
             ok: false,
             allowed: false,
             error: error?.message || 'manual_activation_failed'
-        }, '*')
+        })
     }
 }
 
-window.addEventListener("message", (event) => {
-    const data = event.data || {}
-
+document.addEventListener(AUTOMATION_REQUEST_EVENT, (event) => {
+    const data = parseAutomationRequestEvent(event)
     if (data?.source === 'ptk-automation' && data?.type === 'automation-activate') {
         handleManualAutomationActivationRequest(data).catch(() => { })
-        return
     }
+})
+
+window.addEventListener("message", (event) => {
+    const data = event.data || {}
 
     if (data?.channel === 'ptk_inject2content' && data?.requestId) {
         const pending = pendingWappalyzerRequests.get(data.requestId)
@@ -616,20 +636,20 @@ function handleAutomationBridgeMessage(data, options = {}) {
 
     browser.runtime.sendMessage(payload).then((response) => {
         const normalizedResponse = normalizeAutomationBridgeResponse(data.type, response)
-        window.postMessage({
+        dispatchAutomationResponse({
             source: 'ptk-extension',
             nonce: options.responseNonce || automationNonce,  // Include nonce in response
             requestId: data.requestId,
             ...normalizedResponse
-        }, '*')
+        })
     }).catch((error) => {
         console.error('[PTK Content] Message error:', error)
-        window.postMessage({
+        dispatchAutomationResponse({
             source: 'ptk-extension',
             nonce: options.responseNonce || automationNonce,
             requestId: data.requestId,
             error: error?.message || 'PTK automation error'
-        }, '*')
+        })
     })
 }
 
@@ -637,7 +657,7 @@ function initPtkAutomationMessaging() {
     browser.runtime.onMessage.addListener((message, sender) => {
         if (message?.channel === 'ptk_background2content_automation' && message?.payload) {
             try {
-                window.postMessage(message.payload, '*')
+                dispatchAutomationResponse(message.payload)
             } catch (_) { }
         }
     })
@@ -667,12 +687,15 @@ function installPtkAutomationBridge(version, nonce, automationEnabledState) {
 
 function notifyAutomationStatus(enabled, nonce) {
     try {
-        window.postMessage({
+        const bridgeUrl = browser.runtime.getURL('ptk/automationBridge.js')
+        dispatchAutomationResponse({
             source: 'ptk-extension',
             type: 'automation-status',
             enabled: enabled === true,
-            nonce: nonce || ''
-        }, '*')
+            nonce: nonce || '',
+            version: ptkAutomationVersion,
+            extensionOrigin: bridgeUrl ? new URL(bridgeUrl).origin : ''
+        })
     } catch (_) { }
 }
 

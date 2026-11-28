@@ -1,5 +1,7 @@
 /* Author: Denis Podgurskii */
 
+import { OffscreenRuntimeManager } from "../offscreen/offscreenRuntimeManager.js";
+
 const worker = self;
 
 export class SastTransport {
@@ -10,6 +12,7 @@ export class SastTransport {
     chromeApi = typeof chrome !== "undefined" ? chrome : null,
     WorkerCtor = typeof Worker !== "undefined" ? Worker : null,
     disableRemote = false,
+    offscreenManager = null,
   } = {}) {
     this.asyncSession = asyncSession;
     this.eventHandler = typeof eventHandler === "function" ? eventHandler : null;
@@ -17,8 +20,10 @@ export class SastTransport {
     this.chromeApi = chromeApi;
     this.WorkerCtor = WorkerCtor;
     this.disableRemote = disableRemote === true;
+    this.offscreenManager = offscreenManager || new OffscreenRuntimeManager({ chromeApi });
     this.sastWorker = null;
     this.offscreenInitPromise = null;
+    this.remoteOwner = null;
   }
 
   setEventHandler(handler) {
@@ -51,7 +56,8 @@ export class SastTransport {
     for (const path of candidates) {
       try {
         this.sastWorker = new this.WorkerCtor(this.browserApi.runtime.getURL(path), { type: "module" });
-        this.sastWorker.onmessage = (event) => this.emit(event?.data || {});
+        const instance = this.sastWorker;
+        this.sastWorker.onmessage = (event) => { if (this.sastWorker === instance) this.emit(event?.data || {}); };
         this.sastWorker.onmessageerror = (err) =>
           console.error("SAST worker message error", err, "path:", path);
         this.sastWorker.onerror = (err) =>
@@ -66,25 +72,7 @@ export class SastTransport {
 
   async ensureOffscreenDocument() {
     if (worker.isFirefox) return false;
-    if (typeof this.chromeApi === "undefined" || !this.chromeApi?.offscreen?.createDocument) return false;
-
-    if (!this.offscreenInitPromise) {
-      this.offscreenInitPromise = (async () => {
-        if (this.chromeApi.offscreen.hasDocument) {
-          const has = await this.chromeApi.offscreen.hasDocument();
-          if (has) return true;
-        }
-
-        await this.chromeApi.offscreen.createDocument({
-          url: "ptk/offscreen/sast_offscreen.html",
-          reasons: ["IFRAME_SCRIPTING"],
-          justification: "Run CPU-heavy SAST engine outside the MV3 service worker",
-        });
-        return true;
-      })();
-    }
-
-    return this.offscreenInitPromise;
+    return this.offscreenManager.ensureDocument();
   }
 
   async tryEnsureOffscreenDocument(reason = "unknown") {
@@ -102,10 +90,15 @@ export class SastTransport {
 
   async startRemoteScan({ scanId, scanStrategyCode, opts } = {}) {
     if (this.disableRemote) return false;
+    const owner = { scanId, cancelled: false, dispatched: false };
+    if (this.remoteOwner && this.remoteOwner.scanId !== scanId) throw new Error('sast_worker_owner_conflict');
+    this.remoteOwner = owner;
 
     if (worker.isFirefox) {
       this.ensureFirefoxWorker();
       if (!this.sastWorker) return false;
+      if (owner.cancelled || this.remoteOwner !== owner) return false;
+      owner.dispatched = true;
       this.sastWorker.postMessage({
         type: "start_scan",
         scanId,
@@ -118,7 +111,9 @@ export class SastTransport {
     if (!await this.tryEnsureOffscreenDocument("start_scan")) {
       return false;
     }
+    if (owner.cancelled || this.remoteOwner !== owner) return false;
     try {
+      owner.dispatched = true;
       await this.browserApi.runtime.sendMessage({
         channel: "ptk_bg2offscreen_sast",
         type: "start_scan",
@@ -135,10 +130,13 @@ export class SastTransport {
 
   async scanCodeRemote({ scanId, scripts, html, file, generation = null, collectionId = null, timeoutMs = 30000 } = {}) {
     if (this.disableRemote) return null;
+    const owner = this.remoteOwner;
+    if (owner?.cancelled || owner && owner.scanId !== scanId) throw new Error('sast_scan_cancelled');
 
     if (worker.isFirefox) {
       if (!this.sastWorker) return null;
-      this.sastWorker.postMessage({
+      const result = this.asyncSession.waitForScanResult(file, timeoutMs);
+      try { this.sastWorker.postMessage({
         type: "scan_code",
         scanId,
         scripts,
@@ -146,15 +144,17 @@ export class SastTransport {
         file,
         generation,
         collectionId
-      });
-      return this.asyncSession.waitForScanResult(file, timeoutMs);
+      }); } catch (error) { this.asyncSession.rejectScanResult(file, error, result); }
+      return result;
     }
 
     if (!await this.tryEnsureOffscreenDocument("scan_code")) {
       return null;
     }
+    if (owner && (owner.cancelled || this.remoteOwner !== owner)) throw new Error('sast_scan_cancelled');
+    const result = this.asyncSession.waitForScanResult(file, timeoutMs);
     try {
-      await this.browserApi.runtime.sendMessage({
+      Promise.resolve(this.browserApi.runtime.sendMessage({
         channel: "ptk_bg2offscreen_sast",
         type: "scan_code",
         scanId,
@@ -163,11 +163,12 @@ export class SastTransport {
         file,
         generation,
         collectionId
-      });
+      })).catch(error => this.asyncSession.rejectScanResult(file, error, result));
     } catch (err) {
       console.error("Failed to send code to SAST offscreen worker", err);
+      this.asyncSession.rejectScanResult(file, err, result);
     }
-    return this.asyncSession.waitForScanResult(file, timeoutMs);
+    return result;
   }
 
   stopRemoteScan(scanId) {
@@ -177,28 +178,47 @@ export class SastTransport {
       if (this.sastWorker) {
         this.sastWorker.postMessage({ type: "stop_scan", scanId });
       }
+      if (this.remoteOwner?.scanId === scanId) this.remoteOwner = null;
       return;
     }
-    this.browserApi.runtime.sendMessage({
+    return this.browserApi.runtime.sendMessage({
       channel: "ptk_bg2offscreen_sast",
       type: "stop_scan",
       scanId
-    }).catch(e => e);
+    }).then(result => { if (this.remoteOwner?.scanId === scanId) this.remoteOwner = null; return result; }).catch(e => e);
   }
 
-  async requestScriptsFromTab(tabId, timeoutMs = 8000) {
+  async cancelRemoteScan(scanId) {
+    const owner = this.remoteOwner;
+    if (this.disableRemote) return;
+    if (!owner || owner.scanId !== scanId) throw new Error('sast_worker_owner_conflict');
+    owner.cancelled = true;
+    if (worker.isFirefox) {
+      if (owner.dispatched && this.sastWorker) {
+        const stopped = this.sastWorker;
+        stopped.terminate();
+        if (this.sastWorker === stopped) this.sastWorker = null;
+      }
+    } else if (owner.dispatched) {
+      const result = await this.browserApi.runtime.sendMessage({ channel: 'ptk_bg2offscreen_sast', type: 'cancel_scan', scanId });
+      if (result?.ok !== true || result.cancelled !== true) throw new Error('sast_worker_owner_conflict');
+    }
+    if (this.remoteOwner === owner) this.remoteOwner = null;
+  }
+
+  async requestScriptsFromTab(tabId, timeoutMs = 8000, binding = null) {
     const requestId = `sast_scripts_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const promise = this.asyncSession.createScriptRequest(requestId, timeoutMs);
+    const promise = this.asyncSession.createScriptRequest(requestId, timeoutMs, binding?.accept || null);
 
     try {
-      await this.browserApi.tabs.sendMessage(tabId, {
+      Promise.resolve(this.browserApi.tabs.sendMessage(tabId, {
         channel: "ptk_background2content_sast",
         type: "collect_scripts",
         requestId,
-      });
+      }, binding ? { frameId: binding.identity.frameId, documentId: binding.identity.documentId } : undefined))
+        .catch(err => this.asyncSession.rejectScriptRequest(requestId, err));
     } catch (err) {
       this.asyncSession.rejectScriptRequest(requestId, err);
-      throw err;
     }
     return promise;
   }
@@ -252,7 +272,22 @@ export class SastTransport {
     });
   }
 
-  async waitForSpaIdle(tabId, delayMs = 500) {
+  async waitForSpaIdle(tabId, delayMs = 500, binding = null) {
+    if (binding) {
+      let timer;
+      try {
+        const response = await Promise.race([
+          Promise.resolve().then(() => this.browserApi.tabs.sendMessage(tabId, {
+            channel: "ptk_background2content_sast", type: "sast_wait_ready", delayMs
+          }, { frameId: binding.identity.frameId, documentId: binding.identity.documentId })),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("sast_readiness_timeout")), binding.timeoutMs);
+          })
+        ]);
+        if (response?.ok !== true) throw new Error("sast_document_inactive");
+        return;
+      } finally { clearTimeout(timer); }
+    }
     try {
       await this.browserApi.tabs.sendMessage(tabId, {
         channel: "ptk_background2content_sast",

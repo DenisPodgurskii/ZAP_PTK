@@ -7,15 +7,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import java.util.List;
 import java.util.Set;
 import org.apache.commons.httpclient.URI;
-import org.apache.commons.httpclient.URIException;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.core.scanner.Alert;
 import org.parosproxy.paros.core.scanner.Category;
-import org.parosproxy.paros.network.HttpMalformedHeaderException;
-import org.parosproxy.paros.network.HttpMessage;
-import org.parosproxy.paros.network.HttpRequestHeader;
 import org.zaproxy.addon.commonlib.PolicyTag;
+import org.zaproxy.zap.model.Context;
 import org.zaproxy.zap.model.StructuralNode;
+import org.zaproxy.zap.model.Target;
 
 class PtkActiveScanRuleTest {
 
@@ -37,72 +35,65 @@ class PtkActiveScanRuleTest {
                 rule.getAlertTags().keySet());
     }
 
-    // ---- getFirstStartNodeUrl(List<?>) ----
-
     @Test
-    void getFirstStartNodeUrl_returnsUrlOfFirstNode() throws URIException {
-        StructuralNode node = structuralNodeWithUri(new URI("https://example.com/app/", true));
+    void contextOnlyTargetKeepsItsSectionRoot() {
+        Context context = sectionContext();
         assertEquals(
-                "https://example.com/app/", PtkActiveScanRule.getFirstStartNodeUrl(List.of(node)));
+                "https://example.invalid/dom/",
+                PtkActiveScanTargets.select(
+                        PtkActiveScanTargets.snapshot(new Target(context)),
+                        "https://example.invalid/dom/child/"));
     }
 
     @Test
-    void getFirstStartNodeUrl_usesFirstOfMultipleNodes() throws URIException {
-        StructuralNode first = structuralNodeWithUri(new URI("https://example.com/first/", true));
-        StructuralNode second = structuralNodeWithUri(new URI("https://example.com/second/", true));
-        assertEquals(
-                "https://example.com/first/",
-                PtkActiveScanRule.getFirstStartNodeUrl(List.of(first, second)));
+    void explicitChildKeepsItsOwnUrlInsideTheSameContext() throws Exception {
+        String child = "https://example.invalid/dom/child/";
+        Target target = new Target(structuralNodeWithUri(new URI(child, true)));
+        target.setContext(sectionContext());
+        var scope = PtkActiveScanTargets.snapshot(target);
+        assertEquals(child, PtkActiveScanTargets.select(scope, child));
+        assertNull(PtkActiveScanTargets.select(scope, "https://example.invalid/dom/sibling/"));
     }
 
     @Test
-    void getFirstStartNodeUrl_returnsNullForEmptyList() {
-        assertNull(PtkActiveScanRule.getFirstStartNodeUrl(List.of()));
+    void contextRejectsHostRootUnrelatedPathsAndExclusions() {
+        Context context = sectionContext();
+        context.addExcludeFromContextRegex("https://example.invalid/dom/excluded/.*");
+        var scope = PtkActiveScanTargets.snapshot(new Target(context));
+        for (String url :
+                List.of(
+                        "https://example.invalid/",
+                        "https://example.invalid/dom2/child/",
+                        "https://other.invalid/dom/child/",
+                        "https://example.invalid/dom/excluded/child/",
+                        "https://example.invalid/dom/%2e%2e/sibling/")) {
+            assertNull(PtkActiveScanTargets.select(scope, url), url);
+        }
     }
 
     @Test
-    void getFirstStartNodeUrl_returnsNullForNullList() {
-        assertNull(PtkActiveScanRule.getFirstStartNodeUrl((List<?>) null));
+    void ambiguousTargetsNeverFallBackToTheRepresentativePage() throws Exception {
+        String child = "https://example.invalid/dom/child/";
+        var first = structuralNodeWithUri(new URI(child, true));
+        var second = structuralNodeWithUri(new URI("https://example.invalid/dom/sibling/", true));
+        Context ambiguous = sectionContext();
+        ambiguous.addIncludeInContextRegex("https://example.invalid/other/.*");
+        Context wholeHost = new Context(null, 2);
+        wholeHost.addIncludeInContextRegex("https://example.invalid/.*");
+        for (Target target :
+                List.of(
+                        new Target(),
+                        new Target(ambiguous),
+                        new Target(wholeHost),
+                        new Target(List.of(first, second)))) {
+            assertNull(PtkActiveScanTargets.select(PtkActiveScanTargets.snapshot(target), child));
+        }
     }
 
-    @Test
-    void getFirstStartNodeUrl_returnsNullWhenFirstNodeHasNoUri() {
-        assertNull(PtkActiveScanRule.getFirstStartNodeUrl(List.of(structuralNodeWithUri(null))));
-    }
-
-    // ---- resolveClientSpiderStartUrl ----
-
-    @Test
-    void resolveClientSpiderStartUrl_returnsNullWhenBothNull() {
-        assertNull(PtkActiveScanRule.resolveClientSpiderStartUrl(null, null));
-    }
-
-    @Test
-    void resolveClientSpiderStartUrl_fallsBackToBaseMsgWhenHostProcessIsNull() throws Exception {
-        HttpMessage baseMsg = messageForUrl("https://example.com/fallback/");
-        assertEquals(
-                "https://example.com/fallback/",
-                PtkActiveScanRule.resolveClientSpiderStartUrl(null, baseMsg));
-    }
-
-    // ---- urlFromStructuralNode ----
-
-    @Test
-    void urlFromStructuralNode_returnsNullForNullNode() {
-        assertNull(PtkActiveScanRule.urlFromStructuralNode(null));
-    }
-
-    @Test
-    void urlFromStructuralNode_returnsUriString() throws URIException {
-        URI uri = new URI("https://example.com/path/", true);
-        assertEquals(
-                "https://example.com/path/",
-                PtkActiveScanRule.urlFromStructuralNode(structuralNodeWithUri(uri)));
-    }
-
-    @Test
-    void urlFromStructuralNode_returnsNullWhenNoUriAvailable() {
-        assertNull(PtkActiveScanRule.urlFromStructuralNode(structuralNodeWithUri(null)));
+    private static Context sectionContext() {
+        Context context = new Context(null, 1);
+        context.addIncludeInContextRegex("https://example.invalid/dom/.*");
+        return context;
     }
 
     private static StructuralNode structuralNodeWithUri(URI uri) {
@@ -172,10 +163,5 @@ class PtkActiveScanRuleTest {
                 return false;
             }
         };
-    }
-
-    private static HttpMessage messageForUrl(String url)
-            throws URIException, HttpMalformedHeaderException {
-        return new HttpMessage(new HttpRequestHeader("GET " + url + " HTTP/1.1"));
     }
 }

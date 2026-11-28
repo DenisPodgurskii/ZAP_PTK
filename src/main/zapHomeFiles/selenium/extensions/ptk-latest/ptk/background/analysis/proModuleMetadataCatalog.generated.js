@@ -5215,7 +5215,7 @@ export const PRO_MODULE_METADATA_CATALOGS = Object.freeze({
         "tier": "pro",
         "category": "client_side",
         "severity": "medium",
-        "vulnId": "other",
+        "vulnId": "dom_clobbering",
         "tags": [
           "iast",
           "dom",
@@ -5233,7 +5233,7 @@ export const PRO_MODULE_METADATA_CATALOGS = Object.freeze({
           "sensitive_data"
         ],
         "metadataVersion": "2026-06-04",
-        "sourceHash": "d312af836e73cd79"
+        "sourceHash": "35325aaf4c631d7a"
       },
       {
         "engine": "IAST",

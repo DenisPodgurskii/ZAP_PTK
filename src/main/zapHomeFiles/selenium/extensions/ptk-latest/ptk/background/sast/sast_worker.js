@@ -14,7 +14,7 @@ self.onmessage = async (event) => {
   if (type === "start_scan") {
     try {
       const scanStrategy = msg.scanStrategy ?? msg.policy ?? 0;
-      const engine = new sastEngine(scanStrategy, { ...((msg.opts || {})), scanId });
+      const engine = new sastEngine(scanStrategy, { ...((msg.opts || {})), scanId }, { synchronousEvents: true });
       engines.set(scanId, engine);
 
       const forward = (name, payload) => {
@@ -55,7 +55,7 @@ self.onmessage = async (event) => {
     const { scripts, html, file, generation, collectionId } = msg;
     const engine = engines.get(scanId);
     if (!engine) {
-      self.postMessage({ type: "error", scanId, error: "no_engine_for_scan" });
+      self.postMessage({ type: "error", scanId, file, generation, collectionId, error: "no_engine_for_scan" });
       return;
     }
 
@@ -65,6 +65,8 @@ self.onmessage = async (event) => {
         type: "scan_result",
         scanId,
         file,
+        generation,
+        collectionId,
         findings: Array.isArray(detail?.findings) ? detail.findings : [],
         artifacts: detail?.artifacts || null
       });
@@ -72,6 +74,9 @@ self.onmessage = async (event) => {
       self.postMessage({
         type: "error",
         scanId,
+        file,
+        generation,
+        collectionId,
         error: err?.message || String(err),
       });
     }

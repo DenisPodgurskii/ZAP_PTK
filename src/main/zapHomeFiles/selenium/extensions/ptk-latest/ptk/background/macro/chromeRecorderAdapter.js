@@ -14,15 +14,22 @@ import {
 
 function chromeSelectors(step) {
     const locators = []
+    let unsupportedChains = 0
     const selectors = Array.isArray(step?.selectors) ? step.selectors : []
     for (const group of selectors) {
         const candidates = Array.isArray(group) ? group : [group]
+        // A producer group is one chained selector, not a list of alternatives.
+        // Only complete single selectors fit the existing Flow locator contract.
+        if (candidates.length > 1) {
+            unsupportedChains += 1
+            continue
+        }
         for (const candidate of candidates) {
             const locator = locatorFromString(String(candidate || ''))
             if (locator && !locators.some((entry) => entry.type === locator.type && entry.value === locator.value)) locators.push(locator)
         }
     }
-    return locators
+    return { locators, unsupportedChains }
 }
 
 function chromeKeyValue(rawKey) {
@@ -44,7 +51,21 @@ function chromeKeyValue(rawKey) {
 function chromeStep(source, index, secretValues, diagnostics, context) {
     const stepId = `step-${String(index + 1).padStart(4, '0')}`
     const command = String(source?.type || '')
-    const recordedLocators = chromeSelectors(source)
+    const { locators: recordedLocators, unsupportedChains } = chromeSelectors(source)
+    if (unsupportedChains) {
+        const missingTarget = !recordedLocators.length
+            && ['click', 'doubleClick', 'hover', 'change', 'waitForElement', 'keyDown'].includes(command)
+        diagnostics.push({
+            level: missingTarget ? 'error' : 'warning',
+            code: 'chrome_selector_chain_unsupported',
+            message: missingTarget
+                ? 'Chrome Recorder selector chains require a complete single-selector alternative for this action.'
+                : 'Unsupported Chrome Recorder selector chains were omitted; complete recorded alternatives are retained.',
+            stepId,
+            sourceIndex: index
+        })
+        if (missingTarget) return null
+    }
     const target = String(source?.target || 'main')
     const locators = command === 'keyDown' && !recordedLocators.length
         ? (context.lastLocatorsByTarget.get(target) || []).map((locator) => ({ ...locator }))

@@ -73,6 +73,36 @@ function collectObservedPageUrls(finding = {}) {
     return urls
 }
 
+function parseResourceUrl(value) {
+    // Inline/handler file IDs contain whitespace ("page :: inline-..."). They
+    // are AST identities, not resources, even if URL() would accept them.
+    if (typeof value !== 'string' || !/^https?:\/\//i.test(value)
+        || /[\s\u0000-\u001f\u007f\\]/.test(value)) return null
+    try {
+        const url = new URL(value)
+        return url.username || url.password ? null : url
+    } catch (_) {
+        return null
+    }
+}
+
+function resolveVerifiedSinkResource(finding, observedPageUrls, { scanId, scanResult } = {}) {
+    if (typeof scanId !== 'string' || !scanId || scanResult?.scanId !== scanId
+        || (finding.scanId != null && finding.scanId !== scanId)) return null
+
+    const sink = toObject(finding?.evidence?.sast?.sink)
+    // Never substitute a source file or location.file: a cross-file pattern
+    // finding's codeFile/location.file can identify the source, not the sink.
+    const file = sink?.sinkFileFull ?? sink?.sinkFile ?? sink?.file
+    const resource = parseResourceUrl(file)
+    if (!resource || !Array.isArray(scanResult.files) || !scanResult.files.includes(file)) return null
+
+    // The native finding ties this analyzed sink to its observed document(s).
+    // A caller's pageUrlOverride is not authority to add a foreign resource.
+    const ownedOrigin = observedPageUrls.some(page => parseResourceUrl(page)?.origin === resource.origin)
+    return ownedOrigin ? file : null
+}
+
 function buildLocation(finding = {}, { pageUrlOverride = null } = {}) {
     const location = toObject(finding.location) || {}
     const url = resolveCanonicalUrl(pageUrlOverride, location.runtimeUrl, location.url, location.pageUrl)
@@ -190,7 +220,13 @@ export function toSastFindings(finding, options = {}) {
         const mapped = toSastFinding(finding, options)
         return mapped ? [mapped] : []
     }
-    return urls
+    const mapped = urls
         .map((url) => toSastFinding(finding, Object.assign({}, options, { pageUrlOverride: url })))
         .filter(Boolean)
+    const resourceUrl = resolveVerifiedSinkResource(finding, urls, options)
+    if (resourceUrl && !mapped.some(item => item.location.url === resourceUrl)) {
+        const resource = toSastFinding(finding, Object.assign({}, options, { pageUrlOverride: resourceUrl }))
+        if (resource) mapped.push(resource)
+    }
+    return mapped
 }

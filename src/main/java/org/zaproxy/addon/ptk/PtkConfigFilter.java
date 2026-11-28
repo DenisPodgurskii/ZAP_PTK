@@ -21,6 +21,10 @@ public final class PtkConfigFilter {
 
     private PtkConfigFilter() {}
 
+    public static List<String> supportedIastSchemas() {
+        return List.of("ptk-zap-iast-finding-v1", "ptk-zap-iast-finding-v2", PtkIastV3Contract.V3);
+    }
+
     /**
      * Returns definitions filtered by the enabled flags in {@code param}. If {@code param} is
      * {@code null} all definitions are returned unchanged. No run-location filtering is applied.

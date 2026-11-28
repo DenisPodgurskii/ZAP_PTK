@@ -1,6 +1,7 @@
 package org.zaproxy.addon.ptk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,6 +39,17 @@ class PtkAlertHandlerTest {
     private static final Gson GSON = new Gson();
     private PtkResourcesLoader.LoadedPtkResources resources;
     private PtkZapMapper mapper;
+
+    @Test
+    void firstStoredZapAlertIdZeroIsNotRejectedAsUnstored() {
+        Alert alert = new Alert(210017);
+        assertEquals(-1, alert.getAlertId());
+        assertFalse(PtkAlertHandler.hasStoredAlertId(alert));
+        alert.setAlertId(0);
+        assertTrue(PtkAlertHandler.hasStoredAlertId(alert));
+        alert.setAlertId(1);
+        assertTrue(PtkAlertHandler.hasStoredAlertId(alert));
+    }
 
     @BeforeEach
     void setUp() {

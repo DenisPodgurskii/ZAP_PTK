@@ -1,4 +1,5 @@
 import { collapseDastAggregatedFindings } from "./dastFindingAggregation.js"
+import { stripPrivateDastAnalysisMetadata } from "./dastAnalysisService.js"
 
 const DEFAULT_UI_SCAN_RESULT_BYTE_LIMIT = 8 * 1024 * 1024
 const DEFAULT_UI_SCAN_RESULT_LIMITS = Object.freeze({
@@ -391,6 +392,7 @@ export class DastResultProjector {
         }
         if (source.analysis && typeof source.analysis === "object") {
             snapshot.analysis = this.sanitizeUiValue(source.analysis, 0, this.analysisLimits)
+            stripPrivateDastAnalysisMetadata(snapshot.analysis)
         }
         if (source.analysisVersion) {
             snapshot.analysisVersion = source.analysisVersion

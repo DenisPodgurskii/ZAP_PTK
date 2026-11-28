@@ -1,5 +1,7 @@
 package org.zaproxy.addon.ptk;
 
+import java.util.Objects;
+
 record PtkZapSessionSnapshot(
         String zapid,
         String browserId,
@@ -44,6 +46,14 @@ record PtkZapSessionSnapshot(
 
     boolean isV2TerminalAndDrained() {
         return isV2PhysicallySafeToClose() && publisherDrained;
+    }
+
+    boolean isV2ReadyForBrowserRelease() {
+        return isV2TerminalAndDrained()
+                && (closeRequest == null
+                        || (closeRequest.terminalDrainAcknowledged()
+                                && Objects.equals(closeRequest.sessionId(), sessionId)
+                                && Objects.equals(closeRequest.browserId(), browserId)));
     }
 
     boolean isV2ReleaseClean() {

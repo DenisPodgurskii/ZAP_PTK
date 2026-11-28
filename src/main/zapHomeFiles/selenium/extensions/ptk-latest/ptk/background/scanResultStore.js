@@ -532,7 +532,8 @@ class ScanResultStore {
         tabId = null,
         engine = null,
         windowMs = RELATED_ENGINE_WINDOW_MS,
-        includeSameEngine = false
+        includeSameEngine = false,
+        clone = true
     } = {}) {
         const currentScan = scanId ? this.getScan(scanId) : null
         const currentScanId = String(scanId || currentScan?.scanId || "")
@@ -556,7 +557,7 @@ class ScanResultStore {
             if (finishedTs <= 0) return
             if (centerTs > 0 && Math.abs(centerTs - finishedTs) > effectiveWindowMs) return
 
-            related.push(deepClone(scan))
+            related.push(clone ? deepClone(scan) : scan)
         })
 
         return related.sort((a, b) => {

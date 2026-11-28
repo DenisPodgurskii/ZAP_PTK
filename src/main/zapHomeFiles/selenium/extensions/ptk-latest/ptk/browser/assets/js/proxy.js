@@ -120,7 +120,11 @@ function bindAll() {
 
 function bindInfo() {
     if (controller.url) {
-        $('#dashboard_message_text').text(controller.url)
+        const notes = []
+        if (controller.historyRecovered) notes.push('Proxy history restored after browser worker restart')
+        if (controller.historyTruncated) notes.push('Older Proxy requests were omitted due to the scan history limit')
+        if (controller.historyPersistenceError) notes.push('Proxy scan history could not be checkpointed')
+        $('#dashboard_message_text').text([controller.url, ...notes].join(' · '))
 
     } else {
         $('#dashboard_message_text').html(dashboardText)
